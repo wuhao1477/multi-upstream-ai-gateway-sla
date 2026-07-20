@@ -12,3 +12,4 @@
 ## 产品文档
 
 - [多上游 AI 网关 SLA 保障系统 PRD](docs/PRD.md)
+- [技术选型决策图](docs/tech-selection/DECISION-MAP.md)
