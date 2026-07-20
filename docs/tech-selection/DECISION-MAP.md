@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 调查准备完成，尚未形成选型结论 |
+| 状态 | 调查完成，已形成唯一推荐 |
 | 更新日期 | 2026-07-21 |
 | 目标 | 在现有开源网关上，以最低核心改动实现 PRD 要求 |
 | 首选集成方式 | 外部控制能力或正式扩展点 |
@@ -51,15 +51,15 @@
 
 以下仅为 2026-07-21 获取的仓库元数据，不代表选型结论。
 
-| 候选 | 默认分支 | GitHub 识别许可证 | 当前需要确认 |
+| 候选 | 默认分支 | GitHub 识别许可证 | 调查结论 |
 | --- | --- | --- | --- |
-| `looplj/axonhub` | `unstable` | Other | 实际许可证、扩展接口、外部控制能力 |
-| `Hureru/octopus` | `dev` | AGPL-3.0 | 与上游 Octopus 的关系及新增能力 |
-| `bestruirui/octopus` | `dev` | AGPL-3.0 | 原始项目能力、扩展边界、商用义务 |
-| `fawney19/Aether` | `main` | Other | 实际许可证、项目定位和成熟度 |
-| `diegosouzapw/OmniRoute` | `release/v3.8.49` | MIT | 产品范围是否过宽、路由扩展边界 |
-| `caidaoli/ccLoad` | `master` | MIT | 动态路由、冷却和监控是否可外部控制 |
-| `zhfeng1/ai-gateway` | `main` | 未识别 | 是否存在有效许可证及可用于生产的网关能力 |
+| `looplj/axonhub` | `unstable` | Other | 复合许可证；进入最终推荐，固定 SHA 见基线 |
+| `Hureru/octopus` | `dev` | AGPL-3.0 | 大型独立旁支；不推荐 |
+| `bestruirui/octopus` | `dev` | AGPL-3.0 | 缺少关键领域模型；不推荐 |
+| `fawney19/Aether` | `main` | Other | 非商业许可证；未授权前排除 |
+| `diegosouzapw/OmniRoute` | `release/v3.8.49` | MIT | 条件短名单，耦合和范围过宽；不推荐 |
+| `caidaoli/ccLoad` | `master` | MIT | 轻量故障转移；不进入短名单 |
+| `zhfeng1/ai-gateway` | `main` | 未识别 | 无许可证且为单上游透明代理；排除 |
 
 ## #1: 技术选型目标与边界
 
@@ -89,7 +89,7 @@ Type: Research
 
 ### Answer
 
-待调查。重点确认 `Hureru/octopus` 与 `bestruirui/octopus` 的提交关系，以及 AxonHub、Aether、`zhfeng1/ai-gateway` 的实际许可证内容。调查资产写入 `research/00-repository-baseline.md`。
+已完成。固定 SHA、许可证、维护快照和 Hureru 的分叉差异见 [仓库固定基线](./research/00-repository-baseline.md)。Hureru 与 `bestruirui/octopus` 已形成 424 个文件差异；Aether 为自定义非商业许可证；`zhfeng1/ai-gateway` 未提供许可证。
 
 ## #3: AxonHub 深度评估
 
@@ -103,7 +103,7 @@ Type: Research
 
 ### Answer
 
-待调查。必须追踪一次完整请求的路由、流式输出、失败接管、观测和配置更新路径，并将证据写入 `research/axonhub.md`。
+已完成。AxonHub 具备候选过滤、权重、配额、首内容前顺序回退、执行记录、缓存 Token 成本和管理 API。推荐通过单渠道 API Key Profile 由外部 SLA 决策网关逐请求选资源，AxonHub 本身保持 L0；完整证据见 [AxonHub 评估](./research/axonhub.md)。
 
 ## #4: Octopus 系列深度评估
 
@@ -117,7 +117,7 @@ Type: Research
 
 ### Answer
 
-待调查。除功能外，必须比较两者差异规模、上游同步方式、AGPL 影响、外部控制能力和核心改动位置。调查资产写入 `research/octopus.md`。
+已完成。Hureru 技术能力强于上游，但已是大规模 AGPL 旁支，仍缺价格可信版本、完整余额账本、真实业务测活、故障域和 SLA 账目；两者均不作为基础。证据见 [Octopus 系列评估](./research/octopus.md)。
 
 ## #5: Aether 深度评估
 
@@ -131,7 +131,7 @@ Type: Research
 
 ### Answer
 
-待调查。调查资产写入 `research/aether.md`。
+已完成。Aether 的 Provider/Key/Pool/路由/额度/观测基础最完整，但自定义许可证禁止默认商业或付费使用；未取得书面授权前排除。证据见 [Aether 评估](./research/aether.md)。
 
 ## #6: OmniRoute 深度评估
 
@@ -145,7 +145,7 @@ Type: Research
 
 ### Answer
 
-待调查。调查资产写入 `research/omniroute.md`。
+已完成。OmniRoute 有正式插件、Middleware、Webhook、Combo、额度和用量能力，但请求核心与主应用数据库及多种产品模块强耦合，且仍缺完整价格、余额、故障域、探索预算和重复费用语义；不作为最终基础。证据见 [OmniRoute 评估](./research/omniroute.md)。
 
 ## #7: ccLoad 深度评估
 
@@ -159,7 +159,7 @@ Type: Research
 
 ### Answer
 
-待调查。调查资产写入 `research/ccload.md`。
+已完成。ccLoad 的冷却、延迟提交和串行回退适合轻量代理，但没有正式插件、可信价格/余额模型、故障域和 SLA 账目；补齐会进入 L3。证据见 [ccLoad 评估](./research/ccload.md)。
 
 ## #8: zhfeng1/ai-gateway 深度评估
 
@@ -173,7 +173,7 @@ Type: Research
 
 ### Answer
 
-待调查。调查资产写入 `research/zhfeng1-ai-gateway.md`。
+已完成。该项目是单上游透明代理和请求查看器，不具备多渠道调度数据面，且未提供许可证；立即排除。证据见 [zhfeng1/ai-gateway 评估](./research/zhfeng1-ai-gateway.md)。
 
 ## #9: PRD 能力覆盖矩阵
 
@@ -187,7 +187,7 @@ Type: Research
 
 ### Answer
 
-待调查。结果必须逐项引用 PRD 的 `FR-xxx` 编号，并区分“已有”“L0/L1 可补充”“L2 可补充”“L3 或不可行”。资产写入 `research/capability-matrix.md`。
+已完成。矩阵按 FR-001～FR-105 分组，区分原生覆盖、L0 外置、L1/L2 和 L3 核心改造；AxonHub 的价格、余额、会话、测活和 SLA 账目均由外部控制组件承担。见 [PRD 能力覆盖矩阵](./research/capability-matrix.md)。
 
 ## #10: 外部 SLA 控制边界
 
@@ -201,7 +201,7 @@ Type: Research
 
 ### Answer
 
-待调查。必须明确同步请求前控制、异步结果回传、配置刷新时效和故障时的默认行为。资产写入 `research/control-boundary.md`。
+已完成。同步请求前准入、逐请求资源选择、首字前取消/切换必须由外部 SLA 决策网关完成；价格采集、余额核对、测活和告警走异步控制路径；AxonHub Webhook 仅作异步输入。见 [外部 SLA 控制边界](./research/control-boundary.md)。
 
 ## #11: 维护成本与上游合并可能性
 
@@ -215,13 +215,13 @@ Type: Research
 
 ### Answer
 
-待调查。必须给出预计侵入等级、需要修改的模块数量、上游 PR 可接受性依据和升级冲突风险。资产写入 `research/maintenance.md`。
+已完成。AxonHub 推荐路线不改源码，不维护私有分叉；其他候选要么许可证阻断，要么需要修改请求链和多个状态模块。升级契约、上游 PR 边界和风险见 [维护性判断](./research/maintenance.md)。
 
 ## #12: 候选短名单与验证范围
 
 Blocked by: #9, #10, #11
 
-Type: Prototype
+Type: Decision
 
 ### Question
 
@@ -229,7 +229,7 @@ Type: Prototype
 
 ### Answer
 
-待调查。本票只允许为排名第一的候选定义小范围验证，不为全部候选同时开发原型。
+已完成。排名第一的是 AxonHub。选型生效条件仅验证 Profile 隔离、流式首字/取消、执行回执和复合许可证，不在本票为其他候选开发原型。
 
 ## #13: 最终技术选型
 
@@ -243,4 +243,4 @@ Type: Research
 
 ### Answer
 
-待调查。最终只给出一个推荐方案，并附许可证、侵入等级、PRD 覆盖、维护成本和验证证据。
+已完成。唯一推荐为 AxonHub + 外部 SLA 决策网关，AxonHub 保持 L0。Aether 因许可证排除，Octopus、ccLoad、OmniRoute 和 `ai-gateway` 因分叉、耦合、缺口或许可证排除。完整结论见 [技术选型结论](./TECHNICAL-SELECTION.md)。
