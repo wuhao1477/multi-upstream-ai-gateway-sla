@@ -6,15 +6,17 @@
 
 ## 2. 候选比较
 
-| 候选 | 达到 PRD 所需改动 | 上游升级影响 | 许可证影响 | 维护结论 |
-| --- | --- | --- | --- | --- |
-| AxonHub | 推荐方式为 L0；外部组件通过管理 API 和单资源 Profile 使用 stock 数据面 | 主要关注 API、Profile、流式行为和数据字段兼容 | 主体 Apache-2.0；`llm/` LGPL-3.0 | 最低上游分叉成本，推荐 |
-| bestruirui/octopus | 账号、余额、故障域、测活、账目和告警涉及 L3 | 多个核心模块会长期冲突 | AGPL-3.0 | 不接受 |
-| Hureru/octopus | 仍需 relay、Site、日志、账务、健康任务和管理面 L3 改动 | 已与上游形成 424 文件差异，依赖人工同步 | AGPL-3.0 | 不接受 |
-| Aether | 技术基础较强，但关键 SLA 语义仍需 L2/L3 | 高频演进，定制边界需持续跟踪 | 未取得商业授权前阻断 | 排除 |
-| OmniRoute | 外部插件可完成部分 L1；动态首字预算和账务仍可能进入核心 | Chat 核心与主应用多模块耦合，回归范围大 | MIT | 不作为基础 |
-| ccLoad | 无正式插件，补齐领域模型和策略需 L3 | 项目较小，但私有核心改动比例高 | MIT | 不作为基础 |
-| zhfeng1/ai-gateway | 接近重写 | 无可复用升级边界 | 无许可证 | 排除 |
+| 候选 | 达到 PRD 所需改动 | 上游升级影响 | 维护结论 |
+| --- | --- | --- | --- |
+| AxonHub | 推荐方式为 L0；外部组件通过管理 API 和单资源 Profile 使用 stock 数据面 | 主要关注 API、Profile、流式行为和数据字段兼容 | 最低上游分叉成本，推荐 |
+| Aether | 单 Key Routing Group 可 L0 接入；动态首内容接管必须外置，写入内部需 L2/L3 | 高频演进；需持续验证路由组、Pool 和流式语义 | 优先候选，不作为最终基础 |
+| OmniRoute `main` | 单 Connection 白名单 API Key 可受限 L0；正式 RoutePlan、严格 Key 回执和 Attempt ID 需 L2 | `main` 与发布分支长期分叉；Chat 核心与主应用多模块耦合，回归范围大 | 可作受限适配，不作为基础 |
+| NewAPI | 每真实 Key 独立 Channel + 管理员内部 Token 可 L0；通用外部 RoutePlan 需 L2/L3 | 核心路由和计费高频变化；管理员指定 Channel 不是正式插件契约 | 可作渠道管理平台，不作为基础 |
+| Sub2API | 每真实账号独立 Group/API Key 可 L0；精确账号选择需 L2，统一跨平台接管需 L3 | 功能面和数据模型大，PostgreSQL/Redis 迁移及平台分支回归范围较广 | 专业化候选，不作为通用基础 |
+| Hureru/octopus | 仍需 relay、Site、日志、账务、健康任务和管理面 L3 改动 | 已与上游形成 424 文件差异，依赖人工同步 | 不接受 |
+| bestruirui/octopus `master` | 私有 model alias + 单资源拓扑可受限 L0；正式 Channel/Key 契约需 L2，内置完整 SLA 需 L3 | 指定分支无近期提交，并有已确认的状态码、统计和参数覆盖缺陷 | 低优先级适配，不作为基础 |
+| ccLoad `master` | 单 Key/URL Channel + 单 Channel Token 可 L0；完整 RoutePlan 需 L2，内置完整 SLA 需 L3 | 项目较小且更新频繁；需持续验证 Token 过滤、流提交、隐藏重试和日志字段 | 轻量 L0 备选，不作为最终基础 |
+| zhfeng1/ai-gateway | 接近重写 | 无可复用升级边界 | 排除 |
 
 ## 3. AxonHub 的升级边界
 
@@ -53,4 +55,4 @@
 
 ## 6. 版本判断
 
-AxonHub 最近发布仍为 beta，评估提交位于 `unstable`。技术选型推荐的是固定提交所代表的架构边界，不是授权自动跟随 `unstable`。正式使用前需固定版本并验证外部契约；本轮未运行候选服务或端到端压测，不把源码可行性等同于生产验收。
+AxonHub 最近发布仍为 beta，评估提交位于 `unstable`。技术选型推荐的是固定提交所代表的架构边界，不是自动跟随 `unstable`。正式使用前需固定版本并验证外部契约；本轮未运行候选服务或端到端压测，不把源码可行性等同于生产验收。
