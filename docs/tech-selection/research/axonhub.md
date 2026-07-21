@@ -4,6 +4,7 @@
 | --- | --- |
 | 仓库 | `looplj/axonhub` |
 | 评估提交 | `ed6119a168483a205a85a2f38c7153f5cf1b61a6`（`unstable`，2026-07-20） |
+| 增量复核提交 | `2664f4593566786763570e641c5c295edd3a975d`（`unstable`，2026-07-21） |
 | 最近发布 | `v1.0.0-beta5`（提交 `d061ac7df6aef0c5ec6cdfa9dc5002546a1c5a57`，2026-07-11） |
 | 许可因素 | 按本轮要求，不参与排序 |
 | 结论 | 唯一推荐的数据面基础；不能直接承担完整 SLA 决策 |
@@ -14,7 +15,7 @@ AxonHub 是本轮候选中最适合作为执行数据面的项目。它已经具
 
 推荐边界不是把 SLA 算法写入 AxonHub，而是：
 
-- 外部 SLA 控制组件维护价格、共享余额、故障域、会话预算、缓存作用域、业务测活和策略审计。
+- 外部 SLA 控制组件维护价格、共享余额、订阅计划、到期预测、故障域、会话预算、缓存作用域、业务测活和策略审计。
 - 每个“真实上游 + 账号 + Key + 模型权限”配置为独立 AxonHub 渠道，避免 AxonHub 在同一渠道内切 Key 破坏缓存亲和。
 - 每个实际资源建立单渠道 API Key Profile；外部组件通过选择对应 Profile，逐请求指定执行资源。
 - AxonHub负责协议适配、上游认证、流式转换、基础重试和执行记录。
@@ -52,6 +53,7 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 | 渠道权重 | [ordering_weight](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/ent/schema/channel.go#L140) | 适合慢速全局调节，不足以表达会话预算 |
 | RPM、TPM、并发和队列 | [Channel Limits](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/objects/channel.go#L231) | 可作为容量硬过滤数据 |
 | 多供应商配额检查 | [Provider Quota](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/server/biz/provider_quota.go#L328) | 可复用检查框架；NewAPI/Sub2API 仍需外部适配 |
+| 配额感知评分 | [QuotaAware Strategy](https://github.com/looplj/axonhub/blob/2664f4593566786763570e641c5c295edd3a975d/internal/server/orchestrator/lb_strategy_quota.go#L121) | 高使用率进入 Warning 后施加负分，方向是保留剩余额度，不是临近到期优先消耗 |
 | 价格版本 | [Price Version Schema](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/ent/schema/channel_model_price_versions.go#L28) | 有版本和生效区间，缺可信来源与币种语义 |
 | 缓存 Token 成本 | [Cost Calculation](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/server/biz/cost_calc.go#L139) | 可计算读写缓存费用 |
 | 每次执行的状态和时延 | [Request Execution Schema](https://github.com/looplj/axonhub/blob/ed6119a168483a205a85a2f38c7153f5cf1b61a6/internal/ent/schema/request_execution.go#L37) | 重试尝试可追踪 |
@@ -64,7 +66,8 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 
 管理接口可新增、更新、启停渠道和 Key，批量修改权重；配置变更会通知本机和多实例缓存。单渠道 API Key Profile 能把一次请求限定到指定资源。因此，外部组件可完成以下动作：
 
-- 定时采集 NewAPI/Sub2API 价格、倍率和余额，并维护独立可信版本。
+- 定时采集 NewAPI/Sub2API 价格、倍率、余额和订阅状态，并维护独立可信版本。
+- 在外部维护固定费用、共享额度、有效期、到期未用预测、成本和订阅引流上限。
 - 根据会话状态选择资源，再使用该资源对应的 AxonHub Profile 发起请求。
 - 在首字前观察、取消并重新选择稳定资源。
 - 根据执行结果调用管理接口降级、冷却或停用资源。
@@ -89,6 +92,7 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 | FR-001～006 | FR-001 | FR-002～005 | FR-006；部分原生工具候选为空时会退回全部渠道 |
 | FR-010～019 | FR-012、013 | FR-010、017 | 价格采集、可信确认、币种、汇率、扣费核对 |
 | FR-020～032 | FR-028 | FR-020、021、025、027、031、032 | 共享账号余额、费用预留、保守余额、容量保留 |
+| FR-033～039 | 无 | 配额状态和使用率 | 订阅计划、固定费用分摊、共享额度、到期预测、超额计费和订阅引流上限 |
 | FR-040～047 | 无完整项 | FR-040、041、046、047 | 高分位、样本可信度和故障域 |
 | FR-050～059 | 无完整项 | FR-054、055 | 会话前缀预算、缓存损失预测和实际成功成本 |
 | FR-060～068 | 无 | 无 | 业务测活资格、探索预算、冷却与决策快照全部缺失 |
@@ -99,6 +103,7 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 其他必须在选型时明确的缺口：
 
 - 配额状态 `unknown` 仍可进入候选，不符合保守余额下限要求。
+- QuotaAware 在 Warning 状态下按使用率降低分数，不能实现“临近到期且预计未用额度较高时有限提高优先级”。
 - 首 Token 以首个解析事件计时，未证明一定是用户可见有效内容。
 - 模型能力主要登记在模型级，不能完整表达某个实际 Key 的权限差异。
 - 没有官方供应商、代理层、账号、地区和网络等结构化故障域。
@@ -110,4 +115,4 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 
 ## 7. 采用判断
 
-**采用，定位为执行数据面。** 选型成立的必要条件是接受“外部 SLA 控制组件处于请求链路”这一边界。若要求 stock AxonHub 单独完成全部 PRD，或要求仅靠异步 Webhook 完成会话级路由，则结论为不可行。
+**采用，定位为执行数据面。** 单渠道 Profile 在增量复核提交中仍先按 Channel ID 过滤候选，外部层可以可靠指定资源；新增订阅需求不改变这一优势。选型成立的必要条件是外部 SLA 控制组件同时承担订阅账本和同步请求决策。若要求 stock AxonHub 单独完成全部 PRD，或要求仅靠异步 Webhook/QuotaAware 完成会话与订阅路由，则结论为不可行。

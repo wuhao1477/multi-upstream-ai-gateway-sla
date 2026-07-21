@@ -4,6 +4,7 @@
 | --- | --- |
 | 仓库 | `Wei-Shaw/sub2api` |
 | 评估提交 | `b8b72e1b18310c908668e79112e43c1e7c682696`（`main`） |
+| 增量复核提交 | `5a8d6c4e41e38f05cea4164e6ff03443fc0f6923`（`main`，2026-07-21） |
 | 最近发布 | `v0.1.162` |
 | 许可因素 | 按本轮要求，不参与排序 |
 | 结论 | 原生账号调度能力强；属于专业化候选，不作为通用 SLA 执行数据面首选 |
@@ -26,6 +27,7 @@ Sub2API 面向 Anthropic、OpenAI、Gemini、Antigravity 和 Grok 等账号池�
 
 - 通用选择器考虑分组、平台、模型、排除集合和会话粘性；见 [Gateway Scheduling](https://github.com/Wei-Shaw/sub2api/blob/b8b72e1b18310c908668e79112e43c1e7c682696/backend/internal/service/gateway_scheduling.go#L23)。
 - OpenAI 高级调度器综合优先级、负载、排队、错误率、TTFT、额度余量、上游成本及会话粘性；见 [OpenAI Account Scheduler](https://github.com/Wei-Shaw/sub2api/blob/b8b72e1b18310c908668e79112e43c1e7c682696/backend/internal/service/openai_account_scheduler.go#L920)。
+- 增量复核确认该调度器增加 `Reset` 因子：在存在未来会话窗口结束时间的账号中，距离重置越近，分数越高；该因子默认关闭，并与额度余量、成本、TTFT、错误率和负载共同参与评分，见 [Reset 因子](https://github.com/Wei-Shaw/sub2api/blob/5a8d6c4e41e38f05cea4164e6ff03443fc0f6923/backend/internal/service/openai_account_scheduler.go#L896)。
 - 会话粘性来自系统内部 Redis 绑定，不是客户端可指定的账号选择接口。
 
 ### 首输出和观测
@@ -49,6 +51,7 @@ L0 可以为每个真实账号建立独立 Group 和内部 API Key，由外部 S
 ### 价格、余额和测活
 
 - 用户钱包、订阅额度、Group/Account 倍率和模型成本较完整，但不等于各外部渠道的采购余额和 Key 剩余额度。
+- `Reset` 因子是 OpenAI/Codex 账号窗口特化能力，不是通用上游订阅计划模型；没有统一表达固定费用、多个资源共享一个采购订阅、预计到期未用额度和订阅引流上限。
 - Upstream Billing Probe 只面向 OpenAI API Key 的 `/v1/sub2api/billing`，默认定时获取倍率快照，不是通用余额采集；见 [Billing Probe](https://github.com/Wei-Shaw/sub2api/blob/b8b72e1b18310c908668e79112e43c1e7c682696/backend/internal/service/upstream_billing_probe.go#L549)。
 - Channel Monitor 使用指定 Endpoint、API Key 和模型做管理员合成检测，不是从真实业务流量分配探索机会；见 [Channel Monitor](https://github.com/Wei-Shaw/sub2api/blob/b8b72e1b18310c908668e79112e43c1e7c682696/backend/internal/service/channel_monitor_service.go#L428)。
 - 未发现通用运行时插件注册器。
@@ -69,4 +72,4 @@ Sub2API Adapter 必须声明平台能力差异，尤其是 `first_valid_content_
 
 ## 5. 采用判断
 
-**列入第一梯队的专业化候选，但不作为最终推荐。** 若主要资源是 OpenAI/Anthropic/Gemini/Grok 账号池，Sub2API 的原生调度、并发和额度能力很有价值；本项目需要聚合约二十个异构上游，并由外部 SLA 层逐请求选择真实资源，因此它的通用性和外部控制边界不如 AxonHub。
+**列入第一梯队的专业化候选，但不作为最终推荐。** 若主要资源是 OpenAI/Codex 账号池，Sub2API 的原生调度、并发、额度和 `Reset` 因子很有价值；但本项目需要聚合约二十个异构上游，并统一处理固定费用、共享订阅和到期预测，因此该能力只作为适配参考，不能替代外部订阅决策层。最终推荐仍为 AxonHub。

@@ -4,7 +4,7 @@
 | --- | --- |
 | 调查日期 | 2026-07-21 |
 | 调查方式 | 固定提交源码、GitHub 元数据、CodeGraph 调用链 |
-| 结论使用范围 | 本次技术选型；不代表生产验收 |
+| 结论使用范围 | PRD v1.1 技术选型；不代表生产验收 |
 
 README 只用于识别项目定位。路由、流式处理、失败接管、外部控制和状态模型的结论均以固定提交源码为依据。
 
@@ -22,7 +22,19 @@ README 只用于识别项目定位。路由、流式处理、失败接管、外�
 | `QuantumNous/new-api` | `e0d5156115881780328d31fe9bce7fe25aa9c6c7` | `main` / `v1.0.0-rc.21` | AGPL-3.0 |
 | `Wei-Shaw/sub2api` | `b8b72e1b18310c908668e79112e43c1e7c682696` | `main` / `v0.1.162` | LGPL-3.0-or-later |
 
-“最近发布”与评估提交不一定相同。所有源码链接均固定到上表提交，不引用持续变化的默认分支。OmniRoute 的默认分支是 `release/v3.8.49`，bestruirui/octopus 的默认分支是 `dev`；本轮按要求分别研究其 `main` 和 `master`，两个仓库均不存在另一名称的分支。ccLoad 只有 `master`，不存在 `main`。
+“最近发布”与评估提交不一定相同。除下节明确标注的增量复核外，源码链接均固定到上表提交，不引用持续变化的默认分支。OmniRoute 的默认分支是 `release/v3.8.49`，bestruirui/octopus 的默认分支是 `dev`；本轮按要求分别研究其 `main` 和 `master`，两个仓库均不存在另一名称的分支。ccLoad 只有 `master`，不存在 `main`。
+
+### PRD v1.1 增量复核
+
+新增 FR-033～039 后，对订阅能力相关且研究分支已前进的项目做了增量源码复核。未重写原有全量证据链接，新增结论固定到以下提交：
+
+| 候选 | 增量复核提交 | 复核结果 |
+| --- | --- | --- |
+| `looplj/axonhub` | `2664f4593566786763570e641c5c295edd3a975d`（`unstable`） | 单渠道 Profile 过滤仍有效；QuotaAware 对高使用率渠道降分，不实现临近到期优先消耗 |
+| `QuantumNous/new-api` | `1721144221ec5c94dd87891a7ae1bee228e7bb63`（`main`） | UserSubscription 仍是下游用户订阅，不是上游 Channel 采购订阅；新增提交不改变选型 |
+| `Wei-Shaw/sub2api` | `5a8d6c4e41e38f05cea4164e6ff03443fc0f6923`（`main`） | OpenAI 高级调度器存在临近会话窗口重置优先的 `Reset` 因子，但不构成通用上游订阅模型 |
+
+Aether、OmniRoute、ccLoad、两个 Octopus 指定研究分支未变化，继续使用上表固定提交。
 
 ## 2. 维护状态快照
 

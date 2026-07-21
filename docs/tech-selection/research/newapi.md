@@ -4,6 +4,7 @@
 | --- | --- |
 | 仓库 | `QuantumNous/new-api`（原 `Calcium-Ion/new-api` 已重定向） |
 | 评估提交 | `e0d5156115881780328d31fe9bce7fe25aa9c6c7`（`main`） |
+| 增量复核提交 | `1721144221ec5c94dd87891a7ae1bee228e7bb63`（`main`，2026-07-21） |
 | 最近发布 | `v1.0.0-rc.21` |
 | 许可因素 | 按本轮要求，不参与排序 |
 | 结论 | 可作为成熟渠道管理与计费平台；不作为最终 SLA 执行数据面 |
@@ -28,6 +29,7 @@ NewAPI 的主要优势是渠道接入、协议转换、用户分组、倍率、�
 - 原生支持模型倍率、分组倍率、缓存读写倍率、图片和音频等计费项；见 [价格计算](https://github.com/QuantumNous/new-api/blob/e0d5156115881780328d31fe9bce7fe25aa9c6c7/relay/helper/price.go#L43)。
 - 请求日志包含 Channel、上游请求 ID、Token、额度、总耗时、首响应时间和多 Key 索引等信息；见 [Log 模型](https://github.com/QuantumNous/new-api/blob/e0d5156115881780328d31fe9bce7fe25aa9c6c7/model/log.go#L59)。
 - Channel 有余额和已用额度字段，但这些数据没有形成共享账号余额、在途费用预留和保守可路由余额语义。
+- `UserSubscription`、订阅计划购买和周期重置用于限制下游用户可消费额度，不表示上游 Channel 的采购订阅；见 [UserSubscription 模型](https://github.com/QuantumNous/new-api/blob/1721144221ec5c94dd87891a7ae1bee228e7bb63/model/subscription.go)。
 
 ### 管理与部署
 
@@ -54,6 +56,10 @@ NewAPI 的主要优势是渠道接入、协议转换、用户分组、倍率、�
 - 性能聚合以模型和分组为主，不能替代真实 Key、故障域和尝试级统计。
 - Channel Test 是管理员发起的合成测试，不是符合 FR-060～068 的真实业务测活；见 [Channel Test](https://github.com/QuantumNous/new-api/blob/e0d5156115881780328d31fe9bce7fe25aa9c6c7/controller/channel-test.go#L75)。
 - 未发现请求前同步 Webhook 或通用运行时插件机制。
+
+### 上游订阅
+
+NewAPI 的订阅功能不能直接覆盖 FR-033～039。Channel 没有固定订阅费用、有效期、共享订阅池、续订状态、超额计费和预计到期未用额度等采购语义。外部采集器可以读取 Channel 余额、倍率和用量作为证据，但必须单独维护上游订阅计划，不能把 `UserSubscription` 映射为上游资源订阅。
 
 ## 4. 适配器边界
 

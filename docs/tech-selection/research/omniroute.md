@@ -53,7 +53,7 @@ OmniRoute 有内部流式预读，但不能把 HTTP 200、首个 SSE 事件或�
 
 真实客户端断开可以沿请求 signal 传播。但 Combo 的单目标超时虽然创建 `modelAbortSignal`，Chat 回调没有把该字段传入 `handleSingleModelChat`，因此超时后旧上游可能继续运行：[目标超时控制器](https://github.com/diegosouzapw/OmniRoute/blob/698b6eb00d0a3f589c9ae8828edc7b23002270e0/open-sse/services/combo/targetTimeoutRunner.ts#L36) [Combo 回调字段](https://github.com/diegosouzapw/OmniRoute/blob/698b6eb00d0a3f589c9ae8828edc7b23002270e0/src/sse/handlers/chat.ts#L795)。本项目不能用内置 Combo 承担严格接管；外部层应一次只请求一个 Connection，忽略 keepalive，在动态期限到达时取消整条 HTTP 请求，再开始下一个 Attempt。
 
-## 4. 账目、价格和余额
+## 4. 账目、价格、余额和订阅
 
 成功终态能记录 Provider、Connection、模型、输入/输出/推理、缓存读写和成本；Combo target 也有 step/execution key。缺口是：
 
@@ -61,6 +61,8 @@ OmniRoute 有内部流式预读，但不能把 HTTP 200、首个 SSE 事件或�
 - 一个 `handleChatCore` 内多次 `persistAttemptLogs` 复用同一 `pendingRequestId`；`call_logs.id` 是主键且使用普通 INSERT，后续重复写入失败会被吞掉。[Attempt 日志](https://github.com/diegosouzapw/OmniRoute/blob/698b6eb00d0a3f589c9ae8828edc7b23002270e0/open-sse/handlers/chatCore/attemptLogging.ts#L77) [日志 INSERT](https://github.com/diegosouzapw/OmniRoute/blob/698b6eb00d0a3f589c9ae8828edc7b23002270e0/src/lib/usage/callLogs.ts#L643)
 - 内部 Key 轮换只保存初始/最终 Connection；失败、取消、没有终态 usage 的消耗无法作为财务级 Attempt 证据。
 - 额度与余额只覆盖部分 Provider，不具备二十个异构 NewAPI/Sub2API 站点的统一余额、共享账号关系、费用预留和账单核对语义。
+
+智能路由配置包含 Provider 额度、`budgetCap`、成本/延迟/SLA 限制和 `resetWindowAffinity`，可以按额度窗口结束时间提供调度倾向；见 [Intelligent Routing](https://github.com/diegosouzapw/OmniRoute/blob/698b6eb00d0a3f589c9ae8828edc7b23002270e0/src/lib/combos/intelligentRouting.ts#L8)。但该能力默认权重为 0，且没有通用固定费用、采购订阅有效期、跨 Connection 共享订阅池、预计到期未用额度和订阅引流上限。它只能作为外部订阅决策的输入或局部执行策略，不能成为 FR-033～039 的权威账本。
 
 价格、缓存和成功用量可作为外部账本的辅助证据，不能成为唯一权威来源。
 
@@ -70,7 +72,7 @@ OmniRoute 有内部流式预读，但不能把 HTTP 200、首个 SSE 事件或�
 | --- | --- | --- |
 | 单 Connection 白名单 API Key + 单 Key Connection + 外部逐次取消 | L0 | 可作为受约束执行适配器 |
 | 增加受认证 RoutePlan、逐请求期限、严格 Connection/Key 回执和 Attempt ID | L2 | 涉及少量稳定边界，但仍需上游接受 |
-| 在 OmniRoute 内实现会话预算、价格/余额、真实测活、故障域和完整账本 | L3 | 不接受长期私有分支 |
+| 在 OmniRoute 内实现会话预算、通用订阅、价格/余额、真实测活、故障域和完整账本 | L3 | 不接受长期私有分支 |
 
 项目把 Next.js、Dashboard、SQLite、执行器、路由、日志、压缩、Memory、MCP/A2A 等放在同一产品中，升级和安全审查范围显著大于专用执行网关。其插件能力很强，但不能消除本项目最关键的外部 SLA 状态和首有效内容责任。
 

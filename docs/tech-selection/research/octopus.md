@@ -57,7 +57,7 @@ Group 的 `first_token_time_out` 只在上游已返回 HTTP 响应头、进入 `
 
 ## 5. 价格、缓存、测活和 Attempt
 
-master 支持 input/output/cache read/cache write 价格，并从 models.dev 同步；客户端 API Key 有累计 `MaxCost`。但没有上游账号余额、Key 独立余额、渠道倍率、采购价版本、币种、在途费用或账单核对。
+master 支持 input/output/cache read/cache write 价格，并从 models.dev 同步；客户端 API Key 有累计 `MaxCost` 和到期限制。这些字段约束下游调用凭证，不代表上游渠道订阅。项目没有上游订阅固定费用、共享额度、有效期/续订、超额计费、预计到期未用额度，也没有上游账号余额、Key 独立余额、渠道倍率、采购价版本、币种、在途费用或账单核对。
 
 Attempt 数组记录 Channel、Key ID、序号、耗时、状态和粘性；最终 RelayLog 才记录总 usage 和成本。单次失败 Attempt 没有独立 Token、缓存、费用和可靠 HTTP 状态码，不能核算重复费用。会话键只是 `客户端 API Key ID:model`，进程内保存且重选时只保持 Channel，不保证同一上游 Key：[会话状态](https://github.com/bestruirui/octopus/blob/b7b053e7fd81911e2062359e93f9dcbd58114bb0/internal/relay/balancer/session.go#L9)。
 
@@ -76,7 +76,7 @@ Attempt 数组记录 Channel、Key ID、序号、耗时、状态和粘性；最�
 
 ## 7. Hureru 旁支补充
 
-Hureru 增加了 Site、Account、Token、UserGroup、余额、ChannelBinding、缓存 Token、费用、同账号离群检测和每次尝试日志，比 bestruirui master 更接近聚合站场景。它仍使用固定 `ping` 主动探针，缺价格可信版本、共享余额预留、多层故障域、会话 TTFT 预算、探索预算和完整 Attempt 费用；补齐需要修改 relay、Site、账务、健康任务和管理面。详细证据仍固定在 [Site/Account 模型](https://github.com/Hureru/octopus/blob/0e1a7ee062c8a24a9c8b95e7d1778f265182a304/internal/model/site.go#L14) 和 [尝试指标](https://github.com/Hureru/octopus/blob/0e1a7ee062c8a24a9c8b95e7d1778f265182a304/internal/relay/metrics.go#L17)。
+Hureru 增加了 Site、Account、Token、UserGroup、余额、ChannelBinding、缓存 Token、费用、同账号离群检测和每次尝试日志，比 bestruirui master 更接近聚合站场景。它仍使用固定 `ping` 主动探针，缺通用上游订阅账本、固定费用分摊、共享余额预留、到期预测、多层故障域、会话 TTFT 预算、探索预算和完整 Attempt 费用；补齐需要修改 relay、Site、账务、健康任务和管理面。详细证据仍固定在 [Site/Account 模型](https://github.com/Hureru/octopus/blob/0e1a7ee062c8a24a9c8b95e7d1778f265182a304/internal/model/site.go#L14) 和 [尝试指标](https://github.com/Hureru/octopus/blob/0e1a7ee062c8a24a9c8b95e7d1778f265182a304/internal/relay/metrics.go#L17)。
 
 ## 8. 适配和维护判断
 

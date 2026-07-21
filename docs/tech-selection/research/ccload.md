@@ -61,7 +61,7 @@ ccLoad 每个流式 attempt 从请求开始创建首内容定时器，并通过�
 
 ccLoad 不只支持静态价格：模型目录默认每六小时从 models.dev 拉取，保存来源、ETag 和获取时间；成本引擎覆盖输入/输出、缓存读写、长上下文、service tier、工具及按次项目。Channel `cost_multiplier` 会作为日志快照保存。[目录同步与周期](https://github.com/caidaoli/ccLoad/blob/665fec14f5eed2c00fa0aaf54c9a4643c04d0dab/internal/app/model_catalog_sync.go#L22) [ETag 拉取与安装](https://github.com/caidaoli/ccLoad/blob/665fec14f5eed2c00fa0aaf54c9a4643c04d0dab/internal/app/model_catalog_sync.go#L146)
 
-这些能力仍不能替代采购价格账本：日志不保存当次价格版本、币种和生效区间；未知模型可能按 0 成本处理。项目也没有上游 Account、共享余额、Key 独立余额、在途费用预留、保守下限或账单核对。Channel 日限额和客户端 Token 限额都是完成后记账，存在并发超额窗口。
+这些能力仍不能替代采购价格账本：日志不保存当次价格版本、币种和生效区间；未知模型可能按 0 成本处理。项目也没有上游 Account、共享余额、Key 独立余额、在途费用预留、保守下限或账单核对。Channel 日成本限制、渠道倍率和客户端 Token 限额都是通用限额或完成后记账，不构成上游订阅计划；缺少固定费用、有效期、共享订阅额度、续订/超额规则和到期未用预测，并存在并发超额窗口。
 
 定时 Channel 检查允许配置模型，但请求内容是统一合成内容，且不从合资格真实业务流量抽样；没有探索预算、测活资格、失败后再次试错历史和独立测活账目。缓存方面只有事后 cache token 和 Codex prompt hint，没有通用会话到资源亲和及切换损失预测。
 
@@ -87,4 +87,4 @@ ccLoad 不只支持静态价格：模型目录默认每六小时从 models.dev �
 
 部署方面，ccLoad 是单 Go 二进制、嵌入 Web、默认 SQLite，也支持 MySQL/PostgreSQL，明显比 OmniRoute 轻。多实例时仍需审查内存冷却、统计缓存和 settings 重启行为。
 
-**结论：上调为 L0 轻量执行备选，但不作为最终基础。** 它适合让外部 SLA 网关精确调用一个资源；不具备成为价格、余额、会话和测活权威系统的条件。
+**结论：上调为 L0 轻量执行备选，但不作为最终基础。** 它适合让外部 SLA 网关精确调用一个资源；不具备成为价格、余额、订阅、会话和测活权威系统的条件。

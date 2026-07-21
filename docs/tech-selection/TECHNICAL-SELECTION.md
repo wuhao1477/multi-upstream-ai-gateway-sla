@@ -3,9 +3,11 @@
 | 项目 | 结论 |
 | --- | --- |
 | 选型日期 | 2026-07-21 |
+| PRD 基线 | `v1.1`；新增 FR-033～039 上游订阅渠道调度 |
 | 评估范围 | AxonHub、Aether、OmniRoute、NewAPI、Sub2API、Hureru/octopus、bestruirui/octopus、ccLoad、zhfeng1/ai-gateway |
 | 许可证因素 | 不参与淘汰、排序和最终推荐 |
 | 指定分支复核 | OmniRoute `main@698b6eb0`；bestruirui/octopus `master@b7b053e7`；ccLoad `master@665fec14` |
+| 增量源码复核 | AxonHub `unstable@2664f459`；NewAPI `main@17211442`；Sub2API `main@5a8d6c4e` |
 | 唯一推荐执行数据面 | `looplj/axonhub` |
 | 推荐集成方式 | 平台无关 SLA 决策核心 + GatewayAdapter + stock AxonHub |
 | AxonHub 源码侵入 | L0；不修改上游源码 |
@@ -20,24 +22,30 @@
 1. 可用单渠道 API Key Profile 把一次请求限制到一个真实资源，适合 Key 级成本、余额和缓存归因。
 2. 已有流式提交前预读、取消、顺序回退和 Request Execution/Usage Log，可提供外部账本所需的原始执行证据。
 3. 管理 API 能处理渠道、Key、Profile、权重和状态，外部控制组件无需修改核心路由。
-4. 价格可信版本、共享余额、会话 TTFT、故障域、真实业务测活和重复费用仍由外部 SLA 核心维护，不会形成第三方私有分支。
+4. 价格可信版本、共享余额、订阅计划、到期预测、会话 TTFT、故障域、真实业务测活和重复费用仍由外部 SLA 核心维护，不会形成第三方私有分支。
 
-AxonHub 也不是完整 SLA 成品。动态会话等待时间、并行接管、取消后继续计费和全量探索账目仍必须由外部同步请求层承担。
+AxonHub 也不是完整 SLA 成品。动态会话等待时间、订阅额度利用、并行接管、取消后继续计费和全量探索账目仍必须由外部同步请求层承担。
 
 三个指定分支复核后，最接近推荐边界的是 ccLoad：其单 Channel allowlist Token 可形成 L0 绑定。但 AxonHub 的 Profile 直接表达单渠道授权，执行记录也更接近请求尝试；ccLoad 仍依赖“单 Channel + 单 Key + 单 URL + 单 Token”拓扑约束，且缺统一 Attempt 关联。因此唯一推荐不变。
+
+### PRD v1.1 影响
+
+FR-033～039 要求管理上游订阅计划的固定费用、额度、有效期、共享范围、续订和超额计费，并根据预计到期未用额度有限提高合格流量。该优先级必须同时受 SLA、缓存、容量、单次成本和订阅引流上限约束，不能为消耗额度制造无业务价值请求。
+
+现有候选均不能完整承担这组通用能力。Aether 具备较完整的月度额度字段，Sub2API 的 OpenAI 调度器具备临近窗口重置优先因子，OmniRoute 有额度窗口与 `resetWindowAffinity`；但它们都缺少适用于二十个异构上游的固定费用分摊、共享订阅账本和预计到期未用额度决策。因此外部订阅决策能力从推荐组件变为选型成立的必要条件，执行数据面推荐仍为 AxonHub。
 
 ## 2. 全部候选摘要
 
 | 平台 | 主要定位 | 可复用优势 | 关键不足 | 适配判断 | 结论 |
 | --- | --- | --- | --- | --- | --- |
-| AxonHub | 通用多供应商执行网关 | 单资源 Profile、流式提交前预读/回退、执行记录、缓存 Token 成本、管理 API | 首解析事件不一定等于用户可见内容；会话预算、真实测活、共享余额和重复费用需外置 | L0 | **唯一推荐** |
-| Aether | 资源/Key/路由/额度模型较完整的通用网关 | Routing Group、`allowed_keys`、NewAPI/Sub2API 余额、候选与用量记录、会话亲和 | 普通流式路径不能普遍保证首个有效内容前切换；不能按请求下发任意候选序列和期限；Pool 会削弱 Key 精确过滤 | L0 预设组；完整接管需外置或 L2 | 优先备选 |
-| OmniRoute `main` | 插件化、多 Provider、Combo 调度网关 | 单 Connection 白名单可受限 L0；Provider 覆盖、Plugin/Webhook、额度和缓存指标丰富 | keepalive 和元事件早于有效内容；宽权限 Key 下亲和可覆盖指定 Connection；Combo 取消与 Attempt 账目不完整 | 受限 L0；完整契约 L2 | 条件适配 |
-| Sub2API | 官方/订阅账号池与计费网关 | 账号并发、优先级、负载、TTFT、额度余量、会话粘性；OpenAI 有首语义输出保护 | 公开请求不能精确指定 Account；跨平台首内容能力不一致；平台集合不是任意 Provider 插件；需 PostgreSQL/Redis | 单账号 Group/API Key 为 L0；通用控制需 L2/L3 | 专业化候选 |
-| NewAPI | 渠道管理、协议转换和站内计费平台 | 渠道/模型/分组、倍率、余额、权重、重试、轻量部署和大生态 | 普通调用方不能指定 Channel；Channel 内多 Key 随机/轮询；无首有效内容期限和统一尝试账目 | 单 Key 独立 Channel 为 L0；通用 RoutePlan 需 L2/L3 | 渠道管理备选 |
+| AxonHub | 通用多供应商执行网关 | 单资源 Profile、流式提交前预读/回退、执行记录、缓存 Token 成本、管理 API | 首解析事件不一定等于用户可见内容；会话预算、订阅账本、真实测活、共享余额和重复费用需外置 | L0 | **唯一推荐** |
+| Aether | 资源/Key/路由/额度模型较完整的通用网关 | Routing Group、`allowed_keys`、月度额度/重置/到期字段、候选与用量记录、会话亲和 | 额度候选过滤未排除已过期记录；缺共享订阅池、固定费用分摊和到期未用预测；普通流式路径不能普遍保证首个有效内容前切换 | L0 预设组；完整接管需外置或 L2 | 优先备选 |
+| OmniRoute `main` | 插件化、多 Provider、Combo 调度网关 | 单 Connection 白名单可受限 L0；Provider 覆盖、Plugin/Webhook、额度窗口、预算和 `resetWindowAffinity` | 缺通用固定费用和共享订阅池；keepalive 和元事件早于有效内容；Combo 取消与 Attempt 账目不完整 | 受限 L0；完整契约 L2 | 条件适配 |
+| Sub2API | 官方/订阅账号池与计费网关 | 账号并发、负载、TTFT、额度余量、会话粘性；OpenAI 有首语义输出保护和临近窗口重置优先因子 | 订阅调度是 OpenAI/Codex 特化；缺通用固定费用、共享订阅池和到期未用预测；公开请求不能精确指定 Account | 单账号 Group/API Key 为 L0；通用控制需 L2/L3 | 专业化候选 |
+| NewAPI | 渠道管理、协议转换和站内计费平台 | 渠道/模型/分组、倍率、余额、权重、重试、轻量部署和大生态 | UserSubscription 是下游用户权益，不是上游 Channel 订阅；普通调用方不能指定 Channel；无首有效内容期限和统一尝试账目 | 单 Key 独立 Channel 为 L0；通用 RoutePlan 需 L2/L3 | 渠道管理备选 |
 | Hureru/octopus | 聚合站、Site/Account/Token 模型 | 账号余额、缓存、费用、熔断和会话能力较接近目标 | 外部策略入口弱，补齐价格、测活、故障域和账务需改多个核心模块 | L3 | 不作为基础 |
-| bestruirui/octopus `master` | 轻量多渠道代理 | 私有 model alias + 单资源 Group/Channel 可构造 L0；有静态首 Token 超时和 Attempt 数组 | 无正式 Channel Binding；超时从响应头后开始；存在 429 状态、统计和参数覆盖缺陷 | 受限 L0；正式契约 L2；内置 SLA L3 | 低优先级适配 |
-| ccLoad `master` | 轻量多协议故障转移代理 | Token Channel allowlist、延迟提交、取消、细分缓存/成本、models.dev 价格和多层冷却 | 元事件可提前提交；无共享余额、故障域、真实业务测活及可关联 Attempt 账本 | L0 单资源绑定；内置 SLA L3 | **轻量备选** |
+| bestruirui/octopus `master` | 轻量多渠道代理 | 私有 model alias + 单资源 Group/Channel 可构造 L0；有静态首 Token 超时和 Attempt 数组 | API Key 到期和 MaxCost 属于下游限制；无上游订阅模型；存在流式和统计可靠性缺陷 | 受限 L0；正式契约 L2；内置 SLA L3 | 低优先级适配 |
+| ccLoad `master` | 轻量多协议故障转移代理 | Token Channel allowlist、延迟提交、取消、细分缓存/成本、models.dev 价格和多层冷却 | 仅有倍率、日成本限制和客户端 Token 限额；无上游订阅模型、共享余额及可关联 Attempt 账本 | L0 单资源绑定；内置 SLA L3 | **轻量备选** |
 | zhfeng1/ai-gateway | 单上游透明代理与调试查看器 | 原始请求、响应和首字节观察 | 没有多渠道调度、资源账目或执行数据面 | 接近重写 | 排除 |
 
 ## 3. 推荐集成边界
@@ -46,8 +54,10 @@ AxonHub 也不是完整 SLA 成品。动态会话等待时间、并行接管、�
 
 - 维护 `真实上游 → 账号 → Key → 模型/权限 → 地区/故障域` 资源目录。
 - 定时采集 NewAPI、Sub2API 及二开版本的价格、倍率、余额、额度和权限，并保存来源与版本。
-- 按价格可信度、确认余额、在途费用预留、安全储备、容量和故障域生成候选。
+- 维护订阅计划的固定费用、额度、有效期、共享范围、续订、超额计费和预计到期未用额度。
+- 按价格可信度、确认余额、订阅有效性、在途费用预留、安全储备、容量和故障域生成候选。
 - 维护会话前缀 TTFT、缓存亲和、真实业务测活、探索预算、冷却和三类账目。
+- 在成本与订阅引流上限内调整订阅渠道优先级；无法安全利用时记录原因和预计损失。
 - 在首个有效内容提交前观察流，按剩余预算取消当前请求、选择下一资源并记录每次尝试。
 
 ### GatewayAdapter 负责
@@ -59,15 +69,16 @@ AxonHub 也不是完整 SLA 成品。动态会话等待时间、并行接管、�
 
 ### 上游元数据适配器负责
 
-NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系统。价格、倍率和余额采集应独立于 Aether、AxonHub 等执行适配器，避免把某个平台的内部计费字段误认为真实采购成本。
+NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系统。价格、倍率、余额和订阅状态采集应独立于 Aether、AxonHub 等执行适配器，避免把下游用户订阅、平台内部计费字段或单一账号窗口误认为真实上游采购成本。
 
 ## 4. 资源建模约束
 
 推荐平台无关模型：
 
-- `UpstreamResource`：真实站点、账号、Key、模型权限、余额关系、故障域和缓存作用域。
+- `UpstreamResource`：真实站点、账号、Key、模型权限、余额/订阅关系、故障域和缓存作用域。
+- `SubscriptionPlan`：固定费用、总额度、剩余额度、有效期、共享范围、续订、超额计费和引流上限。
 - `ExecutionBinding`：该资源在某个平台中的引用，例如 AxonHub Profile、Aether Routing Group、NewAPI Channel 或 Sub2API Group/API Key。
-- `RoutePlan`：候选顺序、每次首个有效内容期限、缓存目标、故障域限制、费用上限、测活标记和取消规则。
+- `RoutePlan`：候选顺序、每次首个有效内容期限、缓存目标、故障域限制、费用/订阅引流上限、测活标记和取消规则。
 - `AttemptResult`：实际资源、平台请求 ID、首字、完整结果、取消状态、Token、缓存、费用和是否已向客户端提交。
 
 所有适配器都应采用“一个真实资源对应一个执行绑定”。除既有 AxonHub、Aether、NewAPI 和 Sub2API 映射外，ccLoad 使用单 Key/URL Channel + 单 Channel Token，OmniRoute 使用单 Key Connection + 单 Connection 白名单 API Key，Octopus 只能使用私有 model alias + 单资源 Group/Channel。把多个真实 Key 留给平台内部自由轮换，会破坏缓存亲和、余额归因和故障隔离。
@@ -81,6 +92,7 @@ NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系�
 | 缓存率 ≥90% | SLA 核心维护会话/Key/模型缓存作用域和切换损失；执行平台提供缓存 Token 记录 |
 | 价格和倍率变动 | NewAPI/Sub2API 采集器形成可信版本；过期或异常时限制付费流量 |
 | 账号余额和 Key 余额 | 外部账本维护共享关系、在途预留和安全储备，平台额度只作辅助证据 |
+| 订阅额度利用 | 外部订阅账本预测到期未用额度，只在 SLA、缓存、容量和成本限制内提高合格业务流量 |
 | 无缝测活 | 使用合资格真实业务请求，由 SLA 核心维护探索预算和冷却；不依赖固定 `hello`/`ping` |
 | 首字前接管 | 同步 SLA 层缓冲首个有效内容，按期限取消并切换；已提交有效内容后不得拼接另一响应 |
 | 失败和重复费用 | 按 Attempt 记录所有请求、取消、继续计费、缓存损失和余额差异，不能只看最终响应 |
@@ -99,8 +111,9 @@ NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系�
 2. 验证客户端断开、SLA 接管取消和上游取消均可关联到同一 Attempt。
 3. 验证首个有效内容定义不把响应头、空 SSE 或 heartbeat 当作首字。
 4. 验证价格、余额、缓存 Token、费用和平台请求 ID 可以与外部账本关联。
-5. 接受外部 SLA 决策核心是同步请求链路的必要组成；只部署平台本身不能满足本 PRD。
-6. 对备用适配器逐项验证单资源拓扑不会被会话亲和、内部 Key/URL 轮换、隐藏重试或元事件提前提交破坏。
+5. 验证订阅有效期、共享额度、固定费用分摊、超额计费和预计到期未用额度不依赖执行平台内部推断。
+6. 接受外部 SLA 决策核心是同步请求链路的必要组成；只部署平台本身不能满足本 PRD。
+7. 对备用适配器逐项验证单资源拓扑不会被会话亲和、内部 Key/URL 轮换、隐藏重试或元事件提前提交破坏。
 
 ## 8. 证据索引
 
