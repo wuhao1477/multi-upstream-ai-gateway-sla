@@ -11,6 +11,8 @@ Scenarios (choose via model name):
   mock-heartbeat     : sends SSE comment heartbeats then content (tests non-content first bytes)
   mock-500           : returns HTTP 500 immediately (tests failover)
   mock-normal-2      : same as normal, different id — use as the "second" channel
+  mock-abort         : sends role + partial content, then abruptly drops the TCP
+                       connection with NO finish and NO [DONE] (upstream mid-stream abort)
 
 Run: python3 mock_upstream.py [port]   (default 8091)
 """
@@ -65,6 +67,17 @@ class Handler(BaseHTTPRequestHandler):
         model = req.get("model", "mock-normal")
         cid = "chatcmpl-mock-" + model
 
+        # Per-channel behaviour override via the upstream Authorization header
+        # (AxonHub forwards each channel's credential apiKey). A channel whose
+        # credential contains "slow" behaves like mock-slow-first regardless of
+        # the requested model — used to build the internal-failover test
+        # (assumption #2 path B): slow channel A first-event-times-out, AxonHub
+        # fails over to fast channel B.
+        auth = self.headers.get("Authorization", "")
+        if "slow" in auth:
+            model = "mock-slow-first"
+            cid = "chatcmpl-mock-slow-channel"
+
         if model == "mock-500":
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
@@ -86,6 +99,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(sse(chunk(cid, model, {}, finish="stop")))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
+                return
+
+            if model == "mock-abort":
+                # upstream sends role + a bit of content, then abruptly drops the
+                # connection mid-stream: no finish_reason, no [DONE], no usage.
+                self.wfile.write(sse(chunk(cid, model, {"role": "assistant"})))
+                self.wfile.write(sse(chunk(cid, model, {"content": "partial"})))
+                self.wfile.flush()
+                time.sleep(0.2)
+                try:
+                    # force an abrupt TCP close so AxonHub sees a truncated stream
+                    self.connection.shutdown(1)  # SHUT_WR
+                    self.connection.close()
+                except Exception:
+                    pass
+                self.close_connection = True
                 return
 
             if model == "mock-heartbeat":

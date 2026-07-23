@@ -67,11 +67,32 @@ harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点�
 | # | 结果 | 证据（运行时） | 日期 |
 | --- | --- | --- | --- |
 | 1 | ✅ 证实 | mock-500（渠道A）失败后在**渠道A内重试 3 次**（execution 均 `channelID=Channel/1`、`responseStatusCode=500`），客户端收到错误 `mock upstream 500`，**从未切到渠道B**（active profile 仅含渠道A） | 2026-07-23 |
-| 2 | ✅ 证实（客户端断开路） | mock-slow-first 客户端 2s 断开后，Request 及其 execution 均 `status=canceled`、`errorMessage="...context canceled"`，按 `requestID` 关联同一 Request。接管/上游取消两路本轮未构造（同属 `canceled` 枚举，建议后续补） | 2026-07-23 |
+| 2 | ✅ 证实（三路） | 客户端断开=`canceled`、上游中途断开=`failed`、内部首事件超时+转移=attempt `failed`+`completed`；三者均逐 attempt 落 execution、关联同一 request，可对账。详见下 | 2026-07-23 |
 | 3 | ⚠️ 风险证实 | `metricsFirstTokenLatencyMs` = 首个 JSON 流事件（含 role-only delta），**非用户可见内容 TTFT**。三条铁证见下 | 2026-07-23 |
 | 4 | ✅ 证实 | usage_log 记录 token（prompt/completion/total/**cached**）+ `totalCost` + `costPriceReferenceID`（价格版本），挂在对应 Request 下；成本按配置单价精确算出，缓存 token 走折扣价 | 2026-07-23 |
 | 5 | ⚠️ 部分收口 | 配额 enforcement 系统级、**默认关闭**；`DE_PRIORITIZE` 下配额 `unknown` 渠道**仍进候选且可被选中**（保守下限=保留而非排除）。详见下 | 2026-07-23 |
 | 6 | ⏸ 本轮未覆盖 | ccLoad 独立仓库、需另起 compose | — |
+
+### 假设 2 取消对账 —— 三路取消/失败全部可对账
+
+三种中断来源都逐 attempt 落一行 execution、以 `channelID` 标注、关联同一 `request_id`：
+
+| 取消/失败来源 | attempt status | errorMessage | 关联 |
+| --- | --- | --- | --- |
+| 客户端断开 | `canceled` | `...context canceled` | ✅ 同 request |
+| 上游中途断开（mock-abort：发 role+部分内容后直接断 TCP，无 finish/[DONE]） | `failed` | `stream ended without terminal event or completed response` | ✅ 同 request |
+| 内部首事件超时 + 故障转移 | attempt-1 `failed` / attempt-2 `completed` | `stream first event timeout` | ✅ 两 attempt 同 request |
+| （参照）上游 500 | `failed` | `mock upstream 500` | ✅ 同 request |
+
+**语义澄清（重要）**：`canceled` 在 beta5 里**专指客户端/上下文取消**；上游断开、内部超时都归 `failed`。→ **外部 SLA 账本若要统一"取消"口径，须按 `errorMessage` 归并，不能只看 status 枚举。**
+
+**"SLA 接管"的定位**：选型架构里的"SLA 接管取消"是自研层在 AxonHub 之前决定取消 → 从 AxonHub 看等同客户端断开 → `canceled`（已覆盖）。本轮另验证了 AxonHub **自身** retry-policy 驱动的故障转移（独立机制）：内部首事件超时掐断 attempt-1（`failed`）+ 转移到 attempt-2（`completed`），同一 request 可对账。
+
+**RetryPolicy 配置要点**（`retryPolicy` / `updateRetryPolicy`，系统级）：
+
+- `streamFirstEventTimeoutSeconds` **默认 `0`=关闭** —— 开箱状态 AxonHub **不会**主动掐断慢首字，须显式开启才有内部接管。
+- `maxChannelRetries`（默认 3，跨渠道转移）、`maxSingleChannelRetries`（默认 2，同渠道）、`loadBalancerStrategy`（默认 `adaptive`；`failover` 按 `orderingWeight` 升序定主备）。
+- 坑：`updateRetryPolicy` 是**整体替换**，只传部分字段会把其余重置为默认/0。
 
 ### 假设 3 首字定义 —— 三条运行时铁证
 

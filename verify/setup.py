@@ -92,7 +92,8 @@ def channel_input(name):
         "name": name,
         "credentials": {"apiKey": "mock-key"},
         "supportedModels": ["mock-normal", "mock-normal-2", "mock-empty-sse",
-                             "mock-slow-first", "mock-heartbeat", "mock-500"],
+                             "mock-slow-first", "mock-heartbeat", "mock-500",
+                             "mock-abort"],
         "defaultTestModel": "mock-normal",
     }
 
