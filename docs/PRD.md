@@ -578,7 +578,7 @@
 | Sub2API 订阅字段完整性 | 已改用 sub2api 源码 ent schema 逐字段确认（比空账号更准），无需生效订阅账号 | ✅ 完成 |
 | 币种折算 | 已决策：一期所有币种 1:1 按美元处理，币种仅名称 | ✅ 完成（FR-018） |
 | ASXS 登录端点 | 已抓取：`POST /api/manage/auth/login` → 返回 7 天 JWT 存 localStorage `token` | ✅ 完成 |
-| 6 项技术假设 Docker 验证 | AxonHub 单渠道隔离、首字定义等 | ⏳ 见 [ISSUE-001](./issues/ISSUE-001-tech-assumption-verification.md) |
+| 6 项技术假设 Docker 验证 | AxonHub 1/2/4 证实、3 风险证实、5 部分收口、6 退路稳固；仅假设 5 的真实配额态待真实订阅凭证 | ✅ 完成（2026-07-23），见 [ISSUE-001](./issues/ISSUE-001-tech-assumption-verification.md) |
 
 ## 14. 需求变更与追溯
 
