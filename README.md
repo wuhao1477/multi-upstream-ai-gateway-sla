@@ -44,6 +44,7 @@
 - [03 GatewayAdapter 契约](docs/dev/03-gateway-adapter.md) —— 执行面接口 + AxonHub beta5 实现 + ccLoad 退路空壳
 - [04 采集器契约](docs/dev/04-collector-adapter.md) —— CollectorAdapter 接口 + 三家族字段映射 + 凭证生命周期状态机
 - [05 调度与经营策略](docs/dev/05-scheduling-and-operations.md) —— selector 排序/RoutePlan + steward 测活/冷却/订阅倾斜/告警
+- [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、AxonHub 集成、升级门禁（verify/ 准入）、备份保留、M0 部署清单
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）
