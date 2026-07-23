@@ -71,7 +71,7 @@ harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点�
 | 3 | ⚠️ 风险证实 | `metricsFirstTokenLatencyMs` = 首个 JSON 流事件（含 role-only delta），**非用户可见内容 TTFT**。三条铁证见下 | 2026-07-23 |
 | 4 | ✅ 证实 | usage_log 记录 token（prompt/completion/total/**cached**）+ `totalCost` + `costPriceReferenceID`（价格版本），挂在对应 Request 下；成本按配置单价精确算出，缓存 token 走折扣价 | 2026-07-23 |
 | 5 | ⚠️ 部分收口 | 配额 enforcement 系统级、**默认关闭**；`DE_PRIORITIZE` 下配额 `unknown` 渠道**仍进候选且可被选中**（保守下限=保留而非排除）。详见下 | 2026-07-23 |
-| 6 | ⏸ 本轮未覆盖 | ccLoad 独立仓库、需另起 compose | — |
+| 6 | ✅ 单资源拓扑稳固 | ccLoad `v3.6.1` L0（单渠道/单URL/单Key）：会话粘性/Key轮换/URL轮换/隐藏重试(openai+5xx) 四项零破坏；唯一短板=元事件提前提交（同 AxonHub 假设 3）。详见下 | 2026-07-23 |
 
 ### 假设 2 取消对账 —— 三路取消/失败全部可对账
 
@@ -135,9 +135,31 @@ beta5 的 provider 配额模型：
 
 源码级"过滤先于负载均衡"由 profile 白名单在运行时确实先于 LB 生效间接佐证（见假设 1）。**未隔离验证**（需真实订阅凭证，mock 无法伪造订阅面板协议）：`available`/`exhausted` 真实状态下的剔除与降级排序、`unknown` 是否排在 `available` 之后——需接真实 `opencode_go`/`claudecode` 渠道另做。
 
+### 假设 6 备选 ccLoad —— 单资源拓扑稳固（唯一短板同 AxonHub）
+
+在 ccLoad `v3.6.1`（提交 `665fec1`，与 [ccload.md](../tech-selection/research/ccload.md) 评估提交对齐）上，按其自带 Dockerfile 构建、搭最小 L0 拓扑（**单渠道 / 单 URL / 单 Key `sequential` / Channel Token 限定单渠道**），发 12 次探测（= 12 次上游连接，精确 1:1）：
+
+| 风险 | 判定 | 证据 |
+| --- | --- | --- |
+| 会话粘性 | ✅ 未破坏 | 单资源无可粘的"非预期资源"；6 次相同请求全 `channel_id=1/key=…AAA/url=mock:8091`。`codex_session_cache` 仅 Codex 协议触发，openai 渠道未触发 |
+| 内部 Key 轮换 | ✅ 未破坏 | mock 侧 12/12 请求 `Authorization` 恒为单 Key，零轮换 |
+| 内部 URL 轮换 | ✅ 未破坏 | 12/12 恒同 host+path；ccLoad `base_url` 恒定 |
+| 隐藏重试 | ✅ 未破坏（本场景） | 一次外部请求 = 恰好一次上游连接；`mock-500` 仅 1 次上游连接、无隐藏重试。**未覆盖** ccload.md 点名的 Codex 400 body-rewrite 隐藏重试路径（`proxy_forward.go:1549`；openai+5xx 非该路径） |
+| **元事件提前提交** ⚠️ | **风险证实** | 见下 |
+
+**元事件提前提交 —— 与 AxonHub 假设 3 同根同构**（mock 在 role-only delta 后 sleep 0.5s 才发首内容）：
+
+- 客户端在 ~52ms 收到首个 SSE（role-only，`content=None`），首个可见内容 `Hello` ~515ms 才到 → ccLoad 在元事件上就 `deferredWriter.Commit()`，早于真实内容 ~460ms。
+- ccLoad 自记 `first_byte_time=0.042s`（≈role delta）；`mock-empty-sse`（零可见内容）仍记 `0.042s`；`mock-heartbeat`（先 ~0.6s 注释心跳）记 `0.615s` → SSE 注释不计、role-only delta 计入。
+- 源码根因：`proxy_forward.go:771-778` 用 `HasStreamOutput()` 同时驱动 commit 与首字节打点，而它在判断事件是否含可见内容**之前**即置 `true`（`proxy_sse_parser.go:485`）。
+
+**总判定**：**单资源拓扑在 ccLoad 上对"一个外部请求 = 一个上游资源"的绑定稳固，可作为 AxonHub 退路。** 唯一已知短板与 AxonHub **完全同构**——`first_byte_time` 把 role-only 元事件当"首输出"，**不可作为用户可见 TTFT**；外部 SLA 核心须自算内容感知 TTFT 并在动态期限到达时取消整条请求（ccload.md 已写入适配器契约）。
+
+**未覆盖（需前提）**：① Codex 400 body-rewrite 隐藏重试路径（需建 codex 渠道 + 400 场景，可用 mock 补做）；② 取消传播——ccLoad 延迟提交致客户端在首字节前阻塞，2s 断连探测未命中，mid-stream 取消未有效验证、不下结论（属假设 2 范畴）。
+
 ### beta5 schema 适配（供今后升级重跑参考）
 
-运行时实跑用 `v1.0.0-beta5` 镜像，其 GraphQL schema 与固定评估提交 `ed6119a1` 有若干差异；harness 脚本（`verify/setup.py`、`verify/run_tests.sh`）已据实适配（工作区改动，未 commit）。**每次升级 AxonHub 重跑时若报字段/端点错误，按下表核对：**
+运行时实跑用 `v1.0.0-beta5` 镜像，其 GraphQL schema 与固定评估提交 `ed6119a1` 有若干差异；harness 脚本（`verify/setup.py`、`verify/run_tests.sh`、`verify/mock_upstream.py`）已据实适配并入库。**每次升级 AxonHub 重跑时若报字段/端点错误，按下表核对：**
 
 | 位置 | beta5 实际 | 说明 |
 | --- | --- | --- |
@@ -150,3 +172,20 @@ beta5 的 provider 配额模型：
 | 模型定价 | `saveChannelModelPrices(channelId, input:[SaveChannelModelPriceInput!])` | item `pricing.mode="usage_per_unit"`，`usagePerUnit`=每 1M token 单价；itemCode：`prompt_tokens/completion_tokens/prompt_cached_tokens` |
 | 路由就绪 | 渠道启用后异步同步，有秒级延迟 | setup.py 加 warmup 轮询，避免 run_tests 竞态到 `model not found` |
 | 时间戳 | macOS `date` 无 `%N` | run_tests.sh 用 `gdate`/python 回退取毫秒 |
+| RetryPolicy | `retryPolicy` / `updateRetryPolicy`（系统级，**整体替换**） | `streamFirstEventTimeoutSeconds` 默认 `0`=关闭；`maxChannelRetries`(3)/`maxSingleChannelRetries`(2)/`loadBalancerStrategy`（`failover` 按 `orderingWeight` 升序定主备）；配额 enforcement 见 `quotaEnforcementSettings`（默认 `enabled=false`） |
+
+## 运行时验证总结（6 项 · 2026-07-23）
+
+- **1 / 2 / 4 证实**：单渠道隔离、三路取消对账、账本 token+cost 关联，均运行时坐实。
+- **3 风险证实 ＋ 6 同构短板**：AxonHub 与 ccLoad **都**把 role-only 元事件当首字节，`metricsFirstTokenLatencyMs` / `first_byte_time` 字段**均不可作为用户可见 TTFT**。这是贯穿两个候选的**同一根因**。
+- **5 部分收口**：配额 enforcement **默认关闭**，`unknown` 配额渠道**保留而非保守排除**；若需"未知即排除"须自研层补。
+- **6 退路稳固**：ccLoad 单资源拓扑资源绑定稳固（粘性/轮换/隐藏重试零破坏），可作退路；短板同 3。
+
+**跨候选一致的自研核心硬约束**（无论选 AxonHub 还是 ccLoad 都成立）：
+
+1. **自算内容感知 TTFT** —— 不采信网关的首字/首字节字段（排除 role-only、空 SSE、心跳注释）。
+2. **动态期限到达即取消整条请求** —— 首字前接管须由自研层驱动。
+3. **取消/失败按 `errorMessage` 归并对账** —— 网关 `status` 枚举里 `canceled` 仅指客户端取消，上游断开/内部超时归 `failed`。
+4. **配额状态未知时保守过滤** —— 网关默认"保留"，与合规诉求相反，须自研层补。
+
+**未覆盖（后续可补）**：假设 5 的 `available`/`exhausted` 真实配额态（需真实订阅凭证）；假设 6 的 Codex 400 body-rewrite 隐藏重试路径、ccLoad mid-stream 取消传播。
