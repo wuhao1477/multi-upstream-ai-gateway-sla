@@ -2,7 +2,9 @@
 
 | 项目 | 结论 |
 | --- | --- |
-| 选型日期 | 2026-07-21 |
+| 选型日期 | 2026-07-21（2026-07-23 对齐 PRD v1.2） |
+| 对齐 PRD 版本 | v1.2（含 FR-033～039 订阅、FR-110～117 平台可靠性与协议等） |
+| 关联验证 | [ISSUE-001](../issues/ISSUE-001-tech-assumption-verification.md) 6 项假设源码级预验证已完成 |
 | 评估范围 | AxonHub、Aether、OmniRoute、NewAPI、Sub2API、Hureru/octopus、bestruirui/octopus、ccLoad、zhfeng1/ai-gateway |
 | 许可证因素 | 不参与淘汰、排序和最终推荐 |
 | 指定分支复核 | OmniRoute `main@698b6eb0`；bestruirui/octopus `master@b7b053e7`；ccLoad `master@665fec14` |
@@ -81,6 +83,7 @@ NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系�
 | 缓存率 ≥90% | SLA 核心维护会话/Key/模型缓存作用域和切换损失；执行平台提供缓存 Token 记录 |
 | 价格和倍率变动 | NewAPI/Sub2API 采集器形成可信版本；过期或异常时限制付费流量 |
 | 账号余额和 Key 余额 | 外部账本维护共享关系、在途预留和安全储备，平台额度只作辅助证据 |
+| 成本限制内提高订阅额度有效利用率 | SLA 核心负责订阅台账（FR-033/034）、共享订阅额度识别（FR-035）、额度消耗预测与到期未用风险判断（FR-036）、到期紧迫度调度约束（FR-037）、成本上限与订阅引流上限控制（FR-038），以及不可安全利用时允许到期并记录原因与损失（FR-039）；执行网关（AxonHub）只回传每次请求的用量、缓存和费用 |
 | 无缝测活 | 使用合资格真实业务请求，由 SLA 核心维护探索预算和冷却；不依赖固定 `hello`/`ping` |
 | 首字前接管 | 同步 SLA 层缓冲首个有效内容，按期限取消并切换；已提交有效内容后不得拼接另一响应 |
 | 失败和重复费用 | 按 Attempt 记录所有请求、取消、继续计费、缓存损失和余额差异，不能只看最终响应 |
@@ -115,6 +118,7 @@ NewAPI 和 Sub2API 既可能是候选平台，也可能是上游账号管理系�
 - [zhfeng1/ai-gateway 评估](./research/zhfeng1-ai-gateway.md)
 - [PRD 能力矩阵](./research/capability-matrix.md)
 - [外部控制边界](./research/control-boundary.md)
+- [订阅数据采集验证](./research/subscription-data-verification.md)
 - [维护性判断](./research/maintenance.md)
 
 本结论只回答基础项目和集成边界，不包含技术栈、开发计划或实施排期。

@@ -99,7 +99,7 @@ AxonHub 会在响应提交给客户端前预读流事件。首事件超时或首
 其他必须在选型时明确的缺口：
 
 - 配额状态 `unknown` 仍可进入候选，不符合保守余额下限要求。
-- 首 Token 以首个解析事件计时，未证明一定是用户可见有效内容。
+- 首 Token 以首个解析事件计时，未证明一定是用户可见有效内容。**（2026-07-23 源码级确认：`orchestrator/performance.go` 的 `MarkFirstToken()` 在首个非 nil 流事件即打点，早于内容判断；记录的 `metrics_first_token_latency_ms` 非首个可见内容。外部 SLA 核心须自算 TTFT。详见 [ISSUE-001](../../issues/ISSUE-001-tech-assumption-verification.md)。）**
 - 模型能力主要登记在模型级，不能完整表达某个实际 Key 的权限差异。
 - 没有官方供应商、代理层、账号、地区和网络等结构化故障域。
 - 现有 `channel probe` 是对真实历史流量做聚合，不会分配受预算控制的业务测活机会。
