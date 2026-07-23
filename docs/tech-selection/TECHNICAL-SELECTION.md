@@ -2,7 +2,7 @@
 
 | 项目 | 结论 |
 | --- | --- |
-| 选型日期 | 2026-07-21（2026-07-23 对齐 PRD v1.2） |
+| 选型日期 | 2026-07-21（2026-07-23 对齐 PRD v1.2；同日[景观复审](./research/2026-07-resurvey.md)新筛 10+ 家未发现更优，维持推荐） |
 | 对齐 PRD 版本 | v1.2（含 FR-033～039 订阅、FR-110～117 平台可靠性与协议等） |
 | 关联验证 | [ISSUE-001](../issues/ISSUE-001-tech-assumption-verification.md) 6 项假设源码级预验证已完成 |
 | 评估范围 | AxonHub、Aether、OmniRoute、NewAPI、Sub2API、Hureru/octopus、bestruirui/octopus、ccLoad、zhfeng1/ai-gateway |

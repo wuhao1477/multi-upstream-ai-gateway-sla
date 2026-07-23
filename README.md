@@ -27,6 +27,7 @@
 - [候选仓库固定基线](docs/tech-selection/research/00-repository-baseline.md)
 - 逐仓库评估：[AxonHub](docs/tech-selection/research/axonhub.md)（推荐）、[Aether](docs/tech-selection/research/aether.md)、[OmniRoute](docs/tech-selection/research/omniroute.md)、[NewAPI](docs/tech-selection/research/newapi.md)、[Sub2API](docs/tech-selection/research/sub2api.md)、[Octopus 系列](docs/tech-selection/research/octopus.md)、[ccLoad](docs/tech-selection/research/ccload.md)、[zhfeng1/ai-gateway](docs/tech-selection/research/zhfeng1-ai-gateway.md)
 - 横向分析：[能力覆盖矩阵](docs/tech-selection/research/capability-matrix.md)、[外部控制边界](docs/tech-selection/research/control-boundary.md)、[维护性判断](docs/tech-selection/research/maintenance.md)
+- [选型复审（2026-07-23）](docs/tech-selection/research/2026-07-resurvey.md) —— 新筛 10+ 家（LiteLLM/Bifrost/Portkey/gpt-load 等），未发现更优，维持推荐
 
 ### 专项调研（issues）
 - [ISSUE-001：AxonHub 6 项技术假设验证](docs/issues/ISSUE-001-tech-assumption-verification.md)
