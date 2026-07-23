@@ -48,3 +48,4 @@
 | [02 数据模型](./02-data-model.md) | PG 单库 schema：资源注册、别名策略、价格版本、逐 Attempt 账本、订阅台账（双倍率）、健康/冷却、采集/余额、告警、保留分区 | 草案 |
 | [03 GatewayAdapter 契约](./03-gateway-adapter.md) | 执行面接口 + AxonHub beta5 实现（Key-per-Channel、retry 置零、对账归并、隐藏重试补算）+ ccLoad 退路空壳 | 草案 |
 | [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 三家族（NewAPI/Sub2API/ASXS）字段映射 + 凭证生命周期状态机 | 草案 |
+| [05 调度与经营策略](./05-scheduling-and-operations.md) | selector 候选过滤/排序/RoutePlan + steward 测活预算/冷却/订阅倾斜/容量保留/告警/错误预算 | 草案 |
