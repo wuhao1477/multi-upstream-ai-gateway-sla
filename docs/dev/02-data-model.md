@@ -48,7 +48,7 @@ CREATE DOMAIN usd_amount AS NUMERIC(20,10);
 
 ## 1. 资源注册域（账本与台账的外键基座）
 
-> 支撑 FR-001~005 的身份登记；本篇按需给出，重点深度在后面 6 个域。「路由资源」= 渠道+账号+Key+模型+地区+缓存作用域（FR-002/术语§3/FR-109）。
+> 支撑 FR-001~005 的身份登记；本篇按需给出，重点深度在后面 6 个域。「路由资源」= 渠道+账号+Key+模型+地区+缓存作用域（FR-002、术语§3）。
 
 ### 1.1 渠道 / 真实上游 / 账号 / Key / 模型
 
@@ -176,7 +176,7 @@ CREATE INDEX idx_keys_account_status  ON upstream_keys(account_id, status);
 CREATE INDEX idx_bindings_channel     ON bindings(channel_id);
 ```
 
-**服务 FR/AC**：FR-001~006、FR-022、FR-031、FR-044/045、FR-055、FR-095、FR-109、FR-113；AC-01、AC-04、AC-05、AC-11。
+**服务 FR/AC**：FR-001~006、FR-022、FR-031、FR-044/045、FR-055、FR-095、FR-113；AC-01、AC-04、AC-05、AC-11。
 
 ---
 
