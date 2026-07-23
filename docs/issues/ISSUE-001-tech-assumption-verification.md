@@ -144,7 +144,7 @@ beta5 的 provider 配额模型：
 | 会话粘性 | ✅ 未破坏 | 单资源无可粘的"非预期资源"；6 次相同请求全 `channel_id=1/key=…AAA/url=mock:8091`。`codex_session_cache` 仅 Codex 协议触发，openai 渠道未触发 |
 | 内部 Key 轮换 | ✅ 未破坏 | mock 侧 12/12 请求 `Authorization` 恒为单 Key，零轮换 |
 | 内部 URL 轮换 | ✅ 未破坏 | 12/12 恒同 host+path；ccLoad `base_url` 恒定 |
-| 隐藏重试 | ✅ 未破坏（本场景） | 一次外部请求 = 恰好一次上游连接；`mock-500` 仅 1 次上游连接、无隐藏重试。**未覆盖** ccload.md 点名的 Codex 400 body-rewrite 隐藏重试路径（`proxy_forward.go:1549`；openai+5xx 非该路径） |
+| 隐藏重试 | ⚠️ 绑定未破，但 1:1 不变式破 | openai+5xx：一次外部请求=恰好一次上游连接、无隐藏重试。**Codex 400 body-rewrite（`strip_codex_thinking`）确证存在**：一次外部请求 → 2 次上游 POST（400→删 reasoning 重试→200），但**严格复用同一 Key/URL**（`proxy_forward.go:1559`），不外溢到其他资源。详见下"补验" |
 | **元事件提前提交** ⚠️ | **风险证实** | 见下 |
 
 **元事件提前提交 —— 与 AxonHub 假设 3 同根同构**（mock 在 role-only delta 后 sleep 0.5s 才发首内容）：
@@ -155,7 +155,10 @@ beta5 的 provider 配额模型：
 
 **总判定**：**单资源拓扑在 ccLoad 上对"一个外部请求 = 一个上游资源"的绑定稳固，可作为 AxonHub 退路。** 唯一已知短板与 AxonHub **完全同构**——`first_byte_time` 把 role-only 元事件当"首输出"，**不可作为用户可见 TTFT**；外部 SLA 核心须自算内容感知 TTFT 并在动态期限到达时取消整条请求（ccload.md 已写入适配器契约）。
 
-**未覆盖（需前提）**：① Codex 400 body-rewrite 隐藏重试路径（需建 codex 渠道 + 400 场景，可用 mock 补做）；② 取消传播——ccLoad 延迟提交致客户端在首字节前阻塞，2s 断连探测未命中，mid-stream 取消未有效验证、不下结论（属假设 2 范畴）。
+**补验（2026-07-23 第二轮，两项已收口）**：
+
+- **Codex 400 body-rewrite 隐藏重试** —— 源码 `proxy_forward.go` L1551–1573 重试循环 + `codexRetryBodyFor400`(L1677)：`strip_codex_thinking` 分支在 `Codex 协议 + 400 + 错误体提及 reasoning/thinking` 时删掉 `reasoning` 重发。实测（单 codex 渠道，`/v1/responses` 带 reasoning）：一次外部请求 → **2 次上游 POST**（seq3 有 reasoning→400、seq4 无 reasoning→200，同 TCP keep-alive、同 Key `-CODEX`、同 URL）；ccLoad `admin/logs` **只留一条 200 记录**（`message="ok [strip_codex_thinking]"`，首个 400 被吸收、无独立用量/费用记录）。→ **"一次外部请求 = 一次上游连接"的不变式在 Codex 渠道被打破**（变 2 次），但**单资源绑定未破**——重试严格落回同一 Key/URL（`proxy_forward.go:1559`），不外溢。含义：靠"一次调用 = 一次上游用量"记账会漏掉这次隐藏调用，须在适配层显式识别（ccLoad 无渠道级 `no_retry`）；且首个 400 无独立审计记录（印证 ccload.md §5 审计缺口）。
+- **mid-stream 取消传播** —— 改造探测（长流 30 chunk、客户端收 3 个 chunk 后硬 RST 断连）：mock 侧下一个 chunk 写入即 `EPIPE`、**停在中途不再产出**；ccLoad `admin/logs` 记 status `499`、`context canceled`、`duration ≈ 客户端断连时刻`。→ **ccLoad 把首字后的 mid-stream 取消即时传播到上游**、主动拆除上游连接，**可止损上游用量**。补上了上一轮"首字节前阻塞未命中"的空白。
 
 ### beta5 schema 适配（供今后升级重跑参考）
 
@@ -179,7 +182,7 @@ beta5 的 provider 配额模型：
 - **1 / 2 / 4 证实**：单渠道隔离、三路取消对账、账本 token+cost 关联，均运行时坐实。
 - **3 风险证实 ＋ 6 同构短板**：AxonHub 与 ccLoad **都**把 role-only 元事件当首字节，`metricsFirstTokenLatencyMs` / `first_byte_time` 字段**均不可作为用户可见 TTFT**。这是贯穿两个候选的**同一根因**。
 - **5 部分收口**：配额 enforcement **默认关闭**，`unknown` 配额渠道**保留而非保守排除**；若需"未知即排除"须自研层补。
-- **6 退路稳固**：ccLoad 单资源拓扑资源绑定稳固（粘性/轮换/隐藏重试零破坏），可作退路；短板同 3。
+- **6 退路稳固**：ccLoad 单资源拓扑**资源绑定稳固**（粘性 / Key·URL 轮换零破坏），可作退路；两点补验收口——Codex 400 隐藏重试在**同资源内**多发一次上游调用（1:1 调用不变式破、须记账层识别）、mid-stream 取消**能传播到上游止损**；短板同 3。
 
 **跨候选一致的自研核心硬约束**（无论选 AxonHub 还是 ccLoad 都成立）：
 
@@ -187,5 +190,6 @@ beta5 的 provider 配额模型：
 2. **动态期限到达即取消整条请求** —— 首字前接管须由自研层驱动。
 3. **取消/失败按 `errorMessage` 归并对账** —— 网关 `status` 枚举里 `canceled` 仅指客户端取消，上游断开/内部超时归 `failed`。
 4. **配额状态未知时保守过滤** —— 网关默认"保留"，与合规诉求相反，须自研层补。
+5. **识别网关的同资源隐藏重试** —— ccLoad Codex 渠道遇 400 会在同一 Key/URL 上自动重发一次且只留一条审计记录；记账不能假设"一次调用 = 一次上游用量"，须在适配层按网关行为补算隐藏上游调用。
 
-**未覆盖（后续可补）**：假设 5 的 `available`/`exhausted` 真实配额态（需真实订阅凭证）；假设 6 的 Codex 400 body-rewrite 隐藏重试路径、ccLoad mid-stream 取消传播。
+**未覆盖（需真实前提）**：仅剩假设 5 的 `available`/`exhausted` 真实配额态（需真实订阅凭证，mock 无法伪造订阅面板协议）。假设 6 的两个补验项已于第二轮收口。
