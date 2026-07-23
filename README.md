@@ -2,7 +2,7 @@
 
 统一接入约 20 个 AI 上游渠道，依据价格、余额、性能、稳定性、容量、缓存表现、模型能力和订阅额度动态分配请求，在满足可定义 SLA 的前提下降低实际服务成本。
 
-本仓库当前为**需求与选型阶段的文档库**，不含开发计划、技术栈与代码实现。
+本仓库为**需求、选型与开发设计阶段的文档库**（暂不含代码实现）。开发设计见 [docs/dev/](docs/dev/00-overview-and-milestones.md)。
 
 ## 当前阶段（截至 2026-07-23）
 
@@ -36,6 +36,10 @@
 - [ISSUE-002：多平台采集适配器设计](docs/issues/ISSUE-002-collector-adapter-design.md)
 - [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
 - [ISSUE-003：运行时/采集反馈的需求候选（待评审并入 PRD v1.3）](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md)
+
+### 开发设计（2026-07-23 启动）
+- [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
+- [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、AxonHub 集成契约（Key-per-Channel）、请求时序、开放点
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）
