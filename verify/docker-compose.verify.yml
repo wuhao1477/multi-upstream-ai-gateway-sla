@@ -1,0 +1,41 @@
+# ISSUE-001 验证用 compose —— 仅供本地临时验证，跑完用 cleanup.sh 清理。
+# AxonHub 使用 SQLite（免 Postgres）；mock 上游用 stdlib Python，无需构建。
+#
+# 版本锁定：验证应固定到评估版本。looplj/axonhub 未必为 unstable 提交打镜像 tag，
+# 这里默认 v1.0.0-beta5（最接近评估提交 ed6119a1 的发布）。如需严格对齐评估提交，
+# 请自行按仓库 Dockerfile 在该提交上构建镜像并替换下方 image。
+services:
+  mock-upstream:
+    image: python:3.12-alpine
+    container_name: ah-verify-mock
+    working_dir: /app
+    volumes:
+      - ./mock_upstream.py:/app/mock_upstream.py:ro
+    command: ["python3", "mock_upstream.py", "8091"]
+    networks: [ah-verify]
+
+  axonhub:
+    image: looplj/axonhub:v1.0.0-beta5
+    container_name: ah-verify-axonhub
+    environment:
+      AXONHUB_DB_DIALECT: sqlite3
+      AXONHUB_DB_DSN: "file:/data/axonhub.db?cache=shared&_fk=1"
+      AXONHUB_SERVER_HOST: "0.0.0.0"
+      AXONHUB_SERVER_PORT: "8090"
+      AXONHUB_SERVER_DEBUG: "true"
+      # 缩短首事件超时，便于触发 mock-slow-first 的接管/回退
+      AXONHUB_SERVER_LLM_REQUEST_TIMEOUT: "600s"
+    ports:
+      - "8090:8090"
+    volumes:
+      - ah_verify_data:/data
+    depends_on: [mock-upstream]
+    networks: [ah-verify]
+
+networks:
+  ah-verify:
+    name: ah-verify
+
+volumes:
+  ah_verify_data:
+    name: ah-verify-data
