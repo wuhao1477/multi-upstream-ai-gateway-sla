@@ -8,7 +8,7 @@
 
 | 事项 | 状态 |
 | --- | --- |
-| 产品需求 PRD | ✅ v1.2，16 项业务参数全部确认 |
+| 产品需求 PRD | ✅ v1.3，16 项业务参数确认 + 运行时验证反馈已折入（ISSUE-003） |
 | 开源网关技术选型 | ✅ 唯一推荐 AxonHub 执行数据面 + 外部自研 SLA 决策核心（L0，不改源码） |
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
