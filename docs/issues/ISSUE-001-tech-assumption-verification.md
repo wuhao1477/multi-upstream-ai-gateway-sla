@@ -62,7 +62,7 @@ harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点�
 
 ## Docker 运行时验证结果（2026-07-23，AxonHub `v1.0.0-beta5` / SQLite）
 
-运行时实跑结论与源码级预验证**完全一致**。汇总:
+运行时实跑结论与源码级预验证一致（假设 5 的配额缺口另由运行时决定性确认，见下）。汇总:
 
 | # | 结果 | 证据（运行时） | 日期 |
 | --- | --- | --- | --- |
@@ -70,7 +70,7 @@ harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点�
 | 2 | ✅ 证实（客户端断开路） | mock-slow-first 客户端 2s 断开后，Request 及其 execution 均 `status=canceled`、`errorMessage="...context canceled"`，按 `requestID` 关联同一 Request。接管/上游取消两路本轮未构造（同属 `canceled` 枚举，建议后续补） | 2026-07-23 |
 | 3 | ⚠️ 风险证实 | `metricsFirstTokenLatencyMs` = 首个 JSON 流事件（含 role-only delta），**非用户可见内容 TTFT**。三条铁证见下 | 2026-07-23 |
 | 4 | ✅ 证实 | usage_log 记录 token（prompt/completion/total/**cached**）+ `totalCost` + `costPriceReferenceID`（价格版本），挂在对应 Request 下；成本按配置单价精确算出，缓存 token 走折扣价 | 2026-07-23 |
-| 5 | ⏸ 本轮未覆盖 | 需 Provider Quota 配额场景；源码级结论为"过滤先于负载均衡" | — |
+| 5 | ⚠️ 部分收口 | 配额 enforcement 系统级、**默认关闭**；`DE_PRIORITIZE` 下配额 `unknown` 渠道**仍进候选且可被选中**（保守下限=保留而非排除）。详见下 | 2026-07-23 |
 | 6 | ⏸ 本轮未覆盖 | ccLoad 独立仓库、需另起 compose | — |
 
 ### 假设 3 首字定义 —— 三条运行时铁证
@@ -98,6 +98,21 @@ harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点�
 - 前提：AxonHub 侧需配置模型价格（`saveChannelModelPrices`，见下）+ 上游回传 usage（标准 OpenAI 流式末帧 `usage` 对象）。二者齐备即可财务级对账。
 
 > 失败/取消的请求（mock-500、mock-slow-first）`usageLogs` 为空、`externalID` 为空，符合预期（无成功用量）。
+
+### 假设 5 权限/配额过滤顺序 —— 部分收口（配额模型 + unknown 保守下限）
+
+beta5 的 provider 配额模型：
+
+- **enforcement 是系统全局开关**（`quotaEnforcementSettings{ enabled mode }`），**默认 `enabled=false`** —— 开箱即用时 provider 配额根本不参与候选过滤/排序，必须显式开启。
+- 两种模式：`EXHAUSTED_ONLY`（仅耗尽才管）/ `DE_PRIORITIZE`（降优先级）。
+- provider 配额**仅对订阅类渠道生效**（`opencode_go` / `claudecode` / `codex` / `github_copilot` 等）；通用 `openai`/`anthropic` 渠道 `providerQuotaStatus=null`，不参与 provider 配额。
+- 配额状态 `available | warning | exhausted | unknown` 挂在 Channel 上（`Channel.providerQuotaStatus`），由 AxonHub 探测订阅面板得出；探测失败/未就绪即 `unknown`（`ready:false`）。
+
+**决定性运行时结论（收口 [axonhub.md](../tech-selection/research/axonhub.md) 记录的缺口）**：显式开启 `enabled=true, mode=DE_PRIORITIZE`，把 Key profile 锁到一个配额 `unknown`（`opencode_go` 探测失败）的渠道，发 `mock-normal` → 请求 `completed`、execution 落在该 unknown 渠道；混合 profile（openai 无配额 + opencode_go unknown）连发 9 请求 → 全部正常路由。
+
+→ **`unknown` 配额渠道仍进候选且可被选中，保守下限是"保留可用"（permissive），不是"按 exhausted 剔除"（conservative-exclude）。** 若外部 SLA 要求"配额状态未知时保守排除该渠道"，**AxonHub 默认不满足，须自研层补这层保守过滤**（与"自研核心承担关键判定"定位一致）。附带更强的默认风险：配额执行**默认完全关闭**。
+
+源码级"过滤先于负载均衡"由 profile 白名单在运行时确实先于 LB 生效间接佐证（见假设 1）。**未隔离验证**（需真实订阅凭证，mock 无法伪造订阅面板协议）：`available`/`exhausted` 真实状态下的剔除与降级排序、`unknown` 是否排在 `available` 之后——需接真实 `opencode_go`/`claudecode` 渠道另做。
 
 ### beta5 schema 适配（供今后升级重跑参考）
 
