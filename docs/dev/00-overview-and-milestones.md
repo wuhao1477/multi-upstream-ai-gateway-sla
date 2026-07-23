@@ -45,5 +45,6 @@
 | --- | --- | --- |
 | 00（本篇） | 总览、硬约束、里程碑 | 草案 |
 | [01 架构设计](./01-architecture.md) | 组件、请求路径、AxonHub 集成契约、部署 | 草案 |
-| 02 数据模型 | Attempt 账本、价格版本、订阅台账、健康状态表结构 | 待写（M0 前） |
-| 03 适配器契约 | GatewayAdapter 接口、三家族采集器接口（承接 ISSUE-002 §2） | 待写（M1 前） |
+| [02 数据模型](./02-data-model.md) | PG 单库 schema：资源注册、别名策略、价格版本、逐 Attempt 账本、订阅台账（双倍率）、健康/冷却、采集/余额、告警、保留分区 | 草案 |
+| [03 GatewayAdapter 契约](./03-gateway-adapter.md) | 执行面接口 + AxonHub beta5 实现（Key-per-Channel、retry 置零、对账归并、隐藏重试补算）+ ccLoad 退路空壳 | 草案 |
+| [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 三家族（NewAPI/Sub2API/ASXS）字段映射 + 凭证生命周期状态机 | 草案 |
