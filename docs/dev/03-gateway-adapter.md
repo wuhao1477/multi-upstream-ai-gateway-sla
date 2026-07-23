@@ -242,7 +242,7 @@ const (
 - **禁止采信 `metricsFirstTokenLatencyMs`**：三条运行时铁证——mock-normal（role-only 后 sleep 0.5s 发首内容却记 10ms）、mock-empty-sse（零内容仍记 10ms）、mock-heartbeat（记 623ms=心跳后 role delta 时刻）。该字段打点在**首个流事件**而非首个可见内容。适配器把它塞进 `AttemptRecord.GatewayTTFTMs` 仅供存证。
 - **取消传播（AC-32）**：`ctx` 取消 / `AttemptStream.Close()` → 断开到 AxonHub 的 HTTP 连接。从 AxonHub 视角这等同客户端断开，落 `canceled`（假设 2 已证实客户端断开→`canceled`）。executor 在动态期限到达或确认接管后调用它止损上游用量。
 
-> **协议开放点**：AxonHub 对 OpenAI **Responses** 协议透传完整度未实测（[01 §6 开放点 2](./01-architecture.md#6-开放点评审需拍板)）。M1 用 verify/ 式 mock 补一轮 Responses 探测；若不足，该协议由 `protocol` 层直连转换后再走本方法，`Capabilities().DegradedFields["responses_passthrough"]` 标注。
+> **协议实测收口**（[07 §3](./07-axonhub-runtime-probes.md)）：AxonHub inbound `/v1/responses` **原生支持**；但 outbound 打上游原生 Responses **须把渠道配成 `ChannelType="openai_responses"`**——`openai` 型会**静默下转 Chat Completions**（丢 Responses-only 语义）。故 `ProvisionBinding` 对 Responses 渠道必须设 `openai_responses`。且 AxonHub 为**领域模型 round-trip 转译**（重签 item id、丢未知/自定义字段），非字节级透传：标准字段够用无需自研转换；若需严格保真则 `protocol` 层直连，`Capabilities().DegradedFields["responses_passthrough"]` 标注。真实上游保真度待 M1 用真实凭证补验。
 
 ### 4.4 `Reconcile` —— 逐尝试对账 + errorMessage 归并 + 隐藏重试补算
 
@@ -317,7 +317,7 @@ query($ids: [ID!]) {
 | `metricsFirstTokenLatencyMs` | 打点在首个流事件，非可见内容（AC-31） | executor 内容感知 TTFT 自算 |
 | `providerQuotaStatus=unknown` | 网关默认"保留"而非排除（FR-118） | selector 保守排除 |
 | `status` 枚举 | `canceled` 仅指客户端取消（AC-30） | ledger 按 errorMessage 归并 |
-| `responses_passthrough`（若探测不足） | Responses 完整度未实测 | protocol 层直连转换 |
+| `responses_passthrough` | 领域模型 round-trip 丢未知字段/重签 item id（[07 §3](./07-axonhub-runtime-probes.md) 实测）；误配 `openai` 型会静默下转 CC | 严格保真时 protocol 层直连；Responses 渠道强制配 `openai_responses` |
 
 ---
 

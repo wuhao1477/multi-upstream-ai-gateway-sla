@@ -50,3 +50,4 @@
 | [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 三家族（NewAPI/Sub2API/ASXS）字段映射 + 凭证生命周期状态机 | 草案 |
 | [05 调度与经营策略](./05-scheduling-and-operations.md) | selector 候选过滤/排序/RoutePlan + steward 测活预算/冷却/订阅倾斜/容量保留/告警/错误预算 | 草案 |
 | [06 部署与运维](./06-deployment-and-operations.md) | 单机 Compose 拓扑、AxonHub 集成部署、升级门禁（verify/ 准入）、备份保留、可观测、M0 部署清单 | 草案 |
+| [07 AxonHub 运行时实测](./07-axonhub-runtime-probes.md) | 部署开放点实测收口：PG 支持、多实例共 PG（双活可行/迁移串行）、Responses 透传（openai_responses/round-trip 损耗） | ✅ 已实测 |

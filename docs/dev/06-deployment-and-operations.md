@@ -26,10 +26,10 @@
 | `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例 |
 | `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres、axonhub | 无本地状态；`/healthz` 就绪探针 |
 | `postgres` | postgres:16 | 5432 | — | 单库；账本 + `axonhub` 分 schema（开放点） |
-| `axonhub` | `looplj/axonhub:v1.0.0-beta5`（**锁定 tag**） | 8090 | postgres | stock 不改源码；启动即由 core 下发 retryPolicy 置零 |
+| `axonhub-a/b` | `looplj/axonhub:v1.0.0-beta5`（**锁定 tag**） | 8090/8091 | postgres | stock 不改源码；一期**双实例共 PG**（[07 §2](./07-axonhub-runtime-probes.md) 实测双活可行，消除数据面单点）；启动由单实例 bootstrap 下发 retryPolicy 置零，**迁移串行** |
 | `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
 
-> **为何 2 个 core**：FR-110 要求任一实例宕机不影响服务。Caddy 对 `/healthz` 失败的实例自动摘除；两实例无差别（状态全在 PG，账本主键 UUIDv7 无序列争用，[02 §9.3](./02-data-model.md)）。
+> **为何 2 个 core**：FR-110 要求任一实例宕机不影响服务。Caddy 对 `/healthz` 失败的实例自动摘除；两实例无差别（状态全在 PG，账本主键 UUIDv7 无序列争用，[02 §9.3](./02-data-model.md)）。**AxonHub 同理一期双实例共 PG**（[07 §2](./07-axonhub-runtime-probes.md) 实测稳态双活可行），仅初始化/升级迁移须串行（§2.3/§3）。
 
 ---
 
@@ -39,7 +39,7 @@
 
 - AxonHub 用 PG 而非默认 SQLite：`AXONHUB_DB_DIALECT=postgres`、DSN 指向同一 `postgres` 服务的 **`axonhub` schema**（与自研账本 `public` 隔离）。
 - 收益：备份/运维统一；`Reconcile` 拉取的 `requests/executions/usageLogs` 可与自研账本**本地 JOIN 对账**，免跨库。
-- **M0 验证项**：beta5 的 PG DSN 连通性与 schema 隔离（[verify/](../../verify/README.md) 目前用 SQLite，M0 补一轮 PG 形态）。
+- ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：DSN 格式 `postgres://user:pass@host:5432/db?sslmode=disable`（dialect=`postgres`）；`search_path=<schema>`（需预先 `CREATE SCHEMA`，ent 不自建）实现与自研账本共库分 schema，25 张表落指定 schema。
 
 ### 2.2 启动后置初始化（由 sla-core 幂等下发，非人工）
 
@@ -51,8 +51,9 @@ core 启动时对 axonhub 执行一次幂等 bootstrap（经 `/admin/graphql`，
 
 ### 2.3 单点风险与处置（01 开放点 1）
 
-- **AxonHub 单实例是数据面单点**（FR-110 只约束自研核心）。一期接受：compose `restart: unless-stopped` 进程级自愈；core 侧对 axonhub 不可用**快速失败并返回明确不可用，禁旁路直连上游**（FR-110/AC-27）。
-- 二期评估 AxonHub 双实例共 PG（beta5 是否支持多实例共库待验，列观察项）。
+- ✅ **已实测**（[07 §2](./07-axonhub-runtime-probes.md)）：**AxonHub 双实例 + 共享 PG 稳态双活可行**（状态实时共享、任一实例可读写与路由），数据面单点**可消除**。**一期推荐双实例**（axonhub-a/b 指同一 PG，Caddy 据 `/health` 摘除故障实例）。
+- **迁移串行硬约束**：schema 迁移期无并发锁——并发冷启动 init 会让第二个实例 panic（`pg_type` 唯一约束冲突）。故**初始化只让一个实例做**（bootstrap 由选主的单实例执行）；滚动升级见 §3。
+- 兜底：无论单/双实例，core 侧对 axonhub 全不可用时**快速失败、返回明确不可用、禁旁路直连上游**（FR-110/AC-27）。
 
 ---
 
@@ -64,7 +65,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 | --- | --- |
 | 生产锁定具体 tag | compose 用 `looplj/axonhub:v1.0.0-beta5`，**不用 `latest`/`unstable`** |
 | 升级前跑准入检查 | 换 tag 前先在 verify/ 跑 [ISSUE-001 六假设 harness](../../verify/README.md)：单渠道隔离/取消对账/首字/账本/配额/隐藏重试全绿 + [beta5 schema 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 逐项核对（GraphQL 字段名漂移是首要风险） |
-| 固定升级窗口、可回滚 | 建议每季度一次；升级 = 改 tag + 跑 harness + 灰度一个 core 实例；失败 `docker compose` 回滚旧 tag |
+| 固定升级窗口、可回滚 | 建议每季度一次；升级 = 改 tag + 跑 harness + **多实例先单实例迁移完再拉起其余**（[07 §2](./07-axonhub-runtime-probes.md)：并发迁移崩实例）+ 灰度一个 core 实例；失败 `docker compose` 回滚旧 tag |
 
 > harness 已入库（`verify/`），是每次升级的**准入门**而非一次性验证；GraphQL 报字段错时按适配表修正 `Reconcile` 查询（[03 §4.4](./03-gateway-adapter.md)）。
 
@@ -120,12 +121,12 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 
 ## 8. 开放点（评审需拍板）
 
-| # | 开放点 | 建议 |
+| # | 开放点 | 结论 |
 | --- | --- | --- |
-| 1 | AxonHub beta5 是否支持多实例共 PG（消除数据面单点） | M0/M1 期实测；不支持则维持单实例 + 进程自愈（一期可接受） |
-| 2 | LB 选 Caddy vs Nginx | Caddy（自动 TLS、配置简单、单机足够） |
-| 3 | collector 独立容器 vs core 子命令 | 一期同二进制子命令（部署简单）；量级上来再拆独立容器/独立扩缩 |
-| 4 | 备份加密（含明文 Key 的 dump） | 一期 dump 落本机加密卷；对外前随 FR-113 一起升级 |
+| 1 | AxonHub beta5 多实例共 PG（消除数据面单点） | ✅ **已实测收口**（[07 §2](./07-axonhub-runtime-probes.md)）：稳态双活可行、消除单点；迁移须串行（runbook 硬约束） |
+| 2 | LB 选型 | ✅ **定** Caddy（自动 TLS、配置简单、单机足够） |
+| 3 | collector 打包 | ✅ **定** 一期 core 二进制子命令（部署简单）；量级上来再拆独立容器/独立扩缩 |
+| 4 | 备份加密（含明文 Key 的 dump） | ✅ **定** 一期 dump 落本机加密卷；对外提供服务前随 FR-113 一起升级 |
 
 ---
 

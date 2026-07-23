@@ -847,7 +847,7 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 | --- | --- | --- |
 | 1 | 分区自动化用 `pg_partman` 还是自研定时任务 | 一期自研定时任务（单机、依赖少）；量级上来再评估 pg_partman |
 | 2 | `session_id` 来源（不存正文如何标识会话） | 由调用方在请求头/参数传会话键，或 policy 层按缓存作用域派生；本库只存标识不存内容 |
-| 3 | AxonHub 换 PG 共库 vs 独立 SQLite（01-架构开放点4） | 建议共库分 schema（`axonhub` schema），对账可本地 JOIN，免跨库；M0 验证 beta5 PG DSN |
+| 3 | AxonHub 换 PG 共库 vs 独立 SQLite（01-架构开放点4） | ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：beta5 支持 PG；用 DSN `search_path=<schema>`（需预建）与自研账本**共库分 schema**，对账本地 JOIN、免跨库 |
 | 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | 元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
 | 5 | 隐藏重试补算的触发点 | 对账阶段按渠道 `site_family`/channel_type 与网关审计比对推断（ccLoad Codex 渠道），非请求路径实时判 |
 
