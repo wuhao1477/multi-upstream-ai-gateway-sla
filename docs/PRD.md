@@ -579,6 +579,7 @@
 | 币种折算 | 已决策：一期所有币种 1:1 按美元处理，币种仅名称 | ✅ 完成（FR-018） |
 | ASXS 登录端点 | 已抓取：`POST /api/manage/auth/login` → 返回 7 天 JWT 存 localStorage `token` | ✅ 完成 |
 | 6 项技术假设 Docker 验证 | AxonHub 1/2/4 证实、3 风险证实、5 部分收口、6 退路稳固；仅假设 5 的真实配额态待真实订阅凭证 | ✅ 完成（2026-07-23），见 [ISSUE-001](./issues/ISSUE-001-tech-assumption-verification.md) |
+| 运行时/采集反馈的需求候选 | ISSUE-001/002 跑出的新发现（订阅台账补字段、签到额度建模、隐藏重试记账、配额未知过滤、取消归并对账）待评审并入 v1.3 | ⏳ 待评审，见 [ISSUE-003](./issues/ISSUE-003-runtime-feedback-requirement-candidates.md) |
 
 ## 14. 需求变更与追溯
 

@@ -34,6 +34,7 @@
 - [ISSUE-002：四站实测探测结果](docs/issues/ISSUE-002-probe-results.md)
 - [ISSUE-002：多平台采集适配器设计](docs/issues/ISSUE-002-collector-adapter-design.md)
 - [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
+- [ISSUE-003：运行时/采集反馈的需求候选（待评审并入 PRD v1.3）](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md)
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）
