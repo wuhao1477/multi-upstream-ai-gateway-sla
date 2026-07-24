@@ -63,7 +63,7 @@
 
 | # | 开放点 | 建议 |
 | --- | --- | --- |
-| 1 | **AxonHub 单实例是数据面单点**（FR-110 只约束自研核心） | ✅ **已实测**（[07 §2](./07-axonhub-runtime-probes.md)）：AxonHub 双实例 + 共享 PG **稳态双活可消除单点**；**约束**：迁移须串行（初始化/滚动升级单实例先跑，否则并发迁移崩实例）。一期推荐双实例，迁移串行写进 runbook |
+| 1 | **AxonHub 单实例是数据面单点**（FR-110 只约束自研核心） | ✅ **已定（2026-07-23）：默认单实例** —— FR-110 不要求 AxonHub 多实例；单点由进程自愈 + 核心禁旁路兜底，个人/内部足够。**双实例为可选**（[07 §2](./07-axonhub-runtime-probes.md) 验证可行、需迁移串行），需要时再启用，不背默认复杂度。详见 [06 §2.3](./06-deployment-and-operations.md) |
 | 2 | AxonHub 对 **OpenAI Responses 协议**的透传完整度 | ✅ **已实测**（[07 §3](./07-axonhub-runtime-probes.md)）：inbound `/v1/responses` 原生支持；outbound 须配 `openai_responses` 渠道（`openai` 型静默下转 CC）；为领域模型 round-trip（丢未知字段/重签 item id），标准字段够用无需自研转换，严格保真需 protocol 层直连（真实上游保真度待 M1 补验） |
 | 3 | Key-per-Channel 的 **Key 数量管理**（20 渠道×可能的分组） | ✅ **已定**：由 GatewayAdapter 自动开通/回收并登记到 PG（见 [03 §4.1/4.6](./03-gateway-adapter.md)、[09 `/admin/bindings`](./09-admin-api.md)），禁止人工建 Key |
 | 4 | AxonHub 存储从 SQLite 换 PG 共库 | ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：beta5 支持 PG，DSN `postgres://…?sslmode=disable`，`search_path` 与自研账本共库分 schema |

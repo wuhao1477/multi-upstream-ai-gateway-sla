@@ -65,8 +65,8 @@ multi-upstream-ai-gateway-sla/
 | `executor` | SSE 逐事件解析 `HasVisibleContent`、内容感知 TTFT、期限到 `Close()` 传播取消 | 03 §4.3、AC-31/32 |
 | `ledger` | Attempt 账本、`Reconcile`、errorMessage 归并、隐藏重试补算、gateway_overhead 计算 | 03 §4.4、02 §4 |
 | `gateway` | `GatewayAdapter` 接口 + AxonHub（Key-per-Channel/retry 置零/openai_responses 强校验）+ ccLoad 退路 | 03 |
-| `store` | PG 访问、迁移、UUIDv7、月分区、内存快照重建；决策路径只读快照 | 02 §9 |
-| `bootstrap` | 启动 `pg_try_advisory_lock` 选主 → 单实例跑迁移 + axonhub bootstrap | 06 §2.2/2.3 |
+| `store` | PG 访问（**`pgx` + `sqlc`**：手写 SQL 生成类型安全代码，零反射）、迁移、UUIDv7、月分区、内存快照重建；决策路径只读快照 | 02 §9、10 开放点3 |
+| `bootstrap` | 启动 `pg_try_advisory_lock` 选主 → 取到锁的 core 跑 axonhub bootstrap（init + retryPolicy 置零 + ProvisionBinding），其余跳过轮询就绪 | 06 §2.2/2.3 |
 | `admin`/`config` | `/admin/*` 管理 API、二次确认、ParamMeta | 09 |
 
 ---
@@ -94,7 +94,7 @@ multi-upstream-ai-gateway-sla/
 | verify/ harness 对 beta5 跑通 | 现有 `verify/`（不动） |
 | CI：构建 + 加载 + 不可存列断言 | `.github/workflows/ci.yml`、`make test` |
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
-| **选主并发迁移不崩**（07 §2 硬约束） | `internal/bootstrap` advisory lock；建议加一条**双实例并发冷启动**的集成测试 |
+| bootstrap 选主（避免双 core 重复初始化） | `internal/bootstrap` advisory lock；单实例 AxonHub 无并发迁移问题（默认）。**双实例 AxonHub 部署时**才需按 07 §2 补"并发冷启动不崩"的集成测试（可选路径） |
 
 ---
 
@@ -104,7 +104,7 @@ multi-upstream-ai-gateway-sla/
 | --- | --- | --- |
 | 1 | Go 版本锁定策略 | ✅ **已定**：`go.mod` 声明 `go 1.2x` 跟随稳定版；不锁死 patch，CI 用固定 minor |
 | 2 | 单 module vs 多 module | ✅ **已定**：单 module（个人项目、包间共享类型多），`internal/` 隔离 |
-| 3 | ORM vs 手写 SQL | ⏸ **待 M0 定**：倾向轻量（`sqlc`/`pgx` + 手写 SQL），避免重 ORM；M0 起骨架时定 |
+| 3 | 存储访问层选型 | ✅ **已定（2026-07-23）：`pgx` + `sqlc`** —— pgx 做驱动、sqlc 从手写 SQL 生成类型安全 Go 代码。零运行时反射、账本类重查询可控、与"决策只读内存快照 / 写路径异步"架构契合；避免重 ORM 的反射开销与不可控查询。迁移用纯 SQL（`migrations/`）+ sqlc 对齐 |
 | 4 | 配置来源（文件 vs env vs config_params） | ✅ **已定**：基础设施走 env（[06 §4](./06-deployment-and-operations.md)），业务策略走 `config_params`（[09](./09-admin-api.md)），不混 |
 
 ---
