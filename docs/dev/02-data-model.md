@@ -886,11 +886,11 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 
 | # | 开放点 | 建议 |
 | --- | --- | --- |
-| 1 | 分区自动化用 `pg_partman` 还是自研定时任务 | 一期自研定时任务（单机、依赖少）；量级上来再评估 pg_partman |
+| 1 | 分区自动化用 `pg_partman` 还是自研定时任务 | ✅ **已定**：一期自研定时任务（单机、依赖少）；量级上来再评估 pg_partman |
 | 2 | `session_id` 来源（不存正文如何标识会话） | ✅ **已收口**（见 §4.5）：**多源提取、不要求调用方配合**——主流客户端本就自带（Claude Code `X-Claude-Code-Session-Id`、Codex `session_id`/`conversation_id`、Responses `conversation`/`prompt_cache_key`）；按优先级捞，全未命中则按单轮处理、不派生不编造 |
 | 3 | AxonHub 换 PG 共库 vs 独立 SQLite（01-架构开放点4） | ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：beta5 支持 PG；用 DSN `search_path=<schema>`（需预建）与自研账本**共库分 schema**，对账本地 JOIN、免跨库 |
-| 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | 元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
-| 5 | 隐藏重试补算的触发点 | 对账阶段按渠道 `site_family`/channel_type 与网关审计比对推断（ccLoad Codex 渠道），非请求路径实时判 |
+| 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | ✅ **已定**：元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
+| 5 | 隐藏重试补算的触发点 | ✅ **已定**：对账阶段按渠道 `site_family`/channel_type 与网关审计比对推断（ccLoad Codex 渠道），非请求路径实时判 |
 | 6 | 一期入站协议范围（FR-111 现为 CC + Responses） | ✅ **已定（2026-07-23）：维持 CC + Responses，不扩** —— **主力客户端为 Codex CLI，说的正是 OpenAI Responses，已在一期范围内**。Claude Code（Anthropic Messages）与 Gemini CLI（Gemini API）一期不直连；提取规则保留在 §4.5 仅为将来扩协议时零改动 |
 
 ---

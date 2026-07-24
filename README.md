@@ -47,6 +47,8 @@
 - [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、AxonHub 集成、升级门禁（verify/ 准入）、备份保留、M0 部署清单
 - [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 部署开放点实测收口：PG 支持、多实例共 PG（双活可行/迁移串行）、Responses 透传
 - [08 参考项目评估：zhfeng1/ai-gateway](docs/dev/08-ref-eval-zhfeng1-ai-gateway.md) —— 源码级评估：TTFT 品类通病佐证、网关开销测法、TPS 分母口径、不吸收清单
+- [09 管理 API 与设置面](docs/dev/09-admin-api.md) —— `/admin/*` 配置 API、关键项二次确认、策略元数据（FR-115 操作面）
+- [10 工程结构与构建](docs/dev/10-project-structure.md) —— Go 单仓布局、包边界、构建/CI 门禁、M0 交付物映射
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）

@@ -53,3 +53,5 @@
 | [06 部署与运维](./06-deployment-and-operations.md) | 单机 Compose 拓扑、AxonHub 集成部署、升级门禁（verify/ 准入）、备份保留、可观测、M0 部署清单 | 草案 |
 | [07 AxonHub 运行时实测](./07-axonhub-runtime-probes.md) | 部署开放点实测收口：PG 支持、多实例共 PG（双活可行/迁移串行）、Responses 透传（openai_responses/round-trip 损耗） | ✅ 已实测 |
 | [08 参考项目评估：zhfeng1/ai-gateway](./08-ref-eval-zhfeng1-ai-gateway.md) | 源码级评估：TTFT 品类通病第三方佐证、网关开销测法、TPS 分母口径；明确不吸收清单 | ✅ 已评估 |
+| [09 管理 API 与设置面](./09-admin-api.md) | `/admin/*` 配置读写 API、关键项二次确认流程、策略元数据（FR-115 操作面） | 草案 |
+| [10 工程结构与构建](./10-project-structure.md) | Go 单仓布局、包边界（对齐 01 模块）、构建/CI 门禁（含 FR-112 与假设2 守卫）、M0 交付物映射 | 草案 |
