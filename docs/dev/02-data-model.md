@@ -362,8 +362,11 @@ CREATE TABLE attempts (
   -- ── 逐尝试 metrics（自算，AC-31）──
   content_aware_ttft_ms INTEGER,              -- 自算内容感知首字（排除 role-only/空SSE/心跳，AC-31/假设3/6）
   gateway_reported_ttft_ms INTEGER,           -- beta5 metricsFirstTokenLatencyMs：仅存证、永不采信（AC-31）
-  full_latency_ms   INTEGER,                  -- 完整延迟（首字→完整结束）
-  output_tokens_per_s NUMERIC(12,3),          -- 输出速度（FR-040）
+  full_latency_ms   INTEGER,                  -- 总延迟（请求进入→完整结束）
+  upstream_latency_ms INTEGER,                -- 上游耗时（发往上游→完整结束）
+  -- 决策/网关自身开销 = full_latency_ms − upstream_latency_ms，用于 FR-110「P99≤50ms」自监控（测法见 06 §6）
+  output_tokens_per_s NUMERIC(12,3),          -- 输出速度（FR-040）；**分母 = full_latency_ms − content_aware_ttft_ms**
+                                              -- 只算生成阶段；用总延迟会把慢首字渠道误判为「生成慢」
   stream_broken     BOOLEAN NOT NULL DEFAULT false, -- 已输出首字后中断=完整失败，不拼接（FR-078/AC-12）
 
   -- ── SLA 取消 / 继续计费 / 重复费用（FR-080、AC-32）──

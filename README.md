@@ -46,6 +46,7 @@
 - [05 调度与经营策略](docs/dev/05-scheduling-and-operations.md) —— selector 排序/RoutePlan + steward 测活/冷却/订阅倾斜/告警
 - [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、AxonHub 集成、升级门禁（verify/ 准入）、备份保留、M0 部署清单
 - [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 部署开放点实测收口：PG 支持、多实例共 PG（双活可行/迁移串行）、Responses 透传
+- [08 参考项目评估：zhfeng1/ai-gateway](docs/dev/08-ref-eval-zhfeng1-ai-gateway.md) —— 源码级评估：TTFT 品类通病佐证、网关开销测法、TPS 分母口径、不吸收清单
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）

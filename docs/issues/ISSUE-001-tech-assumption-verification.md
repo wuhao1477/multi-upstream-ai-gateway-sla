@@ -180,7 +180,7 @@ beta5 的 provider 配额模型：
 ## 运行时验证总结（6 项 · 2026-07-23）
 
 - **1 / 2 / 4 证实**：单渠道隔离、三路取消对账、账本 token+cost 关联，均运行时坐实。
-- **3 风险证实 ＋ 6 同构短板**：AxonHub 与 ccLoad **都**把 role-only 元事件当首字节，`metricsFirstTokenLatencyMs` / `first_byte_time` 字段**均不可作为用户可见 TTFT**。这是贯穿两个候选的**同一根因**。
+- **3 风险证实 ＋ 6 同构短板**：AxonHub 与 ccLoad **都**把 role-only 元事件当首字节，`metricsFirstTokenLatencyMs` / `first_byte_time` 字段**均不可作为用户可见 TTFT**。这是贯穿两个候选的**同一根因**。**第三方佐证**：另一独立实现 [zhfeng1/ai-gateway](../dev/08-ref-eval-zhfeng1-ai-gateway.md) 更朴素——在原始字节流首块即打点（连 SSE 事件层都不解析，心跳注释也算首字）。三个**互相独立**的实现无一做内容感知，可判定为**该品类的系统性通病**而非个别疏忽，「自研核心必须自算」由此更稳固。
 - **5 部分收口**：配额 enforcement **默认关闭**，`unknown` 配额渠道**保留而非保守排除**；若需"未知即排除"须自研层补。
 - **6 退路稳固**：ccLoad 单资源拓扑**资源绑定稳固**（粘性 / Key·URL 轮换零破坏），可作退路；两点补验收口——Codex 400 隐藏重试在**同资源内**多发一次上游调用（1:1 调用不变式破、须记账层识别）、mid-stream 取消**能传播到上游止损**；短板同 3。
 

@@ -101,7 +101,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 | 面 | 做法 |
 | --- | --- |
 | 就绪/存活 | sla-core `/healthz`（PG 可达 + axonhub 可达）；Caddy 据此摘除实例 |
-| 决策延迟 | 自监控 P99 决策开销 ≤50ms（FR-110）；超标告警（内部指标，非账本） |
+| 决策延迟 | 自监控 P99 决策开销 ≤50ms（FR-110）。**测法**：发往上游前多打一个时间戳，`决策/网关开销 = 总延迟 − 上游耗时`（对应 [02](./02-data-model.md) `attempts.full_latency_ms − upstream_latency_ms`）；超标告警 |
 | 账本对账滞后 | 监控 `attempts.reconciled=false` 积压（[02 idx_attempts_unrecon](./02-data-model.md)） |
 | 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（`is_stale`）；凭证失效告警 P2 |
 | 业务告警 | P1/P2/P3 经 `alert_events` 出（[05 §5.2](./05-scheduling-and-operations.md)）；P1 不得延迟（FR-103） |
