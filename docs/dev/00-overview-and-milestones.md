@@ -6,6 +6,7 @@
 | 日期 | 2026-07-23 |
 | 输入 | [PRD v1.3](../PRD.md)、[选型结论](../tech-selection/TECHNICAL-SELECTION.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md) |
 | 技术栈决策（2026-07-23 确认） | 自研核心 **Go**；状态存储 **PostgreSQL 单库**（一期不引 Redis）；部署 **单机 Docker Compose**（LB + 2 核心实例 + PG + AxonHub）；文档按 docs/dev/ 分篇 |
+| 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；渠道须强校验为 `openai_responses`（[03](./03-gateway-adapter.md)）；ccLoad 退路的 Codex 隐藏重试补算为必须项（FR-119） |
 
 ## 1. 要建什么（一句话）
 

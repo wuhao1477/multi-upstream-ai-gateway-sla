@@ -243,6 +243,8 @@ const (
 - **取消传播（AC-32）**：`ctx` 取消 / `AttemptStream.Close()` → 断开到 AxonHub 的 HTTP 连接。从 AxonHub 视角这等同客户端断开，落 `canceled`（假设 2 已证实客户端断开→`canceled`）。executor 在动态期限到达或确认接管后调用它止损上游用量。
 
 > **协议实测收口**（[07 §3](./07-axonhub-runtime-probes.md)）：AxonHub inbound `/v1/responses` **原生支持**；但 outbound 打上游原生 Responses **须把渠道配成 `ChannelType="openai_responses"`**——`openai` 型会**静默下转 Chat Completions**（丢 Responses-only 语义）。故 `ProvisionBinding` 对 Responses 渠道必须设 `openai_responses`。且 AxonHub 为**领域模型 round-trip 转译**（重签 item id、丢未知/自定义字段），非字节级透传：标准字段够用无需自研转换；若需严格保真则 `protocol` 层直连，`Capabilities().DegradedFields["responses_passthrough"]` 标注。真实上游保真度待 M1 用真实凭证补验。
+>
+> ⚠️ **优先级已抬升（2026-07-23）**：**主力客户端为 Codex CLI，走的正是 Responses**（[02 §4.5](./02-data-model.md)）。因此"渠道必须配 `openai_responses`"**不是边缘约束而是主干路径的正确性前提**——误配 `openai` 会让**主力流量**被静默下转 Chat Completions（客户端侧看不出异常，但 Responses-only 语义已丢）。`ProvisionBinding` 必须对此做**强校验并拒绝错配**，不可依赖人工配置正确。
 
 ### 4.4 `Reconcile` —— 逐尝试对账 + errorMessage 归并 + 隐藏重试补算
 
@@ -346,7 +348,11 @@ ccLoad 把首字后的 **mid-stream 取消即时传播到上游**并主动拆连
 
 ccLoad Codex 渠道遇 **400 + 错误体提及 reasoning/thinking** 触发 `strip_codex_thinking`：删 `reasoning` 字段**在同一 Key/URL 上重发**（`proxy_forward.go:1559`）。实测一次外部请求 → **2 次上游 POST**（400→删 reasoning→200），但 `admin/logs` **只留一条 200 记录**（`message="ok [strip_codex_thinking]"`），首个 400 被吸收、无独立用量/费用记录。
 
-→ **"一次外部调用 = 一次上游调用"的不变式在 Codex 渠道被打破**（变 2 次），且单资源绑定未破（严格落回同一 Key/URL，不外溢）。`Reconcile` 对 `channelType="codex"` 的 ccLoad 渠道必须：
+→ **"一次外部调用 = 一次上游调用"的不变式在 Codex 渠道被打破**（变 2 次），且单资源绑定未破（严格落回同一 Key/URL，不外溢）。
+
+> ⚠️ **优先级已抬升（2026-07-23）**：**主力客户端 Codex CLI 的请求本就带 `reasoning`**，正是 `strip_codex_thinking` 的触发前提。故启用 ccLoad 退路时，该隐藏重试**会命中主力流量而非边缘场景**，成本低估是系统性的而非偶发——FR-119 的补算在退路场景下是**必须实现项**，不可延后。
+
+`Reconcile` 对 `channelType="codex"` 的 ccLoad 渠道必须：
 
 1. 识别 `message` 含 `strip_codex_thinking` 标记 → `HiddenUpstreamAdd=1`（`CountableFrom="adapter-inference"`）。
 2. 按网关行为补算被吸收的那次 400 上游调用的用量与成本（ccLoad 无渠道级 `no_retry`，无法从源头关闭）。
