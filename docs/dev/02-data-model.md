@@ -439,6 +439,42 @@ CREATE TABLE session_prefix_ledger (
 );
 ```
 
+### 4.5 会话标识来源（多源提取，**不要求调用方配合**）
+
+> 收口 §11 开放点 2。原则：**主流编码客户端本来就带会话标识**，网关只需按优先级"捞"，不新增对外契约要求；捞不到才退化，**绝不编造会话身份**。
+
+**调研证据（2026-07-23，覆盖 AxonHub 支持的协议与主流客户端）**：
+
+| 客户端 / 协议 | 客户端说的入站协议 | 自带会话标识 | 载体 | 一期可直连？（FR-111） |
+| --- | --- | --- | --- | --- |
+| **Claude Code**（v2.1.86+） | Anthropic Messages | ✅ 自动发送 | 头 `X-Claude-Code-Session-Id`（社区明确为**代理可观测性**设计：只读头、不碰 body） | ❌ **一期不收 Anthropic 入站** |
+| **Codex CLI** | OpenAI Responses | ✅ 自动发送 | 头 `session_id` + `conversation_id`；body `prompt_cache_key`（其缓存键优先级 `session_id > conversation_id > user_id`） | ✅ |
+| **OpenCode** | OpenAI CC（base_url 可配） | ❌ 当前不发 | 内部有 SessionID/ParentSessionID 但从不出网（[issue #12930](https://github.com/anomalyco/opencode/issues/12930) 请求中） | ✅（落序 7 退化） |
+| **Gemini CLI** | Gemini API | ⚠️ 内部有不外发 | sessionId 存 `~/.gemini/tmp/<hash>/chats/`；协议侧有 `previous_interaction_id`（服务端会话态）。[#8944](https://github.com/google-gemini/gemini-cli/issues/8944)/[#13823](https://github.com/google-gemini/gemini-cli/issues/13823) 请求暴露 | ❌ **一期不收 Gemini 入站** |
+| **Cline** | OpenAI CC（base_url 可配） | ❓ **未证实** | 未见公开的会话头文档；需实测抓包确认 | ✅（待实测） |
+| OpenAI **Chat Completions** 协议 | —— | ⚠️ 无原生会话字段 | 仅 `user`（用户标识，**非会话**）；`prompt_cache_key` 可选 | ✅ |
+| OpenAI **Responses** 协议 | —— | ✅ 协议原生 | `conversation`（持久 ID）、`previous_response_id`（逐轮链式） | ✅ |
+
+> **协议范围张力（需决策，见 §11 开放点 6）**：AxonHub 入站支持 **4 种**协议（OpenAI CC / OpenAI Responses / Anthropic Messages / Gemini），我们一期 FR-111 只收 **2 种**（CC + Responses）。后果：**会话标识最完善的 Claude Code（Anthropic Messages）与有原生会话态的 Gemini CLI 都无法直连我们的核心**——它们要么经翻译层，要么需扩 FR-111。这不影响本节的提取链设计（提取链对已支持协议完备），但影响**可服务的客户端范围**。
+
+**提取优先级（protocol 层实现，命中即停）**：
+
+| 序 | 来源 | 位置 | 稳定性 |
+| --- | --- | --- | --- |
+| 1 | `X-Claude-Code-Session-Id` | 头 | 稳定，整会话不变 |
+| 2 | `session_id` → `conversation_id` | 头 | 稳定 |
+| 3 | `prompt_cache_key` | body（OpenAI 官方缓存亲和键） | 稳定；**同时喂缓存作用域**（FR-055） |
+| 4 | `conversation` | body（Responses） | 稳定 |
+| 5 | `previous_response_id` | body（Responses） | **逐轮变化**——须维护 `previous_response_id → session_id` 链映射才能还原会话 |
+| 6 | `X-Session-Id` | 头 | 通用回退，供自定义客户端**可选**使用 |
+| 7 | 全未命中 | —— | **按单轮请求处理**：不做前缀首字统计（FR-050/051 跳过该请求），不派生、不编造 |
+
+**约束**：
+
+- 序 3~5 在 body 中，需解析请求体——**FR-112 禁止的是"存储"正文，不禁止读取**；提取后只落 `requests.session_id` 这一个标识值，正文不入库。头部来源（序 1/2/6）无需碰 body，优先级更高也更省。
+- 序 7 的退化是**有意的**：宁可少统计一条前缀首字，也不能用"IP+Key+模型"这类拼接键把并发的不同会话错误归并（会让 FR-050/051 的前缀平均失真）。
+- OpenCode 类客户端当前落到序 7；待其 #12930 落地后自动升到序 2，**无需我方改动**。
+
 **索引**
 
 ```sql
@@ -849,10 +885,11 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 | # | 开放点 | 建议 |
 | --- | --- | --- |
 | 1 | 分区自动化用 `pg_partman` 还是自研定时任务 | 一期自研定时任务（单机、依赖少）；量级上来再评估 pg_partman |
-| 2 | `session_id` 来源（不存正文如何标识会话） | 由调用方在请求头/参数传会话键，或 policy 层按缓存作用域派生；本库只存标识不存内容 |
+| 2 | `session_id` 来源（不存正文如何标识会话） | ✅ **已收口**（见 §4.5）：**多源提取、不要求调用方配合**——主流客户端本就自带（Claude Code `X-Claude-Code-Session-Id`、Codex `session_id`/`conversation_id`、Responses `conversation`/`prompt_cache_key`）；按优先级捞，全未命中则按单轮处理、不派生不编造 |
 | 3 | AxonHub 换 PG 共库 vs 独立 SQLite（01-架构开放点4） | ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：beta5 支持 PG；用 DSN `search_path=<schema>`（需预建）与自研账本**共库分 schema**，对账本地 JOIN、免跨库 |
 | 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | 元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
 | 5 | 隐藏重试补算的触发点 | 对账阶段按渠道 `site_family`/channel_type 与网关审计比对推断（ccLoad Codex 渠道），非请求路径实时判 |
+| 6 | **一期入站协议范围是否扩到 Anthropic Messages / Gemini**（FR-111 现为 CC + Responses） | ⚠️ **需产品决策**：AxonHub 入站支持 4 种协议，一期只收 2 种 → **Claude Code（Anthropic Messages，会话标识最完善）与 Gemini CLI（Gemini API）无法直连**。选项：① 维持 2 种，这两类客户端经翻译层或不支持；② 扩 FR-111 加 Anthropic Messages（覆盖 Claude Code，AxonHub 侧已原生支持，成本主要在我方 protocol 层）；③ 再加 Gemini。见 §4.5 |
 
 ---
 

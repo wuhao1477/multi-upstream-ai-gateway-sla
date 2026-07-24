@@ -52,7 +52,12 @@ core 启动时对 axonhub 执行一次幂等 bootstrap（经 `/admin/graphql`，
 ### 2.3 单点风险与处置（01 开放点 1）
 
 - ✅ **已实测**（[07 §2](./07-axonhub-runtime-probes.md)）：**AxonHub 双实例 + 共享 PG 稳态双活可行**（状态实时共享、任一实例可读写与路由），数据面单点**可消除**。**一期推荐双实例**（axonhub-a/b 指同一 PG，Caddy 据 `/health` 摘除故障实例）。
-- **迁移串行硬约束**：schema 迁移期无并发锁——并发冷启动 init 会让第二个实例 panic（`pg_type` 唯一约束冲突）。故**初始化只让一个实例做**（bootstrap 由选主的单实例执行）；滚动升级见 §3。
+- **迁移串行硬约束**：schema 迁移期无并发锁——并发冷启动 init 会让第二个实例 panic（`pg_type` 唯一约束冲突）。故**初始化/迁移只允许一个实例执行**；滚动升级见 §3。
+- **选主机制（PG advisory lock）**：sla-core 启动做 bootstrap 前，先在自研库取一把**会话级咨询锁** `SELECT pg_try_advisory_lock(<固定常量>)`：
+  - 取到锁的实例执行 bootstrap（含 axonhub `system/initialize` 与 retryPolicy 全字段下发），完成后 `pg_advisory_unlock`；
+  - 未取到的实例**跳过 bootstrap**，轮询等待 axonhub `/health` 与就绪标记后进入服务态；
+  - 用 PG 咨询锁而非新建表/选主组件：无额外依赖、连接断开自动释放（不会因实例崩溃留下死锁）。
+  - 同一把锁也用于**滚动升级时的迁移串行**（§3）。
 - 兜底：无论单/双实例，core 侧对 axonhub 全不可用时**快速失败、返回明确不可用、禁旁路直连上游**（FR-110/AC-27）。
 
 ---
