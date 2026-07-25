@@ -489,6 +489,8 @@ CREATE INDEX idx_req_tenant_level   ON requests(tenant_id, sla_level, created_at
 
 ## 5. 订阅台账域（双倍率 + 共享额度 + 三家族真实字段）
 
+> ⏭ **本域已移入二期**（[15 §1.2](./15-scope-and-preflight.md)）：**表结构保留**（空表无成本、便于二期直接启用），一期**不写入、不参与调度**。
+
 > FR-033~039。字段以 **ISSUE-002 §3.2 sub2api ent schema** 与 **§3.3 ASXS `/api/me/billing/state`** 真实结构为准。一期**不建模签到额度**（FR-034 已删该句；NewAPI 系接受额度预测偏低）。双倍率（用满/实际，参数14/AC-24）。共享额度按 `(user_id, group_id)` 聚合（FR-035，源码级确证）。可主动重置额度只读登记、不自动触发。
 
 ### 5.1 订阅计划（可售套餐 / 商品）

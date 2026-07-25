@@ -6,9 +6,9 @@
 | 日期 | 2026-07-23 |
 | 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 三家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
 | 输入 | [PRD v1.3](../PRD.md)、[DECISIONS](../DECISIONS.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md)、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)、[00 总览](./00-overview-and-milestones.md)、[01 架构](./01-architecture.md) |
-| 覆盖 FR | FR-010/011/012/013/017/018、FR-020～032、FR-033～039、FR-116 |
-| 覆盖 AC | AC-17、AC-20～24、AC-28、AC-29 |
-| 里程碑 | M3 元数据与订阅（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
+| 覆盖 FR | FR-010/011/012/013/017/018、FR-020～032、FR-116（⏭ FR-033～039 订阅采集移入二期，[15 §1.2](./15-scope-and-preflight.md)） |
+| 覆盖 AC | AC-17、AC-28、AC-29（⏭ AC-20～24 移入二期） |
+| 里程碑 | M3 元数据采集（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
 
 > **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；ASXS 是闭源自建平台，**一站一适配器，不可复用、不作探测基准**。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
 
@@ -84,8 +84,8 @@ type CollectorAdapter interface {
 	// 分组/倍率：分组倍率、订阅类型、周期上限、高峰倍率（FR-010/033）
 	FetchGroups(ctx context.Context, s Session) ([]Group, error)
 
-	// 订阅周期额度：周期额度、已用、重置时间、双倍率输入、额度来源优先级（FR-033～039）
-	// 无订阅对象的站型（NewAPI）返回 ErrUnsupported
+	// 订阅周期额度（FR-033～039）。⏭ **一期不实现**（[15 §1.2](./15-scope-and-preflight.md)）：
+	// 一期所有站型统一返回 ErrUnsupported；二期按站型实现。
 	FetchSubscriptionQuotas(ctx context.Context, s Session) ([]SubscriptionQuota, error)
 
 	// 模型价格：输入/输出/缓存倍率（FR-010/012/013）

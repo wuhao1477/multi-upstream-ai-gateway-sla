@@ -40,7 +40,7 @@
 | 银 | SLA > 成本 > 缓存 | 健康达标 → 成本 → 缓存 |
 | 铜 | 成本 > 缓存 > SLA | 成本 → 缓存 → 健康 |
 
-- **成本排序用「用满倍率」而非实际倍率**（参数14/AC-24 核心）：订阅渠道 `subscription_plans.usable_multiplier` 参与调度比价；`actual_multiplier` 只用于账务报表（[02 §5](./02-data-model.md)）。示例：用满 0.034 的订阅渠道调度优先级高于倍率 0.035 的普通渠道。
+- **一期成本排序**：按 `price_versions` 的价格版本 × 分组/Key 倍率算预计实际成功成本。⏭ 订阅渠道的**用满倍率**比价（参数14/AC-24）**移入二期**（[15 §1.2](./15-scope-and-preflight.md)）。
 - **缓存作用域**：连续会话优先复用 `cache_scopes` 可延续的 binding，切换有损时计入切换成本（FR-055）。
 - **SLA 达标度**：用 `resource_health` 的 P95/P99 与目标 `sla_targets.target_value` 比，不用标称值/总体平均（FR-042）。
 
@@ -121,6 +121,8 @@
 
 ### 4.1 订阅倾斜三道闸（参数15，全满足才倾斜）
 
+> ⏭ **本节已移入二期**（[15 §1.2](./15-scope-and-preflight.md)）：一期不实现订阅倾斜；排序键中的**用满倍率**同步推迟，一期成本排序仅用普通渠道价格版本×倍率。
+
 到期作废前可适当多用订阅渠道，但三闸缺一不可（[02 `subscription_waste_forecast`](./02-data-model.md)）：
 
 | 闸 | 阈值 | 判据 |
@@ -179,8 +181,8 @@
 | 10 数据时效 | §1.1 序6 | `config_params`(freshness.*) |
 | 11 样本/冷却 | §3.1 | `resource_health` |
 | 12 容量保留 | §4.2 | `config_params`(capacity.*) |
-| 13/14 订阅台账/双倍率 | §1.2、§4.1 | `subscription_plans.usable/actual_multiplier` |
-| 15 订阅倾斜三道闸 | §4.1 | `subscription_waste_forecast` |
+| 13/14 订阅台账/双倍率 ⏭二期 | §1.2、§4.1 | `subscription_plans.usable/actual_multiplier` |
+| 15 订阅倾斜三道闸 ⏭二期 | §4.1 | `subscription_waste_forecast` |
 | 16 告警分级 | §5.2 | `alert_events` |
 
 ---
