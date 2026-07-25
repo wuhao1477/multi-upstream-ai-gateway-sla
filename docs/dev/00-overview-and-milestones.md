@@ -6,7 +6,7 @@
 | 日期 | 2026-07-23 |
 | 输入 | [PRD v1.3](../PRD.md)、[选型结论](../tech-selection/TECHNICAL-SELECTION.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md) |
 | 技术栈决策（2026-07-23 确认） | 自研核心 **Go**（存储层 **pgx + sqlc**）；状态存储 **PostgreSQL 单库**（一期不引 Redis）；部署 **单机 Docker Compose**（LB + **≥2 核心实例** + PG + **AxonHub 默认单实例**，双实例可选）；文档按 docs/dev/ 分篇 |
-| 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；渠道须强校验为 `openai_responses`（[03](./03-gateway-adapter.md)）；ccLoad 退路的 Codex 隐藏重试补算为必须项（FR-119） |
+| 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；渠道须强校验为 `openai_responses`（[03](./03-upstream-layer.md)）；ccLoad 退路的 Codex 隐藏重试补算为必须项（FR-119） |
 
 ## 1. 要建什么（一句话）
 
@@ -47,7 +47,7 @@
 | 00（本篇） | 总览、硬约束、里程碑 | 草案 |
 | [01 架构设计](./01-architecture.md) | 组件、请求路径、AxonHub 集成契约、部署 | 草案 |
 | [02 数据模型](./02-data-model.md) | PG 单库 schema：资源注册、别名策略、价格版本、逐 Attempt 账本、订阅台账（双倍率）、健康/冷却、采集/余额、告警、保留分区 | 草案 |
-| [03 GatewayAdapter 契约](./03-gateway-adapter.md) | 执行面接口 + AxonHub beta5 实现（Key-per-Channel、retry 置零、对账归并、隐藏重试补算）+ ccLoad 退路空壳 | 草案 |
+| [03 上游对接层](./03-upstream-layer.md) | 执行面接口 + AxonHub beta5 实现（Key-per-Channel、retry 置零、对账归并、隐藏重试补算）+ ccLoad 退路空壳 | 草案 |
 | [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 三家族（NewAPI/Sub2API/ASXS）字段映射 + 凭证生命周期状态机 | 草案 |
 | [05 调度与经营策略](./05-scheduling-and-operations.md) | selector 候选过滤/排序/RoutePlan + steward 测活预算/冷却/订阅倾斜/容量保留/告警/错误预算 | 草案 |
 | [06 部署与运维](./06-deployment-and-operations.md) | 单机 Compose 拓扑、AxonHub 集成部署、升级门禁（verify/ 准入）、备份保留、可观测、M0 部署清单 | 草案 |

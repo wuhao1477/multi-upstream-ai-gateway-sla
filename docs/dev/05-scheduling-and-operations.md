@@ -5,7 +5,7 @@
 | 状态 | 草案，待评审（M2/M4 前定稿） |
 | 日期 | 2026-07-23 |
 | 定位 | 把 `selector`（候选选择与排序）与 `steward`（测活/冷却/订阅倾斜/告警/错误预算）落成可实现规则。数值全部来自 [DECISIONS](../DECISIONS.md) 参数确认，**作默认值 + 可配置**（存 [02 §2 `config_params`](./02-data-model.md)，关键项二次确认，FR-115） |
-| 输入 | [PRD v1.3](../PRD.md)、[DECISIONS](../DECISIONS.md)（16 参数）、[02 数据模型](./02-data-model.md)、[03 GatewayAdapter](./03-gateway-adapter.md)、[01 架构](./01-architecture.md)（selector/steward 模块） |
+| 输入 | [PRD v1.3](../PRD.md)、[DECISIONS](../DECISIONS.md)（16 参数）、[02 数据模型](./02-data-model.md)、[03 上游对接层](./03-upstream-layer.md)、[01 架构](./01-architecture.md)（selector/steward 模块） |
 | 不含 | 流式执行/首字判定/取消传播（属 `executor`，见 03/01）；采集（见 04） |
 
 > 一条总原则贯穿全篇：**决策只读内存快照、P99≤50ms（FR-110）**。所有排序键、预算、门槛均来自后台刷新的快照（价格/健康/余额/订阅），同步路径不查库、不发网络请求。
@@ -49,7 +49,7 @@
 `selector` 输出 `RoutePlan = [{binding, deadline_ms}...]` 交 `executor`：
 
 - **每跳期限按 SLA 等级 TTFT 预算分配**：金级首跳期限 = min(该 binding 近期 P95, 等级 TTFT 预算)，为接管留余量（前缀平均 ≤10s → 金级单跳 P95≤5s，§11）。
-- 期限到达且未见**内容感知有效首字** → executor `Close()` 传播取消、切下一跳（[03 §4.3](./03-gateway-adapter.md)、AC-32）。
+- 期限到达且未见**内容感知有效首字** → executor `Close()` 传播取消、切下一跳（[03 §4.3](./03-upstream-layer.md)、AC-32）。
 - 决策快照(候选/排除原因/选择)写 `requests.decision_snapshot`（元数据 JSON，不含正文，FR-097/112）。
 
 ---

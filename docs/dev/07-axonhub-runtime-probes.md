@@ -1,7 +1,9 @@
 # 07 AxonHub 运行时实测（部署开放点收口 · 2026-07-23）
 
 | 项目 | 内容 |
-| --- | --- |
+| > ⚠️ **历史记录（2026-07-25 标注）**：本篇实测已用于支撑 [11 架构转向决策](./11-decision-full-selfbuilt.md)——一期**移除 AxonHub、改为自研直连**。§3bis 的真实上游 Responses 基线（35 字段、reasoning item、`prompt_cache_key`）**转为自研透传层要 100% 保真的目标**（见 [03 §10](./03-upstream-layer.md)）。**本篇不再指导部署**；部署见 [06](./06-deployment-and-operations.md)。
+
+--- | --- |
 | 状态 | ✅ 已实测收口（三项经验性开放点） |
 | 日期 | 2026-07-23 |
 | 目的 | 用 Docker 实测 AxonHub `v1.0.0-beta5` 的真实行为，为 01/02/03/06 的部署开放点定稿提供事实依据（不凭空判断） |
@@ -76,7 +78,7 @@
 - beta5 **支持** OpenAI Responses 端到端（inbound 原生 + `openai_responses` 渠道 outbound 到上游原生）。
 - **两个必须知道的约束**：① 是否打上游原生 Responses **取决于渠道 type**——`openai` 型会**静默下转** Chat Completions（上游 Responses-only 语义丢失），要保原生须配 `openai_responses`；② 即便用 `openai_responses`，也是**经领域模型 round-trip 的结构化转译**，重签 item id、丢未知字段，**非透明字节代理**。
 - **对 FR-111**：若只需"标准 Responses 字段收发"，AxonHub 用 `openai_responses` 渠道即满足，无需自研直连转换。若需**严格保真**（保留 Responses-only 结构/自定义字段/原始 item id、`reasoning`/tool 专有内容零丢失），须自研核心 protocol 层直连转换补齐；且 GatewayAdapter 须确保 Responses 渠道被配成 `openai_responses`（误配 `openai` 会静默降级）。
-- → **收口 [01 开放点2](./01-architecture.md#6-开放点评审需拍板) / [03 §4.3](./03-gateway-adapter.md#43-execute--内容感知首字由-executor-判定ac-3132)**。
+- → **收口 [01 开放点2](./01-architecture.md#6-开放点评审需拍板) / [03 §4.3](./03-upstream-layer.md#43-execute--内容感知首字由-executor-判定ac-3132)**。
 
 ---
 
@@ -110,7 +112,7 @@
 
 `requests.format=openai/responses`、`status=completed`、`externalID=resp_...`；`usageLogs` 的 `promptTokens=4401`、`promptCachedTokens=3840` 与上游一致（`totalCost=null` 因本次未配价格，符合预期）。
 
-### 结论（**修正 §3 与 [03](./03-gateway-adapter.md) 的判断**）
+### 结论（**修正 §3 与 [03](./03-upstream-layer.md) 的判断**）
 
 - §3 基于 mock 的"标准字段够用、无需自研转换"**不成立**。真实上游下 AxonHub 丢弃 80% 顶层字段与整条 reasoning item。
 - **主力 Codex 的会话标识仍可用**——因其走 HTTP 头（`session_id`/`conversation_id`，[02 §4.5](./02-data-model.md) 序 1/2），AxonHub 不碰头部；但 **body 来源（序 3/5）经 AxonHub 后全部失效**。

@@ -5,7 +5,7 @@
 | 状态 | 草案，待评审（M0 开工即用） |
 | 日期 | 2026-07-23 |
 | 定位 | 补齐设计审查发现的空缺：M0 首个交付物是"Go 工程骨架"，但此前无目录/包/构建约定。本篇定 module、目录布局、包边界、构建与 CI |
-| 输入 | [00 里程碑](./00-overview-and-milestones.md)、[01 架构六模块](./01-architecture.md)、[03 GatewayAdapter](./03-gateway-adapter.md)、[04 CollectorAdapter](./04-collector-adapter.md)、[06 部署](./06-deployment-and-operations.md)、[09 管理 API](./09-admin-api.md) |
+| 输入 | [00 里程碑](./00-overview-and-milestones.md)、[01 架构六模块](./01-architecture.md)、[03 上游对接层](./03-upstream-layer.md)、[04 CollectorAdapter](./04-collector-adapter.md)、[06 部署](./06-deployment-and-operations.md)、[09 管理 API](./09-admin-api.md) |
 | 约束 | 单仓单 module；包边界对齐 01 的模块划分；一期 Go（版本用 go.mod 里 `go 1.2x`，跟随稳定版，不锁死具体小版本） |
 
 > **务实边界**：只定"能开工、不返工"的骨架结构，不预先造抽象。目录按 01 已定的模块切，一个模块一个包；接口（GatewayAdapter/CollectorAdapter）已在 03/04 定义，这里只定它们**放哪**。
@@ -52,7 +52,7 @@ multi-upstream-ai-gateway-sla/
 └── .github/workflows/ci.yml   # 或对应 CI
 ```
 
-**包边界原则**：一个 `internal/` 子包对应 [01 §2](./01-architecture.md) 的一个模块，**依赖单向**：`protocol → policy → selector → executor → gateway`；`ledger`/`steward` 读写 `store`；`store` 不反向依赖业务包。接口下沉、实现分子目录（`gateway/axonhub` 等），换实现不动调用方（对应 [03 GatewayAdapter](./03-gateway-adapter.md) 的抽象目的）。
+**包边界原则**：一个 `internal/` 子包对应 [01 §2](./01-architecture.md) 的一个模块，**依赖单向**：`protocol → policy → selector → executor → gateway`；`ledger`/`steward` 读写 `store`；`store` 不反向依赖业务包。接口下沉、实现分子目录（`gateway/axonhub` 等），换实现不动调用方（对应 [03 上游对接层](./03-upstream-layer.md) 的抽象目的）。
 
 ---
 

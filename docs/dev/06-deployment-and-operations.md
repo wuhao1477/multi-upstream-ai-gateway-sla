@@ -6,7 +6,7 @@
 | 日期 | 2026-07-23 |
 | 形态 | **单机 Docker Compose**：Caddy LB + 2× sla-core（Go）+ PostgreSQL + AxonHub `v1.0.0-beta5`（stock，L0）+ collector |
 | 约束 | 个人/内部使用；任一 sla-core 实例宕机不影响服务（FR-110）；AxonHub 锁定 beta5、升级须过 verify/ 门禁（硬约束 11） |
-| 输入 | [01 架构](./01-architecture.md)、[00 硬约束](./00-overview-and-milestones.md)、[03 GatewayAdapter](./03-gateway-adapter.md)、[verify/](../../verify/README.md)、[ISSUE-001 beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) |
+| 输入 | [01 架构](./01-architecture.md)、[00 硬约束](./00-overview-and-milestones.md)、[03 上游对接层](./03-upstream-layer.md)、[verify/](../../verify/README.md)、[ISSUE-001 beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) |
 
 ---
 
@@ -46,8 +46,8 @@
 core 启动时对 axonhub 执行一次幂等 bootstrap（经 `/admin/graphql`，字段名按 beta5 适配表）：
 
 1. `system/initialize` + `auth/signin`（均带 `/admin` 前缀）。
-2. **全字段 `updateRetryPolicy{enabled:false, streamFirstEventTimeoutSeconds:0, maxChannelRetries:0, maxSingleChannelRetries:0, ...}`** —— 整体替换的坑（假设 2 补验），部署脚本单测校验全字段下发（[03 §5.1](./03-gateway-adapter.md)）。
-3. 按 PG 中登记的 binding 逐个 `ProvisionBinding`（建渠道 → `updateChannelStatus(enabled)` → 建 Key → 锁单渠道 profile → `saveChannelModelPrices`），全部经 GatewayAdapter，**禁止人工建 Key**（[03 §4.1/4.6](./03-gateway-adapter.md)）。
+2. **全字段 `updateRetryPolicy{enabled:false, streamFirstEventTimeoutSeconds:0, maxChannelRetries:0, maxSingleChannelRetries:0, ...}`** —— 整体替换的坑（假设 2 补验），部署脚本单测校验全字段下发（[03 §5.1](./03-upstream-layer.md)）。
+3. 按 PG 中登记的 binding 逐个 `ProvisionBinding`（建渠道 → `updateChannelStatus(enabled)` → 建 Key → 锁单渠道 profile → `saveChannelModelPrices`），全部经 GatewayAdapter，**禁止人工建 Key**（[03 §4.1/4.6](./03-upstream-layer.md)）。
 
 ### 2.3 AxonHub 实例数：默认单实例，双实例可选（01 开放点 1）
 
@@ -75,7 +75,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 | 升级前跑准入检查 | 换 tag 前先在 verify/ 跑 [ISSUE-001 六假设 harness](../../verify/README.md)：单渠道隔离/取消对账/首字/账本/配额/隐藏重试全绿 + [beta5 schema 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 逐项核对（GraphQL 字段名漂移是首要风险） |
 | 固定升级窗口、可回滚 | 建议每季度一次。**单实例（默认）升级极简**：停 axonhub → 换 tag → 起（它单独迁移自己的库，零并发冲突）→ 跑 harness → 全绿才恢复流量；失败 `docker compose` 回滚旧 tag。升级窗口内有短暂 axonhub 不可用（核心此间返回明确不可用，不旁路），个人/内部可接受。**双实例（可选）**才需"先单实例迁移完再拉起其余"的串行滚动（[07 §2](./07-axonhub-runtime-probes.md)：并发迁移崩实例） |
 
-> **分离带来的升级隔离**：AxonHub 是 stock、L0、躲在 [GatewayAdapter](./03-gateway-adapter.md) 接口后、版本锁定。升级风险被三层关住——① 只可能在 GatewayAdapter 边界出问题，不渗进自研核心；② verify/ harness 是每次升级的**准入门**（不全绿不准升）；③ 默认单实例让升级本身就是"停-换-验-起"，无滚动复杂度。GraphQL 报字段错时按 [beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 修正 `Reconcile` 查询（[03 §4.4](./03-gateway-adapter.md)）。
+> **分离带来的升级隔离**：AxonHub 是 stock、L0、躲在 [GatewayAdapter](./03-upstream-layer.md) 接口后、版本锁定。升级风险被三层关住——① 只可能在 GatewayAdapter 边界出问题，不渗进自研核心；② verify/ harness 是每次升级的**准入门**（不全绿不准升）；③ 默认单实例让升级本身就是"停-换-验-起"，无滚动复杂度。GraphQL 报字段错时按 [beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 修正 `Reconcile` 查询（[03 §4.4](./03-upstream-layer.md)）。
 
 ---
 

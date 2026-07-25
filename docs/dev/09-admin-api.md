@@ -16,11 +16,11 @@
 
 | 平面 | 端点前缀 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| 数据平面 | `/v1/*`（chat_completions、responses） | 上游业务 API Key | 承载真实请求（[03](./03-gateway-adapter.md)） |
+| 数据平面 | `/v1/*`（chat_completions、responses） | 上游业务 API Key | 承载真实请求（[03](./03-upstream-layer.md)） |
 | 健康 | `/healthz` | 无 | LB 探针（[06](./06-deployment-and-operations.md)） |
 | **管理平面** | **`/admin/*`** | **独立管理令牌**（非业务 Key） | 本篇；配置读写、策略、审计查询 |
 
-- 管理平面与 AxonHub 的 `/admin/graphql` 是**两回事**：后者是 GatewayAdapter 对 AxonHub 的调用（[03](./03-gateway-adapter.md)），前者是**我方核心自己**对运维暴露的面。命名沿用 `/admin` 但挂在 sla-core 上。
+- 管理平面与 AxonHub 的 `/admin/graphql` 是**两回事**：后者是 GatewayAdapter 对 AxonHub 的调用（[03](./03-upstream-layer.md)），前者是**我方核心自己**对运维暴露的面。命名沿用 `/admin` 但挂在 sla-core 上。
 - 一期鉴权：单个**管理令牌**（环境变量注入，明文一期可接受，随 FR-113 一起在对外前升级）；管理平面**只在内网/本机可达**，不经公网。
 
 ---
@@ -90,7 +90,7 @@ type ParamMeta struct {
 
 | 端点 | 作用 | 里程碑 |
 | --- | --- | --- |
-| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（触发 GatewayAdapter `ProvisionBinding`，禁人工建 Key，[03](./03-gateway-adapter.md)） | M1 |
+| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（触发 GatewayAdapter `ProvisionBinding`，禁人工建 Key，[03](./03-upstream-layer.md)） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
 | `GET /admin/ledger/requests?…` | 账本查询（逐 Attempt、对账状态；FR-097/098） | M1 |
 | `GET /admin/subscriptions` | 订阅台账与双倍率、到期浪费预测（[02 §5](./02-data-model.md)） | M3 |

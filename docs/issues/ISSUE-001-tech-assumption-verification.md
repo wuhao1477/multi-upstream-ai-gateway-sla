@@ -11,6 +11,8 @@
 
 > **环境说明**：两阶段执行。① **源码级预验证**在无 Docker/Go 的会话沙箱完成（逐项定位到具体文件与函数），把 6 项假设从"仅 README 声明"升级为"源码证实/证伪"。② **运行时验证**已于 2026-07-23 在装有 Docker（OrbStack v29.4.0）的本机对 AxonHub `v1.0.0-beta5`（SQLite）实跑完成，逐项结论见文末"Docker 运行时验证结果"。两阶段结论一致：其中假设 3 的风险由运行时铁证收口。
 
+> ⚠️ **历史记录（2026-07-25 标注）**：本篇的运行时结论已用于支撑 [11 架构转向决策](../dev/11-decision-full-selfbuilt.md)——一期**移除 AxonHub/ccLoad、改为自研直连**。其中假设 3（首字非可见内容）、假设 6（Codex 隐藏重试）与 [07 §3bis](../dev/07-axonhub-runtime-probes.md)（Responses round-trip 吞 reasoning）是转向的直接依据。**本篇不再指导实现**；实现契约见 [03 上游对接层](../dev/03-upstream-layer.md)。其 mock 上游场景（`verify/`）仍作自研透传层的测试夹具。
+
 ## 待验证的 6 项假设
 
 每项写成可自动重复运行的测试，保留作为今后升级 AxonHub 的准入检查（AxonHub 近 30 天 75 次提交，每次升级都要重跑）。

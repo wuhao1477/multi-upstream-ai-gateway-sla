@@ -95,7 +95,7 @@ TPS **不用总耗时**，而用"总耗时 − 首字耗时"，即只算**生成
 
 `app/main.py:253-292` 对多种响应结构逐路径探测 usage：`usage.output_tokens_details.reasoning_tokens`、`usage.completion_tokens_details.reasoning_tokens`、`response.usage.*`、`message.usage.*` —— 覆盖 OpenAI Chat Completions / Responses / Anthropic 三种形态；另有 `parse_completed_response_from_sse` 逆序扫 SSE 找 `response.completed` 还原最终响应。
 
-**与我们的关系**：主路径我们从 AxonHub `usageLogs` 拿用量，用不上。但 **ccLoad 退路无渠道级定价、账本需自算成本**（[03 §6.1](./03-gateway-adapter.md)），届时要从原始上游响应里抠 usage，这种"多路径探测 + 从 SSE 还原完成态"的写法可作参考。**优先级低，M1 之后再说。**
+**与我们的关系**：主路径我们从 AxonHub `usageLogs` 拿用量，用不上。但 **ccLoad 退路无渠道级定价、账本需自算成本**（[03 §6.1](./03-upstream-layer.md)），届时要从原始上游响应里抠 usage，这种"多路径探测 + 从 SSE 还原完成态"的写法可作参考。**优先级低，M1 之后再说。**
 
 ---
 

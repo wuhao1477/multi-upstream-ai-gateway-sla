@@ -16,12 +16,12 @@
 
 | AxonHub 能力 | 我们的处置 | 出处 |
 | --- | --- | --- |
-| 重试 / 故障转移 | **全字段置零**（否则污染 Attempt 账本） | [03 §4.1](./03-gateway-adapter.md)、假设 1/2 |
+| 重试 / 故障转移 | **全字段置零**（否则污染 Attempt 账本） | [03 §4.1](./03-upstream-layer.md)、假设 1/2 |
 | 负载均衡 | 不用，自研 `selector` 决策 | [05 §1](./05-scheduling-and-operations.md) |
 | 配额执行 | 不用（其默认关闭且 `unknown` 不排除），FR-118 自研补 | 假设 5、[07 §2](./07-axonhub-runtime-probes.md) |
 | 首字指标 | **不采信**，自算内容感知 TTFT | AC-31、假设 3 |
 | 首事件超时 | 不用，`executor` 自管每跳期限 | [05 §1.3](./05-scheduling-and-operations.md) |
-| 逐次执行账本 | **与自研 `attempts` 账本重复**，还要额外做对账 | [02 §4](./02-data-model.md)、[03 §4.4](./03-gateway-adapter.md) |
+| 逐次执行账本 | **与自研 `attempts` 账本重复**，还要额外做对账 | [02 §4](./02-data-model.md)、[03 §4.4](./03-upstream-layer.md) |
 
 **实际仍在用的只剩"一把 Key 打一个渠道"**——这件事自研起来是平凡的。
 
@@ -82,7 +82,7 @@
 
 | 文档 | 提及数 | 处置 |
 | --- | --- | --- |
-| [03 GatewayAdapter](./03-gateway-adapter.md) | 44 | **重写**为《上游对接层》：自研透传/SSE/取消/usage 提取；保留能力声明与降级思想 |
+| [03 上游对接层](./03-upstream-layer.md) | 44 | **重写**为《上游对接层》：自研透传/SSE/取消/usage 提取；保留能力声明与降级思想 |
 | [ISSUE-001](../issues/ISSUE-001-tech-assumption-verification.md) | 41 | **转为历史记录**：标注结论已用于支撑"不采用 AxonHub"的决策 |
 | [02 数据模型](./02-data-model.md) | 33 | 去掉 `axonhub_*` 对账列与相关索引；账本简化为单一真相源 |
 | [06 部署运维](./06-deployment-and-operations.md) | 30 | 去 AxonHub 容器/PG 共库/升级门禁；拓扑简化为 Caddy + core×2 + PG + collector |
