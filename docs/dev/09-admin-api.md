@@ -105,13 +105,16 @@ type ParamMeta struct {
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
+| `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
-| `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`/`rpm_limit`/`expires_at`（[02 §2bis](./02-data-model.md)） | **M0** |
+| `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`/`rpm_limit`/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
 | `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
+| `GET /admin/reservations?needs_review=true` | 列出待人工核对的保守结算（`unknown_billing`/`interrupted` 崩溃恢复产生，[02 §2bis](./02-data-model.md)） | M1 |
+| `POST /admin/reservations/{request_id}/adjust` | 运维核对上游账单后修正实际费用。**必须传新 `event_key`，走统一 `finalize` 事务；严禁直接改 `client_daily_spend`**（直接改会重新引入重复扣减） | M1 |
 | `GET/POST/DELETE /admin/data-policies` | 数据许可规则 CRUD（[02 §2ter](./02-data-model.md)，FR-093）。开关 `data_policy_enabled` 默认 `false`，走 §3 二次确认 | M4 |
-| `POST /admin/data-policies/simulate` | 传四元组 `(tenant_id,data_class,region,business_tier)`，返回允许渠道列表 + 每个被排除渠道的原因（`data_policy_denied`/`data_policy_no_match`）——**AC-14 的可执行判定入口** | M4 |
+| `POST /admin/data-policies/simulate` | 传 **`gateway_client_id`**（属性由服务端从该凭证行取，**不接受调用方自报**），返回允许渠道列表 + 每个被排除渠道的原因（`data_policy_denied`/`data_policy_no_match`）；与请求路径共用求值实现——**AC-14 的可执行判定入口** | M4 |
 
 ---
 

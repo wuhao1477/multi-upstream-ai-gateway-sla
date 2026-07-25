@@ -51,7 +51,7 @@ L1 是关键设计：**只记"第 3 个事件在 517ms 到达、类型 output_te
 - **换行归一化**：真实上游 `\r\n` 与 `\n` 混用，不归一会切错块
 - **`data:` 多行拼接**：SSE 规范允许一个事件多行 `data:`，须 `\n` 拼接后再 JSON 解析
 
-→ 直接用于我们 `executor` 的 `HasActionableOutput` 判定（[03](./03-upstream-layer.md)）。这两点做错，首字判定就是错的。
+→ 直接用于我们 `executor` 的 `ShouldCommit`/`HasTTFTOutput` 双判定（[03](./03-upstream-layer.md)）。这两点做错，首字判定就是错的。
 
 ### 3.2 两段式延迟分解（其 `tps_from_values` / `gateway_overhead_ms`）
 

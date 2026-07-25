@@ -36,7 +36,7 @@ multi-upstream-ai-gateway-sla/
 │   ├── upstream/              # 自研上游对接层(03):字节透传 + 旁路观察
 │   │   ├── client.go          # Client 接口(03 §2)
 │   │   ├── passthrough.go     # 字节透传管道 + tee
-│   │   └── ssescan.go         # SSE 扫描器 + HasActionableOutput 判定(03 §3.2)
+│   │   └── ssescan.go         # SSE 扫描器 + ShouldCommit/HasTTFTOutput 双判定(03 §3.2)
 │   ├── collector/             # CollectorAdapter 接口 + newapi/sub2api/asxs/ 实现(04)
 │   │   ├── collector.go       # 接口(04 §1)
 │   │   ├── newapi/ sub2api/ asxs/

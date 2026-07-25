@@ -45,7 +45,9 @@
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
 | AC-27 | 自研核心某一实例宕机 | FIXTURE | `docker stop sla-core-a` → 持续打 30 个请求，**全部成功、无一失败**；Caddy 日志显示已摘除该实例；恢复后自动重新纳入 |
-| **AC-33**（新增） | 入站鉴权：无凭证 / 已吊销 / 越权别名 / 超配额 | FIXTURE | ① 不带 `Authorization` → **401**；② 用已 `revoked` 凭证 → **401**；③ 用 `allowed_aliases` 外的别名 → **403**；④ 超 `rpm_limit` → **429**；⑤ 合法凭证正常 200。**跨实例并发**：⑥ 双 core 同时打，日费用累计到 `quota_daily_usd` 时**必然被拒**（不得因预留晚于检查而超限）；⑦ RPM 窗口跨实例共享（在 A 打满后 B 也拒）；⑧ core 重启后配额计数不清零。另断言：`GET /admin/clients` **不回显完整凭证**、库中 `secret_hash` 非明文、日志中不出现凭证明文 |
+| **AC-33**（新增） | 入站鉴权：无凭证 / 已吊销 / 越权别名 / 超配额 | FIXTURE | ① 不带 `Authorization` → **401**；② 用已 `revoked` 凭证 → **401**；③ 用 `allowed_aliases` 外的别名 → **403**；④ 超 `rpm_limit` → **429**；⑤ 合法凭证正常 200。**跨实例并发**：⑥ 双 core 同时打，日费用累计到 `quota_daily_usd` 时**必然被拒**（不得因预留晚于检查而超限）；⑦ RPM 窗口跨实例共享（在 A 打满后 B 也拒）；⑧ core 重启后配额计数不清零。
+**预留正确性**（[02 §2bis](./02-data-model.md) 上界算法）：⑨ 预留额 = RoutePlan 全部跳的上界之和（发生接管时不超预留）；⑩ **实际用量高于初始估算**时结算按实际写入，且溢出后**下一个请求必被 429**；⑪ `channel_models.max_output_tokens` 为 NULL 的 binding **不得进入候选**（无上界即不可预留）；⑫ **kill-after-apply-before-ack** 重放：`settled_usd` 不翻倍、`reserved_usd` 不为负；⑬ 高并发（100 并发同凭证）下 `reserved_usd + settled_usd` **恒不超** `quota_daily_usd` + 单请求上界。
+另断言：`GET /admin/clients` **不回显完整凭证**、库中 `secret_hash` 非明文、日志中不出现凭证明文 |
 
 ### M1 上游直连 + 账本
 
@@ -55,10 +57,10 @@
 | AC-16 | 查询任一历史请求 | FIXTURE | 任取一个 `request_id`，`GET /admin/ledger/requests/{id}` 返回：全部 attempt、每跳 binding、状态、TTFT、usage、成本、决策快照；**字段无 NULL 缺失**（失败/取消的 usage 为空属预期） |
 | AC-26 | CC 与 Responses 两种协议、流式 + 工具调用 | **REAL** | 两协议各发 1 次流式 + 1 次带工具调用请求；**4 次全部 200**；工具调用字段在响应中**原样存在**（对比直连基线 diff 为空） |
 | AC-30 | 客户端断开 / 上游断流 / 内部超时三种中断 | MOCK | 三场景各构造 1 次；`attempts.cancel_reason` 分别为 `client_disconnect` / `upstream_disconnect` / `internal_timeout`；三者 `request_id` 关联正确 |
-| AC-31 | role-only 元事件后 0.5s 才发首内容 | MOCK | `mock-normal` / `mock-empty-sse` / `mock-heartbeat` 三场景：`content_aware_ttft_ms` 分别 ≈500ms / **NULL（无可见内容）** / ≈600ms+；**不得**出现 ≈0ms |
+| AC-31 | role-only 元事件后 0.5s 才发首内容 | MOCK | **七场景 × 双断言**（[03 §3.2](./03-upstream-layer.md) 拆为 `ShouldCommit`/`HasTTFTOutput`，须分别断言）：<br>`mock-normal` → commit=true@首 delta，ttft≈500ms<br>`mock-heartbeat` → 心跳不触发，ttft≈600ms+<br>`mock-tool-only` → commit=true@首 `function_call`/`tool_calls`，ttft=该时刻，**不得被接管取消**<br>`mock-refusal-only` → 同上<br>`mock-reasoning-summary-only` → 同上<br>`mock-empty-sse`（`response.completed` 无 delta）→ **commit=true（不取消）但 ttft=NULL**<br>`mock-error-terminal` → commit=true（按失败关单）、ttft=NULL<br>全场景**不得**出现 ttft≈0ms |
 | AC-32 | 已输出首字后中途取消 | MOCK | 客户端收 3 chunk 后断开 → mock 侧下一次写入 **EPIPE**、停止产出；`attempts.cancel_propagated = true`；上游连接关闭时刻 − 客户端断开时刻 **< 1s** |
 
-| **AC-35** | 进程在四个时点崩溃后重启（**账本崩溃恢复**） | FIXTURE | 自动化在 **四个时点** `kill -9` core 并重启核验：①**上游调用前** → attempt 置 `failed`（`external_call_started_at IS NULL`，**确定未计费**）；②**上游已发出、首条 outbox 事件前** → 租约超时后置 **`unknown_billing`** 并产生 P2 告警（[02 §4.2bis](./02-data-model.md)）；③首字后终帧前 → 有 TTFT 无 usage；④终帧后关单前 → 完整记录。**四种情况都不得出现"请求完全不存在"或永久停留 `pending`**；`ledger_outbox` 未投递行被重放且**不产生重复账目**（[01 §5.1](./01-architecture.md)、[02 §9.2bis](./02-data-model.md)） |
+| **AC-35** | 进程在四个时点崩溃后重启（**账本 + 配额崩溃恢复**） | FIXTURE | 自动化在四个时点 `kill -9` core 并重启，**每个时点断言四项全部终结**（[01 §5.1](./01-architecture.md)、[02 §4.2bis](./02-data-model.md)）：`attempt_status` / `requests.final_status` / `client_reservations.state` / `client_daily_spend.reserved_usd`。①调用前 → `failed`/`failed`/`abandoned`/预留已归零；②已发出未见首字 → `unknown_billing`/`failed`/`settled`+`needs_manual_review`+P2 告警；③**首字后终帧前（`attempt_status='committed'`）** → `interrupted`/`interrupted`/`settled`+P3；④终帧后关单前 → `completed`/`completed`/`settled`(实际用量)。**四个时点均须断言：无 `pending`/`committed` 残留、无 `reserved` 预留残留、`ledger_outbox` 重放不产生重复账目**。另须含**长流式续租用例**：一个 90s 的流式响应在续租正常时**不得**被恢复扫描终结 |
 
 > **M1 关键验收**（[00](./00-overview-and-milestones.md) 已列）：REAL 环境 Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**。
 
@@ -90,10 +92,10 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-08 | 低权重渠道长期无样本 | FIXTURE | 样本不足（1h<20 且 24h<100）→ `low_confidence=true`，**不作主渠道**；⏭ 一期无主动测活，该渠道靠人工开启后由真实流量积累样本（[15 S1](./15-scope-and-preflight.md)） |
+| AC-08 | 低权重渠道长期无样本 → 受控验证闭环 | FIXTURE | ①样本不足（1h<20 且 24h<100）→ `low_confidence=true`，**不作稳定主渠道**；②**新建 binding** 与**冷却期满 binding** 都进入 `canary`，在**不制造任何全局故障**的前提下，仅靠正常业务流量走完 `canary → observing → available`（[05 §2.0](./05-scheduling-and-operations.md)）；③canary 硬上限生效：单 binding 每小时 ≤`canary_max_per_hour`、并发 ≤`canary_max_concurrent`，**金/银别名请求一次都不得**落到 canary binding；④canary 连续失败达阈值 → 退回 `cooling` 且退避翻倍；⑤无健康接管候选时**不分配** canary |
 | AC-11 | 多渠道共享同一官方上游并同时故障 | FIXTURE | 同 `fault_domain` 的资源被整体降权/排除，**不逐个重试**；告警标注故障域 |
 | AC-13 | 请求含不可重复的外部写入 | FIXTURE | 该请求**不被分配测活**、**不并发重试**（参数 6 默认全局禁并发重试） |
-| AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
+| AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。③**伪造 `X-Data-Class: public` 请求头不得改变求值结果**（属性只认 `gateway_clients` 行）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
 | AC-18 | 单租户流量突增（容量隔离，一期无主动测活） | FIXTURE | 单租户突增时**不占用接管保留容量**；受限流量按配置规则处理（排队/拒绝），其他租户不受影响 |
 | **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（mock 上游、90% 流式），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
 | **AC-34** | **1000 并发用户高强度持续使用**（程序自身抗压） | **LOAD** | 按 §2bis 冻结模型：① 1000 并发稳态 30 分钟，决策开销 **P99 ≤50ms**、错误率 <0.01%；② 内存不持续增长、结束后 goroutine/连接回落基线 ±10%、无 OOM/FD 耗尽；③ **另须完成上限探测并记录容量拐点** |

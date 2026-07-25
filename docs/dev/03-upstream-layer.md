@@ -61,7 +61,7 @@ type Response struct {
 }
 
 // Stream 是字节级透传的流。Read 出来的字节原样写给下游；
-// Observe 返回旁路观察通道，供 executor 做首字判定（HasActionableOutput）与 usage 提取。
+// Observe 返回旁路观察通道，供 executor 做接管判定（ShouldCommit）、TTFT 打点（HasTTFTOutput）与 usage 提取。
 type Stream interface {
     io.ReadCloser              // 字节级透传；Close 即向上游传播取消（AC-32）
     Observe() <-chan Observation
@@ -72,7 +72,9 @@ type Observation struct {
     Seq            int           // 事件序号
     OffsetMs       int           // 相对请求发出的到达偏移
     EventType      string        // SSE event 名，如 response.output_text.delta
-    HasActionableOutput bool     // 是否已产出确定结果（文本/工具调用/拒答/终态）→ 首字判定（AC-31，§3.2）
+    ShouldCommit    bool     // 已产出确定结果（文本/工具调用/拒答/推理摘要/终态）→ 提交并停止接管（AC-32，§3.2）
+    HasTTFTOutput   bool     // 产出了实际内容 → 打 content_aware_ttft_ms（AC-31，§3.2）
+                             // ⚠️ 两者独立，空终态 ShouldCommit=true 而 HasTTFTOutput=false
     Bytes          int           // 该事件字节数
     Usage          *UsageSnapshot // 仅终帧携带
 }
@@ -92,7 +94,8 @@ type ProtocolSupport struct {
 ```
 上游 SSE 字节 ──┬──> 原样写给下游客户端（零改动）
                 └──> tee 到 SSE 扫描器 ──> Observation 通道
-                                            ├─ HasActionableOutput → executor 判定首个可执行输出（AC-31）
+                                            ├─ ShouldCommit  → executor 提交/停止接管（AC-32）
+                                            ├─ HasTTFTOutput → 账本打 TTFT（AC-31）
                                             ├─ 事件轨迹 → 12 的 L1 环形缓冲
                                             └─ 终帧 usage → 账本（02 attempt_usage）
 ```
@@ -105,26 +108,37 @@ type ProtocolSupport struct {
 - **多行 `data:` 拼接**：SSE 规范允许一个事件多行 `data:`，须 `\n` 拼接后再解析
 - **`[DONE]` 与注释行**：`data: [DONE]` 与 `:` 开头的心跳注释**不计入可见内容**
 
-### 3.2 首个可执行输出判定（AC-31）
+### 3.2 两个独立判定：`ShouldCommit` 与 `HasTTFTOutput`（AC-31）
 
-> ⚠️ **不能只认文本**（对抗性审查发现）：若判定标准只有"非空 text delta"，那么**只返回 `tool_calls` 的响应会被判为"无内容"** —— 而这正是主力 Codex **最常见的工作流**。后果：executor 在 TTFT 期限把一个**完全合法的工具响应取消掉**、另起上游、重复计费，最终工具链失败，而 AC-26 明明承诺工具调用兼容。
+> ⚠️ **一个布尔值扛不住两个契约**（对抗性审查第 7 轮 [high]）：上一版把"是否可提交/停止接管"与"是否打内容感知 TTFT"合并为单一 `HasActionableOutput`，在**空终态**上直接自相矛盾——`response.completed` 无任何 delta 时，接管契约要求"算，别取消"，而 AC-31 要求该场景 `content_aware_ttft_ms` **为 NULL**。同一个 bool 不可能同时为 true 和 false。
 >
-> 故判定契约为 **`HasActionableOutput`（首个可执行输出）**，而非狭义的"可见文本"。
+> ⚠️ **也不能只认文本**（第 6 轮发现）：若只认"非空 text delta"，**只返回 `tool_calls` 的响应会被判为无内容** —— 而这正是主力 Codex 最常见的工作流，后果是把合法工具响应取消掉、另起上游、重复计费，与 AC-26 承诺的工具兼容直接冲突。
 
-**判定标准**（按协议分别实现，对齐 [ISSUE-001 假设3](../issues/ISSUE-001-tech-assumption-verification.md) 的三条铁证）：
+**故拆为两个正交判定，逐事件冻结取值**（按协议分别实现，对齐 [ISSUE-001 假设3](../issues/ISSUE-001-tech-assumption-verification.md) 的三条铁证）：
 
-| 事件 | Responses | Chat Completions | 判定 |
-| --- | --- | --- | --- |
-| SSE 注释心跳（`: heartbeat`） | — | — | ❌ 不算 |
-| 生命周期元事件 | `response.created` / `in_progress` / `output_item.added` / `content_part.added` | — | ❌ 不算 |
-| role-only / 空 delta | — | `delta` 仅含 `role` 或为空 | ❌ 不算 |
-| **文本输出** | `response.output_text.delta` 且 text 非空 | `choices[].delta.content` 非空 | ✅ **算** |
-| **工具调用** ← 关键 | `response.function_call_arguments.delta`、`output_item.added` 且 `item.type='function_call'` | `choices[].delta.tool_calls[]` 首次出现 | ✅ **算** |
-| **拒答** | `response.refusal.delta` | `choices[].delta.refusal` | ✅ **算**（拒答是有效终态，不该被接管重试） |
-| **推理摘要**（若上游回传） | `response.reasoning_summary_text.delta` | — | ✅ **算** |
-| 终态直接到达 | `response.completed`（无任何 delta） | `finish_reason` 非空 | ✅ **算**（空响应也是确定结果，见 AC-31 的 `mock-empty-sse`） |
+| 判定 | 语义 | 消费者 |
+| --- | --- | --- |
+| **`ShouldCommit`** | 上游已产出**确定结果**（含"确定地什么都没有"）→ 提交响应头+缓冲字节，**此后不再接管** | `executor` 期限判定（AC-32） |
+| **`HasTTFTOutput`** | 上游产出了**实际内容**→ 打 `content_aware_ttft_ms` | 账本 TTFT / SLA 统计（AC-31） |
 
-**原则**：**任何"上游已开始产出确定结果"的信号都算首个可执行输出** —— 文本、工具调用、拒答、终态皆可；只有**元事件与心跳**不算。宁可少接管一次，也不能把合法响应取消掉重复计费。
+| 事件 | Responses | Chat Completions | `ShouldCommit` | `HasTTFTOutput` |
+| --- | --- | --- | --- | --- |
+| SSE 注释心跳（`: heartbeat`） | — | — | ❌ | ❌ |
+| 生命周期元事件 | `response.created` / `in_progress` / `output_item.added`(非 function_call) / `content_part.added` | — | ❌ | ❌ |
+| role-only / 空 delta | — | `delta` 仅含 `role` 或为空 | ❌ | ❌ |
+| **文本输出** | `response.output_text.delta` 且 text 非空 | `choices[].delta.content` 非空 | ✅ | ✅ |
+| **工具调用** ← 关键 | `response.function_call_arguments.delta`；或 `output_item.added` 且 `item.type='function_call'` | `choices[].delta.tool_calls[]` 首次出现 | ✅ | ✅ |
+| **拒答** | `response.refusal.delta` | `choices[].delta.refusal` | ✅ | ✅ |
+| **推理摘要**（若上游回传） | `response.reasoning_summary_text.delta` | — | ✅ | ✅ |
+| **空终态** ← 两者相反 | `response.completed` 且**此前无任何上述内容事件** | `finish_reason` 非空且此前无内容 | ✅ **算**（确定结果，不取消） | ❌ **不算** → `ttft` 留 **NULL** |
+| 错误终态 | `response.failed` / `response.incomplete` | `error` 事件 | ✅（确定结果 → 按失败关单，不接管重试） | ❌ |
+
+**两条原则**：
+
+1. `ShouldCommit`：**任何"上游已产出确定结果"的信号都算** —— 文本、工具调用、拒答、推理摘要、终态皆可；只有元事件与心跳不算。宁可少接管一次，也不能把合法响应取消掉重复计费。
+2. `HasTTFTOutput`：**只有实际内容算**。空响应/错误终态不产生 TTFT，`content_aware_ttft_ms` 保持 NULL，**不得计入 SLA 首字统计**（否则空响应会伪造出漂亮的 TTFT）。
+
+**蕴含关系**：`HasTTFTOutput ⇒ ShouldCommit`（反之不成立）。实现上 `Observation` 暴露两个独立字段，**不得由一个推另一个**。
 
 > 实现参考：AxonHub 的 `llm/pipeline/empty_response.go:hasResponseContent` 思路可借鉴（[13 §2.1](./13-research-reassessment.md)），但**须扩展到工具调用与拒答**——其原实现同样只覆盖文本。
 
@@ -198,7 +212,7 @@ type ProtocolSupport struct {
 
 ## 10. 实现待办（M1）
 
-1. SSE 扫描器 + `HasActionableOutput` 判定，用 `verify/mock_upstream.py` 场景做夹具；**须新增 tool-only 与 refusal-only 场景**（[11 §3](./11-decision-full-selfbuilt.md)）。
+1. SSE 扫描器 + `ShouldCommit`/`HasTTFTOutput` **双判定**，用 `verify/mock_upstream.py` 场景做夹具；**须新增 tool-only、refusal-only、reasoning-summary-only、空终态四类场景**，每类分别断言两个布尔值（[11 §3](./11-decision-full-selfbuilt.md)）。
 2. 字节透传管道 + tee 旁路观察，验证 35 字段与 reasoning item **零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 的真实上游基线）。
 3. 取消传播与连接池轮换的集成测试。
 4. `Probe()` 的协议能力探测 + 落库。

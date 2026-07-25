@@ -50,8 +50,8 @@
 ```
 1 protocol 收请求(提取会话标识) → policy 解析别名 → selector 产出 RoutePlan [B1(期限5s), B2(期限8s)]
 2 executor 用 B1 的渠道 Key 直连上游，字节流暂不提交给下游；旁路观察每个 SSE 事件
-3 5s 内旁路未见 HasActionableOutput（role-only/元事件/心跳不算；**工具调用与拒答算**）→ Close() 拆上游连接止损，切 B2
-4 起 B2 → 旁路首次 HasActionableOutput=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换
+3 5s 内旁路未见 ShouldCommit（role-only/元事件/心跳不算；工具调用/拒答/空终态都算）→ Close() 拆上游连接止损，切 B2
+4 起 B2 → 旁路首次 ShouldCommit=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换；TTFT 另由 HasTTFTOutput 打点（空响应则留 NULL）
 5 关单：Attempt#1(canceled_by_sla)、Attempt#2(committed) 落账；usage 取自旁路终帧
 ```
 
@@ -85,14 +85,19 @@
 
 **崩溃恢复终态契约**（与 [02 §4.2bis](./02-data-model.md) 租约扫描、[AC-35](./14-acceptance-matrix.md) 严格一致）：
 
-| 崩溃时点 | 判据 | 恢复后终态 |
-| --- | --- | --- |
-| ① 上游调用**前** | `external_call_started_at IS NULL` | **`failed`** —— 确定未计费，无需告警 |
-| ② 已发出、首条 outbox 事件前 | `external_call_started_at IS NOT NULL` 且心跳超时 | **`unknown_billing`** + P2 告警 —— 可能已计费，待人工核对 |
-| ③ 首字后、终帧前 | outbox 有 `first_token` 事件 | 重放后：有 TTFT、无 usage |
-| ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | 重放后：完整记录 |
+| 崩溃时点 | 判据 | attempt | request | reservation（配额） | 告警 |
+| --- | --- | --- | --- | --- | --- |
+| ① 上游调用**前** | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（释放） | 无 |
+| ② 已发出、首字前 | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`(估算)+待核对 | P2 |
+| ③ 首字后、终帧前 | `committed` 且心跳超时 | `interrupted` | `interrupted` | `settled`(估算)+待核对 | P3 |
+| ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | `completed` | `completed` | `settled`(实际) | 无 |
 
-**四种情况都不得出现"请求完全不存在"或永久停留 `pending`。**
+**四条硬性要求**（[02 §4.2bis](./02-data-model.md) 是唯一实现规范）：
+
+1. `pending` 与 `committed` **都是非终态**，恢复扫描必须同时覆盖——只扫 `pending` 会让 ③ 永久悬挂。
+2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
+3. attempt、request、reservation **在同一个 `finalize` 事务里一起终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。
+4. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
 
 ## 6. 开放点（评审需拍板）
 

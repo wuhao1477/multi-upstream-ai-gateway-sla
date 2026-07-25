@@ -299,6 +299,8 @@ CREATE TABLE gateway_clients (
   -- 数据许可属性（FR-093，一期不启用时全为 NULL → 求值按 '*' 处理，见 §2ter）
   region        TEXT,                          -- 地区（如 'us'/'cn'）；NULL=不限
   business_tier TEXT,                          -- 业务等级（如 'prod'/'dev'）；NULL=不限
+  data_class    TEXT,                          -- 数据级别（'public'/'internal'/'sensitive'）；**服务端唯一可信来源**，
+                                               -- 严禁由请求头覆盖（见 §2ter）；NULL=不限
   -- ⚠️ 与上游 Key 不同：入站凭证**只存哈希**（Argon2id/bcrypt），明文仅在签发时返回一次
   secret_hash   TEXT NOT NULL,
   secret_prefix TEXT NOT NULL,                 -- 明文前 8 位，供展示与定位（如 "gw-a1b2c3"）
@@ -355,28 +357,73 @@ CREATE TABLE client_reservations (
   state         TEXT NOT NULL DEFAULT 'reserved'
                   CHECK (state IN ('reserved','settled','abandoned')),
   settle_event_key TEXT,                        -- 结算事件唯一键，重放去重
+  needs_manual_review BOOLEAN NOT NULL DEFAULT false, -- unknown_billing/interrupted 结算：金额为保守估算，待人工核对
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   settled_at    TIMESTAMPTZ,
   UNIQUE (settle_event_key)
 );
+-- 运维视图：所有待人工核对的保守结算
+CREATE INDEX idx_resv_review ON client_reservations(gateway_client_id, spend_date)
+  WHERE needs_manual_review;
 CREATE INDEX idx_resv_open ON client_reservations(gateway_client_id, spend_date)
   WHERE state = 'reserved';
 ```
 
-**预留—结算协议**（防"落账前并发超限"**且**重放安全）：
+**预估上界算法**（对抗性审查第 7 轮 [high]：光有 `estimated_usd` 字段而不定义算法，并发请求可用极低预估同时过闸，随后按高实际费用结算 → 直接突破 `quota_daily_usd`）：
 
-| 时点 | 动作 |
-| --- | --- |
-| 请求进入 | 单事务内：① `INSERT client_reservations(request_id, estimated_usd, state='reserved')`（`request_id` 主键天然去重）② `INSERT … ON CONFLICT DO UPDATE SET reserved_usd = reserved_usd + <预估>` 并**同语句返回新值** ③ 超 `quota_daily_usd` 即**回滚整个事务**并 429 |
-| RPM 校验 | 同事务 `UPDATE client_rate_window SET request_count = request_count + 1` 并判定上限；超限 429 |
-| 请求结束（**幂等结算**） | 单事务内：① `UPDATE client_reservations SET state='settled', actual_usd=?, settle_event_key=? WHERE request_id=? AND state='reserved'` ② **仅当上一步影响行数=1** 才更新聚合表（`reserved_usd -= 预估`、`settled_usd += 实际`）。**重放时行数=0 → 聚合表不动**，天然幂等 |
-| 崩溃兜底 | 悬挂 attempt（§4.2bis）转 `unknown_billing` 时，其预留**保留 `reserved` 不释放**（保守计费），由运维核对上游账单后人工结算或置 `abandoned` |
+```
+单跳上界(binding) = ( 输入 token 上界 × 该 binding 输入单价
+                    + 输出 token 上界 × 该 binding 输出单价 ) × 倍率版本
+  输入 token 上界 = ceil(len(RawBody) / 2)        -- 不解析正文（FR-112），按字节数取保守上界
+                                                  -- 1 token ≥ 2 bytes 对 UTF-8 恒成立 → 是真上界
+  输出 token 上界 = channel_models.max_output_tokens   -- 见下方硬要求
 
-> 两个关键点：
-> 1. **预留发生在请求发起前、且与检查同事务** —— 挡住"两个并发都读到旧余额"；
-> 2. **结算以 per-request 行的状态跃迁为准、聚合表只在跃迁成功时更新** —— 挡住 outbox 重放导致的二次结算。
->
-> **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。
+estimated_usd = Σ 单跳上界(b)  for b in RoutePlan   -- ⚠️ 按 RoutePlan **全部跳**求和
+```
+
+- **为何按全部跳求和**：接管会真的产生多次上游调用，每次都计费。只按首跳预留 → 接管后必然超预留。RoutePlan 在请求进入时已由 selector 产出，可一次算完，**无需增量预留**（增量会把幂等性搞复杂）。
+  > **代价（明示）**：预留偏保守，日配额利用率低于理论值（接管率越低浪费越多）。这是**刻意选择**——宁可保守地拒绝，也不能超限。结算时立即释放差额，只影响"请求进行中"这段窗口。
+- **`channel_models.max_output_tokens` 是硬要求**：该列**未知（NULL）的 binding 不得进入候选**（与 [协议能力探测](#11-渠道--真实上游--账号--key--模型) 同级的登记项）。理由：字节透传硬约束禁止我们改写请求体去注入 `max_output_tokens`，因此上界只能来自**模型侧登记值**；无上界即无法形成可验证预留，**必须拒绝而不是猜**。
+- 请求体若自带更小的 `max_output_tokens`/`max_tokens`，**不采信**（我们不解析正文）。恒用模型侧上限，只会更保守。
+
+**实际费用超出预留时**（上游不遵守上限等）：结算按**实际值**写 `settled_usd`；若结算后 `settled_usd + reserved_usd > quota_daily_usd`，立即置该 client 当日 `over_quota` → **后续请求一律 429**。**已完成的请求不追溯拒绝**（无法收回）。此为可接受的有界溢出，AC-33 须断言"溢出后下一请求必被拒"。
+
+**统一终结事务 `finalize(request_id, outcome)`**（**唯一被允许修改聚合计数器的代码路径**）：
+
+> 对抗性审查第 7 轮 [critical]：预留在请求发起**前**创建，而"上游未发出即崩溃"的恢复只把 attempt 置 `failed`，**没有释放预留** → 每次这类崩溃永久占用一份日配额，累积到最后所有合法请求都收 429。人工把聚合值改回去又重新引入重复扣减。故三条路径必须共用同一个幂等事务。
+
+```sql
+BEGIN;
+-- ① 唯一闸门：per-request 行的状态跃迁。重放/并发时行数=0 → 直接 COMMIT，聚合不动
+UPDATE client_reservations
+   SET state            = :new_state,      -- 'settled' | 'abandoned'
+       actual_usd       = :actual_usd,     -- abandoned 时为 NULL
+       settle_event_key = :event_key,
+       needs_manual_review = :needs_review,
+       settled_at       = now()
+ WHERE request_id = :rid AND state = 'reserved';
+-- ② 仅当 ① 影响行数 = 1 才执行（否则 COMMIT 返回）
+UPDATE client_daily_spend
+   SET reserved_usd = reserved_usd - :estimated_usd,
+       settled_usd  = settled_usd  + COALESCE(:actual_usd, 0)
+ WHERE gateway_client_id = :cid AND spend_date = :date;
+-- ③ 同事务推终态，保证"配额已终结"与"账本已终结"不可分裂
+UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
+ WHERE request_id = :rid AND attempt_status IN ('pending','committed');
+UPDATE requests  SET final_status  = :final_terminal
+ WHERE id = :rid AND final_status = 'pending';
+COMMIT;
+```
+
+**三条调用路径，同一事务，参数不同**：
+
+| 路径 | 触发 | `outcome` → reservation / attempt / request |
+| --- | --- | --- |
+| **正常关单** | 终帧到达 | `settled`(actual=真实 usage) / `completed` / `completed` |
+| **恢复扫描**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（三种 outcome） |
+| **人工核对** | 运维据 P2/P3 告警核对上游账单 | `POST /admin/reservations/{request_id}/adjust`，传新 `event_key`；**不得直接改聚合表** |
+
+> **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
 
 **鉴权流程**（`protocol` 层，先于任何调度）：
 
@@ -430,10 +477,12 @@ CREATE INDEX idx_data_policies_channel ON data_policies(channel_id);
 ```
 
 - **deny 一票否决 → 求值与规则顺序无关**，无最长匹配/优先级，可预测、可单测。
-- **属性来源**：`tenant_id`/`region`/`business_tier` 取自鉴权命中的 `gateway_clients` 行（NULL → `'*'`）；`data_class` 取请求头 `X-Data-Class`，缺省 `'*'`。⏭ 由调用方自报数据级别的可信度问题（自报 `public` 绕过限制）属**二期**议题，一期开关默认关闭故不构成风险敞口；二期若启用多租户，须改为服务端按 `gateway_client` 绑定强制标注、不接受请求头自报。
+- **属性来源：四个维度全部取自鉴权命中的 `gateway_clients` 行**（`tenant_id`/`region`/`business_tier`/`data_class`，NULL → `'*'`）。
+  > 🔒 **铁律：不接受任何请求头/请求体承载的数据分级。** 曾考虑用 `X-Data-Class` 让调用方自报——**已否决**：调用方自报 `public` 即可绕开对敏感数据的渠道限制，等于该功能形同虚设。分级只能由**签发凭证时**由管理员写死在 `gateway_clients` 上；若同一调用方需要多个数据级别，**签发多把凭证**，而非让它自选。
+  > 实现要求：`protocol` 层解析出的任何 `X-Data-Class` 类请求头**必须被丢弃且不进入求值上下文**，并在 CI 加断言（伪造该头不改变求值结果，见 AC-14）。
 - **排除原因入快照**：两种排除原因写 `requests.decision_snapshot.excluded[]`，供 AC-14 断言与排障（[12](./12-debuggability.md)）。
 
-**管理 API**（[09 §5](./09-admin-api.md)）：`GET/POST/DELETE /admin/data-policies`；`POST /admin/data-policies/simulate`（传四元组，返回"允许渠道列表 + 每个被排除渠道的原因"）——**AC-14 的可执行判定入口**。
+**管理 API**（[09 §5](./09-admin-api.md)）：`GET/POST/DELETE /admin/data-policies`；`POST /admin/data-policies/simulate` **传 `gateway_client_id`**（不是裸四元组），服务端据该凭证行取属性后求值，返回"允许渠道列表 + 每个被排除渠道的原因"——与真实请求路径**走同一段求值代码**，否则模拟结果不具备验收效力（**AC-14 的可执行判定入口**）。
 
 **服务 FR/AC**：FR-093（P1，默认关闭）、AC-14。
 
@@ -530,7 +579,9 @@ CREATE TABLE requests (
   decision_snapshot JSONB,                    -- {candidates:[...], excluded:[{binding,reason}], chosen, cache_pred, balance, capacity}
   -- 请求级结果（FR-098）：最终对外结果
   final_status  TEXT NOT NULL DEFAULT 'pending'
-                  CHECK (final_status IN ('pending','completed','failed','canceled','unavailable')),
+                  CHECK (final_status IN ('pending','completed','failed','canceled','unavailable','interrupted')),
+                  -- ⚠️ 'pending' 是**唯一非终态**；恢复扫描必须把它推到某个终态并同步终结
+                  --    对应的 client_reservations 行（§2bis 统一终结事务），否则配额永久泄漏
   effective_ttft_ms INTEGER,                  -- 对外有效首字（取被提交 attempt 的自算 TTFT，AC-31）
   had_takeover  BOOLEAN NOT NULL DEFAULT false, -- 是否发生首字前接管（FR-076/092）
   PRIMARY KEY (id, created_at)                -- 分区键须入主键
@@ -550,7 +601,9 @@ CREATE TABLE attempts (
   price_version_id  UUID REFERENCES price_versions(id),      -- 决策时的**基础价**版本（FR-013/AC-02）
   multiplier_version_id UUID REFERENCES multiplier_versions(id), -- 决策时的**倍率**版本（binding 级）
   -- 两者合起来才是该 attempt 的完整计价输入，缺一不可复算
-  role              TEXT NOT NULL CHECK (role IN ('primary','takeover','retry','probe')), -- FR-076/079
+  role              TEXT NOT NULL CHECK (role IN ('primary','takeover','retry','canary','probe')), -- FR-076/079
+                    -- canary：一期受控验证——**本来就要发的真实业务请求**被分给待验证 binding（不额外产生费用）
+                    -- probe：二期主动测活——**为探测而额外发起**的请求（[05 §2](./05-scheduling-and-operations.md) 二期）
 
   -- ── 状态：网关原始 vs 归并（AC-30 核心）──
   gateway_status    TEXT CHECK (gateway_status IN ('pending','completed','failed','canceled')), -- beta5 execution.status 原样
@@ -560,11 +613,19 @@ CREATE TABLE attempts (
   cancel_reason     TEXT CHECK (cancel_reason IN
                       ('none','client_disconnect','sla_takeover','upstream_disconnect','internal_timeout','upstream_error')),
   attempt_status    TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (attempt_status IN ('pending','committed','canceled_by_sla','failed','completed',
-                                                'unknown_billing')),
-                      -- ⚠️ unknown_billing：上游请求**已发出**但进程在写入首条 outbox 事件前崩溃，
-                      -- 无事件可重放、账本无外部对账源 → 该调用**可能已计费但结果不明**。
-                      -- 必须显式标记而非静默留 pending（否则永久悬挂、污染成本与 SLA 统计）。见 §4.2bis
+                      CHECK (attempt_status IN (
+                        -- 非终态（两者都须被 §4.2bis 租约扫描覆盖）
+                        'pending',            -- 已落意图，未提交
+                        'committed',          -- 已提交输出给下游，流未结束
+                        -- 终态
+                        'completed','failed','canceled_by_sla','unknown_billing','interrupted')),
+                      -- ⚠️ unknown_billing：上游**已发出**但进程在写入首条 outbox 事件前崩溃 →
+                      --    可能已计费、结果完全不明。
+                      -- ⚠️ interrupted：已提交输出（见过首字）但**未见终帧**即崩溃 →
+                      --    **确定已计费**、用量未知。与 unknown_billing 的区别是计费确定性，
+                      --    两者都按保守估算计入成本，都不计入成功率。
+                      -- ⚠️ `pending` 与 `committed` 都是**非终态**：只覆盖 pending 的扫描
+                      --    会让首字后崩溃的 attempt 永久悬挂（对抗性审查第 7 轮 critical）。见 §4.2bis
 
   -- ── 逐尝试 metrics（自算，AC-31）──
   content_aware_ttft_ms INTEGER,              -- 自算内容感知首字（排除 role-only/空SSE/心跳，AC-31/假设3/6）
@@ -624,49 +685,62 @@ CREATE TABLE attempts (
 ```
 
 > ②③ 之间的窗口内崩溃 → `external_call_started_at` 已置但请求可能未真正发出：**按"已发出"保守处理**（宁可标 `unknown_billing` 人工核对，不可漏判为未计费）。
+> 提交首字时（③ 之后）另有 `UPDATE attempt SET attempt_status='committed'`——它使 attempt 离开 `pending`，故恢复扫描必须同时覆盖 `committed`（见下）。
 > `lease_heartbeat_at` 在 ① 即写入非 NULL，**杜绝"已发出但无心跳"的漏扫**。
 
 **恢复扫描**（启动时 + 周期性，与 outbox 重放并列）——**必须覆盖两类，缺一即产生永久 pending**：
 
 ```sql
--- ⚠️ 一条 SQL 同时捞两类：不可只写 external_call_started_at IS NOT NULL，
---    否则"上游调用前崩溃"的 attempt 永远扫不到（对抗性审查 critical 发现）。
--- ⚠️ 心跳判定必须含 IS NULL：SQL 的 < 对 NULL 恒不成立，
---    单写 lease_heartbeat_at < cutoff 会漏掉心跳未写入即崩溃的行。
+-- ⚠️ 三个 WHERE 条件各修过一个 critical 缺陷，缺一即产生永久悬挂：
+-- (1) 状态必须含 'committed'：首字后崩溃的 attempt 已不是 pending，
+--     只扫 pending 会让它**永远扫不到**（对抗性审查第 7 轮 critical）。
+-- (2) 不可只写 external_call_started_at IS NOT NULL，
+--     否则"上游调用前崩溃"的 attempt 永远扫不到（第 5 轮 critical）。
+-- (3) 心跳判定必须含 IS NULL：SQL 的 < 对 NULL 恒不成立，
+--     单写 lease_heartbeat_at < cutoff 会漏掉心跳未写入即崩溃的行（第 5 轮 critical）。
 SELECT * FROM attempts
-WHERE attempt_status = 'pending'
+WHERE attempt_status IN ('pending','committed')          -- 两个非终态全覆盖
   AND (lease_heartbeat_at IS NULL
        OR lease_heartbeat_at < now() - INTERVAL '60 seconds')
 FOR UPDATE SKIP LOCKED;
 ```
 
-捞出后**按是否已发出上游请求分流**：
+> **续租义务**：`executor` 在 attempt 存活期间（含 `committed` 后的流式传输阶段）**必须每 ≤20s 续写一次 `lease_heartbeat_at`**。否则长流式响应会被恢复扫描误判为崩溃并强行终结。20s 续租 / 60s 超时 = 3 倍余量。
 
-| 情形 | 处置 |
-| --- | --- |
-| `external_call_started_at IS NULL` | 上游**未发出** → 置 `failed`，**确定未计费**，无需告警 |
-| `external_call_started_at IS NOT NULL` | **可能已计费** → 置 **`unknown_billing`** + 触发运维告警（[§8](#8-告警与事件域合并持续事件) `alert_events`，P2） |
+捞出后**按"上游发出了吗、见到首字了吗"两个事实分流**，每种情形都推到**终态**并在**同一个 `finalize` 事务**（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)）内终结配额预留：
 
-→ `unknown_billing` 的 attempt **计入成本上限的保守估算**（按该 binding 的价格版本 × 倍率版本估一次调用费用），但**不计入成功率统计**；运维据告警人工核对上游账单后修正。
+| # | 判据 | attempt 终态 | request 终态 | reservation | 告警 |
+| --- | --- | --- | --- | --- | --- |
+| ① | `attempt_status='pending'` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
+| ② | `attempt_status='pending'` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P2** |
+| ③ | `attempt_status='committed'`（已见首字，未见终帧） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P3** |
 
-**验收**：[AC-35](./14-acceptance-matrix.md) 覆盖四个崩溃时点，其中"上游发出后、首条 outbox 前"须得到 `unknown_billing` + 告警，"上游调用前"须得到 `failed`。
+**三条不变式**：
+
+1. **无非终态残留**：扫描后该 request 的所有 attempt 与 request 自身都不再处于 `pending`/`committed`。
+2. **无配额泄漏**：`client_reservations` 不再是 `reserved`，`client_daily_spend.reserved_usd` 已扣回该请求的 `estimated_usd`。②③ 记为已花费（保守），而非挂在预留上——**挂在预留 = 永久占用配额**。
+3. **不污染 SLA**：`unknown_billing` 与 `interrupted` 都**计入成本**、都**不计入成功率/TTFT 统计**（用量是估算值，不是观测值）。
+
+> ②③ 的 `actual_usd` 是估算值,故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{id}/adjust`（新 `event_key`，仍走同一 `finalize` 事务，**禁止直接改聚合表**）。
+
+**验收**：[AC-35](./14-acceptance-matrix.md) 逐一断言四个崩溃时点的 `attempt_status` + `final_status` + `client_reservations.state` + `client_daily_spend.reserved_usd` **四项全部终结**。
 
 ```sql
--- 索引须覆盖两类扫描（含心跳为 NULL 的行）
+-- 索引须覆盖两个非终态与心跳为 NULL 的行
 CREATE INDEX idx_attempts_stale_lease ON attempts(attempt_status, lease_heartbeat_at NULLS FIRST)
-  WHERE attempt_status = 'pending';
+  WHERE attempt_status IN ('pending','committed');
 ```
 
 ### 4.3 逐 Attempt 用量与费用
 
 ```sql
 -- attempt 级用量/费用（FR-058、FR-016/019；假设4 token+cost 已收口）
--- 隐藏重试可能对应多条上游用量 → 用 attempt_id + upstream_seq 表达（FR-119）
+-- 一期 upstream_seq 恒为 1（我们不发隐藏重试，FR-119）；保留该列仅为二期若接入会隐藏重试的上游时零改表（§11 开放点5）
 CREATE TABLE attempt_usage (
   id                UUID NOT NULL,            -- UUIDv7（分区表主键须含分区键，见表尾复合 PK）
   attempt_id        UUID NOT NULL,
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键
-  upstream_seq      SMALLINT NOT NULL DEFAULT 1, -- 第几次上游调用（隐藏重试时 >1，FR-119）
+  upstream_seq      SMALLINT NOT NULL DEFAULT 1, -- 一期恒为 1；>1 保留给二期（FR-119）
   prompt_tokens     INTEGER,                  -- beta5 usageLogs.promptTokens
   completion_tokens INTEGER,                  -- completionTokens
   total_tokens      INTEGER,                  -- totalTokens
@@ -897,7 +971,11 @@ CREATE TABLE resource_health (
   binding_id      BIGINT PRIMARY KEY REFERENCES bindings(id),
   -- 健康六态（FR-046）
   health_state    TEXT NOT NULL DEFAULT 'unknown'
-                    CHECK (health_state IN ('unknown','observing','available','degraded','cooling','disabled')),
+                    CHECK (health_state IN ('unknown','canary','observing','available','degraded','cooling','disabled')),
+                    -- ⚠️ canary（一期受控验证态，[05 §2.0](./05-scheduling-and-operations.md)）：
+                    --    新登记 / 冷却期满的 binding 在此态下按硬上限承接**真实业务流量**积累首批样本。
+                    --    没有它，unknown 渠道因 low_confidence 永不作主渠道 → 永远拿不到样本 →
+                    --    只能在主渠道故障时首次上生产（对抗性审查第 7 轮 [high]）。
   -- 样本门槛计数（参数11）：低样本/过期标低可信（FR-043）
   sample_count_1h  INTEGER NOT NULL DEFAULT 0,   -- 近 1h 样本（≥20 可作主渠道）
   sample_count_24h INTEGER NOT NULL DEFAULT 0,   -- 近 24h 样本（≥100 可作主渠道）
@@ -919,6 +997,13 @@ CREATE TABLE resource_health (
   -- 观察期恢复（FR-047）：30min 或连续 50 次成功后转可用
   observing_since  TIMESTAMPTZ,
   observing_success_count INTEGER NOT NULL DEFAULT 0,
+
+  -- 一期受控验证（canary，[05 §2.0](./05-scheduling-and-operations.md)）
+  canary_since        TIMESTAMPTZ,               -- 进入 canary 的时刻
+  canary_window_start TIMESTAMPTZ,               -- 当前小时窗口起点（配额按小时重置）
+  canary_used_in_window INTEGER NOT NULL DEFAULT 0, -- 本窗口已分配的 canary 请求数（硬上限）
+  canary_inflight     SMALLINT NOT NULL DEFAULT 0,  -- 并发闸（默认上限 1）
+  canary_failures     SMALLINT NOT NULL DEFAULT 0,  -- 连续失败数，达阈值退回 cooling
 
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -1220,9 +1305,9 @@ CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at 
 | --- | --- | --- |
 | 1 | 分区自动化用 `pg_partman` 还是自研定时任务 | ✅ **已定**：一期自研定时任务（单机、依赖少）；量级上来再评估 pg_partman |
 | 2 | `session_id` 来源（不存正文如何标识会话） | ✅ **已收口**（见 §4.5）：**多源提取、不要求调用方配合**——主流客户端本就自带（Claude Code `X-Claude-Code-Session-Id`、Codex `session_id`/`conversation_id`、Responses `conversation`/`prompt_cache_key`）；按优先级捞，全未命中则按单轮处理、不派生不编造 |
-| 3 | AxonHub 换 PG 共库 vs 独立 SQLite（01-架构开放点4） | ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：beta5 支持 PG；用 DSN `search_path=<schema>`（需预建）与自研账本**共库分 schema**，对账本地 JOIN、免跨库 |
+| 3 | ~~AxonHub 换 PG 共库 vs 独立 SQLite~~ | ⛔ **已废止（2026-07-25，[11 转向决策](./11-decision-full-selfbuilt.md)）**：数据面已无 AxonHub，**不存在共库分 schema，也不存在对账 JOIN**。当前结论：**单库单 schema，账本为唯一真相源**。原实测记录见 [07 §1](./07-axonhub-runtime-probes.md)，仅作历史，**不得作为实施指令** |
 | 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | ✅ **已定**：元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
-| 5 | 隐藏重试补算的触发点 | ✅ **已定**：对账阶段按渠道 `site_family`/channel_type 与网关审计比对推断（ccLoad Codex 渠道），非请求路径实时判 |
+| 5 | 隐藏重试补算的触发点 | ⛔ **已废止（2026-07-25）**：原方案依赖外部网关审计比对，转向后**无网关、无对账阶段**。当前结论：**一期不做隐藏重试推断**——我们自己不发隐藏重试（FR-119），`attempt_usage.upstream_seq` 恒为 1；上游中转站内部若有隐藏重试，我们**不可观测也不补算**，其成本已体现在上游回传的 usage 里 |
 | 6 | 一期入站协议范围（FR-111 现为 CC + Responses） | ✅ **已定（2026-07-23）：维持 CC + Responses，不扩** —— **主力客户端为 Codex CLI，说的正是 OpenAI Responses，已在一期范围内**。Claude Code（Anthropic Messages）与 Gemini CLI（Gemini API）一期不直连；提取规则保留在 §4.5 仅为将来扩协议时零改动 |
 
 ---
