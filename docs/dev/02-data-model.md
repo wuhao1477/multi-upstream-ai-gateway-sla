@@ -32,7 +32,10 @@
 ```sql
 -- 统一美元金额域：一期各币种 1:1（FR-018），币种仅名称保留在各表 currency 列
 -- 精度覆盖到 1e-10（实测最小成本样本 1.3e-5，见 ISSUE-001 假设 4）
-CREATE DOMAIN usd_amount AS NUMERIC(20,10);
+CREATE DOMAIN usd_amount AS NUMERIC(20,10) CHECK (VALUE >= 0);
+-- ⚠️ 非负约束是**账务完整性闸门**（第 11 轮 [high]）：`adjust` 是唯一的人工修正入口，
+--    若允许负值，一次 settled_usd += (new − old) 就能把已结算消费改成负数并清掉
+--    needs_manual_review，从而长期放宽日配额，且数据库不会拒绝。
 
 -- 采集侧多种额度单位（quota整数 / USD浮点 / micros）由适配器入库前归一为 usd_amount（ISSUE-002 §6.4）
 -- 所有时间戳统一 TIMESTAMPTZ（UTC 存储）
@@ -409,18 +412,27 @@ estimated_usd = Σ 单跳上界(b)  for b in RoutePlan        -- 按全部跳求
 ```sql
 BEGIN;
 -- ① 唯一闸门：per-request 行的状态跃迁。重放/并发时行数=0 → 直接 COMMIT，聚合不动
-UPDATE client_reservations
-   SET state            = :new_state,      -- 'settled' | 'abandoned'
-       actual_usd       = :actual_usd,     -- abandoned 时为 NULL
-       settle_event_key = :event_key,
-       needs_manual_review = :needs_review,
-       settled_at       = now()
- WHERE request_id = :rid AND state = 'reserved';
--- ② 仅当 ① 影响行数 = 1 才执行（否则 COMMIT 返回）
-UPDATE client_daily_spend
-   SET reserved_usd = reserved_usd - :estimated_usd,
-       settled_usd  = settled_usd  + COALESCE(:actual_usd, 0)
- WHERE gateway_client_id = :cid AND spend_date = :date;
+--    ⚠️ RETURNING 出 client/日期/预留额 —— **聚合表只能用这三个返回值**，
+--       不接受调用方传参（第 11 轮 [high]：跨午夜长流、恢复事件携带旧字段、
+--       实现参数错配都会从**错误日期或错误客户**扣预留，且 reservation 已终态、
+--       幂等重放再也修不回来 → 永久配额泄漏或跨租户账目污染）。
+WITH settled AS (
+  UPDATE client_reservations
+     SET state            = :new_state,      -- 'settled' | 'abandoned'
+         actual_usd       = :actual_usd,     -- abandoned 时为 NULL；非负（domain 约束）
+         settle_event_key = :event_key,
+         needs_manual_review = :needs_review,
+         settled_at       = now()
+   WHERE request_id = :rid AND state = 'reserved'
+  RETURNING gateway_client_id, spend_date, estimated_usd, actual_usd
+)
+-- ② settled 为空（重放/并发）→ 本语句影响 0 行，聚合不动
+UPDATE client_daily_spend d
+   SET reserved_usd = d.reserved_usd - s.estimated_usd,
+       settled_usd  = d.settled_usd  + COALESCE(s.actual_usd, 0)
+  FROM settled s
+ WHERE d.gateway_client_id = s.gateway_client_id
+   AND d.spend_date        = s.spend_date;
 -- ③ 同事务推终态，保证"配额已终结"与"账本已终结"不可分裂
 UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
  WHERE request_id = :rid AND attempt_status IN ('pending','committed');
@@ -428,6 +440,8 @@ UPDATE requests  SET final_status  = :final_terminal
  WHERE id = :rid AND final_status = 'pending';
 COMMIT;
 ```
+
+> **`finalize` 的入参只有** `request_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
 
 **两条调用路径（都从 `reserved` 出发），同一事务，参数不同**：
 
@@ -482,6 +496,7 @@ UPDATE client_reservations
 COMMIT;
 ```
 
+- **`new_actual_usd` 必须 ≥ 0**：`usd_amount` 域已带 `CHECK (VALUE >= 0)`，API 层另行返回 **400** 拒绝负值（不依赖数据库报错）。修正后 `settled_usd` 亦须 ≥ 0，否则整事务回滚。
 - **差额修正而非覆盖**：`settled_usd += (new − old)`，配合 `event_key` 幂等键，重复提交与崩溃重放都只生效一次。
 - **`cid` / `spend_date` / `old_actual` 三者全部从 `FOR UPDATE` 锁定的 reservation 行派生**，不接受调用方传参——既挡住并发丢失更新，也挡住改错客户、改错日期。跨日核对因此天然记到原始那一天。
 - **禁止直接改 `client_daily_spend`**：所有聚合修改只有 `finalize` 与 `adjust` 两个入口。
@@ -734,7 +749,16 @@ CREATE TABLE attempts (
   --    ShouldCommit 在**空终态/错误终态**上也为 true 而 HasTTFTOutput 为 false。
   --    若恢复扫描按"committed ⇒ 见过首字"判定，会把"空响应已提交、关单前崩溃"
   --    误写成 interrupted + 人工核对，而它的真实终态是 completed/failed。
-  response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真的时刻（已向下游提交响应头）
+  response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真、**且已落库**的时刻
+  -- ── 上游事件到达时刻（**同步写之前**）：与下游交付时刻配对，度量我们自己的开销 ──
+  upstream_first_actionable_at TIMESTAMPTZ,   -- 上游首个 ShouldCommit 事件**到达**时刻（早于 response_committed_at）
+  upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 outbox 提交）
+
+  -- ── 下游交付确认（[03 §3.0](./03-upstream-layer.md)）：与上游事实**独立**，不可互相推导 ──
+  -- DB 提交与 socket 写出无法原子化，反方向窗口不可消除 → 必须分开记，冲突时按"未确认=未交付"取保守解释。
+  -- 不参与计费（成本只看上游事实），故可异步经 outbox 落库。
+  downstream_first_byte_at TIMESTAMPTZ,       -- 首字节已写出下游 socket
+  downstream_delivered_at  TIMESTAMPTZ,       -- 终帧已写出下游 socket / 流正常关闭
   has_ttft_output   BOOLEAN NOT NULL DEFAULT false, -- HasTTFTOutput 是否曾为真（决定 TTFT 是否有效）
   terminal_event    TEXT CHECK (terminal_event IN
                       ('completed','empty_completed','error','incomplete')),
@@ -748,6 +772,10 @@ CREATE TABLE attempts (
   full_latency_ms   INTEGER,                  -- 总延迟（请求进入→完整结束）
   upstream_latency_ms INTEGER,                -- 上游耗时（发往上游→完整结束）
   -- 决策/网关自身开销 = full_latency_ms − upstream_latency_ms，用于 FR-110「P99≤50ms」自监控（测法见 06 §6）
+  -- ⚠️ 该差值**测不到同步写**（首字同步写落在 upstream_latency_ms 内被抵消，第 11 轮 [high]）。
+  --    同步写代价用下面两个**派生指标**度量（无需新增列，由上面四个时刻算出，[14 判定口径](./14-acceptance-matrix.md)）：
+  --      downstream_ttft_delay_ms   = downstream_first_byte_at − upstream_first_actionable_at
+  --      downstream_finish_delay_ms = downstream_delivered_at  − upstream_terminal_at
   output_tokens_per_s NUMERIC(12,3),          -- 输出速度（FR-040）；**分母 = full_latency_ms − content_aware_ttft_ms**
                                               -- 只算生成阶段；用总延迟会把慢首字渠道误判为「生成慢」
   stream_broken     BOOLEAN NOT NULL DEFAULT false, -- 已输出首字后中断=完整失败，不拼接（FR-078/AC-12）
@@ -828,10 +856,11 @@ FOR UPDATE SKIP LOCKED;
 | --- | --- | --- | --- | --- | --- |
 | ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
 | ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P2** |
-| ③a | `committed` 且 **`terminal_event IS NOT NULL`**（上游已收完，只是没关单） | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；若 `attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则用估算 + 待核对 | 无（有实际用量时）／P3 |
+| ③a | `committed`、`terminal_event IS NOT NULL` 且 `downstream_delivered_at IS NOT NULL` | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；`attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则估算 + 待核对 | 无／P3 |
+| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_delivered_at IS NULL`**（上游结果已知，**交付未确认**） | `completed` | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
 | ③b | `committed` 且 **`terminal_event IS NULL`**（流真的断了） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P3** |
 
-> ⚠️ ③a 与 ③b 的区分**必须**读 `terminal_event`，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
+> ⚠️ ③a／③b 的区分**必须**读 `terminal_event`；③a／③c 的区分**必须**读 `downstream_delivered_at`。三者是三个独立事实，任何一个都不能由 `attempt_status` 反推，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
 
 **恢复结算金额 = 该 request 所有 attempt 的费用汇总**（第 10 轮 [critical]）：
 

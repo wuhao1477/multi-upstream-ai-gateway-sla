@@ -81,7 +81,9 @@
 
 > **"先落库再放行字节"为什么对首字也必须成立**（第 10 轮 [high]）：上一版只对终帧冻结了顺序，首字仍是"异步经 outbox"。于是进程可以在**首个内容字节已交给客户端、`committed` 尚未落库**时崩溃——库里还是 `pending`，恢复会判成 `unknown_billing`/`failed`，而用户**明明看到了半截输出**。这既违反 [AC-12 B 分支](./14-acceptance-matrix.md)（我们崩溃 → `interrupted`），也让流中断率漏计。
 >
-> **代价（明示）**：首字放行前多一次同步写，给 TTFT 增加约 1~2ms。**每请求只发生一次**（后续 delta 全部直通），相对金级 TTFT 预算（秒级）可忽略。这是用 2ms 换"客户端所见与账本所记不分裂"。
+> **代价（明示，且是待验证假设）**：首字放行前多一次同步写。**每请求只发生一次**（后续 delta 全部直通）。
+> ⚠️ "约 1~2ms"目前**没有负载条件与 PG 分位依据**，不得当结论用——1000 QPS 下首字+终帧合计 ≈2000 次同步事务/秒，连接池排队完全可能把它推高一个量级。
+> **约束**：① [AC-34/36](./14-acceptance-matrix.md) 须用 `downstream_ttft_delay_ms` / `downstream_finish_delay_ms` 两个**专用指标**度量（`总延迟 − 上游耗时` 会把它抵消掉，测不出来）；② 实测阈值由 M4 压测冻结并写回本节；③ 允许**组提交**（≤N 请求合并一个事务、linger ≤2ms）——正确性只要求"字节放行前已提交"，不要求每请求一事务。
 
 **三条不变式**：
 
@@ -97,6 +99,7 @@
 | ② 已发出、首字前 | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`(估算)+待核对 | P2 |
 | ③a 终帧已收、关单前 | `committed` 且 `terminal_event IS NOT NULL` | `completed`/`failed` | 同左 | `settled`(有实际用量则用实际) | 无/P3 |
 | ③b 首字后、终帧前 | `committed` 且 `terminal_event IS NULL` | `interrupted` | `interrupted` | `settled`(估算)+待核对 | P3 |
+| ③c 终帧已落库、**字节未写出** | `terminal_event NOT NULL` 且 `downstream_delivered_at IS NULL` | `completed` | **`interrupted`** | `settled`(**实际**) | 无 |
 | ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | `completed` | `completed` | `settled`(实际) | 无 |
 
 **四条硬性要求**（[02 §4.2bis](./02-data-model.md) 是唯一实现规范）：
@@ -104,9 +107,10 @@
 1. `pending` 与 `committed` **都是非终态**，恢复扫描必须同时覆盖——只扫 `pending` 会让 ③ 永久悬挂。
 2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
 3. attempt、request、reservation **在同一个 `finalize` 事务里一起终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。
-4. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③a/③b 必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
-5. `interrupted` 与 `failed` **对用户 SLA 的口径相同**（都是完整失败、都计入流中断率，FR-071/AC-12），区分终态只为归因（我们崩了 vs 上游断了）。
-6. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
+4. **DB 提交与 socket 写出无法原子化，反方向窗口不可消除**：先落库再放行只挡住"客户端有、库里没有"；"库里有、客户端没收全"必然存在（③c）。故 `attempts` 另记 `downstream_first_byte_at`/`downstream_delivered_at` 两个**独立事实**，冲突时按"未确认 = 未交付"取保守解释——attempt 层可以是 `completed`（成本精确已知），request 层仍判 `interrupted`（交付未确认）。详见 [03 §3.0](./03-upstream-layer.md) 四时点表。
+5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③a/③b 必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
+6. `interrupted` 与 `failed` **对用户 SLA 的口径相同**（都是完整失败、都计入流中断率，FR-071/AC-12），区分终态只为归因（我们崩了 vs 上游断了）。
+7. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
 
 ## 6. 开放点（评审需拍板）
 

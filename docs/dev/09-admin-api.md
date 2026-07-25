@@ -114,7 +114,7 @@ type ParamMeta struct {
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
 | `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
 | `GET /admin/reservations?needs_review=true` | 列出待人工核对的保守结算（`unknown_billing`/`interrupted` 崩溃恢复产生，[02 §2bis](./02-data-model.md)） | M1 |
-| `POST /admin/reservations/{request_id}/adjust` | 运维核对上游账单后修正实际费用。走**独立的 `adjust` 事务**（`FOR UPDATE` 锁定 reservation → 从锁定行派生 client/日期/旧值 → 按差额修正聚合），**不是 `finalize`**——`finalize` 的闸门是 `state='reserved'`，而待核对行早已是 `settled`，走它必然 0 行无效。入参只有 `new_actual_usd`/`event_key`/`operator`/`reason`；**client 与日期不可由调用方指定**，且**严禁直接改 `client_daily_spend`** | M1 |
+| `POST /admin/reservations/{request_id}/adjust` | 运维核对上游账单后修正实际费用。走**独立的 `adjust` 事务**（`FOR UPDATE` 锁定 reservation → 从锁定行派生 client/日期/旧值 → 按差额修正聚合），**不是 `finalize`**——`finalize` 的闸门是 `state='reserved'`，而待核对行早已是 `settled`，走它必然 0 行无效。入参只有 `new_actual_usd`/`event_key`/`operator`/`reason`，且 **`new_actual_usd < 0` 直接 400**；**client 与日期不可由调用方指定**，且**严禁直接改 `client_daily_spend`** | M1 |
 | `GET/POST/DELETE /admin/data-policies` | 数据许可规则 CRUD（[02 §2ter](./02-data-model.md)，FR-093）。开关 `data_policy_enabled` 默认 `false`，走 §3 二次确认 | M4 |
 | `POST /admin/data-policies/simulate` | 传 **`gateway_client_id`**（属性由服务端从该凭证行取，**不接受调用方自报**），返回允许渠道列表 + 每个被排除渠道的原因（`data_policy_denied`/`data_policy_no_match`）；与请求路径共用求值实现——**AC-14 的可执行判定入口** | M4 |
 

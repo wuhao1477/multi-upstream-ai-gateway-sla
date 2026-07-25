@@ -125,14 +125,32 @@ type ProtocolSupport struct {
   >
   > **取舍（明示）**：这条规则的代价是——上游已经成功且**钱已经花了**，却因为我们的库写不进去而让用户拿不到结果。接受这个代价的理由是：账本是唯一真相源，**无法持久化就无法诚实地声称成功**；而且 outbox 写的是与全站同一个 PG，它不可用时我们本来就在全面失败，不存在"只有这一个请求受影响"的情形。
 
-**恢复语义的可实现边界**（AC-35 据此写判定）：
+**两个独立事实，不可互相推导**（第 11 轮 [critical] 修正）：
 
-| kill 时点 | 客户端看到 | 库中证据 | 恢复终态 |
-| --- | --- | --- | --- |
-| 终帧已收、**outbox 未提交** | **流被中断**（终帧未放行） | `terminal_event IS NULL` | `interrupted`（③b）— 一致 |
-| **outbox 已提交**、终帧已放行、finalize 未完成 | 完整响应 | `terminal_event` 已落 | `completed`（③a）— 一致 |
+> ⚠️ 上一版声称"客户端拿到完整响应 ⟺ 库中有终帧证据"——**这个等价物理上做不到**：数据库提交与 socket 写出无法原子化。冻结顺序只消除了**一个方向**（客户端有、库里没有）；反方向的窗口**必然存在且不可消除**——outbox 已提交、终帧字节尚未写出时崩溃，库里看到 `terminal_event IS NOT NULL` 会判 `completed`，而客户端实际收到的是**截断流**。首字处同理。
+>
+> 正确做法不是假装窗口不存在，而是**把"上游结果已知"与"下游交付已确认"建模成两个独立事实**，在二者不一致时**取保守解释**。
 
-> 关键：**"客户端拿到完整响应"与"库里有终帧证据"由同一个顺序保证同生同灭**，不存在第三种状态。上一版的矛盾正是因为允许了"客户端有、库里没有"。
+```sql
+-- attempts 增两列：下游交付确认（best-effort，socket write 返回后异步经 outbox 落库）
+downstream_first_byte_at TIMESTAMPTZ,   -- 首字节已写出下游 socket
+downstream_delivered_at  TIMESTAMPTZ,   -- 终帧已写出下游 socket / 流正常关闭
+```
+
+- 这两列**不参与计费**（成本只看上游事实），因此可以异步落库、允许滞后——它们只影响**用户侧 SLA 的诚实性**。
+- **不一致时一律按"未确认 = 未交付"处理**：宁可把一次实际成功的交付记为失败，也不能把用户看到的截断流记为成功。
+
+**四个 kill 时点的完整终态**（AC-12/AC-35 据此写判定）：
+
+| # | kill 时点 | 客户端实际 | 库中事实 | attempt | request（用户 SLA） | 计费 |
+| --- | --- | --- | --- | --- | --- | --- |
+| K1 | 首字 outbox **提交前** | 无内容 | `pending` | `unknown_billing` | `failed` | 估算 + 待核对 |
+| K2 | 首字已提交、**字节未写出** | 无内容 | `committed`，`downstream_first_byte_at IS NULL` | `interrupted` | `failed`（用户没看到内容 → 不计流中断） | 估算 + 待核对 |
+| K3 | 终帧 outbox **提交前** | 截断流 | `committed`，`terminal_event IS NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
+| K4 | 终帧已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_delivered_at IS NULL` | **`completed`**（上游结果与成本**精确已知**） | **`interrupted`**（交付未确认 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
+| — | 全部完成 | 完整响应 | `terminal_event` + `downstream_delivered_at` 均非空 | `completed` | `completed` | 实际 |
+
+> **K4 是这次修正的核心**：attempt 层记 `completed`（我们确实知道上游干了什么、花了多少钱），request 层记 `interrupted`（我们**不能确认**用户收全了）。两层结论不同不是矛盾，而是两个不同事实的如实记录。
 
 ### 3.1 SSE 扫描器（只读不改）
 

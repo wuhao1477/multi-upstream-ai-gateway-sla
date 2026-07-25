@@ -47,7 +47,7 @@
 | AC-27 | 自研核心某一实例宕机 | FIXTURE | `docker stop sla-core-a` → 持续打 30 个请求，**全部成功、无一失败**；Caddy 日志显示已摘除该实例；恢复后自动重新纳入 |
 | **AC-33**（新增） | 入站鉴权：无凭证 / 已吊销 / 越权别名 / 超配额 | FIXTURE | ① 不带 `Authorization` → **401**；② 用已 `revoked` 凭证 → **401**；③ 用 `allowed_aliases` 外的别名 → **403**；④ 超 `rpm_limit` → **429**；⑤ 合法凭证正常 200。**跨实例并发**：⑥ 双 core 同时打，日费用累计到 `quota_daily_usd` 时**必然被拒**（不得因预留晚于检查而超限）；⑦ RPM 窗口跨实例共享（在 A 打满后 B 也拒）；⑧ core 重启后配额计数不清零。
 **预留正确性**（[02 §2bis](./02-data-model.md) 上界算法）：⑨ 预留额 = RoutePlan 全部跳的上界之和（发生接管时不超预留）；⑩ **实际用量高于初始估算**时结算按实际写入，且溢出后**下一个请求必被 429**；⑪ `models.max_input_tokens`/`max_output_tokens` 为 NULL 的模型，其全部 binding **不得进入候选**（无上界即不可预留）；且 `POST /admin/models` 缺这两个字段必须返回 **400**，建成后 selector 能正确读到两列；⑫ **kill-after-apply-before-ack** 重放：`settled_usd` 不翻倍、`reserved_usd` 不为负；⑬ 高并发（100 并发同凭证）下 `reserved_usd + settled_usd` **恒不超** `quota_daily_usd` + 单请求上界；⑯ **多模态/续接请求**（含 `image_url`、`previous_response_id` 等标记）按 `models.max_input_tokens` 预留，且 `max_input_tokens`/`max_output_tokens` 为 NULL 的模型 binding 不进候选；⑰ RPM 与日配额的**原子语句各自返回 0 行时必须 429**，不得先放行再补记。
-**人工修正**（[02 §2bis](./02-data-model.md) `adjust` 事务）：⑭ 恢复扫描产生的 `needs_manual_review` 记录能被 `adjust` 修正为真实值且标志清除；⑮ 同一 `event_key` 重复提交、或"已更新聚合未 ack"之间 kill 后重放，`settled_usd` **不得二次变动**；⑱ **两个不同 `event_key` 并发修正同一 reservation**，收敛后 `client_daily_spend.settled_usd` 与 `client_reservations.actual_usd` **必须一致**（不得出现 10→12/13 并发后聚合变 15 的失真）；⑲ `adjust` 只能改动该 reservation 自身的 client 与日期（参数不可指定）。
+**人工修正**（[02 §2bis](./02-data-model.md) `adjust` 事务）：⑭ 恢复扫描产生的 `needs_manual_review` 记录能被 `adjust` 修正为真实值且标志清除；⑮ 同一 `event_key` 重复提交、或"已更新聚合未 ack"之间 kill 后重放，`settled_usd` **不得二次变动**；⑱ **两个不同 `event_key` 并发修正同一 reservation**，收敛后 `client_daily_spend.settled_usd` 与 `client_reservations.actual_usd` **必须一致**（不得出现 10→12/13 并发后聚合变 15 的失真）；⑲ `adjust` 只能改动该 reservation 自身的 client 与日期（参数不可指定）；⑳ **负值拒绝**：`new_actual_usd < 0` 返回 400、事务回滚、`settled_usd` 不变，且修正后 `settled_usd` 恒 ≥ 0；㉑ **`finalize` 同样不接受 client/日期/预留额传参**——跨午夜长流（预留在 D 日、结算在 D+1 日）的费用必须记在 **D 日**，且 `reserved_usd` 在 D 日归零。
 另断言：`GET /admin/clients` **不回显完整凭证**、库中 `secret_hash` 非明文、日志中不出现凭证明文 |
 
 ### M1 上游直连 + 账本
@@ -70,7 +70,7 @@
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
 | AC-06 | A 渠道 ~20s 低价、B 渠道 ~3s 较贵 | MOCK | 金级别名请求：首跳选 A，期限内未见有效首字 → 切 B；**最终 TTFT < 该等级目标**；账本含 2 条 attempt（#1 `canceled_by_sla`、#2 `committed`） |
-| AC-12 | 已输出首字后流中断（**两个分支，终态不同但 SLA 口径相同**） | MOCK | **A 上游断流（我们存活、观测得到）**：`mock-abort` → `attempts.stream_broken=true`、`attempt_status='failed'`、`requests.final_status='failed'`。**B 网关自身崩溃（无观测）**：`attempt_status='interrupted'`、`final_status='interrupted'`（[02 §4.2bis](./02-data-model.md) ③b）。<br>**B 分支的两个 kill 时点**（[01 §5.1](./01-architecture.md) 冻结的首字顺序）：B1 在"首字已从上游收到、`committed` 未落库"之间 kill → 下游**未收到任何内容字节**且恢复为 `unknown_billing`（未提交即未对用户可见）；B2 在"`committed` 已落库、字节已放行"之后 kill → 恢复为 `interrupted` 且流中断率 +1。**两者必须一致：用户看到内容 ⟺ 库中有 committed 证据**。<br>**两分支共同断言**：①**不得**拼接第二个响应（下游字节在中断处结束）；②都计入用户 SLA **失败**且 `stream_break_rate` 分母 +1（FR-071）；③已记录的 `content_aware_ttft_ms` 照常保留计入。<br>`interrupted` 是**可区分的存储终态**而非另一种成功——它存在的唯一理由是把"我们崩了"与"上游断了"在排障与渠道健康归因上分开（B 不计入该 binding 成功率，A 计入） |
+| AC-12 | 已输出首字后流中断（**两个分支，终态不同但 SLA 口径相同**） | MOCK | **A 上游断流（我们存活、观测得到）**：`mock-abort` → `attempts.stream_broken=true`、`attempt_status='failed'`、`requests.final_status='failed'`。**B 网关自身崩溃（无观测）**：`attempt_status='interrupted'`、`final_status='interrupted'`（[02 §4.2bis](./02-data-model.md) ③b）。<br>**B 分支（网关自身崩溃）须覆盖 [03 §3.0](./03-upstream-layer.md) 的**四个 kill 时点**，每个都断言 attempt 与 request 两层终态：K1 首字 outbox 提交前 → `unknown_billing`/`failed`；K2 首字已提交但**字节未写出** → `interrupted`/`failed`（客户端无内容，**不**计流中断）；K3 终帧 outbox 提交前 → `interrupted`/`interrupted`（计流中断）；**K4 终帧已提交但字节未写出** → attempt `completed`（成本用实际用量、无需人工核对）而 request `interrupted`（交付未确认 → 保守判失败、计流中断）。<br>**K4 必须单独注入**（在 outbox commit 返回之后、socket write 之前 kill）——这是 DB 提交与 socket 写出无法原子化导致的**不可消除**窗口，不得假设它不存在。<br>**两分支共同断言**：①**不得**拼接第二个响应（下游字节在中断处结束）；②都计入用户 SLA **失败**且 `stream_break_rate` 分母 +1（FR-071）；③已记录的 `content_aware_ttft_ms` 照常保留计入。<br>`interrupted` 是**可区分的存储终态**而非另一种成功——它存在的唯一理由是把"我们崩了"与"上游断了"在排障与渠道健康归因上分开（B 不计入该 binding 成功率，A 计入） |
 | AC-15 | 全部合规资源不可用 | FIXTURE | 所有候选置不可用：金级排队 ≤15s 后返回明确错误（含建议重试时间 + 事件编号）；**响应中无任何上游内容**；未旁路未降级模型 |
 | AC-25 | `gpt-5.5` vs `gpt-5.5-sla-1` 两个别名 | FIXTURE | 各发 100 次：两者**适用各自别名映射的策略**（一期为单级 SLA + 测活资格标记）；⏭ 测活分配行为随主动测活移入二期验证 |
 
@@ -168,6 +168,20 @@
 - **P99 ≤50ms 测的是"决策/网关自身开销"，不是端到端延迟**：
   `开销 = 总延迟 − 上游耗时`（[02 `attempts.full_latency_ms − upstream_latency_ms`](./02-data-model.md)、[06 §6](./06-deployment-and-operations.md)）。
   → 直接对应 FR-110 原文"**决策过程给每个请求增加的时延** P99 ≤50 毫秒"。用端到端会把 mock 上游的固有延迟算进来，测不出程序真实开销。
+- ⚠️ **`总延迟 − 上游耗时` 观测不到同步写的延迟**（第 11 轮 [high]）：[01 §5.1](./01-architecture.md) 冻结的**首字同步写发生在上游流仍存活期间**，其耗时落在 `upstream_latency_ms` 里，被减法整个抵消；1000 QPS 下光首字+终帧就是 **≈2000 次同步事务/秒**，连接池排队会直接推高用户可感的首字延迟，而现有门禁**照样能通过**。故必须**另立两个专用指标**：
+
+  | 指标 | 定义 | 门禁 |
+  | --- | --- | --- |
+  | `downstream_ttft_delay_ms` | `attempts.downstream_first_byte_at − upstream_first_actionable_at` | P99 阈值**压测中冻结**（见下） |
+  | `downstream_finish_delay_ms` | `attempts.downstream_delivered_at − upstream_terminal_at` | 同上 |
+
+  两者均为**派生指标**，四个时刻列都已在 [02 `attempts`](./02-data-model.md) 落库，无需新增列。
+
+  这两个差值**只包含我们自己的同步写与调度**，上游耗时被完全排除，是同步写代价的唯一可信度量。
+
+- **压测必须开启真实同步持久化**（不得为了跑分把同步写降级为异步），并同时记录：PG **事务提交延迟 P50/P99**、连接池**等待时长与耗尽次数**、每秒同步事务数。
+- ⚠️ **设计中"约 1~2ms"是待验证假设，不是结论**：它没有负载条件、PG 延迟分位或连接池容量依据。**M4 压测的产出之一就是给这两个指标定出真实阈值并写回 [01 §5.1](./01-architecture.md) 与 [03 §3.0](./03-upstream-layer.md)**；若实测显著劣于假设，须启用下方的**组提交**优化后重测。
+- **允许的优化：组提交（batch commit）**。正确性只要求"**字节放行前该事件已提交**"，**不要求每请求一个事务**。故实现可把 ≤N 个请求的首字/终帧事件合并进一个事务（linger ≤2ms），把 2000 txn/s 压到百量级。该优化**不改变任何恢复语义**——组内任一事件提交即全部提交。
 - **失败阈值**：1000 并发稳态错误率 **<0.01%**（超过即不通过）。
 - **资源判定**（比 P99 更能暴露程序缺陷）：
   - 稳态 30 分钟内**内存不持续增长**（斜率趋零，排除泄漏）；
