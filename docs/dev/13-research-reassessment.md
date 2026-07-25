@@ -5,7 +5,7 @@
 | 状态 | ✅ 重审完成；**新发现的实现风险需落入 03 重写与 02/12**（见 §6） |
 | 日期 | 2026-07-25 |
 | 缘起 | [11 转向决策](./11-decision-full-selfbuilt.md)后，全部存量调研的**评估标准变了**，须整体重审 |
-| 范围 | 19+ 网关项目、5 个客户端、3 个上游家族、18 份调研文档 |
+| 范围 | 20+ 网关项目（含 2026-07-25 新增 **CLIProxyAPI**）、5 个客户端、3 个上游家族、18 份调研文档 |
 
 ## 0. 评估标准的根本变化
 
@@ -72,6 +72,33 @@ Codex 期待 `function_call` item 的 `status` 为 **`in_progress`** 而非 `com
 
 ## 2. 网关项目重审：从"候选"到"参考实现"
 
+### 2.0 CLIProxyAPI —— **与本项目重合度最高的参考实现**（2026-07-25 新增调研）
+
+[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)：**Go / MIT / 44.7k stars / 7k forks / 3,127 commits / 高度活跃**。定位是"为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容接口"，**把订阅制 CLI 工具包装成标准 API 端点**。
+
+| 维度 | 情况 | 对我们的意义 |
+| --- | --- | --- |
+| **重合度** | 服务对象正是 Codex / Claude Code / Gemini CLI | **迄今重合度最高的项目** |
+| **许可证** | **MIT** | 比 AxonHub（`llm/` LGPL-3.0）与 zhfeng1（无 LICENSE）都宽松，**参考最无顾虑** |
+| 语言 | Go | 可直接读实现 |
+| 架构 | **executors + translators 做格式转换，非字节透传** | ⚠️ 见下 |
+| 鉴权 | OAuth 订阅账号 + API Key，多账号轮询 | 一期用不上（上游全是 `sk-` key 中转站）；**将来接订阅账号时是首选参考** |
+| 管理面 | Management API（账号/供应商管理） | 可参考 [09](./09-admin-api.md) 的设计 |
+
+#### ⚠️ 它的 Codex 兼容故障，是本次重审最强的警示
+
+[issue #2401](https://github.com/router-for-me/CLIProxyAPI/issues/2401)：Codex CLI 0.117.0 报
+
+```
+unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
+```
+
+**而 CLIProxyAPI 侧日志显示 200** —— 即代理认为成功，**Codex 消费流失败**。疑因 SSE 流格式/终止细节、错误事件格式，或"**Codex 的期待比通用 SSE 客户端更严格**"。
+
+**该 issue 被 closed as "not planned"，至今未修复。**
+
+→ 一个 44.7k stars、高度活跃、**专为 Codex 而生**的 Go 代理，用 translator 路线，仍栽在 Codex 的 SSE 严格性上且未能修复。**这是我们不走解析-重组路线的最强证据。**
+
 ### 2.1 AxonHub —— 已排除为执行面，**升为首要参考代码库**
 
 | 维度 | 参考价值 |
@@ -99,7 +126,7 @@ Codex 期待 `function_call` item 的 `status` 为 **`in_progress`** 而非 `com
 
 | 项目 | 重审结论 |
 | --- | --- |
-| **LiteLLM** | **最大价值是其 bug**（§1.1）：主流网关在 Responses SSE 生命周期上翻车，是我们的前车之鉴 |
+| **LiteLLM** | **最大价值是其 bug**（§1.1/§5）：主流网关在 Responses SSE 生命周期上翻车，是我们的前车之鉴 |
 | Bifrost / Portkey / Manifest / gpt-load / uni-api | 无特别可借鉴项；架构与我们（决策在核心、执行纯透传）不同 |
 | NewAPI / Sub2API / Octopus / Aether / OmniRoute | 作为**上游站型**的价值远大于作为网关（见 §3） |
 | claude-relay-service | 订阅账号池管理，一期用不上（上游全是 `sk-` key 中转站） |
@@ -132,20 +159,32 @@ Codex 期待 `function_call` item 的 `status` 为 **`in_progress`** 而非 `com
 
 ---
 
-## 5. 一条关键的架构启示
+## 5. 关键架构启示：三个独立项目在同一处翻车
 
-§1.1 与 [07 §3bis](./07-axonhub-runtime-probes.md) 合起来看，得到一个**此前没意识到的结论**：
+把三处发现并排看，得到本次重审**最有价值的结论**：
 
-> AxonHub 的 Responses round-trip 会**吞掉 reasoning item**——而 Codex 恰恰要求 reasoning 保真且事件生命周期完整。
-> **即使我们不转向自研，AxonHub 这条路对主力 Codex 也是走不通的。**
+| # | 项目 | 规模 | 路线 | 在 Codex 上的结局 |
+| --- | --- | --- | --- | --- |
+| 1 | **LiteLLM** | 54.4k stars | 解析-重组 | 遗漏 4 个 SSE 事件 → Codex 报 `OutputTextDelta without active item`（[#20975](https://github.com/BerriAI/litellm/issues/20975)） |
+| 2 | **AxonHub** | 4.7k stars | 领域模型 round-trip | **吞掉 reasoning item + 28 个字段**（[07 §3bis](./07-axonhub-runtime-probes.md) 实测） |
+| 3 | **CLIProxyAPI** | **44.7k stars，专为 Codex 而生** | executors + translators | Codex 报 502 而代理侧 200，**closed as not planned 未修复**（[#2401](https://github.com/router-for-me/CLIProxyAPI/issues/2401)） |
 
-这把 [11 的转向](./11-decision-full-selfbuilt.md)从"权衡后的选择"提升为"**必然选择**"。
+**三个互相独立、规模从 4.7k 到 54.4k 的项目，全部采用解析-重组路线，全部在 Codex 兼容性上出问题。** 其中第 3 个是专门为 Codex 设计的，仍未能修复。
 
-**由此确定实现取向**：Responses 路径应做**字节级透传**（passthrough），而非解析-重组。理由：
+> 这不是某个项目的实现疏漏，而是**路线本身的系统性代价**：Responses 协议的事件生命周期契约严格（§1.1）、字段众多（真实上游 35 个）、含 reasoning 等结构化 item，任何"解析进领域模型再重新发出"的中间层都要 100% 复刻这套契约，**漏一个事件、丢一个字段就炸**。
 
-- 重组就要负责完整事件序列（§1.1 的坑），LiteLLM 已示范其难度
-- 字节级透传天然保真 35 字段、reasoning item、上游响应头
-- 我们需要的内容感知 TTFT（AC-31）只需**旁路观察**流内容，不必重组它
+### 由此确定的实现取向（**硬约束级**）
+
+**Responses 路径做字节级透传（passthrough），不做解析-重组。**
+
+| 理由 | 说明 |
+| --- | --- |
+| 规避已证实的系统性风险 | 三个项目的翻车点全在重组，透传绕开整类问题 |
+| 天然保真 | 35 字段、reasoning item、`x-codex-turn-state` 等响应头全部原样到达客户端 |
+| 我们并不需要重组 | 内容感知 TTFT（AC-31）只需**旁路观察**流内容即可判定，不必接管流的构造 |
+| 与账本不冲突 | usage/成本从旁路观察到的终帧提取，或按 [02](./02-data-model.md) 的价格版本自算 |
+
+同时，[11 的转向](./11-decision-full-selfbuilt.md)由此从"权衡后的选择"变为"**必然选择**"——AxonHub 吞 reasoning 与 Codex 的要求直接冲突，那条路本就走不通。
 
 ---
 
@@ -169,6 +208,8 @@ Codex 期待 `function_call` item 的 `status` 为 **`in_progress`** 而非 `com
 1. **存量调研没有白做**：ISSUE-002 全部有效；ISSUE-001/07 转为决策证据 + 保真目标；zhfeng1 已产出 12。
 2. **最大增量来自客户端侧**：Codex CLI 的三条硬约束（事件生命周期、function_call status、响应头透传）**此前完全没有记录**，而它是主力。
 3. **发现 7 项新实现风险**，全部归自研层负责，已列落点。
-4. **转向决策被强化**：AxonHub 吞 reasoning item 与 Codex 要求直接冲突，该路本就走不通。
+4. **三个独立项目在同一处翻车**（§5）：LiteLLM / AxonHub / CLIProxyAPI 全部采用解析-重组，全部在 Codex 兼容性上出问题——其中 CLIProxyAPI 专为 Codex 而生、44.7k stars，仍 closed as not planned。→ **字节级透传升为硬约束级取向**。
+5. **转向决策被双重强化**：既有 AxonHub 吞 reasoning 的直接冲突，又有整条重组路线的系统性风险。
+6. **CLIProxyAPI 是最佳参考代码库**：Go + **MIT**（最宽松）+ 服务对象完全重合；一期不用其 OAuth 订阅能力，但**将来接订阅账号时是首选参考**。
 
 _本篇只做重审与落点登记，未改动既有文档。§6 的落点随 [11](./11-decision-full-selfbuilt.md) 的全量返工一并执行。_
