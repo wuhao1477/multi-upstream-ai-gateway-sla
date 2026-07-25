@@ -242,7 +242,11 @@ const (
 - **禁止采信 `metricsFirstTokenLatencyMs`**：三条运行时铁证——mock-normal（role-only 后 sleep 0.5s 发首内容却记 10ms）、mock-empty-sse（零内容仍记 10ms）、mock-heartbeat（记 623ms=心跳后 role delta 时刻）。该字段打点在**首个流事件**而非首个可见内容。适配器把它塞进 `AttemptRecord.GatewayTTFTMs` 仅供存证。
 - **取消传播（AC-32）**：`ctx` 取消 / `AttemptStream.Close()` → 断开到 AxonHub 的 HTTP 连接。从 AxonHub 视角这等同客户端断开，落 `canceled`（假设 2 已证实客户端断开→`canceled`）。executor 在动态期限到达或确认接管后调用它止损上游用量。
 
-> **协议实测收口**（[07 §3](./07-axonhub-runtime-probes.md)）：AxonHub inbound `/v1/responses` **原生支持**；但 outbound 打上游原生 Responses **须把渠道配成 `ChannelType="openai_responses"`**——`openai` 型会**静默下转 Chat Completions**（丢 Responses-only 语义）。故 `ProvisionBinding` 对 Responses 渠道必须设 `openai_responses`。且 AxonHub 为**领域模型 round-trip 转译**（重签 item id、丢未知/自定义字段），非字节级透传：标准字段够用无需自研转换；若需严格保真则 `protocol` 层直连，`Capabilities().DegradedFields["responses_passthrough"]` 标注。真实上游保真度待 M1 用真实凭证补验。
+> **协议实测收口**（[07 §3](./07-axonhub-runtime-probes.md)）：AxonHub inbound `/v1/responses` **原生支持**；但 outbound 打上游原生 Responses **须把渠道配成 `ChannelType="openai_responses"`**——`openai` 型会**静默下转 Chat Completions**（丢 Responses-only 语义）。故 `ProvisionBinding` 对 Responses 渠道必须设 `openai_responses`。且 AxonHub 为**领域模型 round-trip 转译**，非字节级透传。
+>
+> ⚠️ **真实上游实测已推翻"标准字段够用"的判断**（[07 §3bis](./07-axonhub-runtime-probes.md)，2026-07-25）：直连 vs 经 AxonHub 同请求 diff 显示**顶层字段 35 → 7，丢失 28 个**，含 `prompt_cache_key`、`previous_response_id`、`reasoning`、`prompt_cache_retention`、`store`、`instructions`、`tools` 等；且 **`output` 数组里的 `reasoning` item 被整条吞掉**（2 条 → 1 条），`usage.reasoning_tokens` 由 12 归零。
+>
+> **结论**：若需保留 Responses 专有语义（reasoning 输出、缓存亲和键、工具定义等），**必须由 `protocol` 层直连转换，不能依赖 AxonHub 透传**。`Capabilities().DegradedFields["responses_passthrough"]` 必须如实标注该损耗。**主力 Codex 的会话标识不受影响**——其走 HTTP 头（`session_id`/`conversation_id`），AxonHub 不改头部；但 body 侧来源全失效（见 [02 §4.5](./02-data-model.md)）。
 >
 > ⚠️ **优先级已抬升（2026-07-23）**：**主力客户端为 Codex CLI，走的正是 Responses**（[02 §4.5](./02-data-model.md)）。因此"渠道必须配 `openai_responses`"**不是边缘约束而是主干路径的正确性前提**——误配 `openai` 会让**主力流量**被静默下转 Chat Completions（客户端侧看不出异常，但 Responses-only 语义已丢）。`ProvisionBinding` 必须对此做**强校验并拒绝错配**，不可依赖人工配置正确。
 
@@ -319,7 +323,7 @@ query($ids: [ID!]) {
 | `metricsFirstTokenLatencyMs` | 打点在首个流事件，非可见内容（AC-31） | executor 内容感知 TTFT 自算 |
 | `providerQuotaStatus=unknown` | 网关默认"保留"而非排除（FR-118） | selector 保守排除 |
 | `status` 枚举 | `canceled` 仅指客户端取消（AC-30） | ledger 按 errorMessage 归并 |
-| `responses_passthrough` | 领域模型 round-trip 丢未知字段/重签 item id（[07 §3](./07-axonhub-runtime-probes.md) 实测）；误配 `openai` 型会静默下转 CC | 严格保真时 protocol 层直连；Responses 渠道强制配 `openai_responses` |
+| `responses_passthrough` | **真实上游实测**（[07 §3bis](./07-axonhub-runtime-probes.md)）：顶层 35→7 字段，丢 `prompt_cache_key`/`previous_response_id`/`reasoning`/`prompt_cache_retention` 等 28 项；**`output` 的 reasoning item 被整条吞掉**、`reasoning_tokens` 归零。另：误配 `openai` 型会静默下转 CC | **需 Responses 专有语义时 protocol 层直连（非可选）**；Responses 渠道强制配 `openai_responses`；会话标识改走 HTTP 头（不依赖 body） |
 
 ---
 

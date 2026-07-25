@@ -80,9 +80,46 @@
 
 ---
 
-## 4. 诚实的前提局限
+## 3bis. 真实上游保真度实测（2026-07-25 补测，**推翻 §3 的 mock 推断**）
 
-- 实测项 3 的"上游原生 Responses"用**自造 mock**（响应结构按 OpenAI Responses 规范手写）。对**真实** OpenAI Responses API 的字段级保真度，**因无真实 OpenAI 凭证、未出网直连验证**。`MOCK_MARKER` 丢弃 / item id 重签 / created_at 归零为实测事实，据此推断 AxonHub 走领域模型 round-trip；若要对真实上游做保真度定量核对，需真实 OpenAI API Key + 允许出网（列为 M1 待补，与 verify/ 准入检查一并）。
+§3 用 mock 只能推断"重签 item id、丢少量未知字段"。用**真实 Responses 上游**（NewAPI 中转站 `api.lyjxka.top`，模型 `gpt-5.5`）做直连 vs 经 AxonHub 的同请求逐字段 diff，**实际损耗远比 mock 推断严重**。
+
+**方法**：同一请求体（含探针 `prompt_cache_key`、`metadata`）分别打直连上游与经 AxonHub（`openai_responses` 渠道），对比响应。
+
+### 结果：顶层字段 35 → 7，丢失 28 个
+
+| 字段 | 直连 | 经 AxonHub | 对本项目的影响 |
+| --- | --- | --- | --- |
+| `prompt_cache_key` | `1743acabce91c7ec` | ❌ **丢失** | **[02 §4.5](./02-data-model.md) 会话标识提取链序 3 失效** |
+| `previous_response_id` | `null`（字段存在） | ❌ **丢失** | **提取链序 5 失效** |
+| `reasoning` | `{context, effort:medium, mode, summary}` | ❌ **丢失** | Codex 主力字段 |
+| `prompt_cache_retention` | `24h` | ❌ **丢失** | 缓存策略依据 |
+| `store` / `service_tier` / `instructions` / `temperature` / `tools` / `text` / `truncation` 等 | 有 | ❌ **全丢** | 共 28 个 |
+| `status` / `model` | `completed` / `gpt-5.5` | ✅ 保留 | — |
+
+### 更严重：`output` 数组的 `reasoning` item 被整条吞掉
+
+| | 直连 | 经 AxonHub |
+| --- | --- | --- |
+| `output` 条数 | **2**（`reasoning` + `message`） | **1**（仅 `message`） |
+| `usage.reasoning_tokens` | `12` | **`0`** |
+
+即 AxonHub 的领域模型 round-trip **不保留 reasoning 输出项**，且 usage 中的 reasoning token 计数归零。
+
+### 落账（正常）
+
+`requests.format=openai/responses`、`status=completed`、`externalID=resp_...`；`usageLogs` 的 `promptTokens=4401`、`promptCachedTokens=3840` 与上游一致（`totalCost=null` 因本次未配价格，符合预期）。
+
+### 结论（**修正 §3 与 [03](./03-gateway-adapter.md) 的判断**）
+
+- §3 基于 mock 的"标准字段够用、无需自研转换"**不成立**。真实上游下 AxonHub 丢弃 80% 顶层字段与整条 reasoning item。
+- **主力 Codex 的会话标识仍可用**——因其走 HTTP 头（`session_id`/`conversation_id`，[02 §4.5](./02-data-model.md) 序 1/2），AxonHub 不碰头部；但 **body 来源（序 3/5）经 AxonHub 后全部失效**。
+- 若需保留 `reasoning`、缓存亲和键等 Responses 专有语义，**必须由自研 `protocol` 层直连转换**，不能依赖 AxonHub 透传。
+
+## 4. 前提局限
+
+- §3 的 mock 结论已由 §3bis 的真实上游实测**取代**（mock 无法暴露字段丢失，因 mock 响应本身不含这些字段）。
+- §3bis 用的是 NewAPI 中转站的 `gpt-5.5`，非 OpenAI 官方端点；但其响应结构为标准 OpenAI Responses（35 字段齐全、含 reasoning/缓存字段），足以暴露 AxonHub 的 round-trip 损耗。对 OpenAI 官方端点的核对可在有官方凭证时补做，**预期结论不变**（损耗发生在 AxonHub 侧，与上游来源无关）。
 
 ---
 
@@ -92,6 +129,6 @@
 | --- | --- | --- |
 | AxonHub 是否支持 PG 共库 | 01 开放点4、02 开放点3、06 §2.1 | ✅ 支持，`search_path` 分 schema |
 | AxonHub 多实例能否消除数据面单点 | 01 开放点1、06 开放点1 | ✅ 稳态双活**可行**（迁移须串行）。**但决策取默认单实例**（[06 §2.3](./06-deployment-and-operations.md)）：FR-110 只约束核心，双实例复杂度不划算；本实测作为"需要时可启用"的后备验证留档 |
-| Responses 协议透传完整度 | 01 开放点2、03 §4.3 | ⚠️ 原生支持需 `openai_responses` 渠道；结构化转译有字段级损耗，严格保真需自研层 |
+| Responses 协议透传完整度 | 01 开放点2、03 §4.3 | ⚠️ **已用真实上游收口（§3bis）**：原生支持需 `openai_responses` 渠道；**顶层字段 35→7（丢 28 个，含 `prompt_cache_key`/`previous_response_id`/`reasoning`），`output` 的 reasoning item 被整条吞掉**。主力 Codex 靠 HTTP 头取会话标识不受影响；但需保留 Responses 专有语义**必须自研 protocol 层直连** |
 
 清理确认：`docker compose down -v` + 删 axonhub 镜像 + 删临时目录；`docker ps -a` 无残留、端口释放、本仓库 `git status` clean。
