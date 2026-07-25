@@ -216,16 +216,6 @@ CREATE INDEX idx_bindings_channel     ON bindings(channel_id);
 -- ⚠️ routing_policies 必须先于 model_aliases 创建（后者有外键指向它），
 -- 定义见下方"路由策略"；此处仅提示建表顺序，实际 DDL 在 migrations/ 中按依赖排序。
 
--- 对外模型别名（FR-062/117、AC-25）：如 gpt-5.5（可测活） vs gpt-5.5-sla-1（禁测活）
-CREATE TABLE model_aliases (
-  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名
-  target_model_id BIGINT REFERENCES models(id),
-  policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
-  enabled        BOOLEAN NOT NULL DEFAULT true,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- 路由策略（FR-090/104/115）：一套具体策略，别名映射到它
 CREATE TABLE routing_policies (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -241,6 +231,16 @@ CREATE TABLE routing_policies (
   changed_by     TEXT,                        -- FR-099/104 责任人
   change_reason  TEXT,
   is_active      BOOLEAN NOT NULL DEFAULT true
+);
+
+-- 对外模型别名（FR-062/117、AC-25）：如 gpt-5.5（可测活） vs gpt-5.5-sla-1（禁测活）
+CREATE TABLE model_aliases (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名
+  target_model_id BIGINT REFERENCES models(id),
+  policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
+  enabled        BOOLEAN NOT NULL DEFAULT true,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- SLA 目标（FR-090/091）：按模型/请求类型/租户/等级+统计周期配置服务目标，全部可配置
@@ -1068,9 +1068,8 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
 -- 恢复扫描的两个索引（request 级入口 + attempt 侧租约判活）
 CREATE INDEX idx_requests_open ON requests(created_at) WHERE final_status = 'pending';
 CREATE INDEX idx_attempts_lease ON attempts(request_id, attempt_no, lease_heartbeat_at NULLS FIRST);
--- 支撑恢复扫描的 NOT EXISTS 反连接
-CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created_at, event_type)
-  WHERE delivered_at IS NULL;
+-- ⚠️ 支撑本扫描的 `idx_outbox_undelivered` 建在 §9.2bis `ledger_outbox` 定义处——
+--    索引不能早于表，迁移按文档顺序抽取时会直接失败（第 18 轮）。
 ```
 
 ### 4.3 逐 Attempt 用量与费用
@@ -1595,6 +1594,16 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 > `routing_policies → model_aliases → sla_targets`、
 > `requests → attempts → attempt_usage / ledger_outbox`。
 
+**门禁必须覆盖的三类"抽出来就跑不了"**（第 18 轮实测发现两处）：
+
+| 类别 | 检查 | 曾踩过的实例 |
+| --- | --- | --- |
+| **前向外键** | 任一 `REFERENCES X` 出现时 `X` 必须已 `CREATE TABLE` | `model_aliases.policy_id REFERENCES routing_policies` 早于 `routing_policies` 定义 |
+| **索引早于表** | `CREATE INDEX ... ON X` 必须晚于 `CREATE TABLE X` | `idx_outbox_undelivered ON ledger_outbox` 写在 §4.2bis，而 `ledger_outbox` 定义在 §9.2bis |
+| **代码块纯净** | ` ```sql ` 块内不得出现 Markdown（`>` / `|` / `**` / `#`） | 第 16 轮在 `alert_events` 后混入三行引用 |
+
+> 这三类都**不是语义争议，是机器可判定的**：CI 从文档抽取全部 ```sql 块按出现顺序拼成迁移、在临时 PG 上真跑一遍即可全部暴露。**本节的价值就在于它不依赖人读**——前 17 轮的人工审查都没发现这两处顺序问题。
+
 ### 9.2 保留策略配置化
 
 - 保留窗口（默认 7 个月 ≥180 天）走 `config_params(param_key='retention.months', is_critical=true)`；缩短保留是关键操作，需二次确认（FR-115）。
@@ -1626,6 +1635,9 @@ CREATE TABLE ledger_outbox (
 );
 
 CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at IS NULL;
+-- 支撑 §4.2bis 恢复扫描的 NOT EXISTS 反连接（必须建在本表之后）
+CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created_at, event_type)
+  WHERE delivered_at IS NULL;
 ```
 
 **恢复流程**：实例启动时扫描 `delivered_at IS NULL` 的行并重放（`FOR UPDATE SKIP LOCKED`，多实例安全）。因幂等键存在，重放不会产生重复账目。
