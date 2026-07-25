@@ -499,6 +499,14 @@ COMMIT;
 | **`finalize_recovery`** | 恢复扫描（§4.2bis） | 终态 | **写终态** | 结算 | 释放 |
 
 > 四者共用同一段幂等骨架（reservation 的 `reserved → settled/abandoned` 跃迁是唯一聚合闸门），差别只在**是否写 `requests.final_status`** 与参数。
+>
+> ⚠️ **无预留的请求必须走旁路**（本轮自查 [critical]）：骨架以"reservation 跃迁成功"为继续执行的闸门，而 **全候选不可用**（无 attempt、无预留）与 **D 阶段预留失败 429** 这两条路径**从未产生 reservation 行** → 闸门恒不通过 → 后续写 `requests.final_status` 的语句也不执行 → **request 永久停留 `pending`**。
+> 故 `finalize_abort` 分两种形态：
+>
+> | 形态 | 判据 | 动作 |
+> | --- | --- | --- |
+> | **有预留** | 存在 `client_reservations` 行且 `state='reserved'` | 走完整骨架（跃迁 → 扣回聚合 → attempt/canary → 写 request 终态） |
+> | **无预留** | 该 `request_id` 无 `client_reservations` 行 | **跳过 ①②④**，只执行 `UPDATE requests SET final_status=:t WHERE id=:rid AND final_status='pending'`；聚合表本就没被动过，无需扣回 |
 > **只有 `finalize_upstream` 不写 request 终态**——它跑在字节放行之前，那时交付结果未知；写了就会让 K4 不可达（第 12 轮 [critical]）。其余三者跑在"本请求已无后续"之时，必须写，否则 request 永久 `pending`。
 
 **`finalize_abort` 的 request 终态映射**（`cancel_reason` → `requests.final_status`）：
@@ -641,6 +649,7 @@ COMMIT;
 | **A. 鉴权** | `protocol` 层，最先 | ① `Authorization: Bearer <token>` → 按 `secret_prefix` 定位 → 校验 `secret_hash`；② `status='active'` 且未过期，否则 **401**；③ 模型别名 ∈ `allowed_aliases`，否则 **403** |
 | **B. RPM 原子闸** | 同上，鉴权后 | 见下方原子语句；返回 0 行即 **429**。RPM 不依赖 RoutePlan，可在此完成 |
 | **C. 日配额快速拒绝** | 同上 | 读内存快照：若 `settled_usd + reserved_usd ≥ quota_daily_usd` 直接 **429**。**这是优化不是保证**——只为省掉必然失败的调度开销，正确性由 D 承担 |
+| **C′. 落 `requests` 行** | 鉴权通过后、进入 policy/selector 前 | **同步插入** `requests`（`final_status='pending'`）。**必须早于 attempt 与预留**——否则零 attempt 路径（全候选不可用、D 失败 429）不落账，违反 FR-097/098 与 AC-15 |
 | **D. 原子预留** | **selector 产出 RoutePlan 之后、发起上游调用之前** | 算 `estimated_usd` → 见下方原子语句；返回 0 行即 **429**。**这是日配额的唯一正确性保证点** |
 | **E. 进入执行** | — | `requests.tenant_id`/`region`/`business_tier`/`data_class` 全部取自该凭证行（§2ter） |
 
@@ -977,14 +986,22 @@ CREATE TABLE attempts (
 --    NULL 必须显式覆盖：SQL 的 < 对 NULL 恒不成立（第 5 轮 critical）。
 SELECT r.id, r.created_at, a.*
   FROM requests r
-  JOIN attempts a
+  -- ⚠️ 必须 LEFT JOIN（本轮自查 [critical]）：INNER JOIN 会漏掉**零 attempt 的请求**——
+  --    全候选不可用、预留失败 429 都属此类，它们有 requests 行却没有任何 attempt，
+  --    用 INNER JOIN 永远捞不到 → 永久停留 pending。
+  LEFT JOIN attempts a
     ON a.request_id = r.id AND a.request_created_at = r.created_at
- WHERE r.final_status = 'pending'
-   AND r.created_at > now() - INTERVAL '7 days'          -- 限定分区范围，避免全表扫
    AND a.attempt_no = (SELECT max(attempt_no) FROM attempts x
                         WHERE x.request_id = r.id AND x.request_created_at = r.created_at)
-   AND (a.lease_heartbeat_at IS NULL
-        OR a.lease_heartbeat_at < now() - INTERVAL '60 seconds')
+ WHERE r.final_status = 'pending'
+   AND r.created_at > now() - INTERVAL '7 days'          -- 限定分区范围，避免全表扫
+   AND (
+     -- 有 attempt：按最后一跳的租约判活
+     (a.id IS NOT NULL AND (a.lease_heartbeat_at IS NULL
+                            OR a.lease_heartbeat_at < now() - INTERVAL '60 seconds'))
+     -- 零 attempt：没有租约可判，按请求自身年龄判活
+     OR (a.id IS NULL AND r.created_at < now() - INTERVAL '60 seconds')
+   )
    -- ⚠️ 反连接必须写进 SQL 本体，不能只写在说明里（第 15 轮 [high]）：
    --    downstream_write_completed 已写入 outbox 但尚未投递时，
    --    attempts.downstream_write_completed_at 仍是 NULL → 会被误判成 ③c/interrupted，
@@ -1013,6 +1030,7 @@ SELECT r.id, r.created_at, a.*
 
 | # | 对应 [03 §3.0](./03-upstream-layer.md) | 判据（读 attempt 的三个事实列） | attempt 终态 | request 终态 | reservation | 告警 |
 | --- | --- | --- | --- | --- | --- | --- |
+| ⓪ | — | **该 request 无任何 attempt**（全候选不可用／预留失败 429） | — | `unavailable`（无候选）／`failed`（预留失败） | 无预留行 → **跳过闸门**，直接写 request 终态 | P1（无候选时，AC-15） |
 | ① | — | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**） | 无（确定未计费） |
 | ② | **K1** | `external_call_started_at NOT NULL` 且 `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`，全跳汇总，`needs_manual_review=true` | **P2** |
 | ③b1 | **K2** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`，全跳汇总，待核对 | **P3** |

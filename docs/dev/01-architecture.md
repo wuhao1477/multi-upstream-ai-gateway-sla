@@ -73,7 +73,13 @@
 
 | 时点 | 必须持久化的内容 | 同步/异步 |
 | --- | --- | --- |
-| **发起上游调用前** | `requests` 行 + 本跳 `attempts` 行（状态 `pending`，含 binding、price_version_id）+ `client_reservations` 预留（[02 §2bis](./02-data-model.md) D 阶段） | **同步提交**（先落库再发请求） |
+| **鉴权通过、进入调度前** | `requests` 行（`final_status='pending'`，含 client、别名、协议） | **同步提交** |
+| **发起上游调用前** | 本跳 `attempts` 行（`pending`，含 binding、price_version_id）+ `client_reservations` 预留（[02 §2bis](./02-data-model.md) D 阶段） | **同步提交**（先落库再发请求） |
+
+> ⚠️ **`requests` 必须比 attempt/预留更早落库**（本轮自查）：原设计把三者绑在"发起上游调用前"同一步，于是
+> **全候选不可用**（selector 输出空，无 attempt）与 **预留失败 429**（D 阶段返回 0 行）这两条路径**根本不会产生任何账本记录**——
+> 与 FR-097/098「每个请求可查询」、AC-15「返回事件编号并落账本」、AC-33「429 可审计」全部冲突。
+> 提前插入后，这两条路径都有 `pending` 行，再由 `finalize_abort` 推到 `unavailable`／`failed` 终态。
 | **首次 ShouldCommit → 放行响应头与缓冲字节之前** | `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步提交（先落库再放行字节）** |
 | **识别终帧 → 放行终帧字节之前** | 见下方 `finalize_upstream` 行（**同步直写表，非 outbox**） | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
 | 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
