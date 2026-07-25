@@ -107,6 +107,8 @@ CREATE TABLE models (
   -- 曾把输出上限写成 channel_models.max_output_tokens —— 那一列**根本不存在**（第 9 轮 critical）。
   max_input_tokens  INTEGER,      -- 协议级最大可计费输入（通常=上下文窗口）；上游物理上不可能计费超过它
   max_output_tokens INTEGER,      -- 最大可生成输出 token 数
+  -- 写入载体：POST/PATCH /admin/models（[09 §5](./09-admin-api.md)），接口层强制 NOT NULL AND > 0；
+  -- 列本身可空只为兼容历史行，**业务上等价于必填**（为空即该模型全部 binding 不进候选）
   supports_streaming BOOLEAN,
   supports_tools     BOOLEAN,
   supports_structured_output BOOLEAN,
@@ -825,11 +827,26 @@ FOR UPDATE SKIP LOCKED;
 | # | 判据 | attempt 终态 | request 终态 | reservation | 告警 |
 | --- | --- | --- | --- | --- | --- |
 | ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
-| ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P2** |
+| ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P2** |
 | ③a | `committed` 且 **`terminal_event IS NOT NULL`**（上游已收完，只是没关单） | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；若 `attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则用估算 + 待核对 | 无（有实际用量时）／P3 |
-| ③b | `committed` 且 **`terminal_event IS NULL`**（流真的断了） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P3** |
+| ③b | `committed` 且 **`terminal_event IS NULL`**（流真的断了） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P3** |
 
 > ⚠️ ③a 与 ③b 的区分**必须**读 `terminal_event`，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
+
+**恢复结算金额 = 该 request 所有 attempt 的费用汇总**（第 10 轮 [critical]）：
+
+> ⚠️ 上一版写"`actual_usd` = 单跳保守估算"——但**预留是 request 级、按 RoutePlan 全部跳求和的**。若首跳超时被取消（钱已真实花掉）、第二跳崩溃，只结算单跳就会把首跳成本整个漏掉；而 `finalize` 又会一次性释放**整笔**预留 → `settled_usd` 系统性偏低，调用方可持续突破日费用上限。
+
+```
+actual_usd(request) = Σ over 该 request 的所有 attempt:
+   ├─ 已终结且有实际用量（attempt_usage 有行） → 用**实际费用**
+   ├─ 已终结但无用量（canceled_by_sla / failed 且上游已发出） → 用该跳**单跳保守估算**
+   ├─ 已终结且确定未计费（external_call_started_at IS NULL）  → 0
+   └─ 本次悬挂的那一跳                                        → 该跳**单跳保守估算**
+```
+
+- 该汇总**在 `finalize` 的同一事务内计算并写入**，与预留释放原子完成。
+- **验收**：[AC-35](./14-acceptance-matrix.md) 与 [AC-33](./14-acceptance-matrix.md) 须有**联合用例**：首跳接管后第二跳崩溃，恢复后 `actual_usd` **必须包含首跳的实际成本**，且 `reserved_usd` 归零、`settled_usd` 不偏低。
 
 **三条不变式**：
 
@@ -847,7 +864,7 @@ FOR UPDATE SKIP LOCKED;
    > **为什么两套口径方向相反**：进程崩溃是**我们的**故障，不是渠道的故障。计入用户 SLA 是诚实（用户确实失败了）；不计入渠道健康是准确（否则会冤枉一个健康渠道、把它冷却掉，故障范围反而扩大）。
    > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
 
-> ②③ 的 `actual_usd` 是估算值,故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{id}/adjust`（新 `event_key`，仍走同一 `finalize` 事务，**禁止直接改聚合表**）。
+> ②③b 的 `actual_usd` 含估算成分，故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{request_id}/adjust`——它是[§2bis 的**独立 `adjust` 事务**](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)（从 `settled` 出发、`FOR UPDATE` 锁定、按差额修正），**不是 `finalize`**：`finalize` 的闸门是 `state='reserved'`，对已 `settled` 的待核对行必然影响 0 行、静默失效。幂等键用 `reservation_adjustments.event_key`，**不是** `settle_event_key`。**禁止直接改聚合表**。
 
 **验收**：[AC-35](./14-acceptance-matrix.md) 逐一断言四个崩溃时点的 `attempt_status` + `final_status` + `client_reservations.state` + `client_daily_spend.reserved_usd` **四项全部终结**。
 
@@ -1186,7 +1203,7 @@ CREATE TABLE canary_claims (
   request_id    UUID NOT NULL,
   attempt_id    UUID NOT NULL,
   lease_owner   TEXT NOT NULL,                 -- 实例标识
-  lease_expires_at TIMESTAMPTZ NOT NULL,       -- 默认 now() + 5min
+  lease_expires_at TIMESTAMPTZ NOT NULL,       -- 初值 now()+60s；**须随 attempt 心跳续租**（见下）
   state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   released_at   TIMESTAMPTZ
@@ -1195,7 +1212,15 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 ```
 
 
-**生命周期**：占用（条件 UPDATE + INSERT claim + INSERT attempt，**单事务**）→ 释放（`finalize` 内按 `claim_id` 一次性跃迁，跃迁成功才 `canary_inflight -= 1`）→ 回收（后台任务只收 `state='active' AND lease_expires_at < now()`，**禁止**按"当前无 attempt 就归零"）。
+**生命周期**：占用（条件 UPDATE + INSERT claim + INSERT attempt，**单事务**）→ **续租**（见下）→ 释放（`finalize` 内按 `claim_id` 一次性跃迁，跃迁成功才 `canary_inflight -= 1`）→ 回收（后台任务只收过期租约）。
+
+**claim 租约必须与 attempt 租约同生命周期**（第 10 轮 [high]）：
+
+> ⚠️ 上一版把租约写死 5 分钟且**没有任何续租动作**。一个合法的 canary 流只要跑超过 5 分钟，后台就会把**仍在执行**的 claim 回收并递减 `canary_inflight`，第二个请求随即拿到 claim——`canary_max_concurrent=1` 当场失效；原 attempt 结束时又因 claim 已 `released` 而无法修正计数。
+
+- **续租**：`executor` 每次续写 `attempts.lease_heartbeat_at`（[§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 要求 ≤20s 一次）时，**在同一条语句/同一事务内**把关联 claim 的 `lease_expires_at` 一并延长到 `now() + 60s`。两个租约同源，不会出现"attempt 活着但 claim 过期"。
+- **回收判据加严**：后台只回收 **`state='active'` 且 `lease_expires_at < now()` 且关联 attempt 已处于终态或同样失租**的 claim，回收时对 claim 行加锁并复核。仅凭 claim 过期不足以回收。
+- **验收**：[AC-08](./14-acceptance-matrix.md) 须含**超过租约时长的长流用例**（如 5 分钟以上的 canary 流式请求），断言期间并发上限不被突破、claim 未被误回收。
 
 **服务 FR/AC**：FR-121；AC-08⑥⑦⑧。
 

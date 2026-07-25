@@ -73,9 +73,15 @@
 
 | 时点 | 必须持久化的内容 | 同步/异步 |
 | --- | --- | --- |
-| **发起上游调用前** | `requests` 行 + 本跳 `attempts` 行（状态 `pending`，含 binding、price_version_id） | **同步提交**（先落库再发请求） |
-| 首字判定后 / 每跳结束 | attempt 状态、TTFT、cancel_reason | 异步，但经 **outbox** |
-| 终帧 / 关单 | usage、成本、final_status | 异步，但经 **outbox** |
+| **发起上游调用前** | `requests` 行 + 本跳 `attempts` 行（状态 `pending`，含 binding、price_version_id）+ `client_reservations` 预留（[02 §2bis](./02-data-model.md) D 阶段） | **同步提交**（先落库再发请求） |
+| **首次 ShouldCommit → 放行响应头与缓冲字节之前** | `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步提交（先落库再放行字节）** |
+| **识别终帧 → 放行终帧字节之前** | `terminal_event`、usage、attempt_end | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
+| 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
+| 关单 | `final_status`、成本汇总 | 异步，但经 **outbox** |
+
+> **"先落库再放行字节"为什么对首字也必须成立**（第 10 轮 [high]）：上一版只对终帧冻结了顺序，首字仍是"异步经 outbox"。于是进程可以在**首个内容字节已交给客户端、`committed` 尚未落库**时崩溃——库里还是 `pending`，恢复会判成 `unknown_billing`/`failed`，而用户**明明看到了半截输出**。这既违反 [AC-12 B 分支](./14-acceptance-matrix.md)（我们崩溃 → `interrupted`），也让流中断率漏计。
+>
+> **代价（明示）**：首字放行前多一次同步写，给 TTFT 增加约 1~2ms。**每请求只发生一次**（后续 delta 全部直通），相对金级 TTFT 预算（秒级）可忽略。这是用 2ms 换"客户端所见与账本所记不分裂"。
 
 **三条不变式**：
 

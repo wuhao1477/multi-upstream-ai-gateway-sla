@@ -99,7 +99,9 @@ type ParamMeta struct {
 
 | 端点 | 作用 | 里程碑 |
 | --- | --- | --- |
-| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`，供上游对接层读取，[03](./03-upstream-layer.md)） | M1 |
+| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`/`bindings`，供上游对接层读取，[03](./03-upstream-layer.md)）。**只引用已登记的 `model_id`，不在此隐式创建模型**——模型走 `/admin/models` | M1 |
+| `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
+| `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
 | `GET /admin/ledger/requests?…` | 账本查询（逐 Attempt、对账状态；FR-097/098） | M1 |
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
