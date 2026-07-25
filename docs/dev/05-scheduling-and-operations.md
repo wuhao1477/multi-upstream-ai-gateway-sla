@@ -123,9 +123,20 @@ RETURNING canary_used_in_window, canary_inflight;
 ```
 
 - **返回 0 行 = 未抢到额度** → **不走 canary**，按正常排序选 binding。抢不到是常态，不是错误。
-- **claim 成功后必须记账**：把 `binding_id` 写进该 attempt 的上下文，**释放恰好一次**——`finalize` 事务（[02 §2bis](./02-data-model.md)）内 `UPDATE resource_health SET canary_inflight = canary_inflight - 1 WHERE binding_id=:bid AND canary_inflight > 0`。因 `finalize` 本身幂等（per-request 行状态跃迁闸门），**释放也天然只发生一次**；崩溃恢复走同一 `finalize`，故 inflight 不会泄漏。
+- **claim 必须与 attempt 同事务，并有可持久化的所有者**（第 9 轮 [high]）：
+
+> ⚠️ 上一版只递增匿名计数、且与 attempt 插入分属两个事务 → ⓐ 崩溃在「claim 成功、attempt 未落库」之间会**永久泄漏 inflight**；ⓑ 兜底规则写成「该 binding 无存活 canary attempt 则归零」，会与**尚未插入 attempt 的正常 claimant** 竞态——提前归零后第二个请求即可进入，`canary_max_concurrent=1` 当场被突破。
+
+表结构见 [02 §6 `canary_claims`](./02-data-model.md)（DDL 唯一真相源在 02）。
+
+
+| 时点 | 动作 |
+| --- | --- |
+| **占用** | **单事务内**：① 上面那条条件 UPDATE（0 行即回滚、放弃 canary）② `INSERT canary_claims(state='active')` ③ `INSERT attempts`（意图先行，[01 §5.1](./01-architecture.md)）。三者同生共死——**崩溃在事务内 = 什么都没发生**，不泄漏 |
+| **释放** | 在 `finalize` 事务（[02 §2bis](./02-data-model.md)）内：`UPDATE canary_claims SET state='released', released_at=now() WHERE claim_id=:claim AND state='active'`；**仅当影响行数=1** 才 `canary_inflight -= 1`。一次性跃迁 → 重放/并发都只减一次 |
+| **回收** | 后台任务（与租约扫描同一个）只回收 `state='active' AND lease_expires_at < now()` 的 claim，按同样的「跃迁成功才减计数」规则。**禁止**按「当前无 attempt 就归零」——那会误伤仍在事务中的 claimant |
+
 - **对 P99≤50ms 的影响**：这条 UPDATE **只在"内存快照判定该 binding 处于 canary 且本次可能分配"时才执行**，正常流量路径**一次都不会跑**（canary 上限默认 20/小时/binding）。若该语句超时（>10ms），立即放弃 canary 走正常路径——**决策路径永不因 canary 阻塞**。
-- **兜底**：`canary_inflight` 若因异常泄漏，由与租约扫描（[02 §4.2bis](./02-data-model.md)）同一个后台任务按"该 binding 无存活 canary attempt 则归零"修正。
 
 **状态跃迁**：
 

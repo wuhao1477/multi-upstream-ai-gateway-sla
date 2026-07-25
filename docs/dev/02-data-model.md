@@ -103,6 +103,10 @@ CREATE TABLE models (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   canonical_name TEXT NOT NULL,   -- 真实上游模型名（区别于对外别名）
   max_context   INTEGER,
+  -- ── 费用预留上界所需（§2bis 预估算法）。**两列缺一，该模型的 binding 不得进候选** ──
+  -- 曾把输出上限写成 channel_models.max_output_tokens —— 那一列**根本不存在**（第 9 轮 critical）。
+  max_input_tokens  INTEGER,      -- 协议级最大可计费输入（通常=上下文窗口）；上游物理上不可能计费超过它
+  max_output_tokens INTEGER,      -- 最大可生成输出 token 数
   supports_streaming BOOLEAN,
   supports_tools     BOOLEAN,
   supports_structured_output BOOLEAN,
@@ -369,26 +373,30 @@ CREATE INDEX idx_resv_open ON client_reservations(gateway_client_id, spend_date)
   WHERE state = 'reserved';
 ```
 
-**预估上界算法**（对抗性审查第 7 轮 [high]：光有 `estimated_usd` 字段而不定义算法，并发请求可用极低预估同时过闸，随后按高实际费用结算 → 直接突破 `quota_daily_usd`）：
+**预估上界算法**（对抗性审查第 7 轮 [high] 引入、第 9 轮 [critical] 修正）：
+
+> ⚠️ **`len(RawBody)` 不是通用上界**（第 9 轮）：设计承诺多模态原样透传——一个几十字节的图片 URL 可对应上千视觉计费 token；Responses 的 `previous_response_id`/`conversation` 还会引入**请求体里根本不存在**的服务端上下文。这两类请求下按字节数预留会严重低估，日配额照样被突破。
 
 ```
 单跳上界(binding) = ( 输入 token 上界 × 该 binding 输入单价
-                    + 输出 token 上界 × 该 binding 输出单价 ) × 倍率版本
-  输入 token 上界 = len(RawBody)                  -- 不解析正文（FR-112），按**字节数**取上界
-                                                  -- ⚠️ 曾写 ceil(len/2) 并断言"1 token ≥ 2 bytes" —— **数学上错误**
-                                                  --    （对抗性审查第 8 轮 critical）：字节级 BPE 中单 token 可只对应
-                                                  --    1 字节，该公式最多只预留真实用量的一半。
-                                                  -- ✅ len(RawBody) 才是真上界：字节级 BPE 每个 token 至少映射 1 字节，
-                                                  --    故 token 数 ≤ 字节数，对任意输入恒成立。
-  输出 token 上界 = channel_models.max_output_tokens   -- 见下方硬要求
+                    + models.max_output_tokens × 该 binding 输出单价 ) × 倍率版本
 
-estimated_usd = Σ 单跳上界(b)  for b in RoutePlan   -- ⚠️ 按 RoutePlan **全部跳**求和
+输入 token 上界 =
+  ├─ 纯文本且无服务端上下文引用 → min( len(RawBody), models.max_input_tokens )
+  │     依据：字节级 BPE 每 token 至少映射 1 字节 → token 数 ≤ 字节数，恒成立
+  └─ 其余情况（保守分支）      → models.max_input_tokens
+        依据：上游**物理上不可能**计费超过模型上下文窗口 → 对任意输入都是真上界
+
+estimated_usd = Σ 单跳上界(b)  for b in RoutePlan        -- 按全部跳求和（接管会真的多次计费）
 ```
 
-- **为何按全部跳求和**：接管会真的产生多次上游调用，每次都计费。只按首跳预留 → 接管后必然超预留。RoutePlan 在请求进入时已由 selector 产出，可一次算完，**无需增量预留**（增量会把幂等性搞复杂）。
-  > **代价（明示）**：预留偏保守，日配额利用率低于理论值（接管率越低浪费越多）。这是**刻意选择**——宁可保守地拒绝，也不能超限。结算时立即释放差额，只影响"请求进行中"这段窗口。
-- **`channel_models.max_output_tokens` 是硬要求**：该列**未知（NULL）的 binding 不得进入候选**（与 [协议能力探测](#11-渠道--真实上游--账号--key--模型) 同级的登记项）。理由：字节透传硬约束禁止我们改写请求体去注入 `max_output_tokens`，因此上界只能来自**模型侧登记值**；无上界即无法形成可验证预留，**必须拒绝而不是猜**。
-- 请求体若自带更小的 `max_output_tokens`/`max_tokens`，**不采信**（我们不解析正文）。恒用模型侧上限，只会更保守。
+**分支判定（字节级子串扫描，不做 JSON 解析）**：请求体中出现以下任一标记即走保守分支——
+`"image_url"`、`"input_image"`、`"input_audio"`、`"input_file"`、`"file_id"`、`"previous_response_id"`、`"conversation"`。
+**扫描不确定时一律走保守分支**（宁可多预留，不可少预留）。
+
+- **硬前置**：`models.max_input_tokens` 或 `max_output_tokens` 为 NULL 的模型，其 binding **不得进入候选**（与协议能力探测同级的登记项）。理由：字节透传硬约束禁止我们改写请求体注入上限，上界只能来自登记值；**无上界即必须拒绝，不能猜**。
+- **请求体自带更小的 `max_output_tokens`/`max_tokens` 不采信**（我们不解析正文），恒用登记上限，只会更保守。
+- **代价（明示）**：多模态与续接会话请求会按**整个上下文窗口**预留，日配额利用率显著下降。这是刻意选择——超限不可逆，过度预留只是暂时占用（结算即释放差额）。若该调用方以多模态为主且不希望被过度限制，**把它的 `quota_daily_usd` 置 NULL**（不设日配额，只记账不预留），由运维用告警而非硬闸控制。
 
 **实际费用超出预留时**（上游不遵守上限等）：结算按**实际值**写 `settled_usd`；若结算后 `settled_usd + reserved_usd > quota_daily_usd`，立即置该 client 当日 `over_quota` → **后续请求一律 429**。**已完成的请求不追溯拒绝**（无法收回）。此为可接受的有界溢出，AC-33 须断言"溢出后下一请求必被拒"。
 
@@ -448,38 +456,81 @@ CREATE TABLE reservation_adjustments (
 ```sql
 -- adjust(request_id, new_actual_usd, event_key, operator, reason)
 BEGIN;
--- ① 幂等闸门：event_key 冲突即整事务无操作（重放安全）
+-- (1) 先锁住目标 reservation，并从**锁定行**派生 client、日期与旧值
+--     第 9 轮 critical：上一版直接接受 :cid/:date 参数且不加锁 →
+--       a) 两个不同 event_key 的并发修正会读到同一个旧值，各自把 (new-old) 加进聚合，
+--          旧值 10、并发改 12 和 13 → 聚合变 15，而 reservation 只能是 12 或 13，永久失真；
+--       b) 参数填错可以改到**别的客户或别的日期**的聚合值。
+SELECT gateway_client_id, spend_date, actual_usd
+  INTO :cid, :date, :old_actual
+  FROM client_reservations
+ WHERE request_id = :rid AND state = 'settled'
+   FOR UPDATE;                                   -- 未命中（不存在/仍 reserved）→ 报错回滚
+-- (2) 幂等闸门：event_key 冲突即无操作
 INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
-SELECT :event_key, :rid, r.actual_usd, :new_actual, :operator, :reason
-  FROM client_reservations r
- WHERE r.request_id = :rid AND r.state = 'settled'      -- 只修已结算行
+VALUES (:event_key, :rid, :old_actual, :new_actual, :operator, :reason)
 ON CONFLICT (event_key) DO NOTHING;
--- ② 仅当 ① 影响行数 = 1 才执行（否则 COMMIT 返回，聚合不动）
+-- (3) 仅当 (2) 影响行数 = 1 才执行（否则 COMMIT 返回，聚合不动）
 UPDATE client_daily_spend
-   SET settled_usd = settled_usd + (:new_actual - (SELECT old_actual_usd
-                                                     FROM reservation_adjustments
-                                                    WHERE event_key = :event_key))
- WHERE gateway_client_id = :cid AND spend_date = :date;   -- ⚠️ 用**差额**，不是覆盖
+   SET settled_usd = settled_usd + (:new_actual - :old_actual)   -- 差额，且 old 来自锁定行
+ WHERE gateway_client_id = :cid AND spend_date = :date;          -- 二者均派生自 reservation
 UPDATE client_reservations
    SET actual_usd = :new_actual, needs_manual_review = false
- WHERE request_id = :rid AND state = 'settled';
+ WHERE request_id = :rid;
 COMMIT;
 ```
 
 - **差额修正而非覆盖**：`settled_usd += (new − old)`，配合 `event_key` 幂等键，重复提交与崩溃重放都只生效一次。
-- **`spend_date` 用原 reservation 的日期**，不用当前日期——否则跨日核对会把费用记到错误的一天。
+- **`cid` / `spend_date` / `old_actual` 三者全部从 `FOR UPDATE` 锁定的 reservation 行派生**，不接受调用方传参——既挡住并发丢失更新，也挡住改错客户、改错日期。跨日核对因此天然记到原始那一天。
 - **禁止直接改 `client_daily_spend`**：所有聚合修改只有 `finalize` 与 `adjust` 两个入口。
-- **验收**：[AC-33](./14-acceptance-matrix.md) 须含：⑭ 恢复扫描产生的 `needs_manual_review` 记录能被 `adjust` 成功修正（`settled_usd` 变为真实值、标志清除）；⑮ 同一 `event_key` 重复提交、或在"已更新聚合、未 ack"之间 kill 后重放，`settled_usd` **不得二次变动**。
+- **验收**：见 [AC-33](./14-acceptance-matrix.md) ⑭／⑮／⑱／⑲（成功修正 / 重复 event_key 与崩溃重放 / **两个不同 event_key 并发修正后聚合与 reservation 必须一致** / 参数不可指定 client 与日期）。
 
 > **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
 
-**鉴权流程**（`protocol` 层，先于任何调度）：
+**鉴权与预留的执行顺序**（第 9 轮 [critical] 修正）：
 
-1. 取 `Authorization: Bearer <token>` → 按 `secret_prefix` 定位候选行 → 校验 `secret_hash`。
-2. 校验 `status='active'` 且未过期 → 否则 **401**（已吊销/过期）。
-3. 校验请求的模型别名 ∈ `allowed_aliases` → 否则 **403**（越权）。
-4. 校验 `rpm_limit` 与 `quota_daily_usd` → 超限 **429**。
-5. 通过后才进入 policy/selector；`requests.tenant_id` 取自该凭证。
+> ⚠️ 上一版把"校验 `quota_daily_usd`"写在鉴权阶段（selector 之前），但 `estimated_usd` **必须等 selector 产出完整 RoutePlan 才算得出来**——顺序上不可能在那时校验。照原文实现必然写成 check-then-act：多实例同时通过基于旧余额的检查，再各自预留，配额直接被突破（违反 AC-33⑥⑬）。故拆成**快速拒绝**与**原子预留**两段。
+
+| 阶段 | 位置 | 动作 |
+| --- | --- | --- |
+| **A. 鉴权** | `protocol` 层，最先 | ① `Authorization: Bearer <token>` → 按 `secret_prefix` 定位 → 校验 `secret_hash`；② `status='active'` 且未过期，否则 **401**；③ 模型别名 ∈ `allowed_aliases`，否则 **403** |
+| **B. RPM 原子闸** | 同上，鉴权后 | 见下方原子语句；返回 0 行即 **429**。RPM 不依赖 RoutePlan，可在此完成 |
+| **C. 日配额快速拒绝** | 同上 | 读内存快照：若 `settled_usd + reserved_usd ≥ quota_daily_usd` 直接 **429**。**这是优化不是保证**——只为省掉必然失败的调度开销，正确性由 D 承担 |
+| **D. 原子预留** | **selector 产出 RoutePlan 之后、发起上游调用之前** | 算 `estimated_usd` → 见下方原子语句；返回 0 行即 **429**。**这是日配额的唯一正确性保证点** |
+| **E. 进入执行** | — | `requests.tenant_id`/`region`/`business_tier`/`data_class` 全部取自该凭证行（§2ter） |
+
+```sql
+-- B. RPM 跨实例原子递增 + 判定（一条语句，无 check-then-act）
+INSERT INTO client_rate_window(gateway_client_id, window_start, request_count)
+VALUES (:cid, date_trunc('minute', now()), 1)
+ON CONFLICT (gateway_client_id, window_start) DO UPDATE
+   SET request_count = client_rate_window.request_count + 1
+ WHERE client_rate_window.request_count < :rpm_limit      -- 已达上限则 DO UPDATE 不执行
+RETURNING request_count;
+-- 返回 0 行 → 429
+```
+
+```sql
+-- D. 日费用原子预留：限额判断 + reserved_usd 递增 + reservation 插入，同一事务
+BEGIN;
+INSERT INTO client_daily_spend(gateway_client_id, spend_date)
+VALUES (:cid, :date) ON CONFLICT DO NOTHING;              -- 保证当日行存在
+
+WITH claimed AS (
+  UPDATE client_daily_spend
+     SET reserved_usd = reserved_usd + :est
+   WHERE gateway_client_id = :cid AND spend_date = :date
+     AND reserved_usd + settled_usd + :est <= :quota      -- ⚠️ 判断与递增在**同一条** UPDATE 里
+  RETURNING gateway_client_id
+)
+INSERT INTO client_reservations(request_id, gateway_client_id, spend_date, estimated_usd, state)
+SELECT :rid, :cid, :date, :est, 'reserved' FROM claimed;  -- claimed 为空则不插入
+COMMIT;
+-- 插入 0 行 → 整体回滚语义（reserved_usd 也未加）→ 429
+```
+
+- `quota_daily_usd IS NULL`（不设日配额）时**跳过 D 的限额判断**，仍插入 reservation 行（记账与崩溃恢复需要它），`reserved_usd` 照常累加。
+- **D 必须在发起上游调用前完成**，与 [§5.1 意图先行](./01-architecture.md) 的 attempt 落库同属"发请求前的同步写"。
 
 **签发与轮换**（[09](./09-admin-api.md) 管理 API）：签发时生成随机明文 → 存哈希 → **明文只返回一次**；吊销即置 `status='revoked'` 并记 `revoked_at/revoke_reason`；轮换 = 新签发 + 旧的宽限期后吊销。
 
@@ -1124,6 +1175,32 @@ CREATE INDEX idx_hwin_binding    ON health_metric_windows(binding_id, window_kin
 
 ---
 
+### 6bis. canary 占用（FR-121，跨实例硬上限的执行载体）
+
+> 硬上限不能只靠 `resource_health` 的计数列——那样双 core 各自放行即突破。占用必须有**可持久化的所有者**，且与 attempt 插入**同事务**（第 9 轮 [high]）。协议与原子 claim 语句见 [05 §2.0](./05-scheduling-and-operations.md)。
+
+```sql
+CREATE TABLE canary_claims (
+  claim_id      UUID PRIMARY KEY,
+  binding_id    BIGINT NOT NULL REFERENCES bindings(id),
+  request_id    UUID NOT NULL,
+  attempt_id    UUID NOT NULL,
+  lease_owner   TEXT NOT NULL,                 -- 实例标识
+  lease_expires_at TIMESTAMPTZ NOT NULL,       -- 默认 now() + 5min
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at   TIMESTAMPTZ
+);
+CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'active';
+```
+
+
+**生命周期**：占用（条件 UPDATE + INSERT claim + INSERT attempt，**单事务**）→ 释放（`finalize` 内按 `claim_id` 一次性跃迁，跃迁成功才 `canary_inflight -= 1`）→ 回收（后台任务只收 `state='active' AND lease_expires_at < now()`，**禁止**按"当前无 attempt 就归零"）。
+
+**服务 FR/AC**：FR-121；AC-08⑥⑦⑧。
+
+---
+
 ## 7. 采集快照 / 余额信号 / 凭证域
 
 > 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证明文（FR-113）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
@@ -1337,12 +1414,12 @@ CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at 
 | --- | --- | --- |
 | §1 注册（channels/accounts/keys/models/bindings/fault_domains/cache_scopes） | FR-001~006、022、031、044/045、055、095、109、113 | AC-01/04/05/11 |
 | §2 别名与策略（model_aliases/routing_policies/sla_targets/config_params） | FR-062、090/091、104、115/116/117 | AC-25/26 |
-| §2bis 入站凭证（gateway_clients/client_daily_spend/client_rate_window/client_reservations） | FR-094、113、120 | AC-33 |
+| §2bis 入站凭证与配额（gateway_clients/client_daily_spend/client_rate_window/client_reservations/**reservation_adjustments**） | FR-094、113、120 | AC-33 |
 | §2ter 数据许可（data_policies） | FR-093（P1，默认关） | AC-14 |
 | §3 价格版本（price_versions/price_change_log） | FR-010、012~018 | AC-02/03/17 |
 | §4 请求与 Attempt 账本（requests/attempts/attempt_usage/session_prefix_ledger） | FR-040、050/051、058、070~072、076/078/079/080、092、097~099、112、116、**119** | AC-06/07/09/12/13/16、**AC-30/31/32** |
 | §5 订阅台账（subscription_plans/user_subscriptions/quota_windows/waste_forecast） | FR-011、033~039、057/058 | AC-20/21/22/23/**24** |
-| §6 健康/冷却/样本（resource_health/health_metric_windows/quality_events） | FR-007、040~047、060/065/066、**121**（canary 受控验证） | AC-08/10 |
+| §6 健康/冷却/样本（resource_health/health_metric_windows/quality_events；canary 占用表 `canary_claims` 见 [05 §2.0](./05-scheduling-and-operations.md)） | FR-007、040~047、060/065/066、**121**（canary 受控验证） | AC-08/10 |
 | §7 采集/余额/凭证（collector_credentials/collector_snapshots/balance_signals） | FR-010/011、020~027、031、113、116、**118** | AC-28/29 |
 | §8 告警（alert_events） | FR-100~103、105 | AC-19 |
 

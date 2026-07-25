@@ -100,6 +100,22 @@ type ProtocolSupport struct {
                                             └─ 终帧 usage → 账本（02 attempt_usage）
 ```
 
+### 3.0 终帧提交顺序（**先落 outbox 再放行终帧**）
+
+> ⚠️ 第 9 轮 [high]：字节流是**直接**写给下游的，而 `terminal_event`/usage 走旁路**之后**才落库。若进程在"客户端已收到完成终帧、outbox 尚未写入"之间崩溃，库里 `terminal_event IS NULL` → 恢复扫描走 [02 §4.2bis](./02-data-model.md) 的 ③b，把一个**实际已正常完成**的请求记成 `interrupted` + 估算费用 + 人工核对。客户端和账本对同一次请求的结论相反。
+
+**故终帧（且仅终帧）的顺序被冻结为**：
+
+```
+旁路识别出终帧 → ① 同步写 durable outbox（terminal_event + usage + attempt_end，同一行）
+              → ② 才把终帧字节转发给下游 / 关闭下游流
+```
+
+- **仍满足字节透传硬约束**：字节内容**一字节不改**，只是最后一帧延迟约 1~2ms 发出。TTFT 与流式体验完全不受影响（首字早已提交）。
+- **只对终帧生效**：中间的 delta 帧一律直通，不引入任何同步写。
+- 若 ① 写库失败：仍照常转发终帧给下游（**用户体验优先**），但把该 attempt 标记为需恢复扫描处理——退化为 ③b，是可接受的降级。
+- **验收**：[AC-35](./14-acceptance-matrix.md) 须含"终帧已从上游收到、outbox 未提交"这一时点的 kill 用例，断言恢复后是 `completed` 而非 `interrupted`。
+
 ### 3.1 SSE 扫描器（只读不改）
 
 解析要点（借鉴 [zhfeng1](./08-ref-eval-zhfeng1-ai-gateway.md) 的实现思路，非代码）：

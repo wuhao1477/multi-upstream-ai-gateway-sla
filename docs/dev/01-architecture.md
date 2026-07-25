@@ -89,7 +89,8 @@
 | --- | --- | --- | --- | --- | --- |
 | ① 上游调用**前** | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（释放） | 无 |
 | ② 已发出、首字前 | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`(估算)+待核对 | P2 |
-| ③ 首字后、终帧前 | `committed` 且心跳超时 | `interrupted` | `interrupted` | `settled`(估算)+待核对 | P3 |
+| ③a 终帧已收、关单前 | `committed` 且 `terminal_event IS NOT NULL` | `completed`/`failed` | 同左 | `settled`(有实际用量则用实际) | 无/P3 |
+| ③b 首字后、终帧前 | `committed` 且 `terminal_event IS NULL` | `interrupted` | `interrupted` | `settled`(估算)+待核对 | P3 |
 | ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | `completed` | `completed` | `settled`(实际) | 无 |
 
 **四条硬性要求**（[02 §4.2bis](./02-data-model.md) 是唯一实现规范）：
@@ -97,7 +98,9 @@
 1. `pending` 与 `committed` **都是非终态**，恢复扫描必须同时覆盖——只扫 `pending` 会让 ③ 永久悬挂。
 2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
 3. attempt、request、reservation **在同一个 `finalize` 事务里一起终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。
-4. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
+4. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③a/③b 必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
+5. `interrupted` 与 `failed` **对用户 SLA 的口径相同**（都是完整失败、都计入流中断率，FR-071/AC-12），区分终态只为归因（我们崩了 vs 上游断了）。
+6. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
 
 ## 6. 开放点（评审需拍板）
 
