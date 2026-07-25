@@ -878,36 +878,52 @@ CREATE TABLE attempts (
 **恢复扫描**（启动时 + 周期性，与 outbox 重放并列）——**必须覆盖两类，缺一即产生永久 pending**：
 
 ```sql
--- ⚠️ 三个 WHERE 条件各修过一个 critical 缺陷，缺一即产生永久悬挂：
--- (1) 状态必须含 'committed'：首字后崩溃的 attempt 已不是 pending，
---     只扫 pending 会让它**永远扫不到**（对抗性审查第 7 轮 critical）。
--- (2) 不可只写 external_call_started_at IS NOT NULL，
---     否则"上游调用前崩溃"的 attempt 永远扫不到（第 5 轮 critical）。
--- (3) 心跳判定必须含 IS NULL：SQL 的 < 对 NULL 恒不成立，
---     单写 lease_heartbeat_at < cutoff 会漏掉心跳未写入即崩溃的行（第 5 轮 critical）。
-SELECT * FROM attempts
-WHERE attempt_status IN ('pending','committed')          -- 两个非终态全覆盖
-  AND (lease_heartbeat_at IS NULL
-       OR lease_heartbeat_at < now() - INTERVAL '60 seconds')
-FOR UPDATE SKIP LOCKED;
+-- ⚠️ 必须是 **request 级**扫描，不能扫 attempt 状态（第 14 轮 critical，同一 bug 第三次）：
+--    两阶段关单后 attempt 先进终态、request 后进终态 → K4（attempt 已 completed/failed、
+--    request 仍 pending）用 attempt_status IN ('pending','committed') **永远扫不到**，
+--    第 13 轮宣称的「③c/K4 真的可达」与实现 SQL 直接冲突。
+-- ⚠️ 唯一非终态是 requests.final_status='pending'；它是恢复扫描的**唯一入口**。
+-- ⚠️ 租约仍挂在 attempt 上（executor 每 ≤20s 续写），故用最后一跳的租约判活。
+--    NULL 必须显式覆盖：SQL 的 < 对 NULL 恒不成立（第 5 轮 critical）。
+SELECT r.id, r.created_at, a.*
+  FROM requests r
+  JOIN attempts a
+    ON a.request_id = r.id AND a.request_created_at = r.created_at
+ WHERE r.final_status = 'pending'
+   AND r.created_at > now() - INTERVAL '7 days'          -- 限定分区范围，避免全表扫
+   AND a.attempt_no = (SELECT max(attempt_no) FROM attempts x
+                        WHERE x.request_id = r.id AND x.request_created_at = r.created_at)
+   AND (a.lease_heartbeat_at IS NULL
+        OR a.lease_heartbeat_at < now() - INTERVAL '60 seconds')
+   FOR UPDATE OF r SKIP LOCKED;
 ```
 
-> **续租义务**：`executor` 在 attempt 存活期间（含 `committed` 后的流式传输阶段）**必须每 ≤20s 续写一次 `lease_heartbeat_at`**。否则长流式响应会被恢复扫描误判为崩溃并强行终结。20s 续租 / 60s 超时 = 3 倍余量。
+**启动与执行顺序被冻结**（第 14 轮 [high]）：
+
+```
+实例启动 / 周期任务：
+  ① 先 drain ledger_outbox（含 downstream_first_byte / downstream_write_completed）
+  ② 再跑上面的恢复扫描
+```
+
+> ⚠️ 顺序反了会误判：socket write 已返回、`downstream_write_completed` 的 outbox 行已写但**尚未投递**时，`attempts.downstream_write_completed_at` 仍是 NULL；若恢复扫描先跑，会把一个**已经完整写完**的请求判成 ③c/`interrupted`。
+> 额外保险：恢复扫描**跳过**存在未投递 `downstream_*` outbox 行的 attempt（`EXISTS (SELECT 1 FROM ledger_outbox o WHERE o.attempt_id=a.id AND o.delivered_at IS NULL)`）。
 
 捞出后**按"上游发出了吗、见到首字了吗"两个事实分流**，每种情形都推到**终态**并在**同一个 `finalize` 事务**（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)）内终结配额预留：
 
-| # | 判据 | attempt 终态 | request 终态 | reservation | 告警 |
-| --- | --- | --- | --- | --- | --- |
-| ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
-| ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P2** |
-| ③a | `committed`、`terminal_event IS NOT NULL` 且 `downstream_write_completed_at IS NOT NULL` | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；`attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则估算 + 待核对 | 无／P3 |
-| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_write_completed_at IS NULL`**（上游结果已知，**写出未确认**） | **由 `terminal_event` 决定**：`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`** | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
-| ③b1 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NULL`**（= K2，我们一个字节都没写出去） | `interrupted` | **`failed`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
-| ③b2 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NOT NULL`**（= K3，写出过部分内容） | `interrupted` | **`interrupted`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
+| # | 对应 [03 §3.0](./03-upstream-layer.md) | 判据（读 attempt 的三个事实列） | attempt 终态 | request 终态 | reservation | 告警 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ① | — | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**） | 无（确定未计费） |
+| ② | **K1** | `external_call_started_at NOT NULL` 且 `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`，全跳汇总，`needs_manual_review=true` | **P2** |
+| ③b1 | **K2** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`，全跳汇总，待核对 | **P3** |
+| ③b2 | **K3** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at NOT NULL` | `interrupted` | **`interrupted`** | `settled`，全跳汇总，待核对 | **P3** |
+| ③c | **K4** | `terminal_event NOT NULL`、`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**：`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`** | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
 
-> ⚠️ 三个事实、三次判定，**任何一个都不能由 `attempt_status` 反推**：
-> ① `terminal_event` 分 ③a/③c 与 ③b；② `downstream_write_completed_at` 分 ③a 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
-> 第 12 轮 [high]：上一版 ③b 只读 `terminal_event`，把「首字尚未写出」（K2）也判成 `interrupted`，等于**声称用户看到过截断流**——实际他什么都没收到。这会虚增 `stream_break_rate` 并污染可用性统计，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
+> **没有"全部写完"这一恢复分支**（第 14 轮 [high] 修正）：`finalize_delivery` 把「写 `downstream_write_completed_at`」与「推 `final_status`」放在**同一事务**，因此**不存在**「列已非空但 request 仍 `pending`」的稳定状态——曾经的 ③a／③d 是**不可达分支**，已删除。已写完的请求由**启动时先 drain outbox** 收口，根本不进恢复扫描。
+>
+> ⚠️ 三个事实列、三次判定，**任何一个都不能由 `attempt_status` 反推**（两阶段关单后 attempt 可能已是终态）：
+> ① `response_committed_at` 分 ② 与 ③；② `terminal_event` 分 ③b 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
+> 第 12 轮曾只读 `terminal_event`，把「首字写出未确认」（K2）也判成 `interrupted`，等于声称用户看到过截断流。
 
 **恢复结算金额 = 该 request 所有 attempt 的费用汇总**（第 10 轮 [critical]）：
 
@@ -953,9 +969,9 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
 **验收**：[AC-35](./14-acceptance-matrix.md) 逐一断言四个崩溃时点的 `attempt_status` + `final_status` + `client_reservations.state` + `client_daily_spend.reserved_usd` **四项全部终结**。
 
 ```sql
--- 索引须覆盖两个非终态与心跳为 NULL 的行
-CREATE INDEX idx_attempts_stale_lease ON attempts(attempt_status, lease_heartbeat_at NULLS FIRST)
-  WHERE attempt_status IN ('pending','committed');
+-- 恢复扫描的两个索引（request 级入口 + attempt 侧租约判活）
+CREATE INDEX idx_requests_open ON requests(created_at) WHERE final_status = 'pending';
+CREATE INDEX idx_attempts_lease ON attempts(request_id, attempt_no, lease_heartbeat_at NULLS FIRST);
 ```
 
 ### 4.3 逐 Attempt 用量与费用
@@ -1495,7 +1511,7 @@ CREATE TABLE ledger_outbox (
   request_created_at TIMESTAMPTZ NOT NULL,     -- 用于定位分区
   event_type    TEXT NOT NULL CHECK (event_type IN
                   ('first_token','attempt_end','usage','cancel',
-                   -- 下游写出事实（第 13 轮 [high]：原枚举没有承载 ③a/③c 区分的事件）
+                   -- 下游写出事实（第 13 轮 [high]：原枚举没有承载 ③b1/③b2/③c 区分的事件）
                    'downstream_first_byte','downstream_write_completed',
                    'request_close')),
   payload       JSONB NOT NULL,                -- 状态更新的元数据（不含正文，FR-112）

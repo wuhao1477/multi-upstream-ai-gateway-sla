@@ -96,23 +96,23 @@
 
 **崩溃恢复终态契约**（与 [02 §4.2bis](./02-data-model.md) 租约扫描、[AC-35](./14-acceptance-matrix.md) 严格一致）：
 
-| 崩溃时点 | 判据 | attempt | request | reservation（配额） | 告警 |
-| --- | --- | --- | --- | --- | --- |
-| ① 上游调用**前** | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（释放） | 无 |
-| ② 已发出、首字前 | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`(估算)+待核对 | P2 |
-| ③a 终帧已收、关单前 | `committed` 且 `terminal_event IS NOT NULL` | `completed`/`failed` | 同左 | `settled`(有实际用量则用实际) | 无/P3 |
-| ③b1 首字**未写出**（K2） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`**（不计流中断） | `settled`(汇总)+待核对 | P3 |
-| ③b2 已写出部分、终帧前（K3） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at IS NOT NULL` | `interrupted` | `interrupted`（计流中断） | `settled`(汇总)+待核对 | P3 |
-| ③c 终帧已落库、**字节未写完**（K4） | `terminal_event NOT NULL` 且 `downstream_write_completed_at IS NULL` | 由 `terminal_event` 定 | **`interrupted`** | `settled`(**实际**) | 无 |
-| ③d 全部写完、`finalize_delivery` 未完成 | `terminal_event NOT NULL` 且 `downstream_write_completed_at NOT NULL` | 由 `terminal_event` 定 | `completed` | `settled`(实际) | 无 |
+| # | 崩溃时点 | 判据 | attempt | request | reservation | 告警 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ① | 上游调用**前** | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（释放） | 无 |
+| ② | 已发出、首字未落库（K1） | `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`(汇总)+待核对 | P2 |
+| ③b1 | 首字已落库、**写出未确认**（K2） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`(汇总)+待核对 | P3 |
+| ③b2 | 已确认写出、终帧前（K3） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at NOT NULL` | `interrupted` | `interrupted` | `settled`(汇总)+待核对 | P3 |
+| ③c | 终帧已落库、**写完未确认**（K4） | `terminal_event NOT NULL` 且 `downstream_write_completed_at IS NULL` | 由 `terminal_event` 定 | **`interrupted`** | `settled`(**实际**) | 无 |
+
+> **「全部写完」不是恢复分支**：`finalize_delivery` 原子地同时写列与 `final_status`，故不存在「列已非空、request 仍 pending」的状态。已写完的请求由**启动时先 drain outbox** 收口。
 
 **四条硬性要求**（[02 §4.2bis](./02-data-model.md) 是唯一实现规范）：
 
-1. `pending` 与 `committed` **都是非终态**，恢复扫描必须同时覆盖——只扫 `pending` 会让 ③ 永久悬挂。
+1. **恢复扫描是 `request` 级的**：唯一非终态是 `requests.final_status='pending'`。**不可扫 `attempt_status`**——两阶段关单后 attempt 先进终态、request 后进终态，扫 attempt 会让 K4 永远扫不到（[02 §4.2bis](./02-data-model.md)）。执行顺序冻结为：**先 drain outbox → 再恢复扫描**。
 2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
 3. **reservation 与 attempt 在 `finalize_upstream` 同一事务里终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。**`requests.final_status` 不在该事务内**——它由 `finalize_delivery` 依据写出事实推定（见上表）。
 4. **DB 提交与 socket 写出无法原子化，反方向窗口不可消除**：先落库再放行只挡住"客户端有、库里没有"；"库里有、客户端没收全"必然存在（③c）。故 `attempts` 另记 `downstream_first_byte_written_at`/`downstream_write_completed_at` 两个**独立事实**，冲突时按"未确认 = 未交付"取保守解释——attempt 层可以是 `completed`（成本精确已知），request 层仍判 `interrupted`（交付未确认）。详见 [03 §3.0](./03-upstream-layer.md) 四时点表。
-5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③a/③b 必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
+5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③b／③c 的区分必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
 6. **`interrupted` 与 `failed` 都计入用户 SLA 失败**（FR-071），但**流中断率的口径更窄**（第 13 轮 [high]）：`stream_break_rate` **只统计"已确认写出过内容之后才中断"**的请求，判据是 `attempts.stream_broken=true` 或 `downstream_first_byte_written_at IS NOT NULL`。
    → K2（首字写出未确认、`failed`）**不计**流中断；K3/K4 与上游断流（已输出后中断）**计**。
    上一版写"两者都计入流中断率"与 AC-35 的 K2 判定直接冲突，实现方无从判断按哪个字段算。
