@@ -70,7 +70,7 @@
 
 > ⏭ **本节（§2.1～§2.3）全部属于二期**，依据 [15 §1.2 / S1](./15-scope-and-preflight.md)。一期**不实现任何主动测活**：无测活预算体系、无测活资格判定、无试错机会分配。下方 §2.0 是一期的实际行为，§2.1 起是二期契约（预留，勿按其验收一期）。
 
-### 2.0 一期实际行为：无主动测活，但有**受控验证（canary）**
+### 2.0 一期实际行为：无主动测活，但有**受控验证 canary（FR-121）**
 
 > ⚠️ **上一版在这里留了个死循环**（对抗性审查第 7 轮 [high]）：一期取消主动测活后，新渠道只能靠真实流量积累样本；但 §1.1 序 4 又规定 `low_confidence` 不作主渠道——**手工启用只改资格、不产生流量**，于是新渠道永远拿不到样本，只可能在主渠道故障时作为未经验证的保底**首次上生产**。等于把渠道验证推迟到故障现场。故一期必须有一个受控验证载体。
 
@@ -98,6 +98,34 @@
 | 3 | 该 binding canary 并发 < 上限 | `canary_max_concurrent = 1` |
 | 4 | **存在健康的接管候选**（canary 失败能被接管补偿） | 无接管候选即不分配 |
 | 5 | 该请求非连续会话的中途轮次（避免破坏缓存前缀） | — |
+
+**跨实例原子占用（claim）—— 硬上限必须落库执行**：
+
+> ⚠️ 第 8 轮 [high]：上一版只在 `resource_health` 放了计数列，而 selector 读的是**内存快照**——双 core 会同时看到 `canary_inflight=0` 各放行一个，默认并发 1 立即被突破；小时上限同理在竞态下失效。"硬上限"必须由数据库的**条件 UPDATE + RETURNING** 执行，内存快照只能做**预筛**。
+
+```sql
+-- 单条语句同时完成：窗口翻转、次数递增、并发递增，并原子判定上限
+UPDATE resource_health
+   SET canary_window_start = CASE WHEN canary_window_start IS NULL
+                                   OR canary_window_start < date_trunc('hour', now())
+                                  THEN date_trunc('hour', now()) ELSE canary_window_start END,
+       canary_used_in_window = CASE WHEN canary_window_start IS NULL
+                                     OR canary_window_start < date_trunc('hour', now())
+                                    THEN 1 ELSE canary_used_in_window + 1 END,
+       canary_inflight = canary_inflight + 1
+ WHERE binding_id = :bid
+   AND health_state = 'canary'
+   AND canary_inflight < :max_concurrent
+   AND (canary_window_start IS NULL
+        OR canary_window_start < date_trunc('hour', now())      -- 新窗口 → 计数归 1，必过
+        OR canary_used_in_window < :max_per_hour)
+RETURNING canary_used_in_window, canary_inflight;
+```
+
+- **返回 0 行 = 未抢到额度** → **不走 canary**，按正常排序选 binding。抢不到是常态，不是错误。
+- **claim 成功后必须记账**：把 `binding_id` 写进该 attempt 的上下文，**释放恰好一次**——`finalize` 事务（[02 §2bis](./02-data-model.md)）内 `UPDATE resource_health SET canary_inflight = canary_inflight - 1 WHERE binding_id=:bid AND canary_inflight > 0`。因 `finalize` 本身幂等（per-request 行状态跃迁闸门），**释放也天然只发生一次**；崩溃恢复走同一 `finalize`，故 inflight 不会泄漏。
+- **对 P99≤50ms 的影响**：这条 UPDATE **只在"内存快照判定该 binding 处于 canary 且本次可能分配"时才执行**，正常流量路径**一次都不会跑**（canary 上限默认 20/小时/binding）。若该语句超时（>10ms），立即放弃 canary 走正常路径——**决策路径永不因 canary 阻塞**。
+- **兜底**：`canary_inflight` 若因异常泄漏，由与租约扫描（[02 §4.2bis](./02-data-model.md)）同一个后台任务按"该 binding 无存活 canary attempt 则归零"修正。
 
 **状态跃迁**：
 
@@ -193,6 +221,7 @@
 
 - 等级数量/各指标数值/统计窗口**全部用户自定义**（参数1：圈的渠道不同，SLA 就不同）；金/银/铜三级仅默认模板（[02 `sla_targets`](./02-data-model.md)、§11）。
 - 统计口径：`有效可用性 = 完整成功数 ÷ 应计入 SLA 的有效请求数`；用户参数错误、用户主动取消不计入失败（PRD §术语）。
+- **崩溃恢复产生的终态照常计入用户 SLA**：`final_status='failed'`（`unknown_billing` 场景）与 `'interrupted'`（首字后崩溃）都**计入失败**，后者还计入 `stream_break_rate`——FR-071 要求用户真实经历的失败与流中断始终计入，AC-12 要求首字后中断记为完整失败。**但这些 attempt 不计入渠道健康统计**（崩溃是我们的故障，不是渠道的），两套口径的完整对照见 [02 §4.2bis 不变式 3](./02-data-model.md)。
 - 错误预算 = 窗口内允许失败上限（如 99.9% → 月 ~43min）；测活失败扣该等级预算 ≤10%（§2.1）。
 
 ### 5.2 告警分级（参数16，分类与时限可配置）

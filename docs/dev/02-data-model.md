@@ -374,8 +374,12 @@ CREATE INDEX idx_resv_open ON client_reservations(gateway_client_id, spend_date)
 ```
 单跳上界(binding) = ( 输入 token 上界 × 该 binding 输入单价
                     + 输出 token 上界 × 该 binding 输出单价 ) × 倍率版本
-  输入 token 上界 = ceil(len(RawBody) / 2)        -- 不解析正文（FR-112），按字节数取保守上界
-                                                  -- 1 token ≥ 2 bytes 对 UTF-8 恒成立 → 是真上界
+  输入 token 上界 = len(RawBody)                  -- 不解析正文（FR-112），按**字节数**取上界
+                                                  -- ⚠️ 曾写 ceil(len/2) 并断言"1 token ≥ 2 bytes" —— **数学上错误**
+                                                  --    （对抗性审查第 8 轮 critical）：字节级 BPE 中单 token 可只对应
+                                                  --    1 字节，该公式最多只预留真实用量的一半。
+                                                  -- ✅ len(RawBody) 才是真上界：字节级 BPE 每个 token 至少映射 1 字节，
+                                                  --    故 token 数 ≤ 字节数，对任意输入恒成立。
   输出 token 上界 = channel_models.max_output_tokens   -- 见下方硬要求
 
 estimated_usd = Σ 单跳上界(b)  for b in RoutePlan   -- ⚠️ 按 RoutePlan **全部跳**求和
@@ -415,13 +419,57 @@ UPDATE requests  SET final_status  = :final_terminal
 COMMIT;
 ```
 
-**三条调用路径，同一事务，参数不同**：
+**两条调用路径（都从 `reserved` 出发），同一事务，参数不同**：
 
 | 路径 | 触发 | `outcome` → reservation / attempt / request |
 | --- | --- | --- |
 | **正常关单** | 终帧到达 | `settled`(actual=真实 usage) / `completed` / `completed` |
 | **恢复扫描**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（三种 outcome） |
-| **人工核对** | 运维据 P2/P3 告警核对上游账单 | `POST /admin/reservations/{request_id}/adjust`，传新 `event_key`；**不得直接改聚合表** |
+
+**人工核对走独立的 adjustment 事务**（第 8 轮 [critical]）：
+
+> ⚠️ 上一版把人工核对也塞进 `finalize`，**永远不可能生效**——`finalize` 的幂等闸门是 `WHERE state='reserved'`，而恢复扫描早已把待核对行置为 `settled`，第一条 UPDATE 必然影响 0 行、事务直接返回。结果：错误的保守估算**永久留在** `settled_usd` 里，人工核对形同虚设。
+>
+> 故人工修正必须是**从 `settled` 出发的增量修正**，走另一套幂等键。
+
+```sql
+-- 修正事件表：幂等键独立于 settle_event_key
+CREATE TABLE reservation_adjustments (
+  event_key     TEXT PRIMARY KEY,              -- 幂等键：重复提交/崩溃重放只生效一次
+  request_id    UUID NOT NULL REFERENCES client_reservations(request_id),
+  old_actual_usd usd_amount NOT NULL,          -- 修正前值（审计）
+  new_actual_usd usd_amount NOT NULL,
+  operator      TEXT NOT NULL,                 -- 责任人（FR-099/104）
+  reason        TEXT NOT NULL,                 -- 依据（如"上游账单 #12345"）
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+```sql
+-- adjust(request_id, new_actual_usd, event_key, operator, reason)
+BEGIN;
+-- ① 幂等闸门：event_key 冲突即整事务无操作（重放安全）
+INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
+SELECT :event_key, :rid, r.actual_usd, :new_actual, :operator, :reason
+  FROM client_reservations r
+ WHERE r.request_id = :rid AND r.state = 'settled'      -- 只修已结算行
+ON CONFLICT (event_key) DO NOTHING;
+-- ② 仅当 ① 影响行数 = 1 才执行（否则 COMMIT 返回，聚合不动）
+UPDATE client_daily_spend
+   SET settled_usd = settled_usd + (:new_actual - (SELECT old_actual_usd
+                                                     FROM reservation_adjustments
+                                                    WHERE event_key = :event_key))
+ WHERE gateway_client_id = :cid AND spend_date = :date;   -- ⚠️ 用**差额**，不是覆盖
+UPDATE client_reservations
+   SET actual_usd = :new_actual, needs_manual_review = false
+ WHERE request_id = :rid AND state = 'settled';
+COMMIT;
+```
+
+- **差额修正而非覆盖**：`settled_usd += (new − old)`，配合 `event_key` 幂等键，重复提交与崩溃重放都只生效一次。
+- **`spend_date` 用原 reservation 的日期**，不用当前日期——否则跨日核对会把费用记到错误的一天。
+- **禁止直接改 `client_daily_spend`**：所有聚合修改只有 `finalize` 与 `adjust` 两个入口。
+- **验收**：[AC-33](./14-acceptance-matrix.md) 须含：⑭ 恢复扫描产生的 `needs_manual_review` 记录能被 `adjust` 成功修正（`settled_usd` 变为真实值、标志清除）；⑮ 同一 `event_key` 重复提交、或在"已更新聚合、未 ack"之间 kill 后重放，`settled_usd` **不得二次变动**。
 
 > **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
 
@@ -623,12 +671,26 @@ CREATE TABLE attempts (
                       --    可能已计费、结果完全不明。
                       -- ⚠️ interrupted：已提交输出（见过首字）但**未见终帧**即崩溃 →
                       --    **确定已计费**、用量未知。与 unknown_billing 的区别是计费确定性，
-                      --    两者都按保守估算计入成本，都不计入成功率。
+                      --    两者都按保守估算计入成本；**渠道健康**统计不计入（崩溃不是渠道的锅），
+                      --    但**用户侧 SLA 必须计入失败**（FR-071/AC-12）。两套口径见 §4.2bis 不变式 3。
                       -- ⚠️ `pending` 与 `committed` 都是**非终态**：只覆盖 pending 的扫描
                       --    会让首字后崩溃的 attempt 永久悬挂（对抗性审查第 7 轮 critical）。见 §4.2bis
 
+  -- ── 三个**互相独立**的持久化事实（对抗性审查第 8 轮 [high]）──
+  -- ⚠️ 不可用 attempt_status='committed' 反推"见过首字"：[03 §3.2](./03-upstream-layer.md) 的
+  --    ShouldCommit 在**空终态/错误终态**上也为 true 而 HasTTFTOutput 为 false。
+  --    若恢复扫描按"committed ⇒ 见过首字"判定，会把"空响应已提交、关单前崩溃"
+  --    误写成 interrupted + 人工核对，而它的真实终态是 completed/failed。
+  response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真的时刻（已向下游提交响应头）
+  has_ttft_output   BOOLEAN NOT NULL DEFAULT false, -- HasTTFTOutput 是否曾为真（决定 TTFT 是否有效）
+  terminal_event    TEXT CHECK (terminal_event IN
+                      ('completed','empty_completed','error','incomplete')),
+                                              -- 观察到的上游终帧类型；NULL = **未见终帧**
+                                              -- 恢复扫描据此区分"流真的断了"与"已收完只是没关单"
+
   -- ── 逐尝试 metrics（自算，AC-31）──
   content_aware_ttft_ms INTEGER,              -- 自算内容感知首字（排除 role-only/空SSE/心跳，AC-31/假设3/6）
+                                              -- has_ttft_output=false 时恒为 NULL
   gateway_reported_ttft_ms INTEGER,           -- beta5 metricsFirstTokenLatencyMs：仅存证、永不采信（AC-31）
   full_latency_ms   INTEGER,                  -- 总延迟（请求进入→完整结束）
   upstream_latency_ms INTEGER,                -- 上游耗时（发往上游→完整结束）
@@ -711,15 +773,28 @@ FOR UPDATE SKIP LOCKED;
 
 | # | 判据 | attempt 终态 | request 终态 | reservation | 告警 |
 | --- | --- | --- | --- | --- | --- |
-| ① | `attempt_status='pending'` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
-| ② | `attempt_status='pending'` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P2** |
-| ③ | `attempt_status='committed'`（已见首字，未见终帧） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P3** |
+| ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
+| ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P2** |
+| ③a | `committed` 且 **`terminal_event IS NOT NULL`**（上游已收完，只是没关单） | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；若 `attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则用估算 + 待核对 | 无（有实际用量时）／P3 |
+| ③b | `committed` 且 **`terminal_event IS NULL`**（流真的断了） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **单跳保守估算**，`needs_manual_review=true` | **P3** |
+
+> ⚠️ ③a 与 ③b 的区分**必须**读 `terminal_event`，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
 
 **三条不变式**：
 
 1. **无非终态残留**：扫描后该 request 的所有 attempt 与 request 自身都不再处于 `pending`/`committed`。
 2. **无配额泄漏**：`client_reservations` 不再是 `reserved`，`client_daily_spend.reserved_usd` 已扣回该请求的 `estimated_usd`。②③ 记为已花费（保守），而非挂在预留上——**挂在预留 = 永久占用配额**。
-3. **不污染 SLA**：`unknown_billing` 与 `interrupted` 都**计入成本**、都**不计入成功率/TTFT 统计**（用量是估算值，不是观测值）。
+3. **两套统计口径必须分开算**（对抗性审查第 8 轮 [high]：上一版一刀切"不计入成功率"，把**我们自己崩溃造成的用户可见中断**从 SLA 分母里抹掉了，与 FR-071「用户真实经历的失败和流中断始终计入 SLA」、AC-12「首字后中断记为完整失败」直接冲突，会让崩溃在 SLA 面板上完全隐形）：
+
+   | 口径 | 用途 | `unknown_billing` | `interrupted` |
+   | --- | --- | --- | --- |
+   | **用户侧 SLA**（按 `requests` 算） | 有效可用性、错误预算、告警 | **计入失败**（`final_status='failed'`） | **计入失败 + `stream_break_rate` 分母**（`final_status='interrupted'`，AC-12/FR-071） |
+   | **渠道健康**（按 `attempts` 算，喂 selector） | 冷却、样本门槛、排序 | **不计入**该 binding 成功率 | **不计入**该 binding 成功率 |
+   | 成本 | 费用统计、配额 | 计入（估算值） | 计入（估算值） |
+   | TTFT | 首字统计 | 无 TTFT（未见首字） | **已记录的 `content_aware_ttft_ms` 照常计入**（那是真实观测值，用户真的等到了首字） |
+
+   > **为什么两套口径方向相反**：进程崩溃是**我们的**故障，不是渠道的故障。计入用户 SLA 是诚实（用户确实失败了）；不计入渠道健康是准确（否则会冤枉一个健康渠道、把它冷却掉，故障范围反而扩大）。
+   > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
 
 > ②③ 的 `actual_usd` 是估算值,故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{id}/adjust`（新 `event_key`，仍走同一 `finalize` 事务，**禁止直接改聚合表**）。
 
@@ -972,7 +1047,7 @@ CREATE TABLE resource_health (
   -- 健康六态（FR-046）
   health_state    TEXT NOT NULL DEFAULT 'unknown'
                     CHECK (health_state IN ('unknown','canary','observing','available','degraded','cooling','disabled')),
-                    -- ⚠️ canary（一期受控验证态，[05 §2.0](./05-scheduling-and-operations.md)）：
+                    -- ⚠️ canary（一期受控验证态，FR-121，[05 §2.0](./05-scheduling-and-operations.md)）：
                     --    新登记 / 冷却期满的 binding 在此态下按硬上限承接**真实业务流量**积累首批样本。
                     --    没有它，unknown 渠道因 low_confidence 永不作主渠道 → 永远拿不到样本 →
                     --    只能在主渠道故障时首次上生产（对抗性审查第 7 轮 [high]）。
@@ -1267,7 +1342,7 @@ CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at 
 | §3 价格版本（price_versions/price_change_log） | FR-010、012~018 | AC-02/03/17 |
 | §4 请求与 Attempt 账本（requests/attempts/attempt_usage/session_prefix_ledger） | FR-040、050/051、058、070~072、076/078/079/080、092、097~099、112、116、**119** | AC-06/07/09/12/13/16、**AC-30/31/32** |
 | §5 订阅台账（subscription_plans/user_subscriptions/quota_windows/waste_forecast） | FR-011、033~039、057/058 | AC-20/21/22/23/**24** |
-| §6 健康/冷却/样本（resource_health/health_metric_windows/quality_events） | FR-007、040~047、060/065/066 | AC-08/10 |
+| §6 健康/冷却/样本（resource_health/health_metric_windows/quality_events） | FR-007、040~047、060/065/066、**121**（canary 受控验证） | AC-08/10 |
 | §7 采集/余额/凭证（collector_credentials/collector_snapshots/balance_signals） | FR-010/011、020~027、031、113、116、**118** | AC-28/29 |
 | §8 告警（alert_events） | FR-100~103、105 | AC-19 |
 

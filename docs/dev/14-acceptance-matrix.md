@@ -92,7 +92,7 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-08 | 低权重渠道长期无样本 → 受控验证闭环 | FIXTURE | ①样本不足（1h<20 且 24h<100）→ `low_confidence=true`，**不作稳定主渠道**；②**新建 binding** 与**冷却期满 binding** 都进入 `canary`，在**不制造任何全局故障**的前提下，仅靠正常业务流量走完 `canary → observing → available`（[05 §2.0](./05-scheduling-and-operations.md)）；③canary 硬上限生效：单 binding 每小时 ≤`canary_max_per_hour`、并发 ≤`canary_max_concurrent`，**金/银别名请求一次都不得**落到 canary binding；④canary 连续失败达阈值 → 退回 `cooling` 且退避翻倍；⑤无健康接管候选时**不分配** canary |
+| AC-08 | 低权重渠道长期无样本 → 受控验证闭环（**FR-121**） | FIXTURE | ①样本不足（1h<20 且 24h<100）→ `low_confidence=true`，**不作稳定主渠道**；②**新建 binding** 与**冷却期满 binding** 都进入 `canary`，在**不制造任何全局故障**的前提下，仅靠正常业务流量走完 `canary → observing → available`（[05 §2.0](./05-scheduling-and-operations.md)）；③canary 硬上限生效：单 binding 每小时 ≤`canary_max_per_hour`、并发 ≤`canary_max_concurrent`，**金/银别名请求一次都不得**落到 canary binding；④canary 连续失败达阈值 → 退回 `cooling` 且退避翻倍；⑤无健康接管候选时**不分配** canary；⑥**双 core 高竞态**：两实例同时对同一 canary binding 打 200 请求，实际落到该 binding 的并发**恒 ≤`canary_max_concurrent`**、每小时**恒 ≤`canary_max_per_hour`**（原子 claim 生效，[05 §2.0](./05-scheduling-and-operations.md)）；⑦请求结束/崩溃恢复后 `canary_inflight` **归零不泄漏** |
 | AC-11 | 多渠道共享同一官方上游并同时故障 | FIXTURE | 同 `fault_domain` 的资源被整体降权/排除，**不逐个重试**；告警标注故障域 |
 | AC-13 | 请求含不可重复的外部写入 | FIXTURE | 该请求**不被分配测活**、**不并发重试**（参数 6 默认全局禁并发重试） |
 | AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。③**伪造 `X-Data-Class: public` 请求头不得改变求值结果**（属性只认 `gateway_clients` 行）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
