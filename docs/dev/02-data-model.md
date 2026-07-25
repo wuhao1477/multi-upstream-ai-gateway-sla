@@ -424,7 +424,8 @@ estimated_usd = Σ 单跳上界(b)  for b in RoutePlan        -- 按全部跳求
 | `terminal_event`、`attempt_usage`、reservation 结算、attempt 终态（= `finalize_upstream`） | **同步直写表，一个事务** | 放行终帧字节**之前** |
 | `downstream_first_byte_written_at` | 经 outbox | socket write 返回后 |
 | `downstream_write_completed_at` + `requests.final_status`（= `finalize_delivery`） | 经 outbox | socket write 返回后 |
-| `cancel_reason`、`cancel_propagated` | 经 outbox | 每跳取消时 |
+| **`attempt_status`(终态) + `cancel_reason` + `canceled_by_sla`** | **同步直写 `attempts`** | **每跳取消/结束时** |
+| `cancel_propagated` 等纯观测字段 | 经 outbox | 每跳取消后 |
 
 > ⚠️ 曾有三份文档三种说法（01 说"同步提交 terminal_event/usage/attempt_end"、03 说"同步写 durable outbox"、02 说 `finalize_upstream` 直写表），开发无从判断终帧事实到底进表还是进 outbox。**以本表为唯一口径**：需要"先落库再放行字节"的事实一律**同步直写表**（outbox 多一跳投递，无法满足该顺序）；outbox 只留字节写出之后才产生的异步事实。
 
@@ -456,15 +457,24 @@ UPDATE client_daily_spend d
   FROM settled s
  WHERE d.gateway_client_id = s.gateway_client_id
    AND d.spend_date        = s.spend_date;
--- ③ 同事务推 **attempt** 终态（由上游 terminal_event 决定，与下游是否写完无关）
+-- ③ 推 **本跳** attempt 终态。
+--    ⚠️ 必须按 `id = :attempt_id`，**不可**按 `request_id = :rid` 批量（多跳致命）：
+--       首字前接管场景下 hop1 已被 SLA 取消、hop2 成功，若按 request_id 批量更新，
+--       尚未落终态的 hop1 会被一并写成 hop2 的终态（`completed`）→
+--       一个被取消的跳被记成渠道成功，污染 binding 成功率、冷却与 AC-30/32。
 UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
- WHERE request_id = :rid AND attempt_status IN ('pending','committed');
--- ④ 释放 canary 占用（若本跳是 canary），一次性跃迁，成功才减计数
+ WHERE id = :attempt_id AND attempt_status IN ('pending','committed');
+-- ④ 释放**本跳**的 canary 占用；按 attempt_id，且用 **GROUP BY 计数**扣减。
+--    ⚠️ 不可写成 `UPDATE ... FROM rel WHERE h.binding_id = rel.binding_id` 直接 -1：
+--       rel 若有多行指向同一 binding，PostgreSQL 的 UPDATE…FROM 对同一目标行**只应用一次**
+--       → 少扣，inflight 永久泄漏（多跳且两跳落在同一 canary binding 时会发生）。
 WITH rel AS (
   UPDATE canary_claims SET state='released', released_at=now()
-   WHERE request_id = :rid AND state='active' RETURNING binding_id)
-UPDATE resource_health h SET canary_inflight = h.canary_inflight - 1
-  FROM rel WHERE h.binding_id = rel.binding_id AND h.canary_inflight > 0;
+   WHERE attempt_id = :attempt_id AND state='active' RETURNING binding_id),
+     agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id)
+UPDATE resource_health h
+   SET canary_inflight = GREATEST(h.canary_inflight - agg.n, 0)
+  FROM agg WHERE h.binding_id = agg.binding_id;
 -- ⑤ request 终态：**仅 finalize_abort / finalize_recovery 执行本句**
 --    finalize_upstream 必须跳过它（那时交付结果未知，写了会让 K4 不可达）
 --    ⚠️ 第 17 轮 [critical]：恢复分流表要求 K1~K3 写 requests.final_status，
@@ -475,7 +485,9 @@ UPDATE requests SET final_status = :request_terminal
 COMMIT;
 ```
 
-> **`finalize` 的入参只有** `request_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
+**每跳结束必须同步写该跳终态**（本轮自查发现）：SLA 接管取消 hop1 时，`attempt_status='canceled_by_sla'` 与 `cancel_reason='sla_takeover'` **必须同步直写**，不能只经 outbox 异步记 `cancel_reason`——否则 hop2 关单时 hop1 仍是 `committed`，任何批量语句都会误判它。`cancel_propagated` 等纯观测字段仍可异步。
+
+> **`finalize` 的入参只有** `request_id`、**`attempt_id`**、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
 
 **三个终结入口，覆盖全部收尾路径**（第 17 轮 [critical]：此前只定义了"终帧到达"这一条正常路径，**取消/断流/超时结束的请求没有任何终结事务**，会残留 `pending` + `reserved`；恢复扫描也没有写 `requests.final_status` 的载体）：
 
@@ -1012,6 +1024,35 @@ SELECT r.id, r.created_at, a.*
 > ⚠️ 三个事实列、三次判定，**任何一个都不能由 `attempt_status` 反推**（两阶段关单后 attempt 可能已是终态）：
 > ① `response_committed_at` 分 ② 与 ③；② `terminal_event` 分 ③b 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
 > 第 12 轮曾只读 `terminal_event`，把「首字写出未确认」（K2）也判成 `interrupted`，等于声称用户看到过截断流。
+
+**`finalize_recovery` 是唯一按 request 批量终结的入口**，且必须**分跳给不同终态**（本轮自查发现）：
+
+> 崩溃时一个 request 可能留下**多个**非终态 attempt——例如 hop1 被接管取消但其同步终态写入恰好没落、hop2 正在执行。若像上方骨架那样对本跳定终态，会漏掉 hop1；若按 `request_id` 一律写成同一个终态，又会把 hop1 误记成 hop2 的结果。
+
+```sql
+-- ⓐ 非最后一跳的非终态 attempt → 必然是被接管取消的（否则不会有下一跳）
+UPDATE attempts SET attempt_status = 'canceled_by_sla',
+       cancel_reason = COALESCE(cancel_reason,'sla_takeover'),
+       canceled_by_sla = true, ended_at = now()
+ WHERE request_id = :rid AND request_created_at = :rcat
+   AND attempt_status IN ('pending','committed')
+   AND attempt_no < :last_attempt_no;
+-- ⓑ 最后一跳 → 按 §4.2bis 分流表（①/②/③b1/③b2/③c）定终态
+UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
+ WHERE id = :last_attempt_id AND attempt_status IN ('pending','committed');
+-- ⓒ 释放该 request 名下**全部**残留 canary claim（按 binding 计数扣减，不可 -1）
+WITH rel AS (
+  UPDATE canary_claims SET state='released', released_at=now()
+   WHERE request_id = :rid AND state='active' RETURNING binding_id),
+     agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id)
+UPDATE resource_health h
+   SET canary_inflight = GREATEST(h.canary_inflight - agg.n, 0)
+  FROM agg WHERE h.binding_id = agg.binding_id;
+```
+
+- ⓐ 的归因是**保守且可辩护**的：能产生下一跳，说明本跳当时确实被判定为需要接管。
+- 其费用按下方汇总规则计入（"已终结但无用量 → 该跳单跳保守估算"）。
+- **验收**：[AC-35](./14-acceptance-matrix.md) 须含**多跳崩溃用例**——hop1 接管后 hop2 执行中 kill，恢复后断言 hop1 = `canceled_by_sla`（**不得**被写成 hop2 的终态）、hop2 按分流表、两跳的 canary claim 全部释放且 `canary_inflight` 归零。
 
 **恢复结算金额 = 该 request 所有 attempt 的费用汇总**（第 10 轮 [critical]）：
 
