@@ -70,7 +70,7 @@
 | **S1** | 真实业务测活（FR-060~067） | ✅ **一期不做主动测活**，只做**被动健康度统计**（真实流量跑过的渠道自然积累样本）。新渠道/恢复中渠道由**人工开启** | FR-060~067 移入二期；[05 §2](./05-scheduling-and-operations.md) 测活预算体系一期不实现；AC-09/10 相应推迟；`probe_kind` 字段保留 |
 | **S2** | 缓存亲和调度（FR-054/055/056） | ✅ **做基础版**：连续会话优先沿用上一轮渠道（会话粘性）；**不做**切换损失预测与缓存率目标约束 | [05 §1.2](./05-scheduling-and-operations.md) 排序键含"会话粘性"；FR-056 切换抑制移入二期；缓存率 ≥90% 目标**一期不承诺** |
 | **S3** | SLA 等级数量 | ✅ **一期只实现单级**，但**表结构与配置预留多级**（二期加等级不改结构） | [02 `sla_targets`/`routing_policies`](./02-data-model.md) 结构不变；[05](./05-scheduling-and-operations.md) 的分级排队/容量保留/优先序**一期简化为单套策略** |
-| **S4** | 数据许可硬过滤（FR-093） | ✅ **实现但默认放行** —— 过滤逻辑写好、配置默认全允许，二期开启零改动 | [05 §1.1](./05-scheduling-and-operations.md) 序 3 保留该层，默认放行 |
+| **S4** | 数据许可硬过滤（FR-093） | ✅ **建表 + 实现过滤层，开关默认 `false`** —— 载体已具体化为 [02 §2ter `data_policies`](./02-data-model.md)（四维 allow/deny）+ [09 `/admin/data-policies`](./09-admin-api.md)；二期开启只需置 `data_policy_enabled=true` 并录规则 | [05 §1.1](./05-scheduling-and-operations.md) 序 3；AC-14 判定见 [14](./14-acceptance-matrix.md) |
 
 ### 2.2 技术类 —— 已定论
 

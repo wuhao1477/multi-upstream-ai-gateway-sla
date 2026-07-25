@@ -50,8 +50,8 @@
 ```
 1 protocol 收请求(提取会话标识) → policy 解析别名 → selector 产出 RoutePlan [B1(期限5s), B2(期限8s)]
 2 executor 用 B1 的渠道 Key 直连上游，字节流暂不提交给下游；旁路观察每个 SSE 事件
-3 5s 内旁路未见 HasVisibleText（role-only/元事件/心跳不算）→ Close() 拆上游连接止损，切 B2
-4 起 B2 → 旁路首次 HasVisibleText=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换
+3 5s 内旁路未见 HasActionableOutput（role-only/元事件/心跳不算；**工具调用与拒答算**）→ Close() 拆上游连接止损，切 B2
+4 起 B2 → 旁路首次 HasActionableOutput=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换
 5 关单：Attempt#1(canceled_by_sla)、Attempt#2(committed) 落账；usage 取自旁路终帧
 ```
 
@@ -83,7 +83,16 @@
 2. **幂等键**：状态更新以 `(attempt_id, 状态跃迁)` 为幂等键，重放不产生重复行、不覆盖更晚状态。
 3. **outbox 先于内存队列**：异步更新先写 durable outbox（同库同事务），再由后台投递；进程崩溃后**重放 outbox**，不依赖内存队列存活。
 
-**崩溃恢复验收场景**（M1 须覆盖，[14](./14-acceptance-matrix.md) 补充用例）：进程在 ①上游调用前 ②首字后终帧前 ③终帧后关单前 崩溃，重启后账本状态分别应为 `pending`（可判定为疑似已计费）、有 TTFT 无 usage、完整——**三种情况都不得出现"请求完全不存在"**。
+**崩溃恢复终态契约**（与 [02 §4.2bis](./02-data-model.md) 租约扫描、[AC-35](./14-acceptance-matrix.md) 严格一致）：
+
+| 崩溃时点 | 判据 | 恢复后终态 |
+| --- | --- | --- |
+| ① 上游调用**前** | `external_call_started_at IS NULL` | **`failed`** —— 确定未计费，无需告警 |
+| ② 已发出、首条 outbox 事件前 | `external_call_started_at IS NOT NULL` 且心跳超时 | **`unknown_billing`** + P2 告警 —— 可能已计费，待人工核对 |
+| ③ 首字后、终帧前 | outbox 有 `first_token` 事件 | 重放后：有 TTFT、无 usage |
+| ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | 重放后：完整记录 |
+
+**四种情况都不得出现"请求完全不存在"或永久停留 `pending`。**
 
 ## 6. 开放点（评审需拍板）
 

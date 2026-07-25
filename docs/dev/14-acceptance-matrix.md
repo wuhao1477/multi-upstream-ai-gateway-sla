@@ -58,7 +58,7 @@
 | AC-31 | role-only 元事件后 0.5s 才发首内容 | MOCK | `mock-normal` / `mock-empty-sse` / `mock-heartbeat` 三场景：`content_aware_ttft_ms` 分别 ≈500ms / **NULL（无可见内容）** / ≈600ms+；**不得**出现 ≈0ms |
 | AC-32 | 已输出首字后中途取消 | MOCK | 客户端收 3 chunk 后断开 → mock 侧下一次写入 **EPIPE**、停止产出；`attempts.cancel_propagated = true`；上游连接关闭时刻 − 客户端断开时刻 **< 1s** |
 
-| **AC-35** | 进程在三个时点崩溃后重启（**账本崩溃恢复**） | FIXTURE | 自动化在 **四个时点** `kill -9` core 并重启核验：①**上游调用前** → attempt 置 `failed`（`external_call_started_at IS NULL`，**确定未计费**）；②**上游已发出、首条 outbox 事件前** → 租约超时后置 **`unknown_billing`** 并产生 P2 告警（[02 §4.2bis](./02-data-model.md)）；③首字后终帧前 → 有 TTFT 无 usage；④终帧后关单前 → 完整记录。**四种情况都不得出现"请求完全不存在"或永久停留 `pending`**；`ledger_outbox` 未投递行被重放且**不产生重复账目**（[01 §5.1](./01-architecture.md)、[02 §9.2bis](./02-data-model.md)） |
+| **AC-35** | 进程在四个时点崩溃后重启（**账本崩溃恢复**） | FIXTURE | 自动化在 **四个时点** `kill -9` core 并重启核验：①**上游调用前** → attempt 置 `failed`（`external_call_started_at IS NULL`，**确定未计费**）；②**上游已发出、首条 outbox 事件前** → 租约超时后置 **`unknown_billing`** 并产生 P2 告警（[02 §4.2bis](./02-data-model.md)）；③首字后终帧前 → 有 TTFT 无 usage；④终帧后关单前 → 完整记录。**四种情况都不得出现"请求完全不存在"或永久停留 `pending`**；`ledger_outbox` 未投递行被重放且**不产生重复账目**（[01 §5.1](./01-architecture.md)、[02 §9.2bis](./02-data-model.md)） |
 
 > **M1 关键验收**（[00](./00-overview-and-milestones.md) 已列）：REAL 环境 Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**。
 
@@ -93,7 +93,7 @@
 | AC-08 | 低权重渠道长期无样本 | FIXTURE | 样本不足（1h<20 且 24h<100）→ `low_confidence=true`，**不作主渠道**；⏭ 一期无主动测活，该渠道靠人工开启后由真实流量积累样本（[15 S1](./15-scope-and-preflight.md)） |
 | AC-11 | 多渠道共享同一官方上游并同时故障 | FIXTURE | 同 `fault_domain` 的资源被整体降权/排除，**不逐个重试**；告警标注故障域 |
 | AC-13 | 请求含不可重复的外部写入 | FIXTURE | 该请求**不被分配测活**、**不并发重试**（参数 6 默认全局禁并发重试） |
-| AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | 一期默认全允许（参数 8）；**启用数据许可后**该渠道被排除，价格不得覆盖许可判定 |
+| AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
 | AC-18 | 单租户流量突增（容量隔离，一期无主动测活） | FIXTURE | 单租户突增时**不占用接管保留容量**；受限流量按配置规则处理（排队/拒绝），其他租户不受影响 |
 | **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（mock 上游、90% 流式），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
 | **AC-34** | **1000 并发用户高强度持续使用**（程序自身抗压） | **LOAD** | 按 §2bis 冻结模型：① 1000 并发稳态 30 分钟，决策开销 **P99 ≤50ms**、错误率 <0.01%；② 内存不持续增长、结束后 goroutine/连接回落基线 ±10%、无 OOM/FD 耗尽；③ **另须完成上限探测并记录容量拐点** |

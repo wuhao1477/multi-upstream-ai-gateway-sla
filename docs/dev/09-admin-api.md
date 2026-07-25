@@ -110,6 +110,8 @@ type ParamMeta struct {
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
 | `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
+| `GET/POST/DELETE /admin/data-policies` | 数据许可规则 CRUD（[02 §2ter](./02-data-model.md)，FR-093）。开关 `data_policy_enabled` 默认 `false`，走 §3 二次确认 | M4 |
+| `POST /admin/data-policies/simulate` | 传四元组 `(tenant_id,data_class,region,business_tier)`，返回允许渠道列表 + 每个被排除渠道的原因（`data_policy_denied`/`data_policy_no_match`）——**AC-14 的可执行判定入口** | M4 |
 
 ---
 
@@ -124,6 +126,8 @@ type ParamMeta struct {
 | 数据时效可配置 | FR-116 |
 | 别名策略载体管理 | FR-062/117 |
 | 账本可查询 | FR-097/098 |
+| 入站凭证签发/吊销/轮换（不回显明文） | FR-094、FR-120、AC-33 |
+| 数据许可规则管理 + simulate | FR-093（默认关）、AC-14 |
 
 ---
 

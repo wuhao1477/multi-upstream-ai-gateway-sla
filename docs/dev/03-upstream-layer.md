@@ -61,7 +61,7 @@ type Response struct {
 }
 
 // Stream 是字节级透传的流。Read 出来的字节原样写给下游；
-// Observe 返回旁路观察通道，供 executor 做首字判定与 usage 提取。
+// Observe 返回旁路观察通道，供 executor 做首字判定（HasActionableOutput）与 usage 提取。
 type Stream interface {
     io.ReadCloser              // 字节级透传；Close 即向上游传播取消（AC-32）
     Observe() <-chan Observation
@@ -72,7 +72,7 @@ type Observation struct {
     Seq            int           // 事件序号
     OffsetMs       int           // 相对请求发出的到达偏移
     EventType      string        // SSE event 名，如 response.output_text.delta
-    HasVisibleText bool          // 是否含用户可见内容 → 内容感知首字判定（AC-31）
+    HasActionableOutput bool     // 是否已产出确定结果（文本/工具调用/拒答/终态）→ 首字判定（AC-31，§3.2）
     Bytes          int           // 该事件字节数
     Usage          *UsageSnapshot // 仅终帧携带
 }
@@ -92,7 +92,7 @@ type ProtocolSupport struct {
 ```
 上游 SSE 字节 ──┬──> 原样写给下游客户端（零改动）
                 └──> tee 到 SSE 扫描器 ──> Observation 通道
-                                            ├─ HasVisibleText → executor 判定内容感知首字（AC-31）
+                                            ├─ HasActionableOutput → executor 判定首个可执行输出（AC-31）
                                             ├─ 事件轨迹 → 12 的 L1 环形缓冲
                                             └─ 终帧 usage → 账本（02 attempt_usage）
 ```
@@ -105,19 +105,28 @@ type ProtocolSupport struct {
 - **多行 `data:` 拼接**：SSE 规范允许一个事件多行 `data:`，须 `\n` 拼接后再解析
 - **`[DONE]` 与注释行**：`data: [DONE]` 与 `:` 开头的心跳注释**不计入可见内容**
 
-### 3.2 内容感知首字判定（AC-31）
+### 3.2 首个可执行输出判定（AC-31）
 
-`HasVisibleText` 的判定标准（对齐 [ISSUE-001 假设3](../issues/ISSUE-001-tech-assumption-verification.md) 的三条铁证）：
+> ⚠️ **不能只认文本**（对抗性审查发现）：若判定标准只有"非空 text delta"，那么**只返回 `tool_calls` 的响应会被判为"无内容"** —— 而这正是主力 Codex **最常见的工作流**。后果：executor 在 TTFT 期限把一个**完全合法的工具响应取消掉**、另起上游、重复计费，最终工具链失败，而 AC-26 明明承诺工具调用兼容。
+>
+> 故判定契约为 **`HasActionableOutput`（首个可执行输出）**，而非狭义的"可见文本"。
 
-| 事件 | 是否算首字 |
-| --- | --- |
-| SSE 注释心跳（`: heartbeat`） | ❌ |
-| `response.created` / `in_progress` / `output_item.added` / `content_part.added` | ❌ 元事件 |
-| role-only delta（CC）/ 空 delta | ❌ |
-| `response.output_text.delta` 且 text 非空 | ✅ **首字** |
-| CC 的 `choices[].delta.content` 非空 | ✅ **首字** |
+**判定标准**（按协议分别实现，对齐 [ISSUE-001 假设3](../issues/ISSUE-001-tech-assumption-verification.md) 的三条铁证）：
 
-> 实现参考：AxonHub 的 `llm/pipeline/empty_response.go:hasResponseContent` 内容感知逻辑写得是对的（[13 §2.1](./13-research-reassessment.md)），可借鉴其判定思路。
+| 事件 | Responses | Chat Completions | 判定 |
+| --- | --- | --- | --- |
+| SSE 注释心跳（`: heartbeat`） | — | — | ❌ 不算 |
+| 生命周期元事件 | `response.created` / `in_progress` / `output_item.added` / `content_part.added` | — | ❌ 不算 |
+| role-only / 空 delta | — | `delta` 仅含 `role` 或为空 | ❌ 不算 |
+| **文本输出** | `response.output_text.delta` 且 text 非空 | `choices[].delta.content` 非空 | ✅ **算** |
+| **工具调用** ← 关键 | `response.function_call_arguments.delta`、`output_item.added` 且 `item.type='function_call'` | `choices[].delta.tool_calls[]` 首次出现 | ✅ **算** |
+| **拒答** | `response.refusal.delta` | `choices[].delta.refusal` | ✅ **算**（拒答是有效终态，不该被接管重试） |
+| **推理摘要**（若上游回传） | `response.reasoning_summary_text.delta` | — | ✅ **算** |
+| 终态直接到达 | `response.completed`（无任何 delta） | `finish_reason` 非空 | ✅ **算**（空响应也是确定结果，见 AC-31 的 `mock-empty-sse`） |
+
+**原则**：**任何"上游已开始产出确定结果"的信号都算首个可执行输出** —— 文本、工具调用、拒答、终态皆可；只有**元事件与心跳**不算。宁可少接管一次，也不能把合法响应取消掉重复计费。
+
+> 实现参考：AxonHub 的 `llm/pipeline/empty_response.go:hasResponseContent` 思路可借鉴（[13 §2.1](./13-research-reassessment.md)），但**须扩展到工具调用与拒答**——其原实现同样只覆盖文本。
 
 ---
 
@@ -189,7 +198,7 @@ type ProtocolSupport struct {
 
 ## 10. 实现待办（M1）
 
-1. SSE 扫描器 + `HasVisibleText` 判定，用 `verify/mock_upstream.py` 的既有场景（role-only / 空 SSE / 心跳 / 慢首帧 / abort）做夹具（[11 §3](./11-decision-full-selfbuilt.md)）。
+1. SSE 扫描器 + `HasActionableOutput` 判定，用 `verify/mock_upstream.py` 场景做夹具；**须新增 tool-only 与 refusal-only 场景**（[11 §3](./11-decision-full-selfbuilt.md)）。
 2. 字节透传管道 + tee 旁路观察，验证 35 字段与 reasoning item **零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 的真实上游基线）。
 3. 取消传播与连接池轮换的集成测试。
 4. `Probe()` 的协议能力探测 + 落库。

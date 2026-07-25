@@ -296,6 +296,9 @@ CREATE TABLE gateway_clients (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name          TEXT NOT NULL,                 -- 调用方标识（如 "codex-cli-local"）
   tenant_id     TEXT,                          -- 关联租户（个人场景可空）
+  -- 数据许可属性（FR-093，一期不启用时全为 NULL → 求值按 '*' 处理，见 §2ter）
+  region        TEXT,                          -- 地区（如 'us'/'cn'）；NULL=不限
+  business_tier TEXT,                          -- 业务等级（如 'prod'/'dev'）；NULL=不限
   -- ⚠️ 与上游 Key 不同：入站凭证**只存哈希**（Argon2id/bcrypt），明文仅在签发时返回一次
   secret_hash   TEXT NOT NULL,
   secret_prefix TEXT NOT NULL,                 -- 明文前 8 位，供展示与定位（如 "gw-a1b2c3"）
@@ -339,16 +342,41 @@ CREATE TABLE client_rate_window (
 );
 ```
 
-**预留—结算协议**（防"落账前并发超限"）：
+**⚠️ 结算必须幂等**（对抗性审查 critical 发现）：outbox 投递天生可重放（在"已应用更新、尚未标记 delivered"之间崩溃后必然重发），若结算是**直接对聚合计数器做加减**（`reserved_usd -= x`），重放即**二次结算** → 负预留或虚高消费，进而 429 判错。故引入 per-request 预留账：
+
+```sql
+-- 每请求一行预留记录：结算以此为准，聚合表由它派生
+CREATE TABLE client_reservations (
+  request_id    UUID PRIMARY KEY,               -- 天然幂等键：一个请求只有一行
+  gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id),
+  spend_date    DATE NOT NULL,
+  estimated_usd usd_amount NOT NULL,            -- 请求进入时预留
+  actual_usd    usd_amount,                     -- 结算后写入
+  state         TEXT NOT NULL DEFAULT 'reserved'
+                  CHECK (state IN ('reserved','settled','abandoned')),
+  settle_event_key TEXT,                        -- 结算事件唯一键，重放去重
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  settled_at    TIMESTAMPTZ,
+  UNIQUE (settle_event_key)
+);
+CREATE INDEX idx_resv_open ON client_reservations(gateway_client_id, spend_date)
+  WHERE state = 'reserved';
+```
+
+**预留—结算协议**（防"落账前并发超限"**且**重放安全）：
 
 | 时点 | 动作 |
 | --- | --- |
-| 请求进入 | 单事务内 `INSERT … ON CONFLICT DO UPDATE SET reserved_usd = reserved_usd + <预估>` 并**在同一语句返回新值**；超 `quota_daily_usd` 即回滚并 **429** |
-| RPM 校验 | 同事务 `UPDATE client_rate_window SET request_count = request_count + 1` 并判定上限；超限 **429** |
-| 请求结束 | 用实际费用替换预留：`reserved_usd -= 预估`、`settled_usd += 实际` |
-| 崩溃兜底 | 悬挂 attempt（§4.2bis）转 `unknown_billing` 时，其预留**保留不释放**（保守），由运维核对后修正 |
+| 请求进入 | 单事务内：① `INSERT client_reservations(request_id, estimated_usd, state='reserved')`（`request_id` 主键天然去重）② `INSERT … ON CONFLICT DO UPDATE SET reserved_usd = reserved_usd + <预估>` 并**同语句返回新值** ③ 超 `quota_daily_usd` 即**回滚整个事务**并 429 |
+| RPM 校验 | 同事务 `UPDATE client_rate_window SET request_count = request_count + 1` 并判定上限；超限 429 |
+| 请求结束（**幂等结算**） | 单事务内：① `UPDATE client_reservations SET state='settled', actual_usd=?, settle_event_key=? WHERE request_id=? AND state='reserved'` ② **仅当上一步影响行数=1** 才更新聚合表（`reserved_usd -= 预估`、`settled_usd += 实际`）。**重放时行数=0 → 聚合表不动**，天然幂等 |
+| 崩溃兜底 | 悬挂 attempt（§4.2bis）转 `unknown_billing` 时，其预留**保留 `reserved` 不释放**（保守计费），由运维核对上游账单后人工结算或置 `abandoned` |
 
-> 关键点：**预留发生在请求发起前、且与检查在同一事务** —— 这才挡得住"两个并发请求都读到旧余额"。仅在结束时累加实际费用是挡不住的。
+> 两个关键点：
+> 1. **预留发生在请求发起前、且与检查同事务** —— 挡住"两个并发都读到旧余额"；
+> 2. **结算以 per-request 行的状态跃迁为准、聚合表只在跃迁成功时更新** —— 挡住 outbox 重放导致的二次结算。
+>
+> **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。
 
 **鉴权流程**（`protocol` 层，先于任何调度）：
 
@@ -361,6 +389,53 @@ CREATE TABLE client_rate_window (
 **签发与轮换**（[09](./09-admin-api.md) 管理 API）：签发时生成随机明文 → 存哈希 → **明文只返回一次**；吊销即置 `status='revoked'` 并记 `revoked_at/revoke_reason`；轮换 = 新签发 + 旧的宽限期后吊销。
 
 **服务 FR/AC**：FR-094（不展示完整凭证）、FR-113（**上游 Key 明文 ≠ 入站凭证明文**，入站强制哈希）；新增 AC 见 [14](./14-acceptance-matrix.md)。
+
+---
+
+## 2ter. 数据许可域（FR-093 / AC-14，**一期建表但默认放行**）
+
+> **此前的空白**（对抗性审查第 6 轮）：FR-093 与 AC-14 只有需求文字（"按租户、数据类型、地区和业务等级定义允许使用的渠道，且在价格比较前执行"），[15 S4](./15-scope-and-preflight.md) 又声称"实现但默认放行、二期开启零改动"——但**没有任何表或 API 承载这四个维度**，"零改动开启"无从谈起，AC-14 也无法执行。本节补齐最小可实现模型。
+
+```sql
+-- 数据许可规则：四维请求属性 × 渠道 → allow/deny
+CREATE TABLE data_policies (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- 四个匹配维度，'*' = 通配（NOT NULL + 哨兵，避免 NULL 参与唯一约束）
+  tenant_id     TEXT NOT NULL DEFAULT '*',
+  data_class    TEXT NOT NULL DEFAULT '*',     -- 数据级别，如 'public'/'internal'/'sensitive'
+  region        TEXT NOT NULL DEFAULT '*',
+  business_tier TEXT NOT NULL DEFAULT '*',
+  channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  effect        TEXT NOT NULL CHECK (effect IN ('allow','deny')),
+  note          TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, data_class, region, business_tier, channel_id, effect)
+);
+
+CREATE INDEX idx_data_policies_channel ON data_policies(channel_id);
+```
+
+**开关**：`config_params` 新增 `data_policy_enabled`（bool，**默认 `false`**，`is_critical=true` 需二次确认）。
+
+**求值算法**（`selector` [§1.1 序 3](./05-scheduling-and-operations.md)，**先于价格比较**，纯内存快照，无查库）：
+
+```
+输入：请求四元组 Q = (tenant_id, data_class, region, business_tier)、候选 channel C
+0. data_policy_enabled = false        → 放行全部候选（一期默认路径，AC-14 一期表现）
+1. 存在匹配行 (effect='deny',  C)     → 排除 C，排除原因 'data_policy_denied'
+2. 存在匹配行 (effect='allow', C)     → 保留 C
+3. 无任何匹配行                        → 排除 C，排除原因 'data_policy_no_match'（**默认拒绝，保守**）
+匹配定义：四个维度上逐一满足 (行值 = '*' OR 行值 = Q 对应值)
+```
+
+- **deny 一票否决 → 求值与规则顺序无关**，无最长匹配/优先级，可预测、可单测。
+- **属性来源**：`tenant_id`/`region`/`business_tier` 取自鉴权命中的 `gateway_clients` 行（NULL → `'*'`）；`data_class` 取请求头 `X-Data-Class`，缺省 `'*'`。⏭ 由调用方自报数据级别的可信度问题（自报 `public` 绕过限制）属**二期**议题，一期开关默认关闭故不构成风险敞口；二期若启用多租户，须改为服务端按 `gateway_client` 绑定强制标注、不接受请求头自报。
+- **排除原因入快照**：两种排除原因写 `requests.decision_snapshot.excluded[]`，供 AC-14 断言与排障（[12](./12-debuggability.md)）。
+
+**管理 API**（[09 §5](./09-admin-api.md)）：`GET/POST/DELETE /admin/data-policies`；`POST /admin/data-policies/simulate`（传四元组，返回"允许渠道列表 + 每个被排除渠道的原因"）——**AC-14 的可执行判定入口**。
+
+**服务 FR/AC**：FR-093（P1，默认关闭）、AC-14。
 
 ---
 
@@ -1102,6 +1177,8 @@ CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at 
 | --- | --- | --- |
 | §1 注册（channels/accounts/keys/models/bindings/fault_domains/cache_scopes） | FR-001~006、022、031、044/045、055、095、109、113 | AC-01/04/05/11 |
 | §2 别名与策略（model_aliases/routing_policies/sla_targets/config_params） | FR-062、090/091、104、115/116/117 | AC-25/26 |
+| §2bis 入站凭证（gateway_clients/client_daily_spend/client_rate_window/client_reservations） | FR-094、113、120 | AC-33 |
+| §2ter 数据许可（data_policies） | FR-093（P1，默认关） | AC-14 |
 | §3 价格版本（price_versions/price_change_log） | FR-010、012~018 | AC-02/03/17 |
 | §4 请求与 Attempt 账本（requests/attempts/attempt_usage/session_prefix_ledger） | FR-040、050/051、058、070~072、076/078/079/080、092、097~099、112、116、**119** | AC-06/07/09/12/13/16、**AC-30/31/32** |
 | §5 订阅台账（subscription_plans/user_subscriptions/quota_windows/waste_forecast） | FR-011、033~039、057/058 | AC-20/21/22/23/**24** |
