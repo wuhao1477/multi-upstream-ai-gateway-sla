@@ -451,7 +451,7 @@ CREATE TABLE session_prefix_ledger (
 | **Codex CLI** | OpenAI Responses | ✅ 自动发送 | 头 `session_id` + `conversation_id`；body `prompt_cache_key`（其缓存键优先级 `session_id > conversation_id > user_id`） | ✅ |
 | **OpenCode** | OpenAI CC（base_url 可配） | ❌ 当前不发 | 内部有 SessionID/ParentSessionID 但从不出网（[issue #12930](https://github.com/anomalyco/opencode/issues/12930) 请求中） | ✅（落序 7 退化） |
 | **Gemini CLI** | Gemini API | ⚠️ 内部有不外发 | sessionId 存 `~/.gemini/tmp/<hash>/chats/`；协议侧有 `previous_interaction_id`（服务端会话态）。[#8944](https://github.com/google-gemini/gemini-cli/issues/8944)/[#13823](https://github.com/google-gemini/gemini-cli/issues/13823) 请求暴露 | ❌ **一期不收 Gemini 入站** |
-| **Cline** | OpenAI CC（base_url 可配） | ❓ **未证实** | 未见公开的会话头文档；需实测抓包确认 | ✅（待实测） |
+| **Cline** | OpenAI CC（base_url 可配） | ❌ **不发**（源码级确认） | 会话标识按 **provider 白名单**下发：`cline`/`cline-pass` 发 `X-Task-ID` 头、`openai-codex` 发 `session_id` 头、`openrouter` 发 **JSON body** `session_id`；**通用 `openai-compatible` 不在名单内**，仅透传用户自配 `config.headers`（`sdk/packages/llms/src/providers/request-headers.ts` 的 `resolveRequiredProviderHeaders()` 对其返回 `undefined`） | ✅（落序 7 退化）**一期不适配** |
 | OpenAI **Chat Completions** 协议 | —— | ⚠️ 无原生会话字段 | 仅 `user`（用户标识，**非会话**）；`prompt_cache_key` 可选 | ✅ |
 | OpenAI **Responses** 协议 | —— | ✅ 协议原生 | `conversation`（持久 ID）、`previous_response_id`（逐轮链式） | ✅ |
 
@@ -480,6 +480,7 @@ CREATE TABLE session_prefix_ledger (
 - 序 3~5 在 body 中，需解析请求体——**FR-112 禁止的是"存储"正文，不禁止读取**；提取后只落 `requests.session_id` 这一个标识值，正文不入库。头部来源（序 1/2/6）无需碰 body，优先级更高也更省。
 - 序 7 的退化是**有意的**：宁可少统计一条前缀首字，也不能用"IP+Key+模型"这类拼接键把并发的不同会话错误归并（会让 FR-050/051 的前缀平均失真）。
 - OpenCode 类客户端当前落到序 7；待其 #12930 落地后自动升到序 2，**无需我方改动**。
+- **Cline（一期不适配，仅留调研结论）**：源码确认它以 **provider 白名单**决定是否下发会话标识，通用 `openai-compatible` 路径**不发**任何会话头，故接入我方网关时落序 7（按单轮处理）。若将来需要支持，有两条零改动路径：① 用户在 Cline 的 OpenAI-compatible 配置里**自填自定义头**（其 `config.headers` 会原样透传，可填 `X-Session-Id` 命中我方序 6）；② Cline 官方把通用 provider 纳入白名单。**一期不为其做任何适配**（主力为 Codex）。
 
 **索引**
 
