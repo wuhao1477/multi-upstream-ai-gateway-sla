@@ -411,6 +411,18 @@ estimated_usd = Σ 单跳上界(b)  for b in RoutePlan        -- 按全部跳求
 
 **实际费用超出预留时**（上游不遵守上限等）：结算按**实际值**写 `settled_usd`；若结算后 `settled_usd + reserved_usd > quota_daily_usd`，立即置该 client 当日 `over_quota` → **后续请求一律 429**。**已完成的请求不追溯拒绝**（无法收回）。此为可接受的有界溢出，AC-33 须断言"溢出后下一请求必被拒"。
 
+**写入路径分工（唯一口径，第 15 轮 [critical] 统一）**：
+
+| 事实 | 写法 | 时机 |
+| --- | --- | --- |
+| `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步直写 `attempts`** | 放行首字节**之前** |
+| `terminal_event`、`attempt_usage`、reservation 结算、attempt 终态（= `finalize_upstream`） | **同步直写表，一个事务** | 放行终帧字节**之前** |
+| `downstream_first_byte_written_at` | 经 outbox | socket write 返回后 |
+| `downstream_write_completed_at` + `requests.final_status`（= `finalize_delivery`） | 经 outbox | socket write 返回后 |
+| `cancel_reason`、`cancel_propagated` | 经 outbox | 每跳取消时 |
+
+> ⚠️ 曾有三份文档三种说法（01 说"同步提交 terminal_event/usage/attempt_end"、03 说"同步写 durable outbox"、02 说 `finalize_upstream` 直写表），开发无从判断终帧事实到底进表还是进 outbox。**以本表为唯一口径**：需要"先落库再放行字节"的事实一律**同步直写表**（outbox 多一跳投递，无法满足该顺序）；outbox 只留字节写出之后才产生的异步事实。
+
 **统一终结事务 `finalize(request_id, outcome)`**（**唯一被允许修改聚合计数器的代码路径**）：
 
 > 对抗性审查第 7 轮 [critical]：预留在请求发起**前**创建，而"上游未发出即崩溃"的恢复只把 attempt 置 `failed`，**没有释放预留** → 每次这类崩溃永久占用一份日配额，累积到最后所有合法请求都收 429。人工把聚合值改回去又重新引入重复扣减。故三条路径必须共用同一个幂等事务。
@@ -794,7 +806,7 @@ CREATE TABLE attempts (
   response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真、**且已落库**的时刻
   -- ── 上游事件到达时刻（**同步写之前**）：与下游交付时刻配对，度量我们自己的开销 ──
   upstream_first_actionable_at TIMESTAMPTZ,   -- 上游首个 ShouldCommit 事件**到达**时刻（早于 response_committed_at）
-  upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 outbox 提交）
+  upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 finalize_upstream 提交）
 
   -- ── 本进程下游写入完成（[03 §3.0](./03-upstream-layer.md)）：与上游事实**独立**，不可互相推导 ──
   -- ⚠️ 只证明「我们写出去了」，**不证明客户端收到了**（对端是 Caddy）。端到端确认需客户端回执，
@@ -895,6 +907,16 @@ SELECT r.id, r.created_at, a.*
                         WHERE x.request_id = r.id AND x.request_created_at = r.created_at)
    AND (a.lease_heartbeat_at IS NULL
         OR a.lease_heartbeat_at < now() - INTERVAL '60 seconds')
+   -- ⚠️ 反连接必须写进 SQL 本体，不能只写在说明里（第 15 轮 [high]）：
+   --    downstream_write_completed 已写入 outbox 但尚未投递时，
+   --    attempts.downstream_write_completed_at 仍是 NULL → 会被误判成 ③c/interrupted，
+   --    与 AC-35「重放后 completed」直接冲突。
+   AND NOT EXISTS (
+         SELECT 1 FROM ledger_outbox o
+          WHERE o.attempt_id = a.id
+            AND o.request_created_at = a.request_created_at
+            AND o.event_type IN ('downstream_first_byte','downstream_write_completed')
+            AND o.delivered_at IS NULL)
    FOR UPDATE OF r SKIP LOCKED;
 ```
 
@@ -907,7 +929,7 @@ SELECT r.id, r.created_at, a.*
 ```
 
 > ⚠️ 顺序反了会误判：socket write 已返回、`downstream_write_completed` 的 outbox 行已写但**尚未投递**时，`attempts.downstream_write_completed_at` 仍是 NULL；若恢复扫描先跑，会把一个**已经完整写完**的请求判成 ③c/`interrupted`。
-> 额外保险：恢复扫描**跳过**存在未投递 `downstream_*` outbox 行的 attempt（`EXISTS (SELECT 1 FROM ledger_outbox o WHERE o.attempt_id=a.id AND o.delivered_at IS NULL)`）。
+> 该跳过条件**已写进上面的 SQL 本体**（`NOT EXISTS` 反连接），不是仅存在于说明里——照 SQL 实现即正确。
 
 捞出后**按"上游发出了吗、见到首字了吗"两个事实分流**，每种情形都推到**终态**并在**同一个 `finalize` 事务**（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)）内终结配额预留：
 
@@ -956,13 +978,21 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
    > **为什么两套口径方向相反**：进程崩溃是**我们的**故障，不是渠道的故障。计入用户 SLA 是诚实（用户确实失败了）；不计入渠道健康是准确（否则会冤枉一个健康渠道、把它冷却掉，故障范围反而扩大）。
    > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
    >
-   > **`stream_break_rate` 的唯一判据**（第 13 轮 [high]：原文"failed 与 interrupted 都计入流中断率"与 AC-35 的 K2 判定冲突，实现方无从选字段）：
+   > **`stream_break_rate` 的唯一判据**：
    > ```
-   > 计入流中断 ⟺ attempts.stream_broken = true
-   >              OR attempts.downstream_first_byte_written_at IS NOT NULL
+   > 分子（计入流中断）⟺
+   >      attempts.stream_broken = true                          -- 上游断流，我们观测到了
+   >   OR ( requests.final_status = 'interrupted'                 -- 我们崩了
+   >        AND attempts.downstream_first_byte_written_at IS NOT NULL )  -- 且已确认写出过内容
+   > 分母 = 同窗口内 requests.is_streaming = true 的全部请求
    > ```
-   > 即**只统计「已确认写出过内容之后才中断」**。K2（写出未确认、`failed`）**不计**；K3/K4 与上游断流（已输出后中断）**计**。
-   > 该判据只看 `attempts` 的两个事实列，**不看 `final_status`**——避免同一口径有两个来源。
+   > ⚠️ **第 13 轮冻结的版本是错的**（第 15 轮 [critical]）：当时只写了
+   > `stream_broken = true OR downstream_first_byte_written_at IS NOT NULL`——
+   > 后半句对**每一个正常成功的流式请求**都成立，等于把全部成功流算成中断，指标直接失去意义。
+   > 漏掉的是「**才中断**」那一半：必须同时要求结果是中断/失败，不能只看"写出过内容"。
+   >
+   > 逐场景核对：正常成功（`completed`）**不计** ✓；K2（`failed`）**不计** ✓；
+   > K3／K4（`interrupted` 且首字节已写出）**计** ✓；上游断流（`stream_broken=true`）**计** ✓。
 
 > ②③b 的 `actual_usd` 含估算成分，故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{request_id}/adjust`——它是[§2bis 的**独立 `adjust` 事务**](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)（从 `settled` 出发、`FOR UPDATE` 锁定、按差额修正），**不是 `finalize`**：`finalize` 的闸门是 `state='reserved'`，对已 `settled` 的待核对行必然影响 0 行、静默失效。幂等键用 `reservation_adjustments.event_key`，**不是** `settle_event_key`。**禁止直接改聚合表**。
 
@@ -972,6 +1002,9 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
 -- 恢复扫描的两个索引（request 级入口 + attempt 侧租约判活）
 CREATE INDEX idx_requests_open ON requests(created_at) WHERE final_status = 'pending';
 CREATE INDEX idx_attempts_lease ON attempts(request_id, attempt_no, lease_heartbeat_at NULLS FIRST);
+-- 支撑恢复扫描的 NOT EXISTS 反连接
+CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created_at, event_type)
+  WHERE delivered_at IS NULL;
 ```
 
 ### 4.3 逐 Attempt 用量与费用
@@ -1510,10 +1543,13 @@ CREATE TABLE ledger_outbox (
   attempt_id    UUID NOT NULL,
   request_created_at TIMESTAMPTZ NOT NULL,     -- 用于定位分区
   event_type    TEXT NOT NULL CHECK (event_type IN
-                  ('first_token','attempt_end','usage','cancel',
-                   -- 下游写出事实（第 13 轮 [high]：原枚举没有承载 ③b1/③b2/③c 区分的事件）
-                   'downstream_first_byte','downstream_write_completed',
-                   'request_close')),
+                  -- ⚠️ outbox **只承载异步事实**（第 15 轮 [critical]）。
+                  --    首字与终帧因为要「先落库再放行字节」，已改为**同步直写表**，
+                  --    不再经 outbox —— 故 'first_token'/'attempt_end'/'usage'/'request_close'
+                  --    四个旧类型已删除，避免出现「同一事实两条写入路径」。
+                  ('downstream_first_byte',        -- 首字节写出 → 写 attempts.downstream_first_byte_written_at
+                   'downstream_write_completed',   -- 终帧写出   → 触发 finalize_delivery
+                   'cancel')),                     -- 每跳取消原因/传播标记
   payload       JSONB NOT NULL,                -- 状态更新的元数据（不含正文，FR-112）
   -- 幂等键：同一 attempt 的同一状态跃迁只生效一次，重放不产生重复/不覆盖更晚状态
   idempotency_key TEXT NOT NULL,

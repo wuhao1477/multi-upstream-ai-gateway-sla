@@ -114,13 +114,16 @@ type ProtocolSupport struct {
 
 
 ```
-旁路识别出终帧 → ① 同步写 durable outbox（terminal_event + usage + attempt_end，同一行）
+旁路识别出终帧 → ① 同步执行 finalize_upstream 事务（**直写表**：attempts.terminal_event
+                     + attempt_usage + reservation 结算 + attempt 终态；requests 保持 pending）
               → ② 才把终帧字节转发给下游 / 关闭下游流
+              → ③ socket write 返回后，经 outbox 异步记 downstream_write_completed
 ```
 
 - **仍满足字节透传硬约束**：字节内容**一字节不改**，只是最后一帧延迟约 1~2ms 发出。TTFT 与流式体验完全不受影响（首字早已提交）。
 - **只对终帧生效**：中间的 delta 帧一律直通，不引入任何同步写。
-- **写库失败时：不放行终帧，中断下游流，按 ③b `interrupted` 结算。**
+- **写库失败时：不放行终帧，中断下游流，按 ③b2 `interrupted` 结算。**
+- ⚠️ ① 是**直写表**不是写 outbox（[02 §2bis 写入路径分工](./02-data-model.md)）：outbox 多一跳投递，满足不了「先落库再放行字节」的顺序。outbox 只承载 ③ 这类字节写出**之后**才产生的异步事实。
   > ⚠️ 第 10 轮 [critical]：上一版写的是"写库失败仍照常转发终帧给下游（用户体验优先），退化为 ③b"——那会造成**客户端收到完整成功响应、账本却记为中断**的永久分裂，而且与 AC-35 要求同一窗口恢复为 `completed` 直接打架。**同一个失败必须只有一种语义。**
   >
   > **取舍（明示）**：这条规则的代价是——上游已经成功且**钱已经花了**，却因为我们的库写不进去而让用户拿不到结果。接受这个代价的理由是：账本是唯一真相源，**无法持久化就无法诚实地声称成功**；而且 outbox 写的是与全站同一个 PG，它不可用时我们本来就在全面失败，不存在"只有这一个请求受影响"的情形。
@@ -154,10 +157,10 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 
 | # | kill 时点 | 下游（Caddy）**可能**收到 | 库中事实 | attempt | request（用户 SLA） | 计费 |
 | --- | --- | --- | --- | --- | --- | --- |
-| K1 | 首字 outbox **提交前** | 无内容 | `pending` | `unknown_billing` | `failed` | 估算 + 待核对 |
+| K1 | 首字同步写 **提交前** | 无内容 | `pending` | `unknown_billing` | `failed` | 估算 + 待核对 |
 | K2 | 首字已提交、**写出未确认** | 通常无内容（**但 write 可能已返回**） | `committed`，`downstream_first_byte_written_at IS NULL` | `interrupted` | `failed`（**未确认写出** → 保守，不计流中断） | 估算 + 待核对 |
-| K3 | 终帧 outbox **提交前**、已确认写出过首字节 | 截断流 | `committed`，`terminal_event IS NULL`，`downstream_first_byte_written_at NOT NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
-| K4 | 终帧已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → `failed`） | **`interrupted`**（我们没写完 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
+| K3 | `finalize_upstream` **提交前**、已确认写出过首字节 | 截断流 | `committed`，`terminal_event IS NULL`，`downstream_first_byte_written_at NOT NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
+| K4 | `finalize_upstream` 已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → `failed`） | **`interrupted`**（我们没写完 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
 | — | 全部完成 | 完整响应 | `terminal_event` + `downstream_write_completed_at` 均非空 | `completed` | `completed` | 实际 |
 
 > **K4 是这次修正的核心**：attempt 层按上游终帧如实记（我们确实知道上游干了什么、花了多少钱），request 层记 `interrupted`（我们**没把它写完**）。两层结论不同不是矛盾，而是两个不同事实的如实记录。

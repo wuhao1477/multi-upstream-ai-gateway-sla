@@ -75,9 +75,9 @@
 | --- | --- | --- |
 | **发起上游调用前** | `requests` 行 + 本跳 `attempts` 行（状态 `pending`，含 binding、price_version_id）+ `client_reservations` 预留（[02 §2bis](./02-data-model.md) D 阶段） | **同步提交**（先落库再发请求） |
 | **首次 ShouldCommit → 放行响应头与缓冲字节之前** | `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步提交（先落库再放行字节）** |
-| **识别终帧 → 放行终帧字节之前** | `terminal_event`、usage、attempt_end | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
+| **识别终帧 → 放行终帧字节之前** | 见下方 `finalize_upstream` 行（**同步直写表，非 outbox**） | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
 | 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
-| **`finalize_upstream`**（终帧到达时） | reservation 结算 + `attempt_status` 终态 + `terminal_event`/usage。**`requests.final_status` 保持 `pending`** | **同步**，在放行终帧字节之前 |
+| **`finalize_upstream`**（终帧到达时） | **直写表**：`attempts.terminal_event` + `attempt_usage` + reservation 结算 + `attempt_status` 终态。**`requests.final_status` 保持 `pending`** | **同步**（不经 outbox），在放行终帧字节之前 |
 | **`finalize_delivery`**（socket write 返回后） | `downstream_write_completed_at`，再据它推 `requests.final_status` | 异步，经 **outbox**（不涉及计费） |
 
 > ⚠️ **关单必须两阶段，不能一步到位**（第 12/13 轮 [critical]）：若在终帧到达时就把 `final_status` 写成 `completed`，那一刻字节**还没写给下游**；随后崩在 K4 窗口时 request 已是终态，恢复扫描的 `WHERE final_status='pending'` 闸门再也改不动它 —— **③c/K4 分支被正常路径整个绕过**。完整 SQL 与幂等约束见 [02 §2bis](./02-data-model.md)。
@@ -92,7 +92,8 @@
 
 1. **意图先行**：任何上游调用之前，其 `request`+`attempt` 意图**已在 PG 落库**。崩溃后可据 `pending` 记录判定"可能已产生费用"，不会静默丢账。
 2. **幂等键**：状态更新以 `(attempt_id, 状态跃迁)` 为幂等键，重放不产生重复行、不覆盖更晚状态。
-3. **outbox 先于内存队列**：异步更新先写 durable outbox（同库同事务），再由后台投递；进程崩溃后**重放 outbox**，不依赖内存队列存活。
+3. **outbox 只承载异步事实**：需要「先落库再放行字节」的（首字、终帧）一律**同步直写表**；outbox 只留 `downstream_first_byte`/`downstream_write_completed`/`cancel`。**同一事实不得有两条写入路径**（[02 §2bis](./02-data-model.md) 写入路径分工）。
+4. **outbox 先于内存队列**：异步更新先写 durable outbox（同库同事务），再由后台投递；进程崩溃后**重放 outbox**，不依赖内存队列存活。
 
 **崩溃恢复终态契约**（与 [02 §4.2bis](./02-data-model.md) 租约扫描、[AC-35](./14-acceptance-matrix.md) 严格一致）：
 
@@ -112,7 +113,7 @@
 2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
 3. **reservation 与 attempt 在 `finalize_upstream` 同一事务里终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。**`requests.final_status` 不在该事务内**——它由 `finalize_delivery` 依据写出事实推定（见上表）。
 4. **DB 提交与 socket 写出无法原子化，反方向窗口不可消除**：先落库再放行只挡住"客户端有、库里没有"；"库里有、客户端没收全"必然存在（③c）。故 `attempts` 另记 `downstream_first_byte_written_at`/`downstream_write_completed_at` 两个**独立事实**，冲突时按"未确认 = 未交付"取保守解释——attempt 层可以是 `completed`（成本精确已知），request 层仍判 `interrupted`（交付未确认）。详见 [03 §3.0](./03-upstream-layer.md) 四时点表。
-5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③b／③c 的区分必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
+5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③b／③c 的区分必须读 `terminal_event`。首字与终帧的提交顺序另有约束：**先同步直写表、再放行字节**（[03 §3.0](./03-upstream-layer.md)、[02 §2bis 写入路径分工](./02-data-model.md)）。
 6. **`interrupted` 与 `failed` 都计入用户 SLA 失败**（FR-071），但**流中断率的口径更窄**（第 13 轮 [high]）：`stream_break_rate` **只统计"已确认写出过内容之后才中断"**的请求，判据是 `attempts.stream_broken=true` 或 `downstream_first_byte_written_at IS NOT NULL`。
    → K2（首字写出未确认、`failed`）**不计**流中断；K3/K4 与上游断流（已输出后中断）**计**。
    上一版写"两者都计入流中断率"与 AC-35 的 K2 判定直接冲突，实现方无从判断按哪个字段算。
