@@ -4,7 +4,7 @@
 
 本仓库为**需求、选型与开发设计阶段的文档库**（暂不含代码实现）。开发设计见 [docs/dev/](docs/dev/00-overview-and-milestones.md)。
 
-## 当前阶段（截至 2026-07-23）
+## 当前阶段（截至 2026-07-25）
 
 | 事项 | 状态 |
 | --- | --- |
@@ -17,7 +17,7 @@
 ## 文档地图
 
 ### 核心交付
-- [产品需求 PRD v1.2](docs/PRD.md) —— 需求主文档（FR-001～117、AC-01～29、默认策略、参数确认）
+- [产品需求 PRD v1.3](docs/PRD.md) —— 需求主文档（FR-001～119、AC-01～32、默认策略、参数确认）
 - [决策确认记录 DECISIONS](docs/DECISIONS.md) —— 16 项参数 + 5 条新需求的确认结果
 - [未决问题清单 OPEN-ISSUES](docs/OPEN-ISSUES.md) —— 五部分问题及处理状态
 
@@ -37,7 +37,7 @@
 - [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
 - [ISSUE-003：运行时/采集反馈的需求候选（待评审并入 PRD v1.3）](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md)
 
-### 开发设计（2026-07-23 启动）
+### 开发设计（2026-07-23 启动，07-25 转向自研）
 - [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
 - [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、sla-core 模块、上游直连、请求时序
 - [02 数据模型](docs/dev/02-data-model.md) —— PG 单库 schema：逐 Attempt 账本、订阅台账（双倍率）、价格版本、健康冷却、月分区保留
@@ -52,9 +52,10 @@
 - [11 架构转向决策](docs/dev/11-decision-full-selfbuilt.md) —— **移除外部网关、彻底自研**的决策与依据
 - [12 可调试性设计](docs/dev/12-debuggability.md) —— 自研透传层排障：FR-112 约束下只存元数据
 - [13 调研资产重审](docs/dev/13-research-reassessment.md) —— Codex 三条硬约束；三项目在同一处翻车 → 字节透传
+- [14 验收矩阵](docs/dev/14-acceptance-matrix.md) —— 32 条 AC → 里程碑 → 可执行判定方法（PM 与开发的验收契约）
 
 ### 运行时验证
-- [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）
+- [verify/ — mock 上游场景集](verify/README.md)（AxonHub 六假设部分转历史；mock 场景转为自研透传层测试夹具）
 
 ## 推荐架构（一句话）
 
