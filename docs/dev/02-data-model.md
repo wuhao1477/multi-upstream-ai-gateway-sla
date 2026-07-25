@@ -499,10 +499,12 @@ COMMIT;
 
 **两条调用路径（都从 `reserved` 出发），同一事务，参数不同**：
 
-| 路径 | 触发 | `outcome` → reservation / attempt / request |
+| 路径 | 触发 | `outcome` → reservation / attempt / **request** |
 | --- | --- | --- |
-| **正常关单** | 终帧到达 | `settled`(actual=真实 usage) / `completed` / `completed` |
-| **恢复扫描**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（三种 outcome） |
+| **`finalize_upstream`（正常路径）** | 终帧到达 | `settled`(actual=真实 usage) / 由 `terminal_event` 决定 / **保持 `pending`** |
+| **恢复扫描**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（五种 outcome） |
+
+> ⚠️ **正常路径也不写 `requests.final_status`**（第 16 轮 [critical]）：上一版这一行写成 `completed / completed`，等于终帧一到达就把 request 关成成功——那正是第 12 轮修掉的老毛病，会让 K4 窗口的崩溃被记成成功。request 终态**只能**由 `finalize_delivery` 依据 `downstream_write_completed_at` 推定。
 
 **人工核对走独立的 adjustment 事务**（第 8 轮 [critical]）：
 
@@ -556,7 +558,7 @@ COMMIT;
 - **禁止直接改 `client_daily_spend`**：所有聚合修改只有 `finalize` 与 `adjust` 两个入口。
 - **验收**：见 [AC-33](./14-acceptance-matrix.md) ⑭／⑮／⑱／⑲（成功修正 / 重复 event_key 与崩溃重放 / **两个不同 event_key 并发修正后聚合与 reservation 必须一致** / 参数不可指定 client 与日期）。
 
-> **验收**：[AC-33](./14-acceptance-matrix.md) 须含 **kill-after-apply-before-ack** 重放测试：在"已更新聚合表、未标记 outbox delivered"之间 kill，重启重放后 `settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
+> **验收**：[AC-33](./14-acceptance-matrix.md) 须含**事务幂等重试**测试——结算已不经 outbox（见上方写入路径分工），故场景改为：同一 `settle_event_key` 重复执行 `finalize_upstream`、或事务提交后连接中断导致调用方重试，`settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
 
 **鉴权与预留的执行顺序**（第 9 轮 [critical] 修正）：
 
@@ -1473,10 +1475,11 @@ CREATE UNIQUE INDEX uq_alert_active ON alert_events(dedup_key) WHERE state <> 'c
 
 CREATE INDEX idx_alert_open ON alert_events(severity, started_at) WHERE state<>'closed';
 
+```
+
 > 生命周期转换（open→acknowledged→recovering→closed）须在**行锁**下进行（`SELECT … FOR UPDATE`），
 > 避免并发转换产生第二条活动行。如需保留"同因重复发生"的明细，另建 `alert_occurrences` 子表，
 > 不在主表堆积。
-```
 
 **服务 FR/AC**：FR-100~103、FR-105；AC-19（余额耗尽/Key 失效即时告警到关闭）。
 

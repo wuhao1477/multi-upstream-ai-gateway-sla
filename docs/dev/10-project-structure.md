@@ -104,7 +104,7 @@ multi-upstream-ai-gateway-sla/
 | --- | --- | --- |
 | 1 | Go 版本锁定策略 | ✅ **已定**：`go.mod` 声明 `go 1.2x` 跟随稳定版；不锁死 patch，CI 用固定 minor |
 | 2 | 单 module vs 多 module | ✅ **已定**：单 module（个人项目、包间共享类型多），`internal/` 隔离 |
-| 3 | 存储访问层选型 | ✅ **已定（2026-07-23）：`pgx` + `sqlc`** —— pgx 做驱动、sqlc 从手写 SQL 生成类型安全 Go 代码。零运行时反射、账本类重查询可控、与"决策只读内存快照 / 写路径异步"架构契合；避免重 ORM 的反射开销与不可控查询。迁移用纯 SQL（`migrations/`）+ sqlc 对齐 |
+| 3 | 存储访问层选型 | ✅ **已定（2026-07-23）：`pgx` + `sqlc`** —— pgx 做驱动、sqlc 从手写 SQL 生成类型安全 Go 代码。零运行时反射、账本类重查询可控、与"决策只读内存快照 / **关键账本同步直写、其余经 outbox 异步**"的写路径分工契合（[01 §5.1](./01-architecture.md)、[02 §2bis](./02-data-model.md)）；避免重 ORM 的反射开销与不可控查询。迁移用纯 SQL（`migrations/`）+ sqlc 对齐 |
 | 4 | 配置来源（文件 vs env vs config_params） | ✅ **已定**：基础设施走 env（[06 §4](./06-deployment-and-operations.md)），业务策略走 `config_params`（[09](./09-admin-api.md)），不混 |
 
 ---

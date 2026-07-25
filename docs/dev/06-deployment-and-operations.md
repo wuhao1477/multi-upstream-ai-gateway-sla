@@ -104,7 +104,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 | 决策延迟 | 自监控 P99 决策开销 ≤50ms（FR-110）。**测法**：发往上游前多打一个时间戳，`决策/网关开销 = 总延迟 − 上游耗时`（对应 [02](./02-data-model.md) `attempts.full_latency_ms − upstream_latency_ms`）；超标告警 |
 | **同步写代价** | ⚠️ 上一行的差值**测不到同步写**——首字同步写落在 `upstream_latency_ms` 内被减掉（第 11 轮 [high]）。故另建两个派生指标并单独设阈值：`downstream_ttft_delay_ms = downstream_first_byte_written_at − upstream_first_actionable_at`、`downstream_finish_delay_ms = downstream_write_completed_at − upstream_terminal_at`（列见 [02 `attempts`](./02-data-model.md)，阈值由 [M4 压测](./14-acceptance-matrix.md)冻结） |
 | **PG 事务与连接池** | 同步写在请求路径上 → 必须监控 PG 提交延迟 P50/P99、连接池等待时长与**耗尽次数**、每秒同步事务数。任一恶化会直接表现为用户可感的首字变慢 |
-| 账本写入滞后 | 监控异步账本队列积压与写入延迟（转向自研后无对账环节，[11](./11-decision-full-selfbuilt.md)） |
+| 账本写入滞后 | **关键账本事实是同步直写**（[01 §5.1](./01-architecture.md)），故这里监控的是 **outbox 未投递积压**（`ledger_outbox.delivered_at IS NULL` 的行数与最老行龄）与投递延迟。积压增长意味着 `finalize_delivery` 落后 → request 终态迟迟不落定 |
 | 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（查 `collector_snapshots_v.is_stale` 视图）；凭证失效告警 P2 |
 | 业务告警 | P1/P2/P3 经 `alert_events` 出（[05 §5.2](./05-scheduling-and-operations.md)）；P1 不得延迟（FR-103） |
 

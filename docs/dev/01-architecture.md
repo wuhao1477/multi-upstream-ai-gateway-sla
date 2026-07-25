@@ -31,7 +31,7 @@
 | `selector` | 生成 RoutePlan：候选 Binding 序列 + 每跳期限。输入：价格版本、余额下限、健康/冷却、会话粘性、容量保留、配额状态（unknown 默认排除，FR-118）。⏭ 订阅双倍率移入二期（[15 §1.2](./15-scope-and-preflight.md)） | 决策 P99≤50ms → 全内存快照决策，PG 异步刷新 |
 | `executor` | 按 RoutePlan 逐 Attempt 执行：**字节透传 + 旁路观察**→内容感知首字判定（排除 role-only/空 delta/注释心跳）→期限内未见有效首字则取消本跳并切下一 Binding；已提交有效内容后不再切换 | AC-31/32；判定逻辑可借鉴 AxonHub `hasResponseContent` 思路（[13 §2.1](./13-research-reassessment.md)） |
 | `upstream` | **自研上游对接层**：请求转发、SSE 字节透传、取消传播、usage 提取、协议能力探测。详见 [03](./03-upstream-layer.md) | FR-111/119、AC-31/32 |
-| `ledger` | Attempt 账本写入（异步批量落 PG）。**单一真相源，无对账环节**（转向后不再有外部网关账本需比对） | FR-097/098、FR-058 |
+| `ledger` | Attempt 账本写入：**关键事实同步直写 PG**（意图、首字、终帧/usage/结算——见 §5.1），仅 `downstream_*`/`cancel` 经 outbox 异步投递。**单一真相源，无对账环节** | FR-097/098、FR-058 |
 | `steward` | 冷却/样本门槛、余额信号识别（参数 5 多策略）、告警 P1～P3。⏭ 测活预算体系移二期（[15 S1](./15-scope-and-preflight.md)） | 参数 5/11/16 |
 
 ## 3. 上游对接（自研直连）
@@ -114,9 +114,15 @@
 3. **reservation 与 attempt 在 `finalize_upstream` 同一事务里终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。**`requests.final_status` 不在该事务内**——它由 `finalize_delivery` 依据写出事实推定（见上表）。
 4. **DB 提交与 socket 写出无法原子化，反方向窗口不可消除**：先落库再放行只挡住"客户端有、库里没有"；"库里有、客户端没收全"必然存在（③c）。故 `attempts` 另记 `downstream_first_byte_written_at`/`downstream_write_completed_at` 两个**独立事实**，冲突时按"未确认 = 未交付"取保守解释——attempt 层可以是 `completed`（成本精确已知），request 层仍判 `interrupted`（交付未确认）。详见 [03 §3.0](./03-upstream-layer.md) 四时点表。
 5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③b／③c 的区分必须读 `terminal_event`。首字与终帧的提交顺序另有约束：**先同步直写表、再放行字节**（[03 §3.0](./03-upstream-layer.md)、[02 §2bis 写入路径分工](./02-data-model.md)）。
-6. **`interrupted` 与 `failed` 都计入用户 SLA 失败**（FR-071），但**流中断率的口径更窄**（第 13 轮 [high]）：`stream_break_rate` **只统计"已确认写出过内容之后才中断"**的请求，判据是 `attempts.stream_broken=true` 或 `downstream_first_byte_written_at IS NOT NULL`。
-   → K2（首字写出未确认、`failed`）**不计**流中断；K3/K4 与上游断流（已输出后中断）**计**。
-   上一版写"两者都计入流中断率"与 AC-35 的 K2 判定直接冲突，实现方无从判断按哪个字段算。
+6. **`interrupted` 与 `failed` 都计入用户 SLA 失败**（FR-071），但**流中断率的口径更窄**：
+   ```
+   计入流中断 ⟺ attempts.stream_broken = true
+              OR ( requests.final_status = 'interrupted'
+                   AND attempts.downstream_first_byte_written_at IS NOT NULL )
+   分母 = 同窗口内 requests.is_streaming = true 的全部请求
+   ```
+   正常成功（`completed`）**不计**；K2（`failed`）**不计**；K3／K4 **计**；上游断流（`stream_broken=true`）**计**。
+   唯一口径见 [02 §4.2bis](./02-data-model.md)，本节不得另立简写。
 7. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
 
 ## 6. 开放点（评审需拍板）
