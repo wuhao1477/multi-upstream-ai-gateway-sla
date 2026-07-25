@@ -4,8 +4,8 @@
 | --- | --- |
 | 状态 | 草案，待评审（M0 前定稿） |
 | 日期 | 2026-07-23 |
-| 形态 | **单机 Docker Compose**：Caddy LB + 2× sla-core（Go）+ PostgreSQL + AxonHub `v1.0.0-beta5`（stock，L0）+ collector |
-| 约束 | 个人/内部使用；任一 sla-core 实例宕机不影响服务（FR-110）；AxonHub 锁定 beta5、升级须过 verify/ 门禁（硬约束 11） |
+| 形态 | **单机 Docker Compose**：Caddy LB + 2× sla-core（Go）+ PostgreSQL + collector。**无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
+| 约束 | 个人/内部使用；任一 sla-core 实例宕机不影响服务（FR-110）；上游直连，渠道凭证来自 PG（FR-113） |
 | 输入 | [01 架构](./01-architecture.md)、[00 硬约束](./00-overview-and-milestones.md)、[03 上游对接层](./03-upstream-layer.md)、[verify/](../../verify/README.md)、[ISSUE-001 beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) |
 
 ---
@@ -15,7 +15,7 @@
 ```
                  ┌───────────────── 单机 Docker Compose ─────────────────┐
 客户端 → :443 Caddy(LB/TLS) → sla-core-a :8080 ┐
-                            └→ sla-core-b :8080 ┘─同步→ axonhub :8090 → 上游
+                            └→ sla-core-b :8080 ┘─直连→ ~20 上游渠道
                                     │                        (stock beta5, retry 置零, 默认单实例)
                                     ├→ postgres :5432 (账本/台账/价格/健康，多实例共享)
                                     └→ collector (子命令/独立容器) → 上游站点管理面
@@ -24,58 +24,50 @@
 | 服务 | 镜像/构建 | 端口 | 依赖 | 备注 |
 | --- | --- | --- | --- | --- |
 | `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例 |
-| `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres、axonhub | 无本地状态；`/healthz` 就绪探针。**核心必须 ≥2 实例**（FR-110） |
-| `postgres` | postgres:16 | 5432 | — | 单库；账本 + `axonhub` 分 schema |
-| `axonhub` | `looplj/axonhub:v1.0.0-beta5`（**锁定 tag**） | 8090 | postgres | stock 不改源码；**默认单实例**（进程自愈兜底）；启动由 core bootstrap 下发 retryPolicy 置零。**双实例为可选**（见 §2.3） |
+| `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres | 无本地状态；`/healthz` 就绪探针；**内含自研上游透传层**（[03](./03-upstream-layer.md)）。**必须 ≥2 实例**（FR-110） |
+| `postgres` | postgres:16 | 5432 | — | 单库；账本/台账/价格/健康（单一真相源） |
 | `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
 
-> **为何 core ≥2 而 AxonHub 默认 1**：FR-110 **只约束自研决策核心**（≥2 实例、任一宕机不中断），**未要求 AxonHub 多实例**。核心是策略/账本/合规的必经之路，必须高可用；AxonHub 是受控执行面，单实例挂了由进程自愈 + 核心返回明确不可用（禁旁路）兜底，个人/内部场景足够。是否上 AxonHub 双实例**由部署者按需决定**（§2.3），默认不上以免引入非必要复杂度。
+> **为何 core ≥2**：FR-110 要求任一实例宕机不中断。Caddy 对 `/healthz` 失败的实例自动摘除；两实例无差别（状态全在 PG，账本主键 UUIDv7 无序列争用，[02 §9.3](./02-data-model.md)）。转向自研后**数据面不再有外部网关单点**（[11](./11-decision-full-selfbuilt.md)）。
 
 ---
 
-## 2. AxonHub 集成部署（beta5，L0）
+## 2. 上游直连（自研，无外部网关）
 
-### 2.1 存储：PG 共库分 schema（01 开放点 4 / 02 开放点 3 的建议落地）
+转向自研后（[11](./11-decision-full-selfbuilt.md)），**部署里不再有 AxonHub/ccLoad 容器**，随之消失的还有：PG 共库分 schema、Key-per-Channel 开通编排、`updateRetryPolicy` 下发、GraphQL schema 适配、升级准入门禁。
 
-- AxonHub 用 PG 而非默认 SQLite：`AXONHUB_DB_DIALECT=postgres`、DSN 指向同一 `postgres` 服务的 **`axonhub` schema**（与自研账本 `public` 隔离）。
-- 收益：备份/运维统一；`Reconcile` 拉取的 `requests/executions/usageLogs` 可与自研账本**本地 JOIN 对账**，免跨库。
-- ✅ **已实测**（[07 §1](./07-axonhub-runtime-probes.md)）：DSN 格式 `postgres://user:pass@host:5432/db?sslmode=disable`（dialect=`postgres`）；`search_path=<schema>`（需预先 `CREATE SCHEMA`，ent 不自建）实现与自研账本共库分 schema，25 张表落指定 schema。
+### 2.1 上游渠道与凭证
 
-### 2.2 启动后置初始化（由 sla-core 幂等下发，非人工）
+- 渠道、Key、URL 全部登记在 PG 的 `channels`/`upstream_keys`（一期明文，FR-113），经 [09 `/admin/bindings`](./09-admin-api.md) 管理。
+- sla-core 启动时从 PG 加载并构建内存快照；新增/变更渠道经管理 API 落库后刷新快照，**无需重启**。
+- 每个 Binding 独立 HTTP 连接池（[03 §6](./03-upstream-layer.md)），避免单个上游卡死拖垮其他渠道。
 
-core 启动时对 axonhub 执行一次幂等 bootstrap（经 `/admin/graphql`，字段名按 beta5 适配表）：
+### 2.2 启动初始化
 
-1. `system/initialize` + `auth/signin`（均带 `/admin` 前缀）。
-2. **全字段 `updateRetryPolicy{enabled:false, streamFirstEventTimeoutSeconds:0, maxChannelRetries:0, maxSingleChannelRetries:0, ...}`** —— 整体替换的坑（假设 2 补验），部署脚本单测校验全字段下发（[03 §5.1](./03-upstream-layer.md)）。
-3. 按 PG 中登记的 binding 逐个 `ProvisionBinding`（建渠道 → `updateChannelStatus(enabled)` → 建 Key → 锁单渠道 profile → `saveChannelModelPrices`），全部经 GatewayAdapter，**禁止人工建 Key**（[03 §4.1/4.6](./03-upstream-layer.md)）。
+sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、加载 `config_params` 与别名策略、构建内存快照、协议能力探测（[03 §8](./03-upstream-layer.md)）。
 
-### 2.3 AxonHub 实例数：默认单实例，双实例可选（01 开放点 1）
+**选主**：两个 core 实例并存，为避免重复迁移，bootstrap 前取一把 **PG 咨询锁** `pg_try_advisory_lock(<常量>)`——取到的实例执行迁移与初始化，其余跳过并轮询就绪。用咨询锁而非新建表：无额外依赖、连接断开自动释放不留死锁。
 
-**决策（2026-07-23）：默认单实例；双实例作为部署者可选项，不默认启用、一期不建配套复杂度。**
+### 2.3 上游不可用的处置
 
-理由（务实）：
-
-- FR-110 只约束**自研核心**多实例；AxonHub 是受控执行面，非合规/账本必经点。
-- 个人/内部场景绝大多数时间单实例足够；单实例挂了由 compose `restart: unless-stopped` 进程自愈 + 核心对 axonhub 不可用**快速失败、返回明确不可用、禁旁路直连上游**（FR-110/AC-27）兜底。
-- 双实例的收益（消除数据面单点）在此场景多数用不上，却要背上并发迁移/选主/滚动串行的复杂度——**性价比不划算，需要时再开发**。
-
-**单实例下的 bootstrap（简单）**：2 个 sla-core 都会连这一个 axonhub，为避免双 core 重复初始化/建绑定，bootstrap 仍走一把 **PG 咨询锁** `pg_try_advisory_lock(<常量>)`：取到锁的 core 执行 `system/initialize` + 全字段 retryPolicy 置零 + `ProvisionBinding`，其余 core 跳过、轮询就绪。**AxonHub 自身的 schema 迁移由它单实例独占完成，无并发冲突**（07 的 panic 只在双实例并发冷启动才出现，单实例天然规避）。
-
-**双实例（可选，已验证可行）**：若部署者确需消除数据面单点，[07 §2](./07-axonhub-runtime-probes.md) 已实测**稳态双活可行**（状态实时共享、任一实例可读写与路由）。启用时须满足**一条硬约束**：schema 迁移期无并发锁——**初始化/升级迁移只允许一个实例执行**（用上面同一把咨询锁串行），否则并发迁移会 panic。这条作为"双实例部署 runbook"留档，需要时启用，不进默认路径。
+- 单个上游渠道故障 → `selector` 按健康状态摘除（[05 §3.1](./05-scheduling-and-operations.md) 冷却退避）。
+- **全部候选不可用** → 按等级排队等待后返回明确的"服务暂不可用"，**禁止旁路直连未授权渠道**（FR-110/AC-27、参数7）。
+- sla-core 实例故障 → Caddy 据 `/healthz` 摘除，另一实例继续服务（FR-110）。
 
 ---
 
-## 3. 升级门禁（硬约束 11：AxonHub 更新快，锁版本 + 准入检查）
+## 3. 版本与依赖治理
 
-AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行为下个版本可能变"（选型风险 2）。三条纪律固化为流程：
+转向自研后**没有外部网关版本需要跟随**，升级门禁大幅简化：
 
-| 纪律 | 落地 |
+| 对象 | 治理方式 |
 | --- | --- |
-| 生产锁定具体 tag | compose 用 `looplj/axonhub:v1.0.0-beta5`，**不用 `latest`/`unstable`** |
-| 升级前跑准入检查 | 换 tag 前先在 verify/ 跑 [ISSUE-001 六假设 harness](../../verify/README.md)：单渠道隔离/取消对账/首字/账本/配额/隐藏重试全绿 + [beta5 schema 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 逐项核对（GraphQL 字段名漂移是首要风险） |
-| 固定升级窗口、可回滚 | 建议每季度一次。**单实例（默认）升级极简**：停 axonhub → 换 tag → 起（它单独迁移自己的库，零并发冲突）→ 跑 harness → 全绿才恢复流量；失败 `docker compose` 回滚旧 tag。升级窗口内有短暂 axonhub 不可用（核心此间返回明确不可用，不旁路），个人/内部可接受。**双实例（可选）**才需"先单实例迁移完再拉起其余"的串行滚动（[07 §2](./07-axonhub-runtime-probes.md)：并发迁移崩实例） |
+| sla-core 自身 | 常规发布流程：构建 → CI 全绿（含 FR-112 不可存列断言）→ 灰度一个实例 → 观察 → 全量 |
+| Go 依赖 | `go.mod` 锁定；升级前跑全量测试 |
+| **上游协议变更** | 真正需要盯的风险从"网关版本"变为"**上游协议/模型变更**"：`Probe()` 定期探测协议能力（[03 §8](./03-upstream-layer.md)）；`verify/mock_upstream.py` 的场景集作为回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort） |
+| Codex 客户端演进 | 其 SSE 生命周期契约与响应头要求（[13 §1](./13-research-reassessment.md)）纳入回归测试；**字节透传使我们对客户端演进天然免疫**——上游发什么原样到达 |
 
-> **分离带来的升级隔离**：AxonHub 是 stock、L0、躲在 [GatewayAdapter](./03-upstream-layer.md) 接口后、版本锁定。升级风险被三层关住——① 只可能在 GatewayAdapter 边界出问题，不渗进自研核心；② verify/ harness 是每次升级的**准入门**（不全绿不准升）；③ 默认单实例让升级本身就是"停-换-验-起"，无滚动复杂度。GraphQL 报字段错时按 [beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) 修正 `Reconcile` 查询（[03 §4.4](./03-upstream-layer.md)）。
+> 对比转向前：不再需要"锁 AxonHub tag + 每次升级跑六假设 harness + 核对 GraphQL 适配表"这一整套（[11 §1.4](./11-decision-full-selfbuilt.md)）。
 
 ---
 
@@ -84,7 +76,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 | 类别 | 方式 | 依据 |
 | --- | --- | --- |
 | 策略参数 | 存 PG `config_params`，非环境变量；关键项二次确认（FR-115） | [02 §2](./02-data-model.md) |
-| 基础设施配置 | 环境变量/`.env`（DSN、端口、AxonHub 地址） | — |
+| 基础设施配置 | 环境变量/`.env`（DSN、端口、监听地址） | — |
 | 上游 Key / 采集凭证 | **一期明文**存 PG（`upstream_keys.secret`、`collector_credentials.*`）；日志与管理界面脱敏不显示完整 Key（FR-094/113） | FR-113 |
 | TLS | Caddy 自动证书（内部可用自签） | — |
 
@@ -96,7 +88,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 
 | 对象 | 策略 |
 | --- | --- |
-| PG 全库 | 每日 `pg_dump`（含 `public` + `axonhub` schema）；保留 ≥30 天备份 |
+| PG 全库 | 每日 `pg_dump`；保留 ≥30 天备份 |
 | 账本分区 | 月 RANGE 分区，保留 ≥180 天（7 分区），到期 `DETACH`+`DROP`（[02 §9](./02-data-model.md)，FR-112） |
 | 分区滚动 | 后台定时任务提前建下月分区 + DROP 超期分区（一期自研任务，非 pg_partman，02 开放点 1） |
 | 恢复演练 | M4 前做一次 dump→restore 演练，确认账本可复算（FR-013 历史按原价格版本复算） |
@@ -108,7 +100,7 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 
 | 面 | 做法 |
 | --- | --- |
-| 就绪/存活 | sla-core `/healthz`（PG 可达 + axonhub 可达）；Caddy 据此摘除实例 |
+| 就绪/存活 | sla-core `/healthz`（PG 可达 + 至少一个上游渠道健康）；Caddy 据此摘除实例 |
 | 决策延迟 | 自监控 P99 决策开销 ≤50ms（FR-110）。**测法**：发往上游前多打一个时间戳，`决策/网关开销 = 总延迟 − 上游耗时`（对应 [02](./02-data-model.md) `attempts.full_latency_ms − upstream_latency_ms`）；超标告警 |
 | 账本对账滞后 | 监控 `attempts.reconciled=false` 积压（[02 idx_attempts_unrecon](./02-data-model.md)） |
 | 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（`is_stale`）；凭证失效告警 P2 |
@@ -119,8 +111,8 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 ## 7. M0 部署清单（退出标准）
 
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
-- [ ] AxonHub beta5 用 PG 共库；bootstrap 幂等下发 retryPolicy 置零（单测校验全字段）。
-- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110 验证）；停掉唯一 axonhub，核心返回明确不可用、不旁路（AC-27）。
+- [ ] 上游直连打通：真实上游发一次 Responses 流式请求，**35 字段与 reasoning item 零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 基线）。
+- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部上游候选不可用时返回明确错误、不旁路（AC-27）。
 - [ ] verify/ harness 对当前 beta5 跑通（升级门禁基线）；**M0 起把 07 的 PG 共库 + Responses 渠道两项固化进 harness**（默认单实例，故不含"双实例并发迁移"项——那项仅在选择双实例部署时按 07 §2 runbook 验）。
 - [ ] CI：Go 构建 + `config_params`/别名策略加载 + 不可存列 schema 断言。
 - [ ] `pg_dump`/restore 演练脚本就位。
@@ -131,11 +123,11 @@ AxonHub 近 30 天 ~75 次提交、仍无稳定 1.0，"今天验证通过的行�
 
 | # | 开放点 | 结论 |
 | --- | --- | --- |
-| 1 | AxonHub 实例数（单 vs 多） | ✅ **已定（2026-07-23）：默认单实例**（FR-110 只约束核心，AxonHub 单点由进程自愈+禁旁路兜底）；**双实例为部署者可选**，[07 §2](./07-axonhub-runtime-probes.md) 已验证可行但需迁移串行 runbook，需要时再启用，不进默认路径 |
+| 1 | 数据面单点 | ✅ **已消除**：转向自研后无外部网关容器（[11](./11-decision-full-selfbuilt.md)）；上游直连由 ≥2 个 core 实例承载 |
 | 2 | LB 选型 | ✅ **定** Caddy（自动 TLS、配置简单、单机足够） |
 | 3 | collector 打包 | ✅ **定** 一期 core 二进制子命令（部署简单）；量级上来再拆独立容器/独立扩缩 |
 | 4 | 备份加密（含明文 Key 的 dump） | ✅ **定** 一期 dump 落本机加密卷；对外提供服务前随 FR-113 一起升级 |
 
 ---
 
-_本篇为 M0 部署基线。生产永远锁定 AxonHub 具体 tag；任何 AxonHub 升级先过 verify/ 准入门（硬约束 11）。_
+_本篇为 M0 部署基线。转向自研后不再有外部网关版本治理；需盯的风险转为**上游协议变更**与 **Codex 客户端演进**（§3）。_

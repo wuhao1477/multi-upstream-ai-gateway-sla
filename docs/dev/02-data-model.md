@@ -4,9 +4,9 @@
 | --- | --- |
 | 状态 | 草案，待评审（M0 前定稿） |
 | 日期 | 2026-07-23 |
-| 栈 | Go / PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / AxonHub `v1.0.0-beta5`（L0） |
-| 输入 | [PRD v1.3](../PRD.md)（FR-001~119、AC-01~32、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设 + beta5 schema 适配表）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 六模块、AxonHub 契约） |
-| 覆盖范围 | 本篇只定义**自研 SLA 核心自有的 PG 库**结构。AxonHub 的 `requests/executions/usageLogs` 是**外部只读来源**（经 `/admin/graphql` 对账），不在本库建表，仅保留其关联键 |
+| 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
+| 输入 | [PRD v1.3](../PRD.md)（FR-001~119、AC-01~32、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设 + beta5 schema 适配表）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
+| 覆盖范围 | 本篇定义**自研 SLA 核心的 PG 库**结构。转向自研后（[11](./11-decision-full-selfbuilt.md)），本库是**账本唯一真相源**，无外部网关账本需对账 |
 
 ---
 
@@ -42,7 +42,7 @@ CREATE DOMAIN usd_amount AS NUMERIC(20,10);
 - 账本表主键：`id UUID DEFAULT ...`（应用层生成 **UUIDv7**，保证时间有序 + 多实例无冲突）。
 - 注册/配置表主键：`id BIGINT GENERATED ALWAYS AS IDENTITY`。
 - 枚举一律用 `TEXT + CHECK` 约束（便于 beta5 升级时扩枚举，不用 ALTER TYPE）。
-- `data_source` 取值：`auto_collect`（适配器自动采）/ `manual`（人工录入，7 天有效，FR-011）/ `gateway`（AxonHub 回传）/ `derived`（自算）。
+- `data_source` 取值：`auto_collect`（适配器自动采）/ `manual`（人工录入，7 天有效，FR-011）/ `upstream`（上游回传）/ `derived`（自算）。
 
 ---
 
@@ -60,8 +60,6 @@ CREATE TABLE channels (
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')), -- ISSUE-002 §1 三家族
   base_url        TEXT NOT NULL,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
-  -- AxonHub 侧绑定：Key-per-Channel（假设 1 证实的隔离机制，01-架构 §3）
-  axonhub_channel_id   INTEGER,   -- beta5 relay gid 末段数字（beta5 适配表）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
@@ -95,8 +93,6 @@ CREATE TABLE upstream_keys (
   unlimited_quota BOOLEAN DEFAULT false,
   model_limits  JSONB,            -- NewAPI model_limits（元数据，非正文）
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked','expired','insufficient_perm')), -- FR-031
-  -- AxonHub 侧 Key-per-Channel 映射（01-架构 §3.1；开放点3 自动开通登记）
-  axonhub_api_key_id   INTEGER,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -256,7 +252,7 @@ CREATE INDEX idx_config_active    ON config_params(scope_type, scope_id, param_k
 
 ## 3. 价格版本域（不可覆盖版本 + 美元口径）
 
-> FR-012：每次价格确认形成**不可覆盖版本**；FR-013：每请求关联决策时价格版本；FR-018：统一美元、一期 1:1。与 AxonHub `usageLogs.costPriceReferenceID`（假设 4 证实）关联，使自研账本与网关侧成本可交叉复算。
+> FR-012：每次价格确认形成**不可覆盖版本**；FR-013：每请求关联决策时价格版本；FR-018：统一美元、一期 1:1。价格版本由自研核心持有，`attempts.price_version_id` 回指本表实现历史成本复算。
 
 ```sql
 -- 价格版本（FR-010/012/013/017/018）：append-only，永不 UPDATE 已生效行
@@ -274,8 +270,6 @@ CREATE TABLE price_versions (
   data_source     TEXT NOT NULL,              -- auto_collect / manual / gateway
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）
   effective_at    TIMESTAMPTZ NOT NULL,       -- 生效时间（FR-012）
-  -- 与 AxonHub 侧价格版本对账（假设4；saveChannelModelPrices 下发后 usageLogs 产出该引用）
-  axonhub_cost_price_reference_id TEXT,        -- = beta5 usageLogs.costPriceReferenceID
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -299,7 +293,6 @@ CREATE TABLE price_change_log (
 
 ```sql
 CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC);
-CREATE INDEX idx_price_ref ON price_versions(axonhub_cost_price_reference_id); -- 对账
 ```
 
 **服务 FR/AC**：FR-010、FR-012~018；AC-02（历史按原版本复算）、AC-03（降价确认后逐步）、AC-17（美元口径 1:1）。
@@ -308,7 +301,7 @@ CREATE INDEX idx_price_ref ON price_versions(axonhub_cost_price_reference_id); -
 
 ## 4. 请求与逐 Attempt 账本域（本篇核心）
 
-> 一个外部请求下挂多条 attempt（首字前接管 → 多跳）。每 attempt 记 binding、status、errorMessage、上游 externalID、逐尝试 metrics、是否被 SLA 取消、继续计费标记、隐藏重试补算。取消按 errorMessage 归并（AC-30）。与 AxonHub execution/usageLogs 对账。**不存正文/头/体**（FR-112）。
+> 一个外部请求下挂多条 attempt（首字前接管 → 多跳）。每 attempt 记 binding、status、errorMessage、上游 externalID、逐尝试 metrics、是否被 SLA 取消、继续计费标记、隐藏重试补算。取消按 errorMessage 归并（AC-30）。**账本为单一真相源，无对账环节**（[11](./11-decision-full-selfbuilt.md)）。**不存正文/头/体**（FR-112）。
 
 ### 4.1 外部请求
 
@@ -342,7 +335,7 @@ CREATE TABLE requests (
 -- 逐尝试账本（FR-097/098、FR-070、FR-080、FR-119；AC-09/12/16/30/32）
 CREATE TABLE attempts (
   id                UUID NOT NULL,            -- UUIDv7
-  request_id        UUID NOT NULL,            -- 关联同一外部请求（对账主键，假设2）
+  request_id        UUID NOT NULL,            -- 关联同一外部请求（归集主键）
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键，与 requests 对齐
   attempt_no        SMALLINT NOT NULL,        -- 该请求内第几跳（1=主，2=接管…）
   binding_id        BIGINT NOT NULL REFERENCES bindings(id), -- 渠道+key+url（路由资源）
@@ -371,7 +364,7 @@ CREATE TABLE attempts (
 
   -- ── SLA 取消 / 继续计费 / 重复费用（FR-080、AC-32）──
   canceled_by_sla   BOOLEAN NOT NULL DEFAULT false, -- 是否被 SLA 主动取消（首字前接管/期限到达）
-  cancel_propagated BOOLEAN,                  -- 取消是否已传播到上游止损（AC-32；ccLoad/AxonHub 已验证会拆连接）
+  cancel_propagated BOOLEAN,                  -- 取消是否已传播到上游止损（AC-32；自研层 Close() 拆上游连接，[03 §6](./03-upstream-layer.md)）
   continue_billing  BOOLEAN NOT NULL DEFAULT false, -- 取消后是否仍继续计费（FR-080 记录继续计费情况）
   is_duplicate_cost BOOLEAN NOT NULL DEFAULT false, -- 未取消重复请求费用（FR-058/8.4）
 
@@ -381,12 +374,8 @@ CREATE TABLE attempts (
   hidden_retry_detected BOOLEAN NOT NULL DEFAULT false,
   hidden_retry_kind  TEXT,                    -- 如 'codex_400_strip_thinking'（假设6补验）
 
-  -- ── 与 AxonHub 对账关联键（假设2/4，经 /admin/graphql 拉取）──
-  axonhub_request_id      TEXT,               -- beta5 request_id
-  axonhub_execution_id    TEXT,               -- 逐尝试 execution 记录
-  axonhub_external_id     TEXT,               -- beta5 execution.externalID = 上游平台请求ID（假设4）
-  reconciled        BOOLEAN NOT NULL DEFAULT false, -- 对账是否完成
-  reconciled_at     TIMESTAMPTZ,
+  -- ── 上游关联键（自研直连，旁路观察提取）──
+  upstream_response_id    TEXT,               -- 上游响应 id（如 resp_.../chatcmpl-...），用于排障关联
 
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   ended_at          TIMESTAMPTZ,
@@ -394,7 +383,7 @@ CREATE TABLE attempts (
 ) PARTITION BY RANGE (request_created_at);
 ```
 
-### 4.3 逐 Attempt 用量与费用（对账落地）
+### 4.3 逐 Attempt 用量与费用
 
 ```sql
 -- attempt 级用量/费用（FR-058、FR-016/019；假设4 token+cost 已收口）
@@ -410,8 +399,7 @@ CREATE TABLE attempt_usage (
   prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存部分，FR-054）
   total_cost        usd_amount,               -- beta5 usageLogs.totalCost
   cost_items        JSONB,                    -- beta5 usageLogs.costItems（明细，元数据）
-  axonhub_cost_price_reference_id TEXT,       -- 关联价格版本（假设4；对回 price_versions）
-  cost_source       TEXT NOT NULL DEFAULT 'gateway' CHECK (cost_source IN ('gateway','estimated','reconciled')),
+  cost_source       TEXT NOT NULL DEFAULT 'upstream' CHECK (cost_source IN ('upstream','estimated')),
   -- 预估 vs 实际扣费差异（FR-016/019）：超容差标计费异常
   estimated_cost    usd_amount,
   cost_variance     usd_amount,               -- 实际-预估；无法归因差额单列（FR-019/AC-23）
@@ -443,7 +431,7 @@ CREATE TABLE session_prefix_ledger (
 
 > 收口 §11 开放点 2。原则：**主流编码客户端本来就带会话标识**，网关只需按优先级"捞"，不新增对外契约要求；捞不到才退化，**绝不编造会话身份**。
 
-**调研证据（2026-07-23，覆盖 AxonHub 支持的协议与主流客户端）**：
+**调研证据（2026-07-23/25，覆盖主流客户端与协议）**：
 
 | 客户端 / 协议 | 客户端说的入站协议 | 自带会话标识 | 载体 | 一期可直连？（FR-111） |
 | --- | --- | --- | --- | --- |
@@ -485,11 +473,9 @@ CREATE TABLE session_prefix_ledger (
 **索引**
 
 ```sql
-CREATE INDEX idx_attempts_request   ON attempts(request_id, request_created_at); -- 对账/归集同一请求（假设2）
+CREATE INDEX idx_attempts_request   ON attempts(request_id, request_created_at); -- 归集同一请求的多跳
 CREATE INDEX idx_attempts_binding   ON attempts(binding_id, started_at);         -- 喂健康统计（§7）
-CREATE INDEX idx_attempts_axreq     ON attempts(axonhub_request_id);             -- 与 AxonHub 对账（假设4）
-CREATE INDEX idx_attempts_unrecon   ON attempts(request_created_at)
-                                       WHERE reconciled=false;                    -- 待对账扫描（部分索引）
+CREATE INDEX idx_attempts_upresp    ON attempts(upstream_response_id);           -- 排障关联上游响应
 CREATE INDEX idx_attempts_cancel    ON attempts(cancel_reason)
                                        WHERE cancel_reason<>'none';               -- 取消口径统计（AC-30）
 CREATE INDEX idx_usage_attempt      ON attempt_usage(attempt_id, request_created_at);
@@ -843,7 +829,7 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 ### 9.3 多实例并发写（FR-110）
 
 - 账本主键 UUIDv7 由各 sla-core 实例本地生成，无序列争用；同一 `request_id` 下的多 attempt 由持有该请求的实例串行写，无跨实例竞争。
-- 对账器（steward/ledger）可多实例运行，用 `SELECT ... FOR UPDATE SKIP LOCKED` 在 `idx_attempts_unrecon` 上领取待对账 attempt，避免重复对账。
+- 账本写入由持有该请求的实例完成，无跨实例竞争；**转向自研后无对账器**（[11](./11-decision-full-selfbuilt.md)），usage 直接来自旁路观察的终帧（[03 §7](./03-upstream-layer.md)）。
 - 后台快照（价格/健康/余额）写路径与同步决策路径解耦：决策只读内存快照，PG 抖动不阻塞（01-架构 §5）。
 
 ---
@@ -861,16 +847,18 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 | §7 采集/余额/凭证（collector_credentials/collector_snapshots/balance_signals） | FR-010/011、020~027、031、113、116、**118** | AC-28/29 |
 | §8 告警（alert_events） | FR-100~103、105 | AC-19 |
 
-### 10.1 与 ISSUE-001 运行时结论的对齐（逐条硬约束）
+### 10.1 与硬约束的对齐（转向自研后）
 
-| 运行时硬约束（ISSUE-001 文末 + 00 硬约束表） | 数据层落点 |
+> 下列约束原由 [ISSUE-001](../issues/ISSUE-001-tech-assumption-verification.md) 的运行时验证提出（针对外部网关）；转向自研后（[11](./11-decision-full-selfbuilt.md)）**约束本身依然成立**，只是落点从"网关字段 + 对账"变为"自研旁路观察"。
+
+| 硬约束 | 数据层落点 |
 | --- | --- |
-| 自算内容感知 TTFT，不采信网关首字字段（假设3/6） | `attempts.content_aware_ttft_ms`（采信）vs `gateway_reported_ttft_ms`（仅存证） |
-| 取消/失败按 errorMessage 归并（假设2；beta5 canceled 仅指客户端取消） | `attempts.gateway_status`（原样）+ `error_message` + `cancel_reason`（归并） |
-| 配额未知默认保守排除（假设5；AxonHub 默认保留） | `balance_signals.quota_status`，`unknown` → selector 排除（`idx_balsig_quota`） |
-| 识别同资源隐藏重试、补算上游调用（假设6；Codex 400 body-rewrite） | `attempts.upstream_call_count` + `hidden_retry_detected/kind`；`attempt_usage.upstream_seq` |
-| 账本可对账（假设4：externalID/token/cost/costPriceReferenceID） | `attempts.axonhub_*` + `attempt_usage.axonhub_cost_price_reference_id` → `price_versions` |
-| AxonHub 自身重试须置零，否则污染账本（假设1/2） | `attempts.attempt_no/role` 表达自研层驱动的每跳；网关内隐藏重试若发生落 `upstream_call_count>1` |
+| 自算内容感知 TTFT，不采信任何上游首字信号 | `attempts.content_aware_ttft_ms`（旁路观察判定，[03 §3.2](./03-upstream-layer.md)）；`gateway_reported_ttft_ms` 列保留供上游若回传该类字段时**仅存证** |
+| 取消/失败口径统一（客户端断开 / 上游断流 / SLA 取消 / 上游错误） | `attempts.cancel_reason`（归并枚举）+ `error_message`（原文存证） |
+| 配额未知默认保守排除（FR-118） | `balance_signals.quota_status`，`unknown` → selector 排除（`idx_balsig_quota`） |
+| **一次外部调用 = 一次上游调用**（FR-119） | 自研层**不做隐藏重试**，`upstream_call_count` 恒为 1；`hidden_retry_detected` 仅在接入会隐藏重试的第三方通道时才可能为真（一期不存在） |
+| 账本自洽（usage/cost 由旁路观察终帧提取，价格版本自持） | `attempts.upstream_response_id`、`attempt_usage.*` → `price_versions`（[03 §7](./03-upstream-layer.md)） |
+| 每跳显式落账，无外部账本需比对 | `attempts.attempt_no/role` 表达 `executor` 驱动的每一跳；**单一真相源** |
 
 ### 10.2 与 ISSUE-002 真实字段的对齐
 
