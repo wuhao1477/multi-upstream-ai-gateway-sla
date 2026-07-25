@@ -132,25 +132,33 @@ type ProtocolSupport struct {
 > 正确做法不是假装窗口不存在，而是**把"上游结果已知"与"下游交付已确认"建模成两个独立事实**，在二者不一致时**取保守解释**。
 
 ```sql
--- attempts 增两列：下游交付确认（best-effort，socket write 返回后异步经 outbox 落库）
-downstream_first_byte_at TIMESTAMPTZ,   -- 首字节已写出下游 socket
-downstream_delivered_at  TIMESTAMPTZ,   -- 终帧已写出下游 socket / 流正常关闭
+-- attempts 增两列：**本进程下游写入完成**（socket write 返回后异步经 outbox 落库）
+downstream_first_byte_written_at TIMESTAMPTZ,   -- 首字节已写出本进程的下游连接
+downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流正常关闭
 ```
 
-- 这两列**不参与计费**（成本只看上游事实），因此可以异步落库、允许滞后——它们只影响**用户侧 SLA 的诚实性**。
-- **不一致时一律按"未确认 = 未交付"处理**：宁可把一次实际成功的交付记为失败，也不能把用户看到的截断流记为成功。
+> ⚠️ **这两列证明的是「我们写出去了」，不是「客户端收到了」**（第 12 轮 [critical] 修正）：`sla-core` 的下游对端是 **Caddy**，不是 Codex 客户端。socket write 返回只说明字节被本机内核／Caddy 接受；此后 Caddy、主机或网络仍可能失败，客户端照样拿到截断流。**上一版把它叫作「交付确认」并据此声称用户侧 SLA 诚实性，是第二次过度声称。**
+>
+> **端到端交付确认在当前拓扑下无法实现** —— 那需要客户端回一个应用层 ack，而主力客户端是 Codex CLI，**我们不能要求它配合**（与 [02 §4.5 会话标识](./02-data-model.md) 同一条纪律）。
+>
+> **故本设计能诚实声称的最强结论是**：`completed` = **我们已成功把完整响应写出到下游连接**。「客户端未收到」这一残余窗口**已知、不可观测、明确接受**，不写进任何保证里。
+
+- 这两列**不参与计费**（成本只看上游事实），因此可以异步落库、允许滞后。
+- **不一致时一律按「未写出 = 未完成」处理**：宁可把一次实际成功的响应记为失败，也不能把我们没写完的流记为成功。
 
 **四个 kill 时点的完整终态**（AC-12/AC-35 据此写判定）：
 
-| # | kill 时点 | 客户端实际 | 库中事实 | attempt | request（用户 SLA） | 计费 |
+| # | kill 时点 | 下游（Caddy）实际收到 | 库中事实 | attempt | request（用户 SLA） | 计费 |
 | --- | --- | --- | --- | --- | --- | --- |
 | K1 | 首字 outbox **提交前** | 无内容 | `pending` | `unknown_billing` | `failed` | 估算 + 待核对 |
-| K2 | 首字已提交、**字节未写出** | 无内容 | `committed`，`downstream_first_byte_at IS NULL` | `interrupted` | `failed`（用户没看到内容 → 不计流中断） | 估算 + 待核对 |
+| K2 | 首字已提交、**字节未写出** | 无内容 | `committed`，`downstream_first_byte_written_at IS NULL` | `interrupted` | `failed`（用户没看到内容 → 不计流中断） | 估算 + 待核对 |
 | K3 | 终帧 outbox **提交前** | 截断流 | `committed`，`terminal_event IS NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
-| K4 | 终帧已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_delivered_at IS NULL` | **`completed`**（上游结果与成本**精确已知**） | **`interrupted`**（交付未确认 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
-| — | 全部完成 | 完整响应 | `terminal_event` + `downstream_delivered_at` 均非空 | `completed` | `completed` | 实际 |
+| K4 | 终帧已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → `failed`） | **`interrupted`**（我们没写完 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
+| — | 全部完成 | 完整响应 | `terminal_event` + `downstream_write_completed_at` 均非空 | `completed` | `completed` | 实际 |
 
-> **K4 是这次修正的核心**：attempt 层记 `completed`（我们确实知道上游干了什么、花了多少钱），request 层记 `interrupted`（我们**不能确认**用户收全了）。两层结论不同不是矛盾，而是两个不同事实的如实记录。
+> **K4 是这次修正的核心**：attempt 层按上游终帧如实记（我们确实知道上游干了什么、花了多少钱），request 层记 `interrupted`（我们**没把它写完**）。两层结论不同不是矛盾，而是两个不同事实的如实记录。
+>
+> ⚠️ **attempt 终态永远由 `terminal_event` 决定**（第 12 轮 [high]）：上一版 K4 无条件写 `completed`，会在「上游返回 error 终帧、恰好我们没写完」时把**上游失败记成渠道成功**，污染 binding 成功率、冷却与路由选择。下游是否写完**只决定 request 的终态**，不得影响 attempt 的成败归因。
 
 ### 3.1 SSE 扫描器（只读不改）
 

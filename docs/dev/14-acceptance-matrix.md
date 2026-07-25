@@ -61,7 +61,7 @@
 | AC-31 | role-only 元事件后 0.5s 才发首内容 | MOCK | **七场景 × 双断言**（[03 §3.2](./03-upstream-layer.md) 拆为 `ShouldCommit`/`HasTTFTOutput`，须分别断言）：<br>`mock-normal` → commit=true@首 delta，ttft≈500ms<br>`mock-heartbeat` → 心跳不触发，ttft≈600ms+<br>`mock-tool-only` → commit=true@首 `function_call`/`tool_calls`，ttft=该时刻，**不得被接管取消**<br>`mock-refusal-only` → 同上<br>`mock-reasoning-summary-only` → 同上<br>`mock-empty-sse`（`response.completed` 无 delta）→ **commit=true（不取消）但 ttft=NULL**<br>`mock-error-terminal` → commit=true（按失败关单）、ttft=NULL<br>全场景**不得**出现 ttft≈0ms |
 | AC-32 | 已输出首字后中途取消 | MOCK | 客户端收 3 chunk 后断开 → mock 侧下一次写入 **EPIPE**、停止产出；`attempts.cancel_propagated = true`；上游连接关闭时刻 − 客户端断开时刻 **< 1s** |
 
-| **AC-35** | 进程在四个时点崩溃后重启（**账本 + 配额崩溃恢复**） | FIXTURE | 自动化在四个时点 `kill -9` core 并重启，**每个时点断言四项全部终结**（[01 §5.1](./01-architecture.md)、[02 §4.2bis](./02-data-model.md)）：`attempt_status` / `requests.final_status` / `client_reservations.state` / `client_daily_spend.reserved_usd`。①调用前 → `failed`/`failed`/`abandoned`/预留已归零；②已发出未见首字 → `unknown_billing`/`failed`/`settled`+`needs_manual_review`+P2 告警；③**首字后终帧前（`attempt_status='committed'`）** → `interrupted`/`interrupted`/`settled`+P3；④终帧后关单前 → `completed`/`completed`/`settled`(实际用量)。**四个时点均须断言：无 `pending`/`committed` 残留、无 `reserved` 预留残留、`ledger_outbox` 重放不产生重复账目**。另须含 **③′ 两个边界用例**（[03 §3.0](./03-upstream-layer.md) 冻结的顺序）：③′a 在"终帧已收到、**outbox 未提交**"之间 kill → 下游流**必须已被中断**（客户端未收到完整终帧）且恢复为 `interrupted`；③′b 在"**outbox 已提交**、finalize 未完成"之间 kill → 恢复为 `completed`。**两者必须一致：客户端拿到完整响应 ⟺ 库中有终帧证据**，不允许出现"客户端成功、账本中断"。另须含**长流式续租用例**：一个 90s 的流式响应在续租正常时**不得**被恢复扫描终结 |
+| **AC-35** | 崩溃恢复：账本 + 配额 + 交付终态 | FIXTURE | 自动化在下列时点 `kill -9` core 并重启，**每个时点断言五项**：`attempt_status` / `requests.final_status` / `client_reservations.state` / `client_daily_spend.reserved_usd` / 下游实际收到的字节。判定表与 [03 §3.0](./03-upstream-layer.md) K1~K4、[02 §4.2bis](./02-data-model.md) ①②③a③b1③b2③c **逐行一致**：<br>① 调用前 → `failed`/`failed`/`abandoned`/预留归零<br>② 已发出未见首字（K1）→ `unknown_billing`/`failed`/`settled`+待核对+P2<br>③b1 首字已落库但**字节未写出**（K2）→ `interrupted`/**`failed`**（下游零字节，**不计流中断**）<br>③b2 已写出部分、终帧前（K3）→ `interrupted`/`interrupted`（**计流中断**）<br>③c 终帧已落库但**字节未写完**（K4）→ attempt **由 `terminal_event` 决定**（error/incomplete 须为 `failed`，**不得**记成渠道成功）/ request `interrupted` / `settled` 用**实际用量**、无需人工核对<br>③a 全部写完 → `completed`/`completed`/`settled`(实际)<br>**K4 必须单独注入**（outbox commit 返回之后、socket write 之前 kill）——DB 提交与 socket 写出无法原子化，这个窗口**不可消除**，不得假设它不存在。<br>**共同断言**：无 `pending`/`committed` 残留、无 `reserved` 预留残留、`ledger_outbox` 重放不产生重复账目、跨午夜请求费用记在**预留那一天**。<br>另须含**长流式续租用例**：90s 流式响应在续租正常时**不得**被恢复扫描终结 |
 
 > **M1 关键验收**（[00](./00-overview-and-milestones.md) 已列）：REAL 环境 Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**。
 
@@ -172,8 +172,8 @@
 
   | 指标 | 定义 | 门禁 |
   | --- | --- | --- |
-  | `downstream_ttft_delay_ms` | `attempts.downstream_first_byte_at − upstream_first_actionable_at` | P99 阈值**压测中冻结**（见下） |
-  | `downstream_finish_delay_ms` | `attempts.downstream_delivered_at − upstream_terminal_at` | 同上 |
+  | `downstream_ttft_delay_ms` | `attempts.downstream_first_byte_written_at − upstream_first_actionable_at` | P99 阈值**压测中冻结**（见下） |
+  | `downstream_finish_delay_ms` | `attempts.downstream_write_completed_at − upstream_terminal_at` | 同上 |
 
   两者均为**派生指标**，四个时刻列都已在 [02 `attempts`](./02-data-model.md) 落库，无需新增列。
 

@@ -32,10 +32,16 @@
 ```sql
 -- 统一美元金额域：一期各币种 1:1（FR-018），币种仅名称保留在各表 currency 列
 -- 精度覆盖到 1e-10（实测最小成本样本 1.3e-5，见 ISSUE-001 假设 4）
-CREATE DOMAIN usd_amount AS NUMERIC(20,10) CHECK (VALUE >= 0);
--- ⚠️ 非负约束是**账务完整性闸门**（第 11 轮 [high]）：`adjust` 是唯一的人工修正入口，
---    若允许负值，一次 settled_usd += (new − old) 就能把已结算消费改成负数并清掉
---    needs_manual_review，从而长期放宽日配额，且数据库不会拒绝。
+-- 通用金额（**可正可负**）：用于差额类派生值
+CREATE DOMAIN usd_amount AS NUMERIC(20,10);
+-- 非负金额：价格、费用、余额、配额、预留/结算等**语义上不可能为负**的列一律用它
+CREATE DOMAIN nonneg_usd AS NUMERIC(20,10) CHECK (VALUE >= 0);
+-- ⚠️ 第 11 轮曾直接给 usd_amount 加非负约束 —— **是回归**（第 12 轮 [high]）：
+--    该域已用于 attempt_usage.cost_variance（= 实际−预估，实际更低时必然为负）与
+--    balance_signals.conservative_floor（= 最近余额−已知消耗，可低于零）。
+--    合法数据会撞约束、整笔用量或余额信号无法入库。故拆成两个域，按语义选用。
+-- 非负的意义（`adjust` 是唯一人工修正入口）：若允许负值，一次 settled_usd += (new − old)
+--    就能把已结算消费改成负数并清掉 needs_manual_review，长期放宽日配额而数据库不拒绝。
 
 -- 采集侧多种额度单位（quota整数 / USD浮点 / micros）由适配器入库前归一为 usd_amount（ISSUE-002 §6.4）
 -- 所有时间戳统一 TIMESTAMPTZ（UTC 存储）
@@ -316,7 +322,7 @@ CREATE TABLE gateway_clients (
   -- 授权范围
   allowed_aliases TEXT[],                      -- 可用的模型别名；NULL=全部（FR-062/117）
   -- 配额（防单个调用方烧光额度）
-  quota_daily_usd usd_amount,                  -- 日费用上限；NULL=不限
+  quota_daily_usd nonneg_usd,                  -- 日费用上限；NULL=不限
   rpm_limit     INTEGER,                       -- 每分钟请求数上限
   -- 生命周期
   status        TEXT NOT NULL DEFAULT 'active'
@@ -339,8 +345,8 @@ CREATE INDEX idx_gwclient_active ON gateway_clients(status) WHERE status='active
 CREATE TABLE client_daily_spend (
   gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id),
   spend_date    DATE NOT NULL,
-  reserved_usd  usd_amount NOT NULL DEFAULT 0,  -- 已预留（请求发起时 +预估）
-  settled_usd   usd_amount NOT NULL DEFAULT 0,  -- 已结算（请求结束时按实际替换预留）
+  reserved_usd  nonneg_usd NOT NULL DEFAULT 0,  -- 已预留（请求发起时 +预估）
+  settled_usd   nonneg_usd NOT NULL DEFAULT 0,  -- 已结算（请求结束时按实际替换预留）
   PRIMARY KEY (gateway_client_id, spend_date)
 );
 
@@ -361,8 +367,8 @@ CREATE TABLE client_reservations (
   request_id    UUID PRIMARY KEY,               -- 天然幂等键：一个请求只有一行
   gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id),
   spend_date    DATE NOT NULL,
-  estimated_usd usd_amount NOT NULL,            -- 请求进入时预留
-  actual_usd    usd_amount,                     -- 结算后写入
+  estimated_usd nonneg_usd NOT NULL,            -- 请求进入时预留
+  actual_usd    nonneg_usd,                     -- 结算后写入
   state         TEXT NOT NULL DEFAULT 'reserved'
                   CHECK (state IN ('reserved','settled','abandoned')),
   settle_event_key TEXT,                        -- 结算事件唯一键，重放去重
@@ -433,15 +439,40 @@ UPDATE client_daily_spend d
   FROM settled s
  WHERE d.gateway_client_id = s.gateway_client_id
    AND d.spend_date        = s.spend_date;
--- ③ 同事务推终态，保证"配额已终结"与"账本已终结"不可分裂
+-- ③ 同事务推 **attempt** 终态（由上游 terminal_event 决定，与下游是否写完无关）
 UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
  WHERE request_id = :rid AND attempt_status IN ('pending','committed');
-UPDATE requests  SET final_status  = :final_terminal
- WHERE id = :rid AND final_status = 'pending';
+-- ⚠️ **request 的终态不在这里定**（第 12 轮 [critical]）：见下方两阶段说明
 COMMIT;
 ```
 
 > **`finalize` 的入参只有** `request_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
+
+**关单必须两阶段：`finalize_upstream` → `finalize_delivery`**（第 12 轮 [critical]）：
+
+> ⚠️ 上一版让 `finalize` 在**终帧到达时**就把 `requests.final_status` 写成 `completed`。但那一刻终帧**还没写给下游**（[03 §3.0](./03-upstream-layer.md) 要求先落库再放行）、`downstream_write_completed_at` 也还不存在。于是随后落入 K4 窗口崩溃时，request **早已是终态**，恢复 SQL 的 `WHERE final_status='pending'` 闸门再也改不动它 —— **第 11 轮新增的 K4 语义被正常关单路径整个绕过**，等于白加。
+
+| 阶段 | 触发 | 写什么 | 同步性 |
+| --- | --- | --- | --- |
+| **`finalize_upstream`** | 上游**终帧到达**（成本此刻已确定） | reservation 结算（上方 SQL）+ `attempt_status` 终态 + `terminal_event`/usage | **同步**，且必须在放行终帧字节**之前**提交 |
+| **`finalize_delivery`** | 下游 **socket write 返回之后** | `downstream_write_completed_at` + `requests.final_status` | 异步经 outbox（不涉及计费） |
+
+```sql
+-- finalize_delivery：request 终态由「我们是否写完」决定
+UPDATE requests r
+   SET final_status = CASE
+         WHEN a.downstream_write_completed_at IS NOT NULL
+              AND a.attempt_status = 'completed'          THEN 'completed'
+         WHEN a.attempt_status IN ('failed','unknown_billing') THEN 'failed'
+         ELSE 'interrupted'                                -- 我们没写完 → 保守
+       END
+  FROM attempts a
+ WHERE r.id = :rid AND a.request_id = :rid AND a.attempt_no = :last_attempt_no
+   AND r.final_status = 'pending';                         -- 幂等：只推一次
+```
+
+- **计费与交付彻底解耦**：钱在 `finalize_upstream` 就结清（成本那时已知），交付结论晚一步不影响配额正确性。
+- **崩溃在两阶段之间** = 正是 K4：reservation 已 settled、attempt 已终态、request 仍 `pending` → 恢复扫描按 §4.2bis ③c 判 `interrupted`。**这条路径现在真的可达了。**
 
 **两条调用路径（都从 `reserved` 出发），同一事务，参数不同**：
 
@@ -461,8 +492,8 @@ COMMIT;
 CREATE TABLE reservation_adjustments (
   event_key     TEXT PRIMARY KEY,              -- 幂等键：重复提交/崩溃重放只生效一次
   request_id    UUID NOT NULL REFERENCES client_reservations(request_id),
-  old_actual_usd usd_amount NOT NULL,          -- 修正前值（审计）
-  new_actual_usd usd_amount NOT NULL,
+  old_actual_usd nonneg_usd NOT NULL,          -- 修正前值（审计）
+  new_actual_usd nonneg_usd NOT NULL,
   operator      TEXT NOT NULL,                 -- 责任人（FR-099/104）
   reason        TEXT NOT NULL,                 -- 依据（如"上游账单 #12345"）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -496,7 +527,7 @@ UPDATE client_reservations
 COMMIT;
 ```
 
-- **`new_actual_usd` 必须 ≥ 0**：`usd_amount` 域已带 `CHECK (VALUE >= 0)`，API 层另行返回 **400** 拒绝负值（不依赖数据库报错）。修正后 `settled_usd` 亦须 ≥ 0，否则整事务回滚。
+- **`new_actual_usd` 必须 ≥ 0**：该列用 `nonneg_usd` 域（带 `CHECK (VALUE >= 0)`），API 层另行返回 **400** 拒绝负值（不依赖数据库报错）。修正后 `settled_usd` 亦须 ≥ 0，否则整事务回滚。
 - **差额修正而非覆盖**：`settled_usd += (new − old)`，配合 `event_key` 幂等键，重复提交与崩溃重放都只生效一次。
 - **`cid` / `spend_date` / `old_actual` 三者全部从 `FOR UPDATE` 锁定的 reservation 行派生**，不接受调用方传参——既挡住并发丢失更新，也挡住改错客户、改错日期。跨日核对因此天然记到原始那一天。
 - **禁止直接改 `client_daily_spend`**：所有聚合修改只有 `finalize` 与 `adjust` 两个入口。
@@ -620,9 +651,9 @@ CREATE TABLE price_versions (
   id              UUID PRIMARY KEY,           -- UUIDv7
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
   model_id        BIGINT NOT NULL REFERENCES models(id),
-  input_price     usd_amount NOT NULL,        -- 每计费单位（归一为美元）
-  output_price    usd_amount NOT NULL,
-  cache_price     usd_amount,                 -- 缓存价（走折扣）
+  input_price     nonneg_usd NOT NULL,        -- 每计费单位（归一为美元）
+  output_price    nonneg_usd NOT NULL,
+  cache_price     nonneg_usd,                 -- 缓存价（走折扣）
   billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
   data_source     TEXT NOT NULL,              -- auto_collect / manual
@@ -754,11 +785,13 @@ CREATE TABLE attempts (
   upstream_first_actionable_at TIMESTAMPTZ,   -- 上游首个 ShouldCommit 事件**到达**时刻（早于 response_committed_at）
   upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 outbox 提交）
 
-  -- ── 下游交付确认（[03 §3.0](./03-upstream-layer.md)）：与上游事实**独立**，不可互相推导 ──
+  -- ── 本进程下游写入完成（[03 §3.0](./03-upstream-layer.md)）：与上游事实**独立**，不可互相推导 ──
+  -- ⚠️ 只证明「我们写出去了」，**不证明客户端收到了**（对端是 Caddy）。端到端确认需客户端回执，
+  --    而主力客户端 Codex CLI 不可要求配合 → 该残余不确定性已知并接受，不写进任何保证。
   -- DB 提交与 socket 写出无法原子化，反方向窗口不可消除 → 必须分开记，冲突时按"未确认=未交付"取保守解释。
   -- 不参与计费（成本只看上游事实），故可异步经 outbox 落库。
-  downstream_first_byte_at TIMESTAMPTZ,       -- 首字节已写出下游 socket
-  downstream_delivered_at  TIMESTAMPTZ,       -- 终帧已写出下游 socket / 流正常关闭
+  downstream_first_byte_written_at TIMESTAMPTZ,       -- 首字节已写出下游 socket
+  downstream_write_completed_at  TIMESTAMPTZ,       -- 终帧已写出下游 socket / 流正常关闭
   has_ttft_output   BOOLEAN NOT NULL DEFAULT false, -- HasTTFTOutput 是否曾为真（决定 TTFT 是否有效）
   terminal_event    TEXT CHECK (terminal_event IN
                       ('completed','empty_completed','error','incomplete')),
@@ -774,8 +807,8 @@ CREATE TABLE attempts (
   -- 决策/网关自身开销 = full_latency_ms − upstream_latency_ms，用于 FR-110「P99≤50ms」自监控（测法见 06 §6）
   -- ⚠️ 该差值**测不到同步写**（首字同步写落在 upstream_latency_ms 内被抵消，第 11 轮 [high]）。
   --    同步写代价用下面两个**派生指标**度量（无需新增列，由上面四个时刻算出，[14 判定口径](./14-acceptance-matrix.md)）：
-  --      downstream_ttft_delay_ms   = downstream_first_byte_at − upstream_first_actionable_at
-  --      downstream_finish_delay_ms = downstream_delivered_at  − upstream_terminal_at
+  --      downstream_ttft_delay_ms   = downstream_first_byte_written_at − upstream_first_actionable_at
+  --      downstream_finish_delay_ms = downstream_write_completed_at  − upstream_terminal_at
   output_tokens_per_s NUMERIC(12,3),          -- 输出速度（FR-040）；**分母 = full_latency_ms − content_aware_ttft_ms**
                                               -- 只算生成阶段；用总延迟会把慢首字渠道误判为「生成慢」
   stream_broken     BOOLEAN NOT NULL DEFAULT false, -- 已输出首字后中断=完整失败，不拼接（FR-078/AC-12）
@@ -856,11 +889,14 @@ FOR UPDATE SKIP LOCKED;
 | --- | --- | --- | --- | --- | --- |
 | ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
 | ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P2** |
-| ③a | `committed`、`terminal_event IS NOT NULL` 且 `downstream_delivered_at IS NOT NULL` | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；`attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则估算 + 待核对 | 无／P3 |
-| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_delivered_at IS NULL`**（上游结果已知，**交付未确认**） | `completed` | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
-| ③b | `committed` 且 **`terminal_event IS NULL`**（流真的断了） | `interrupted` | `interrupted` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P3** |
+| ③a | `committed`、`terminal_event IS NOT NULL` 且 `downstream_write_completed_at IS NOT NULL` | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；`attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则估算 + 待核对 | 无／P3 |
+| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_write_completed_at IS NULL`**（上游结果已知，**交付未确认**） | `completed` | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
+| ③b1 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NULL`**（= K2，我们一个字节都没写出去） | `interrupted` | **`failed`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
+| ③b2 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NOT NULL`**（= K3，写出过部分内容） | `interrupted` | **`interrupted`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
 
-> ⚠️ ③a／③b 的区分**必须**读 `terminal_event`；③a／③c 的区分**必须**读 `downstream_delivered_at`。三者是三个独立事实，任何一个都不能由 `attempt_status` 反推，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
+> ⚠️ 三个事实、三次判定，**任何一个都不能由 `attempt_status` 反推**：
+> ① `terminal_event` 分 ③a/③c 与 ③b；② `downstream_write_completed_at` 分 ③a 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
+> 第 12 轮 [high]：上一版 ③b 只读 `terminal_event`，把「首字尚未写出」（K2）也判成 `interrupted`，等于**声称用户看到过截断流**——实际他什么都没收到。这会虚增 `stream_break_rate` 并污染可用性统计，不可用 `attempt_status='committed'` 推导——空终态与错误终态同样会把 attempt 推到 `committed`（[03 §3.2](./03-upstream-layer.md)）。混为一谈会把正常完成的空响应写成 `interrupted` 并误报人工核对。
 
 **恢复结算金额 = 该 request 所有 attempt 的费用汇总**（第 10 轮 [critical]）：
 
@@ -917,12 +953,12 @@ CREATE TABLE attempt_usage (
   completion_tokens INTEGER,                  -- completionTokens
   total_tokens      INTEGER,                  -- totalTokens
   prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存部分，FR-054）
-  total_cost        usd_amount,               -- beta5 usageLogs.totalCost
+  total_cost        nonneg_usd,               -- beta5 usageLogs.totalCost
   cost_items        JSONB,                    -- beta5 usageLogs.costItems（明细，元数据）
   cost_source       TEXT NOT NULL DEFAULT 'upstream' CHECK (cost_source IN ('upstream','estimated')),
   -- 预估 vs 实际扣费差异（FR-016/019）：超容差标计费异常
-  estimated_cost    usd_amount,
-  cost_variance     usd_amount,               -- 实际-预估；无法归因差额单列（FR-019/AC-23）
+  estimated_cost    nonneg_usd,
+  cost_variance     usd_amount,               -- 实际-预估；**可为负**（实际低于预估），故用可正负的 usd_amount（FR-019/AC-23）
   PRIMARY KEY (id, request_created_at),       -- 分区表：主键必须包含分区键
   -- 指向 attempts 的复合外键（分区表间引用须带分区键）
   FOREIGN KEY (attempt_id, request_created_at)
@@ -1026,13 +1062,13 @@ CREATE TABLE subscription_plans (
   external_plan_id TEXT,                      -- 上游 planId（ASXS）/ group_id（sub2api）
   name            TEXT NOT NULL,              -- ASXS planName / sub2api plan.name（如「每日90刀」）
   -- 固定费用（FR-033）：sub2api plans.price / ASXS products.priceCnyCent，归一为美元
-  fixed_fee       usd_amount NOT NULL,
+  fixed_fee       nonneg_usd NOT NULL,
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称（FR-018）
   -- 有效期（FR-033）：sub2api validity_days×unit / ASXS durationDays
   validity_days   INTEGER,
   billing_period  TEXT,                       -- daily/weekly/monthly（ASXS limits.limitType + windowMode=fixed）
   -- 周期包含额度（FR-033）：ASXS limits.limitMicros / sub2api group.*_limit_usd
-  period_quota    usd_amount,
+  period_quota    nonneg_usd,
   supported_models JSONB,                     -- 支持模型（FR-033）
   -- 倍率（FR-033）：sub2api group.rate_multiplier + 高峰倍率
   rate_multiplier NUMERIC(12,6),
@@ -1083,8 +1119,8 @@ CREATE TABLE user_subscriptions (
   status          TEXT NOT NULL CHECK (status IN ('not_effective','active','expired','suspended','data_unknown')),
                                               -- 对齐 PRD §9.3 订阅状态 + sub2api active/expired/suspended
   -- 已用/剩余（FR-034）：区分订阅额度、现金余额、超额付费
-  used_quota      usd_amount,                 -- ASXS usedMicros/1e6
-  left_quota      usd_amount,                 -- ASXS leftMicros/1e6
+  used_quota      nonneg_usd,                 -- ASXS usedMicros/1e6
+  left_quota      nonneg_usd,                 -- ASXS leftMicros/1e6
   remaining_days  INTEGER,                    -- ASXS remainingDays（到期紧迫度，FR-037）
   data_source     TEXT NOT NULL,
   fetched_at      TIMESTAMPTZ NOT NULL,
@@ -1098,8 +1134,8 @@ CREATE TABLE subscription_quota_windows (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   subscription_id BIGINT NOT NULL REFERENCES user_subscriptions(id),
   window_kind     TEXT NOT NULL CHECK (window_kind IN ('daily','weekly','monthly')),
-  limit_usd       usd_amount,                 -- *_limit_usd（周期上限）
-  usage_usd       usd_amount,                 -- *_usage_usd（已用）
+  limit_usd       nonneg_usd,                 -- *_limit_usd（周期上限）
+  usage_usd       nonneg_usd,                 -- *_usage_usd（已用）
   window_start    TIMESTAMPTZ,                -- *_window_start
   window_resets_at TIMESTAMPTZ,               -- *_window_resets_at（重置时间 → FR-036 到期未用预测）
   fetched_at      TIMESTAMPTZ NOT NULL,
@@ -1110,10 +1146,10 @@ CREATE TABLE subscription_quota_windows (
 CREATE TABLE subscription_waste_forecast (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   subscription_id BIGINT NOT NULL REFERENCES user_subscriptions(id),
-  predicted_wasted_quota usd_amount,          -- max(0, 剩余 - 到期前预计合格消耗)
-  eligible_demand usd_amount,                 -- 合格业务需求预估
-  recent_consumption_rate usd_amount,         -- 近期消耗速度
-  active_reset_gain usd_amount,               -- 可主动重置带来的外生额度（FR-036 外生变量）
+  predicted_wasted_quota nonneg_usd,          -- max(0, 剩余 - 到期前预计合格消耗)
+  eligible_demand nonneg_usd,                 -- 合格业务需求预估
+  recent_consumption_rate nonneg_usd,         -- 近期消耗速度
+  active_reset_gain nonneg_usd,               -- 可主动重置带来的外生额度（FR-036 外生变量）
   unusable_reason TEXT,                       -- 不可利用原因（FR-039/AC-21：倍率/性能/稳定性不达标）
   forecast_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -1310,10 +1346,10 @@ CREATE TABLE balance_signals (
   balance_state   TEXT NOT NULL DEFAULT 'unknown'
                     CHECK (balance_state IN ('normal','critical','unknown','exhausted','abnormal')),
   -- 保守下限（FR-026）：最近可信余额 - 已知消耗
-  last_confirmed_balance usd_amount,            -- 归一美元
+  last_confirmed_balance nonneg_usd,            -- 归一美元
   confirmed_at    TIMESTAMPTZ,
-  known_consumption_since usd_amount,           -- 自确认点后的已知消耗（形成保守下限）
-  conservative_floor usd_amount,                -- = last_confirmed - known_consumption
+  known_consumption_since nonneg_usd,           -- 自确认点后的已知消耗（形成保守下限）
+  conservative_floor usd_amount,                -- = last_confirmed - known_consumption；**可为负**，故用可正负的 usd_amount
   -- 信号自适应识别（FR-027、参数5）：组合错误码/文案正则/真实失败信号/余量归零
   signal_kind     TEXT CHECK (signal_kind IN ('error_code','error_text_regex','real_request_fail','quota_zeroed')),
   signal_evidence TEXT,                         -- 触发信号原文关键词（元数据，非正文）
