@@ -50,14 +50,23 @@
         valid: true,
         is_critical: true,
         current_value, new_value,
+        current_version: 7,              ← 预览时的版本，apply 必须原样带回
         impact: "该改动会把全局测活预算从 2% 降到 1%，预计每日探索次数 -50%…",  ← 明示影响(FR-115)
         confirm_token: "<一次性令牌，绑定本次 diff + 5min TTL>"
       }
-2 POST /admin/config/apply {param_key, new_value, changed_by, change_reason, confirm_token}
-    → 校验 confirm_token 与提交 diff 一致且未过期 → INSERT 新版本、confirmed_twice=true → 200
+2 POST /admin/config/apply {param_key, new_value, changed_by, change_reason,
+                            confirm_token, expected_current_version: 7, idempotency_key}
+    → 单事务内：锁定该参数当前最大版本 → 比对 expected_current_version
+       → 不匹配返回 409（preview 已过期，须重新预览）
+       → 匹配则分配 version=max+1、INSERT、confirmed_twice=true、消费 confirm_token → 200
 ```
 
 - `confirm_token` 绑定**具体 diff**：改了值再 apply 会因 token 不匹配被拒——防"确认了 A 却提交了 B"。
+- **并发控制（对抗性审查修正）**：仅靠 token 不够——两个基于同一旧值的 preview 可**都**通过校验，导致重复版本、多实例加载到不确定值。故：
+  - `expected_current_version` 做**乐观锁**：两个并发 apply 只有一个成功，另一个 409；
+  - `idempotency_key` 做**去重**：网络重试重复投递只生效一次（[02 `config_params` UNIQUE(param_key, idempotency_key)](./02-data-model.md)）；
+  - 比对、分配版本、插入、消费令牌**必须在同一事务**，否则窗口期仍可并发插入。
+  - 全局参数的 `scope_id` 用哨兵值 `'*'` 而非 NULL——PG 普通 UNIQUE 允许多行 NULL，用 NULL 会让唯一约束失效（[02](./02-data-model.md)）。
 - 非关键项（`is_critical=false`）可跳过 preview 直接 apply（仍记审计）。
 - **对应 [02 列](./02-data-model.md)**：`confirmed_twice` 唯有走完二次确认才为 `true`；决策路径加载配置时可断言"关键项 `confirmed_twice=true` 才生效"，未确认的关键改动不进快照。
 
@@ -93,7 +102,7 @@ type ParamMeta struct {
 | `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`，供上游对接层读取，[03](./03-upstream-layer.md)） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
 | `GET /admin/ledger/requests?…` | 账本查询（逐 Attempt、对账状态；FR-097/098） | M1 |
-| `GET /admin/subscriptions` | 订阅台账与双倍率、到期浪费预测（[02 §5](./02-data-model.md)） | M3 |
+| ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |

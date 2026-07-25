@@ -224,7 +224,9 @@ CREATE TABLE sla_targets (
 CREATE TABLE config_params (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   scope_type    TEXT NOT NULL CHECK (scope_type IN ('global','tenant','channel','policy','model')),
-  scope_id      TEXT,                         -- 对应 scope 的标识，global 为 NULL
+  -- ⚠️ 不可为 NULL：PG 普通 UNIQUE 允许多行 NULL，global 用 NULL 会让唯一约束失效，
+  -- 并发/重试提交可造出同一参数的重复版本（对抗性审查发现）。global 统一用固定哨兵值 '*'
+  scope_id      TEXT NOT NULL DEFAULT '*',    -- 非 global 填对应标识；global 恒为 '*'
   param_key     TEXT NOT NULL,                -- 如 probe.budget.global_pct / sample.min_1h / cooldown.base_sec
   param_value   JSONB NOT NULL,
   is_critical   BOOLEAN NOT NULL DEFAULT false, -- 关键策略：测活预算/禁测活/订阅倾斜/旁路开关（1.4/FR-115）
@@ -234,8 +236,20 @@ CREATE TABLE config_params (
   changed_by    TEXT,
   change_reason TEXT,
   confirmed_twice BOOLEAN NOT NULL DEFAULT false, -- is_critical 时必须为 true 才生效（二次确认）
-  UNIQUE (scope_type, scope_id, param_key, version)
+  -- 并发控制（09 §3 apply 流程配套）：幂等键使重复提交只生效一次
+  idempotency_key TEXT,
+  CONSTRAINT config_scope_global_sentinel
+    CHECK (scope_type <> 'global' OR scope_id = '*'),
+  UNIQUE (scope_type, scope_id, param_key, version),
+  UNIQUE (param_key, idempotency_key)          -- 同一参数的同一幂等键只允许一行
 );
+
+-- 版本分配与并发提交的约定（详见 [09 §3](./09-admin-api.md)）：
+--   apply 必须携带 expected_current_version 与 idempotency_key；
+--   服务端在**单个事务**内完成：① 锁定该 (scope_type,scope_id,param_key) 的当前最大版本
+--   ② 比对 expected_current_version，不匹配则拒绝（409，preview 已过期）
+--   ③ 分配 version = max+1 并插入 ④ 消费 confirm_token。
+--   → 两个基于同一旧版本的并发 apply，只有一个成功；重复投递因幂等键被去重。
 ```
 
 **索引**
@@ -837,10 +851,35 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 - 保留窗口（默认 7 个月 ≥180 天）走 `config_params(param_key='retention.months', is_critical=true)`；缩短保留是关键操作，需二次确认（FR-115）。
 - **不可存列的守卫**：CI 中加 schema 断言，禁止任何账本表出现 `body/messages/prompt/completion_text/headers` 命名列（FR-112 硬约束 3）。
 
+### 9.2bis 账本 outbox（防崩溃丢账，[01 §5.1](./01-architecture.md)）
+
+账本状态更新不得只存在于内存队列——进程崩溃即永久丢账（账本是唯一真相源，无处可对账）。异步更新一律先写 outbox（与业务行同事务），再由后台投递：
+
+```sql
+CREATE TABLE ledger_outbox (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  attempt_id    UUID NOT NULL,
+  request_created_at TIMESTAMPTZ NOT NULL,     -- 用于定位分区
+  event_type    TEXT NOT NULL CHECK (event_type IN
+                  ('first_token','attempt_end','usage','cancel','request_close')),
+  payload       JSONB NOT NULL,                -- 状态更新的元数据（不含正文，FR-112）
+  -- 幂等键：同一 attempt 的同一状态跃迁只生效一次，重放不产生重复/不覆盖更晚状态
+  idempotency_key TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  delivered_at  TIMESTAMPTZ,                   -- NULL = 待投递
+  UNIQUE (idempotency_key)
+);
+
+CREATE INDEX idx_outbox_pending ON ledger_outbox(created_at) WHERE delivered_at IS NULL;
+```
+
+**恢复流程**：实例启动时扫描 `delivered_at IS NULL` 的行并重放（`FOR UPDATE SKIP LOCKED`，多实例安全）。因幂等键存在，重放不会产生重复账目。
+
 ### 9.3 多实例并发写（FR-110）
 
 - 账本主键 UUIDv7 由各 sla-core 实例本地生成，无序列争用；同一 `request_id` 下的多 attempt 由持有该请求的实例串行写，无跨实例竞争。
 - 账本写入由持有该请求的实例完成，无跨实例竞争；**转向自研后无对账器**（[11](./11-decision-full-selfbuilt.md)），usage 直接来自旁路观察的终帧（[03 §7](./03-upstream-layer.md)）。
+- **崩溃恢复**：任一实例启动时重放 `ledger_outbox` 的未投递行（§9.2bis），包括**其他已崩溃实例**遗留的——outbox 在库中，不随进程消失。
 - 后台快照（价格/健康/余额）写路径与同步决策路径解耦：决策只读内存快照，PG 抖动不阻塞（01-架构 §5）。
 
 ---
