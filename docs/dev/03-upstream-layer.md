@@ -168,7 +168,7 @@ type ProtocolSupport struct {
 
 真实上游实测：同一 NewAPI 站点，`gpt-5.5` 的 **Responses 返回 200 而 CC 返回 503** —— **不能假设两个协议都通**。
 
-- `Probe()` 在渠道接入时与定期健康检查时探测每个模型的 `ProtocolSupport`，落 [02 `channel_models`](./02-data-model.md)。
+- `Probe()` 在渠道接入时与定期健康检查时探测每个模型的 `ProtocolSupport`，**逐协议**落 [02 `channel_models(channel_id, model_id, protocol)`](./02-data-model.md)：写入 `support`、`supports_streaming/tools`、`probed_at`、`probe_failure_reason`。`probed_at` 过期需重探。
 - `selector` 候选过滤时**按请求协议筛**：请求走 Responses 就只选支持 Responses 的 Binding（[05 §1.1](./05-scheduling-and-operations.md) 序 2 模型能力层）。
 
 ---

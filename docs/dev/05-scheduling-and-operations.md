@@ -21,7 +21,7 @@
 | 序 | 过滤层 | 规则 | 依据 |
 | --- | --- | --- | --- |
 | 1 | 别名 → 策略 | 由 `model_aliases.policy_id` 定 SLA 等级与测活资格；别名即策略载体 | FR-062/117、AC-25 |
-| 2 | 模型能力 | 只留 `channel_models.enabled` 且满足请求所需能力（流式/工具/多模态）的 binding | FR-005/006 |
+| 2 | 模型能力**与协议** | 按**请求协议**查 `channel_models(channel_id, model_id, protocol)`：只留 `enabled AND support='supported'` 且满足流式/工具需求的 binding。⚠️ 实测存在**非对称支持**（同模型 Responses 通、CC 返 503），不可假设两协议都可用 | FR-005/006、[02 §1.1](./02-data-model.md) |
 | 3 | 数据许可 | 一期默认全允许（参数8 取消白名单，FR-093 降为可选）；启用时按数据级别过滤 | FR-093（可选） |
 | 4 | 健康/样本 | 排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底） | FR-043/046、参数11 |
 | 5 | 余额/配额 | 排除 `balance_state∈{exhausted,critical}`；**配额 `unknown` 默认保守排除**（FR-118，由自研 selector 实现） | FR-020~027、**FR-118** |

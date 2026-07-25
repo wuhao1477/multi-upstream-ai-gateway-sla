@@ -111,13 +111,29 @@ CREATE TABLE models (
   UNIQUE (canonical_name)
 );
 
--- 渠道×模型能力矩阵（FR-005）：某资源实际支持的模型版本与能力
+-- 渠道×模型×**协议**能力矩阵（FR-005/006）
+-- ⚠️ 必须按协议细分：实测发现同一站点 gpt-5.5 的 Responses 返 200 而 CC 返 503
+--    （[07 §3bis](./07-axonhub-runtime-probes.md)、[13 §3](./13-research-reassessment.md)）。
+--    若只存 (channel, model, enabled)，CC 请求仍会被路由到 Responses-only 渠道 → 必然失败。
 CREATE TABLE channel_models (
   channel_id  BIGINT NOT NULL REFERENCES channels(id),
   model_id    BIGINT NOT NULL REFERENCES models(id),
-  enabled     BOOLEAN NOT NULL DEFAULT true,  -- 模型层开关（FR-004）
-  PRIMARY KEY (channel_id, model_id)
+  protocol    TEXT NOT NULL CHECK (protocol IN ('chat_completions','responses')),
+  enabled     BOOLEAN NOT NULL DEFAULT true,  -- 人工开关（FR-004）
+  -- ── Probe() 探测结果（[03 §8](./03-upstream-layer.md)）──
+  support     TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (support IN ('supported','unsupported','unknown')),
+  supports_streaming BOOLEAN,                 -- 该协议下是否支持流式
+  supports_tools     BOOLEAN,                 -- 是否支持工具调用
+  probed_at   TIMESTAMPTZ,                    -- 最近探测时间；过期需重探
+  probe_failure_reason TEXT,                  -- 如 "503 no available channel"，供排障
+  PRIMARY KEY (channel_id, model_id, protocol)
 );
+
+-- selector 候选过滤按**请求协议**查此表：只选 support='supported' 且 enabled 的行
+-- （[05 §1.1](./05-scheduling-and-operations.md) 序 2 模型能力层）
+CREATE INDEX idx_chmodel_usable ON channel_models(model_id, protocol)
+  WHERE enabled AND support = 'supported';
 ```
 
 ### 1.2 缓存作用域 / 故障域 / 绑定（路由资源）
@@ -322,20 +338,36 @@ CREATE INDEX idx_gwclient_active ON gateway_clients(status) WHERE status='active
 
 ```sql
 -- 价格版本（FR-010/012/013/017/018）：append-only，永不 UPDATE 已生效行
+-- ⚠️ 基础价与倍率**必须分表**（对抗性审查发现）：
+--    基础价的作用域是 (channel, model)，而分组/Key 倍率的作用域是 binding。
+--    混在一张表里 → 同渠道多 Key/多分组时行归属不明，selector 选不出确定的当前价，
+--    历史复算可能用到不相干的倍率，直接破坏 FR-013「历史成本可复算」。
+
+-- ① 基础价版本：作用域 (channel, model)
 CREATE TABLE price_versions (
   id              UUID PRIMARY KEY,           -- UUIDv7
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
   model_id        BIGINT NOT NULL REFERENCES models(id),
   input_price     usd_amount NOT NULL,        -- 每计费单位（归一为美元）
   output_price    usd_amount NOT NULL,
-  cache_price     usd_amount,                 -- 缓存价（走折扣，假设4验算吻合）
-  group_multiplier NUMERIC(12,6),             -- 用户组倍率（FR-010）
-  key_multiplier  NUMERIC(12,6),              -- Key 倍率
-  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token', -- 计费单位（beta5 usage_per_unit=每1M token）
+  cache_price     usd_amount,                 -- 缓存价（走折扣）
+  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
-  data_source     TEXT NOT NULL,              -- auto_collect / manual / gateway
+  data_source     TEXT NOT NULL,              -- auto_collect / manual
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）
   effective_at    TIMESTAMPTZ NOT NULL,       -- 生效时间（FR-012）
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ② 倍率版本：作用域 binding（承载分组倍率与 Key 倍率）
+CREATE TABLE multiplier_versions (
+  id              UUID PRIMARY KEY,           -- UUIDv7
+  binding_id      BIGINT NOT NULL REFERENCES bindings(id),
+  group_multiplier NUMERIC(12,6),             -- 用户组倍率（FR-010）
+  key_multiplier  NUMERIC(12,6),              -- Key 倍率（FR-003）
+  data_source     TEXT NOT NULL,
+  queried_at      TIMESTAMPTZ NOT NULL,
+  effective_at    TIMESTAMPTZ NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -352,13 +384,15 @@ CREATE TABLE price_change_log (
 );
 ```
 
-- **不可覆盖**：`price_versions` 仅 INSERT；「当前生效价」= 取该 (channel,model) 下 `effective_at<=now()` 的最新一行。历史请求靠 `attempts.price_version_id` 定位当时版本复算（FR-013/AC-02）。
+- **不可覆盖**：两表均仅 INSERT。「当前生效价」= 该 `(channel,model)` 下 `effective_at<=now()` 的最新 `price_versions` 行；「当前生效倍率」= 该 `binding_id` 下最新 `multiplier_versions` 行。
+- **成本计算**：`成本 = 基础价 × 倍率 × token`；**两个版本 id 都必须落到 attempt**，历史复算时同时取回才能还原当时的完整计价输入（FR-013/AC-02）。
 - 价格过期/查询失败保守处理（FR-015）由决策层用 `queried_at` 判新鲜度（§11 默认 6h/24h/48h），不在本表建标志位。
 
 **索引**
 
 ```sql
 CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC);
+CREATE INDEX idx_mult_cur  ON multiplier_versions(binding_id, effective_at DESC);
 ```
 
 **服务 FR/AC**：FR-010、FR-012~018；AC-02（历史按原版本复算）、AC-03（降价确认后逐步）、AC-17（美元口径 1:1）。
@@ -405,7 +439,9 @@ CREATE TABLE attempts (
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键，与 requests 对齐
   attempt_no        SMALLINT NOT NULL,        -- 该请求内第几跳（1=主，2=接管…）
   binding_id        BIGINT NOT NULL REFERENCES bindings(id), -- 渠道+key+url（路由资源）
-  price_version_id  UUID REFERENCES price_versions(id),      -- 决策时价格版本（FR-013/AC-02）
+  price_version_id  UUID REFERENCES price_versions(id),      -- 决策时的**基础价**版本（FR-013/AC-02）
+  multiplier_version_id UUID REFERENCES multiplier_versions(id), -- 决策时的**倍率**版本（binding 级）
+  -- 两者合起来才是该 attempt 的完整计价输入，缺一不可复算
   role              TEXT NOT NULL CHECK (role IN ('primary','takeover','retry','probe')), -- FR-076/079
 
   -- ── 状态：网关原始 vs 归并（AC-30 核心）──
@@ -416,7 +452,11 @@ CREATE TABLE attempts (
   cancel_reason     TEXT CHECK (cancel_reason IN
                       ('none','client_disconnect','sla_takeover','upstream_disconnect','internal_timeout','upstream_error')),
   attempt_status    TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (attempt_status IN ('pending','committed','canceled_by_sla','failed','completed')),
+                      CHECK (attempt_status IN ('pending','committed','canceled_by_sla','failed','completed',
+                                                'unknown_billing')),
+                      -- ⚠️ unknown_billing：上游请求**已发出**但进程在写入首条 outbox 事件前崩溃，
+                      -- 无事件可重放、账本无外部对账源 → 该调用**可能已计费但结果不明**。
+                      -- 必须显式标记而非静默留 pending（否则永久悬挂、污染成本与 SLA 统计）。见 §4.2bis
 
   -- ── 逐尝试 metrics（自算，AC-31）──
   content_aware_ttft_ms INTEGER,              -- 自算内容感知首字（排除 role-only/空SSE/心跳，AC-31/假设3/6）
@@ -445,8 +485,51 @@ CREATE TABLE attempts (
 
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   ended_at          TIMESTAMPTZ,
+
+  -- ── attempt 租约（§4.2bis 悬挂检测）──
+  external_call_started_at TIMESTAMPTZ,       -- 上游请求实际发出的时刻；NULL=尚未发出（崩溃则未计费）
+  lease_heartbeat_at TIMESTAMPTZ,             -- 持有实例的心跳；停止更新即视为实例已死
+  lease_owner       TEXT,                     -- 持有该 attempt 的实例标识
+
   PRIMARY KEY (id, request_created_at)
 ) PARTITION BY RANGE (request_created_at);
+```
+
+### 4.2bis 悬挂 Attempt 检测（**补齐 outbox 的盲区**）
+
+> **outbox 重放挡不住这个窗口**：进程若在"**已向上游发出请求**、但**尚未写入首条 outbox 事件**"之间崩溃，则 `attempts` 停在 `pending` 且**无任何事件可重放**。自研账本没有外部对账源，这笔**可能已计费**的调用会永久悬着，污染成本与 SLA 统计。（对抗性审查发现；这是 [01 §5.1](./01-architecture.md) 持久化协议的盲区。）
+
+**租约机制**：
+
+| 字段 | 含义 |
+| --- | --- |
+| `external_call_started_at` | 上游请求**实际发出**的时刻。**NULL 即代表尚未发出** —— 此时崩溃可安全判定为**未计费**，直接置 `failed` |
+| `lease_heartbeat_at` | 持有实例每 N 秒更新一次；**停更即视为实例已死** |
+| `lease_owner` | 持有该 attempt 的实例标识 |
+
+**恢复扫描**（启动时 + 周期性，与 outbox 重放并列）：
+
+```sql
+-- 悬挂判定：仍 pending、已发出上游请求、但心跳超时
+SELECT * FROM attempts
+WHERE attempt_status = 'pending'
+  AND external_call_started_at IS NOT NULL
+  AND lease_heartbeat_at < now() - INTERVAL '60 seconds'
+FOR UPDATE SKIP LOCKED;
+```
+
+| 情形 | 处置 |
+| --- | --- |
+| `external_call_started_at IS NULL` | 上游未发出 → 置 `failed`，**确定未计费** |
+| 已发出且心跳超时 | 置 **`unknown_billing`** + 触发**运维告警**（[02 §8](./02-data-model.md) `alert_events`，P2） |
+
+→ `unknown_billing` 的 attempt **计入成本上限的保守估算**（按该 binding 价格版本估一次调用的费用），但**不计入成功率统计**；运维据告警人工核对上游账单后修正。
+
+**验收**：[AC-35](./14-acceptance-matrix.md) 已含三时点崩溃；**须补第四个时点——"上游请求发出后、首条 outbox 事件前"**，重启后该 attempt 应为 `unknown_billing` 且有告警。
+
+```sql
+CREATE INDEX idx_attempts_stale_lease ON attempts(lease_heartbeat_at)
+  WHERE attempt_status = 'pending';
 ```
 
 ### 4.3 逐 Attempt 用量与费用
@@ -858,10 +941,21 @@ CREATE TABLE alert_events (
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   acknowledged_at TIMESTAMPTZ,
   closed_at       TIMESTAMPTZ,
-  UNIQUE (dedup_key, state) DEFERRABLE          -- 同 dedup_key 同时只允许一个未关闭事件
+  -- ⚠️ 不可用 UNIQUE(dedup_key, state)（对抗性审查发现）：state 不同即视为不同行，
+  --    同因可同时存在 open/acknowledged/recovering 三行；且历史上只允许一条 closed，
+  --    导致同键再次发生后无法转为 closed —— 与"同因只有一个持续事件"完全相反。
+  CONSTRAINT alert_state_valid CHECK (state IN ('open','acknowledged','recovering','closed'))
 );
 
+-- ✅ 正确做法：**部分唯一索引** —— 同 dedup_key 在"未关闭"状态下只允许一行；
+--    closed 行不受限，可累积任意多条历史（AC-19 的去重与生命周期恢复）
+CREATE UNIQUE INDEX uq_alert_active ON alert_events(dedup_key) WHERE state <> 'closed';
+
 CREATE INDEX idx_alert_open ON alert_events(severity, started_at) WHERE state<>'closed';
+
+> 生命周期转换（open→acknowledged→recovering→closed）须在**行锁**下进行（`SELECT … FOR UPDATE`），
+> 避免并发转换产生第二条活动行。如需保留"同因重复发生"的明细，另建 `alert_occurrences` 子表，
+> 不在主表堆积。
 ```
 
 **服务 FR/AC**：FR-100~103、FR-105；AC-19（余额耗尽/Key 失效即时告警到关闭）。
