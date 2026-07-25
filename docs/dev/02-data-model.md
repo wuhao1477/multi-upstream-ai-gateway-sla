@@ -458,18 +458,29 @@ COMMIT;
 | **`finalize_delivery`** | 下游 **socket write 返回之后** | `downstream_write_completed_at` + `requests.final_status` | 异步经 outbox（不涉及计费） |
 
 ```sql
--- finalize_delivery：request 终态由「我们是否写完」决定
+-- finalize_delivery（两步，同一事务；由 outbox 事件 downstream_write_completed 驱动）
+BEGIN;
+-- ① 幂等写入写出事实（重放时 IS NULL 条件不再成立 → 0 行，不覆盖更早的真实时刻）
+UPDATE attempts
+   SET downstream_write_completed_at = :written_at
+ WHERE id = :attempt_id AND downstream_write_completed_at IS NULL;
+-- ② 据该事实推 request 终态（幂等：只在 pending 时推一次）
 UPDATE requests r
    SET final_status = CASE
          WHEN a.downstream_write_completed_at IS NOT NULL
-              AND a.attempt_status = 'completed'          THEN 'completed'
-         WHEN a.attempt_status IN ('failed','unknown_billing') THEN 'failed'
-         ELSE 'interrupted'                                -- 我们没写完 → 保守
+              AND a.attempt_status = 'completed'                THEN 'completed'
+         WHEN a.attempt_status IN ('failed','unknown_billing')  THEN 'failed'
+         ELSE 'interrupted'                                      -- 写出未确认 → 保守
        END
   FROM attempts a
- WHERE r.id = :rid AND a.request_id = :rid AND a.attempt_no = :last_attempt_no
-   AND r.final_status = 'pending';                         -- 幂等：只推一次
+ WHERE r.id = :rid AND a.id = :attempt_id
+   AND r.final_status = 'pending';
+COMMIT;
 ```
+
+**首字节的写出事实同理**：`downstream_first_byte` 事件写 `attempts.downstream_first_byte_written_at`（同样 `WHERE ... IS NULL` 幂等），它不推 request 终态，只用于恢复扫描区分 ③b1／③b2 与统计 `stream_break_rate`。
+
+**两个事件的 `payload`**：`{"attempt_id": <uuid>, "written_at": <timestamptz>}`；`idempotency_key` = `<attempt_id>:downstream_first_byte` / `<attempt_id>:downstream_write_completed`。
 
 - **计费与交付彻底解耦**：钱在 `finalize_upstream` 就结清（成本那时已知），交付结论晚一步不影响配额正确性。
 - **崩溃在两阶段之间** = 正是 K4：reservation 已 settled、attempt 已终态、request 仍 `pending` → 恢复扫描按 §4.2bis ③c 判 `interrupted`。**这条路径现在真的可达了。**
@@ -890,7 +901,7 @@ FOR UPDATE SKIP LOCKED;
 | ① | `pending` 且 `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
 | ② | `pending` 且 `external_call_started_at IS NOT NULL` | `unknown_billing` | `failed` | `settled`，`actual_usd` = **全跳汇总**（见下），`needs_manual_review=true` | **P2** |
 | ③a | `committed`、`terminal_event IS NOT NULL` 且 `downstream_write_completed_at IS NOT NULL` | `completed`（`terminal_event='error'/'incomplete'` → `failed`） | 同左 | `settled`；`attempt_usage` 已落则用**实际值**、`needs_manual_review=false`，否则估算 + 待核对 | 无／P3 |
-| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_write_completed_at IS NULL`**（上游结果已知，**交付未确认**） | `completed` | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
+| ③c | `committed`、`terminal_event IS NOT NULL` 但 **`downstream_write_completed_at IS NULL`**（上游结果已知，**写出未确认**） | **由 `terminal_event` 决定**：`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`** | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
 | ③b1 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NULL`**（= K2，我们一个字节都没写出去） | `interrupted` | **`failed`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
 | ③b2 | `committed`、`terminal_event IS NULL` 且 **`downstream_first_byte_written_at IS NOT NULL`**（= K3，写出过部分内容） | `interrupted` | **`interrupted`** | `settled`，全跳汇总，`needs_manual_review=true` | **P3** |
 
@@ -921,13 +932,21 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
 
    | 口径 | 用途 | `unknown_billing` | `interrupted` |
    | --- | --- | --- | --- |
-   | **用户侧 SLA**（按 `requests` 算） | 有效可用性、错误预算、告警 | **计入失败**（`final_status='failed'`） | **计入失败 + `stream_break_rate` 分母**（`final_status='interrupted'`，AC-12/FR-071） |
+   | **用户侧 SLA**（按 `requests` 算） | 有效可用性、错误预算、告警 | **计入失败**（`final_status='failed'`） | **计入失败**；是否计入 `stream_break_rate` 取决于**是否已确认写出过内容**（见下） |
    | **渠道健康**（按 `attempts` 算，喂 selector） | 冷却、样本门槛、排序 | **不计入**该 binding 成功率 | **不计入**该 binding 成功率 |
    | 成本 | 费用统计、配额 | 计入（估算值） | 计入（估算值） |
    | TTFT | 首字统计 | 无 TTFT（未见首字） | **已记录的 `content_aware_ttft_ms` 照常计入**（那是真实观测值，用户真的等到了首字） |
 
    > **为什么两套口径方向相反**：进程崩溃是**我们的**故障，不是渠道的故障。计入用户 SLA 是诚实（用户确实失败了）；不计入渠道健康是准确（否则会冤枉一个健康渠道、把它冷却掉，故障范围反而扩大）。
    > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
+   >
+   > **`stream_break_rate` 的唯一判据**（第 13 轮 [high]：原文"failed 与 interrupted 都计入流中断率"与 AC-35 的 K2 判定冲突，实现方无从选字段）：
+   > ```
+   > 计入流中断 ⟺ attempts.stream_broken = true
+   >              OR attempts.downstream_first_byte_written_at IS NOT NULL
+   > ```
+   > 即**只统计「已确认写出过内容之后才中断」**。K2（写出未确认、`failed`）**不计**；K3/K4 与上游断流（已输出后中断）**计**。
+   > 该判据只看 `attempts` 的两个事实列，**不看 `final_status`**——避免同一口径有两个来源。
 
 > ②③b 的 `actual_usd` 含估算成分，故 `needs_manual_review=true`；运维据告警核对上游账单后走 `POST /admin/reservations/{request_id}/adjust`——它是[§2bis 的**独立 `adjust` 事务**](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)（从 `settled` 出发、`FOR UPDATE` 锁定、按差额修正），**不是 `finalize`**：`finalize` 的闸门是 `state='reserved'`，对已 `settled` 的待核对行必然影响 0 行、静默失效。幂等键用 `reservation_adjustments.event_key`，**不是** `settle_event_key`。**禁止直接改聚合表**。
 
@@ -1475,7 +1494,10 @@ CREATE TABLE ledger_outbox (
   attempt_id    UUID NOT NULL,
   request_created_at TIMESTAMPTZ NOT NULL,     -- 用于定位分区
   event_type    TEXT NOT NULL CHECK (event_type IN
-                  ('first_token','attempt_end','usage','cancel','request_close')),
+                  ('first_token','attempt_end','usage','cancel',
+                   -- 下游写出事实（第 13 轮 [high]：原枚举没有承载 ③a/③c 区分的事件）
+                   'downstream_first_byte','downstream_write_completed',
+                   'request_close')),
   payload       JSONB NOT NULL,                -- 状态更新的元数据（不含正文，FR-112）
   -- 幂等键：同一 attempt 的同一状态跃迁只生效一次，重放不产生重复/不覆盖更晚状态
   idempotency_key TEXT NOT NULL,

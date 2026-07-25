@@ -77,7 +77,10 @@
 | **首次 ShouldCommit → 放行响应头与缓冲字节之前** | `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步提交（先落库再放行字节）** |
 | **识别终帧 → 放行终帧字节之前** | `terminal_event`、usage、attempt_end | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
 | 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
-| 关单 | `final_status`、成本汇总 | 异步，但经 **outbox** |
+| **`finalize_upstream`**（终帧到达时） | reservation 结算 + `attempt_status` 终态 + `terminal_event`/usage。**`requests.final_status` 保持 `pending`** | **同步**，在放行终帧字节之前 |
+| **`finalize_delivery`**（socket write 返回后） | `downstream_write_completed_at`，再据它推 `requests.final_status` | 异步，经 **outbox**（不涉及计费） |
+
+> ⚠️ **关单必须两阶段，不能一步到位**（第 12/13 轮 [critical]）：若在终帧到达时就把 `final_status` 写成 `completed`，那一刻字节**还没写给下游**；随后崩在 K4 窗口时 request 已是终态，恢复扫描的 `WHERE final_status='pending'` 闸门再也改不动它 —— **③c/K4 分支被正常路径整个绕过**。完整 SQL 与幂等约束见 [02 §2bis](./02-data-model.md)。
 
 > **"先落库再放行字节"为什么对首字也必须成立**（第 10 轮 [high]）：上一版只对终帧冻结了顺序，首字仍是"异步经 outbox"。于是进程可以在**首个内容字节已交给客户端、`committed` 尚未落库**时崩溃——库里还是 `pending`，恢复会判成 `unknown_billing`/`failed`，而用户**明明看到了半截输出**。这既违反 [AC-12 B 分支](./14-acceptance-matrix.md)（我们崩溃 → `interrupted`），也让流中断率漏计。
 >
@@ -101,16 +104,18 @@
 | ③b1 首字**未写出**（K2） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`**（不计流中断） | `settled`(汇总)+待核对 | P3 |
 | ③b2 已写出部分、终帧前（K3） | `terminal_event IS NULL` 且 `downstream_first_byte_written_at IS NOT NULL` | `interrupted` | `interrupted`（计流中断） | `settled`(汇总)+待核对 | P3 |
 | ③c 终帧已落库、**字节未写完**（K4） | `terminal_event NOT NULL` 且 `downstream_write_completed_at IS NULL` | 由 `terminal_event` 定 | **`interrupted`** | `settled`(**实际**) | 无 |
-| ④ 终帧后、关单前 | outbox 有 `usage`/`attempt_end` 事件 | `completed` | `completed` | `settled`(实际) | 无 |
+| ③d 全部写完、`finalize_delivery` 未完成 | `terminal_event NOT NULL` 且 `downstream_write_completed_at NOT NULL` | 由 `terminal_event` 定 | `completed` | `settled`(实际) | 无 |
 
 **四条硬性要求**（[02 §4.2bis](./02-data-model.md) 是唯一实现规范）：
 
 1. `pending` 与 `committed` **都是非终态**，恢复扫描必须同时覆盖——只扫 `pending` 会让 ③ 永久悬挂。
 2. `executor` 在流式传输期间必须**每 ≤20s 续租** `lease_heartbeat_at`，否则长响应被误判崩溃。
-3. attempt、request、reservation **在同一个 `finalize` 事务里一起终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。
+3. **reservation 与 attempt 在 `finalize_upstream` 同一事务里终结**，不允许"账本终结了、配额还挂着"（配额永久泄漏 → 最终全部 429）。**`requests.final_status` 不在该事务内**——它由 `finalize_delivery` 依据写出事实推定（见上表）。
 4. **DB 提交与 socket 写出无法原子化，反方向窗口不可消除**：先落库再放行只挡住"客户端有、库里没有"；"库里有、客户端没收全"必然存在（③c）。故 `attempts` 另记 `downstream_first_byte_written_at`/`downstream_write_completed_at` 两个**独立事实**，冲突时按"未确认 = 未交付"取保守解释——attempt 层可以是 `completed`（成本精确已知），request 层仍判 `interrupted`（交付未确认）。详见 [03 §3.0](./03-upstream-layer.md) 四时点表。
 5. **不可用 `attempt_status='committed'` 反推「见过首字」**——空终态/错误终态同样会 commit（[03 §3.2](./03-upstream-layer.md)）。③a/③b 必须读 `terminal_event`。终帧提交顺序另有约束：**先落 outbox 再放行终帧字节**（[03 §3.0](./03-upstream-layer.md)）。
-6. `interrupted` 与 `failed` **对用户 SLA 的口径相同**（都是完整失败、都计入流中断率，FR-071/AC-12），区分终态只为归因（我们崩了 vs 上游断了）。
+6. **`interrupted` 与 `failed` 都计入用户 SLA 失败**（FR-071），但**流中断率的口径更窄**（第 13 轮 [high]）：`stream_break_rate` **只统计"已确认写出过内容之后才中断"**的请求，判据是 `attempts.stream_broken=true` 或 `downstream_first_byte_written_at IS NOT NULL`。
+   → K2（首字写出未确认、`failed`）**不计**流中断；K3/K4 与上游断流（已输出后中断）**计**。
+   上一版写"两者都计入流中断率"与 AC-35 的 K2 判定直接冲突，实现方无从判断按哪个字段算。
 7. 四种情况都不得出现"请求完全不存在"、不得永久停留 `pending`/`committed`、不得残留 `reserved` 预留。
 
 ## 6. 开放点（评审需拍板）

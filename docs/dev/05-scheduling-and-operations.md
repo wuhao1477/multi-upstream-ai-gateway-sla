@@ -232,7 +232,7 @@ RETURNING canary_used_in_window, canary_inflight;
 
 - 等级数量/各指标数值/统计窗口**全部用户自定义**（参数1：圈的渠道不同，SLA 就不同）；金/银/铜三级仅默认模板（[02 `sla_targets`](./02-data-model.md)、§11）。
 - 统计口径：`有效可用性 = 完整成功数 ÷ 应计入 SLA 的有效请求数`；用户参数错误、用户主动取消不计入失败（PRD §术语）。
-- **崩溃恢复产生的终态照常计入用户 SLA**：`final_status='failed'`（`unknown_billing` 场景）与 `'interrupted'`（首字后崩溃）都**计入失败**，后者还计入 `stream_break_rate`——FR-071 要求用户真实经历的失败与流中断始终计入，AC-12 要求首字后中断记为完整失败。**但这些 attempt 不计入渠道健康统计**（崩溃是我们的故障，不是渠道的），两套口径的完整对照见 [02 §4.2bis 不变式 3](./02-data-model.md)。
+- **崩溃恢复产生的终态照常计入用户 SLA**：`final_status='failed'`（`unknown_billing` 场景）与 `'interrupted'`（首字后崩溃）都**计入失败**，后者是否计入 `stream_break_rate` 由**唯一判据**决定——`attempts.stream_broken=true OR downstream_first_byte_written_at IS NOT NULL`（只统计"已确认写出过内容后才中断"，不看 `final_status`）——FR-071 要求用户真实经历的失败与流中断始终计入，AC-12 要求首字后中断记为完整失败。**但这些 attempt 不计入渠道健康统计**（崩溃是我们的故障，不是渠道的），两套口径的完整对照见 [02 §4.2bis 不变式 3](./02-data-model.md)。
 - 错误预算 = 窗口内允许失败上限（如 99.9% → 月 ~43min）；测活失败扣该等级预算 ≤10%（§2.1）。
 
 ### 5.2 告警分级（参数16，分类与时限可配置）

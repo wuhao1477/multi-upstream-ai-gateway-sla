@@ -146,13 +146,17 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 - 这两列**不参与计费**（成本只看上游事实），因此可以异步落库、允许滞后。
 - **不一致时一律按「未写出 = 未完成」处理**：宁可把一次实际成功的响应记为失败，也不能把我们没写完的流记为成功。
 
+> ⚠️ **`IS NULL` 只意味着「未确认写出」，不等于「下游一个字节都没收到」**（第 13 轮 [high]，同族过度声称第三次）：这两列是 socket write **返回之后异步**落库的，因此存在第三个残余窗口——**write 已返回、时间戳尚未持久化**时崩溃，DB 里是 NULL，而 Caddy 可能早已收到字节。
+>
+> 故：**数据库事实 ≠ 物理事实**。恢复只能依据数据库事实做**保守**判定（未确认即按未写出处理），**不得反过来声称物理上没写出去**。AC-35 必须**分别断言**「数据库里的终态」与「下游实际观测到的字节」，不允许由前者推导后者。
+
 **四个 kill 时点的完整终态**（AC-12/AC-35 据此写判定）：
 
-| # | kill 时点 | 下游（Caddy）实际收到 | 库中事实 | attempt | request（用户 SLA） | 计费 |
+| # | kill 时点 | 下游（Caddy）**可能**收到 | 库中事实 | attempt | request（用户 SLA） | 计费 |
 | --- | --- | --- | --- | --- | --- | --- |
 | K1 | 首字 outbox **提交前** | 无内容 | `pending` | `unknown_billing` | `failed` | 估算 + 待核对 |
-| K2 | 首字已提交、**字节未写出** | 无内容 | `committed`，`downstream_first_byte_written_at IS NULL` | `interrupted` | `failed`（用户没看到内容 → 不计流中断） | 估算 + 待核对 |
-| K3 | 终帧 outbox **提交前** | 截断流 | `committed`，`terminal_event IS NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
+| K2 | 首字已提交、**写出未确认** | 通常无内容（**但 write 可能已返回**） | `committed`，`downstream_first_byte_written_at IS NULL` | `interrupted` | `failed`（**未确认写出** → 保守，不计流中断） | 估算 + 待核对 |
+| K3 | 终帧 outbox **提交前**、已确认写出过首字节 | 截断流 | `committed`，`terminal_event IS NULL`，`downstream_first_byte_written_at NOT NULL` | `interrupted` | `interrupted`（计流中断） | 估算 + 待核对 |
 | K4 | 终帧已提交、**字节未写出** | 截断流 | `terminal_event NOT NULL`，`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → `failed`） | **`interrupted`**（我们没写完 → 保守判失败、计流中断） | **实际用量，无需人工核对** |
 | — | 全部完成 | 完整响应 | `terminal_event` + `downstream_write_completed_at` 均非空 | `completed` | `completed` | 实际 |
 
