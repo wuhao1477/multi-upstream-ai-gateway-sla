@@ -323,7 +323,9 @@ CREATE TABLE gateway_clients (
   allowed_aliases TEXT[],                      -- 可用的模型别名；NULL=全部（FR-062/117）
   -- 配额（防单个调用方烧光额度）
   quota_daily_usd nonneg_usd,                  -- 日费用上限；NULL=不限
-  rpm_limit     INTEGER,                       -- 每分钟请求数上限
+  rpm_limit     INTEGER,                       -- 每分钟请求数上限；**NULL = 不限速**（见下方 B 阶段：
+                                               -- NULL 时必须**整段跳过** RPM 原子闸，不可代入 SQL——
+                                               -- `count < NULL` 恒为 UNKNOWN → DO UPDATE 不执行 → 第二个请求起全部误 429）
   -- 生命周期
   status        TEXT NOT NULL DEFAULT 'active'
                   CHECK (status IN ('active','revoked','expired')),
@@ -409,7 +411,10 @@ estimated_usd = Σ 单跳上界(b)  for b in RoutePlan        -- 按全部跳求
 - **请求体自带更小的 `max_output_tokens`/`max_tokens` 不采信**（我们不解析正文），恒用登记上限，只会更保守。
 - **代价（明示）**：多模态与续接会话请求会按**整个上下文窗口**预留，日配额利用率显著下降。这是刻意选择——超限不可逆，过度预留只是暂时占用（结算即释放差额）。若该调用方以多模态为主且不希望被过度限制，**把它的 `quota_daily_usd` 置 NULL**（不设日配额，只记账不预留），由运维用告警而非硬闸控制。
 
-**实际费用超出预留时**（上游不遵守上限等）：结算按**实际值**写 `settled_usd`；若结算后 `settled_usd + reserved_usd > quota_daily_usd`，立即置该 client 当日 `over_quota` → **后续请求一律 429**。**已完成的请求不追溯拒绝**（无法收回）。此为可接受的有界溢出，AC-33 须断言"溢出后下一请求必被拒"。
+**实际费用超出预留时**（上游不遵守上限等）：结算按**实际值**写 `settled_usd`。溢出后的拒绝**无需任何新字段**——D 阶段的原子预留语句本身就带 `reserved_usd + settled_usd + :est <= :quota` 条件，`settled_usd` 一旦超出，下一个请求的 UPDATE 自然返回 0 行 → **429**。
+  > ⚠️ 曾写"立即置该 client 当日 `over_quota`"——`client_daily_spend` 与 `gateway_clients` **都没有这一列**（第 17 轮 [high]），照此实现会写不存在的字段。**状态由 `reserved_usd + settled_usd >= quota_daily_usd` 派生**，不落列、无需维护一致性。
+
+  **已完成的请求不追溯拒绝**（无法收回）。此为可接受的有界溢出，AC-33 须断言"溢出后下一请求必被拒"。
 
 **写入路径分工（唯一口径，第 15 轮 [critical] 统一）**：
 
@@ -454,11 +459,49 @@ UPDATE client_daily_spend d
 -- ③ 同事务推 **attempt** 终态（由上游 terminal_event 决定，与下游是否写完无关）
 UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
  WHERE request_id = :rid AND attempt_status IN ('pending','committed');
--- ⚠️ **request 的终态不在这里定**（第 12 轮 [critical]）：见下方两阶段说明
+-- ④ 释放 canary 占用（若本跳是 canary），一次性跃迁，成功才减计数
+WITH rel AS (
+  UPDATE canary_claims SET state='released', released_at=now()
+   WHERE request_id = :rid AND state='active' RETURNING binding_id)
+UPDATE resource_health h SET canary_inflight = h.canary_inflight - 1
+  FROM rel WHERE h.binding_id = rel.binding_id AND h.canary_inflight > 0;
+-- ⑤ request 终态：**仅 finalize_abort / finalize_recovery 执行本句**
+--    finalize_upstream 必须跳过它（那时交付结果未知，写了会让 K4 不可达）
+--    ⚠️ 第 17 轮 [critical]：恢复分流表要求 K1~K3 写 requests.final_status，
+--       但骨架里原本没有这一句、后文又说"终态只能由 finalize_delivery 推定"，
+--       而 K1~K3 根本不会产生 delivery 事件 → AC-35 的「无 pending 残留」不可实现。
+UPDATE requests SET final_status = :request_terminal
+ WHERE id = :rid AND final_status = 'pending';        -- 幂等：只推一次
 COMMIT;
 ```
 
 > **`finalize` 的入参只有** `request_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
+
+**三个终结入口，覆盖全部收尾路径**（第 17 轮 [critical]：此前只定义了"终帧到达"这一条正常路径，**取消/断流/超时结束的请求没有任何终结事务**，会残留 `pending` + `reserved`；恢复扫描也没有写 `requests.final_status` 的载体）：
+
+| 入口 | 触发 | 写 attempt | 写 request | 写 reservation | canary claim |
+| --- | --- | --- | --- | --- | --- |
+| **`finalize_upstream`** | 上游终帧到达 | 由 `terminal_event` 决定 | **不写**（保持 `pending`） | 结算(实际) | 释放 |
+| **`finalize_delivery`** | socket write 返回后（经 outbox） | 不写 | **写终态** | 不写 | 不写 |
+| **`finalize_abort`** | 请求以取消/断流/超时收尾 | 终态 + `cancel_reason` | **写终态** | 结算 | 释放 |
+| **`finalize_recovery`** | 恢复扫描（§4.2bis） | 终态 | **写终态** | 结算 | 释放 |
+
+> 四者共用同一段幂等骨架（reservation 的 `reserved → settled/abandoned` 跃迁是唯一聚合闸门），差别只在**是否写 `requests.final_status`** 与参数。
+> **只有 `finalize_upstream` 不写 request 终态**——它跑在字节放行之前，那时交付结果未知；写了就会让 K4 不可达（第 12 轮 [critical]）。其余三者跑在"本请求已无后续"之时，必须写，否则 request 永久 `pending`。
+
+**`finalize_abort` 的 request 终态映射**（`cancel_reason` → `requests.final_status`）：
+
+| `cancel_reason` | request 终态 | 计入 SLA 失败？ |
+| --- | --- | --- |
+| `client_disconnect` | **`canceled`** | **否**——用户主动取消，PRD 术语明确不计入 |
+| `sla_takeover` | 不终结（本跳取消，请求继续走下一跳） | — |
+| `upstream_disconnect` | `failed`（`stream_broken=true` 时计流中断） | 是 |
+| `internal_timeout` | `failed` | 是 |
+| `upstream_error` | `failed` | 是 |
+| 全候选不可用（无 attempt 或全部失败） | `unavailable` | 是 |
+
+> ⚠️ `sla_takeover` 是**唯一不终结 request** 的取消原因：它只结束当前 attempt，请求继续。其余取消原因都意味着"本请求到此为止"，必须走 `finalize_abort`。
+> **验收**：[AC-30/AC-32](./14-acceptance-matrix.md) 须断言——客户端断开后 `requests.final_status='canceled'`、`client_reservations.state≠'reserved'`、`client_daily_spend.reserved_usd` 已扣回、canary claim 已释放，且该请求**不计入 SLA 失败**。
 
 **关单必须两阶段：`finalize_upstream` → `finalize_delivery`**（第 12 轮 [critical]）：
 
@@ -477,6 +520,8 @@ UPDATE attempts
    SET downstream_write_completed_at = :written_at
  WHERE id = :attempt_id AND downstream_write_completed_at IS NULL;
 -- ② 据该事实推 request 终态（幂等：只在 pending 时推一次）
+--    ⚠️ request_id / request_created_at **从 attempts 派生**，不由 payload 传（第 17 轮 [high]）：
+--       outbox 的 payload 只含 attempt_id/written_at，直接用 :rid 会依赖一次未说明的额外查询。
 UPDATE requests r
    SET final_status = CASE
          WHEN a.downstream_write_completed_at IS NOT NULL
@@ -485,7 +530,9 @@ UPDATE requests r
          ELSE 'interrupted'                                      -- 写出未确认 → 保守
        END
   FROM attempts a
- WHERE r.id = :rid AND a.id = :attempt_id
+ WHERE a.id = :attempt_id
+   AND r.id = a.request_id
+   AND r.created_at = a.request_created_at                       -- 分区键对齐
    AND r.final_status = 'pending';
 COMMIT;
 ```
@@ -497,12 +544,13 @@ COMMIT;
 - **计费与交付彻底解耦**：钱在 `finalize_upstream` 就结清（成本那时已知），交付结论晚一步不影响配额正确性。
 - **崩溃在两阶段之间** = 正是 K4：reservation 已 settled、attempt 已终态、request 仍 `pending` → 恢复扫描按 §4.2bis ③c 判 `interrupted`。**这条路径现在真的可达了。**
 
-**两条调用路径（都从 `reserved` 出发），同一事务，参数不同**：
+**调用路径（都从 `reserved` 出发），共用同一幂等骨架，参数不同**：
 
 | 路径 | 触发 | `outcome` → reservation / attempt / **request** |
 | --- | --- | --- |
 | **`finalize_upstream`（正常路径）** | 终帧到达 | `settled`(actual=真实 usage) / 由 `terminal_event` 决定 / **保持 `pending`** |
-| **恢复扫描**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（五种 outcome） |
+| **`finalize_abort`** | 客户端断开／上游断流／内部超时／全候选不可用 | 见上方 `cancel_reason` → `final_status` 映射表 |
+| **`finalize_recovery`**（§4.2bis） | 租约超时 | 见 §4.2bis 分流表（五种 outcome）；**必须显式写 `requests.final_status`** |
 
 > ⚠️ **正常路径也不写 `requests.final_status`**（第 16 轮 [critical]）：上一版这一行写成 `completed / completed`，等于终帧一到达就把 request 关成成功——那正是第 12 轮修掉的老毛病，会让 K4 窗口的崩溃被记成成功。request 终态**只能**由 `finalize_delivery` 依据 `downstream_write_completed_at` 推定。
 
@@ -538,20 +586,32 @@ SELECT gateway_client_id, spend_date, actual_usd
   FROM client_reservations
  WHERE request_id = :rid AND state = 'settled'
    FOR UPDATE;                                   -- 未命中（不存在/仍 reserved）→ 报错回滚
--- (2) 幂等闸门：event_key 冲突即无操作
-INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
-VALUES (:event_key, :rid, :old_actual, :new_actual, :operator, :reason)
-ON CONFLICT (event_key) DO NOTHING;
--- (3) 仅当 (2) 影响行数 = 1 才执行（否则 COMMIT 返回，聚合不动）
-UPDATE client_daily_spend
-   SET settled_usd = settled_usd + (:new_actual - :old_actual)   -- 差额，且 old 来自锁定行
- WHERE gateway_client_id = :cid AND spend_date = :date;          -- 二者均派生自 reservation
-UPDATE client_reservations
-   SET actual_usd = :new_actual, needs_manual_review = false
- WHERE request_id = :rid;
+-- (2)(3) 幂等闸门与后续更新**必须绑定在同一条语句里**（第 17 轮 [high]）：
+--     原版把 gating 只写在注释（"仅当影响行数=1 才执行"），SQL 本体没表达 →
+--     同一 event_key 携带**不同** new_actual_usd 重试时，INSERT 被 DO NOTHING 吃掉，
+--     后面两个 UPDATE 却照跑，聚合与 reservation 被二次改写。
+WITH inserted AS (
+  INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
+  VALUES (:event_key, :rid, :old_actual, :new_actual, :operator, :reason)
+  ON CONFLICT (event_key) DO NOTHING
+  RETURNING request_id, old_actual_usd, new_actual_usd
+),
+agg AS (
+  UPDATE client_daily_spend d
+     SET settled_usd = d.settled_usd + (i.new_actual_usd - i.old_actual_usd)  -- 差额
+    FROM inserted i
+   WHERE d.gateway_client_id = :cid AND d.spend_date = :date                  -- 均派生自锁定行
+  RETURNING 1
+)
+UPDATE client_reservations r
+   SET actual_usd = i.new_actual_usd, needs_manual_review = false
+  FROM inserted i
+ WHERE r.request_id = i.request_id;
+-- inserted 为空（重放）→ agg 与最后一句都影响 0 行，聚合与 reservation 均不动
 COMMIT;
 ```
 
+- **同 `event_key` 携带不同金额的重试**：按上面的 CTE 语义**静默无操作**（第一次的值为准）。若希望暴露调用方错误，API 层可在 `ON CONFLICT` 命中且 `new_actual_usd` 与已存值不一致时返回 **409**——但**数据库层的正确性不依赖它**。
 - **`new_actual_usd` 必须 ≥ 0**：该列用 `nonneg_usd` 域（带 `CHECK (VALUE >= 0)`），API 层另行返回 **400** 拒绝负值（不依赖数据库报错）。修正后 `settled_usd` 亦须 ≥ 0，否则整事务回滚。
 - **差额修正而非覆盖**：`settled_usd += (new − old)`，配合 `event_key` 幂等键，重复提交与崩溃重放都只生效一次。
 - **`cid` / `spend_date` / `old_actual` 三者全部从 `FOR UPDATE` 锁定的 reservation 行派生**，不接受调用方传参——既挡住并发丢失更新，也挡住改错客户、改错日期。跨日核对因此天然记到原始那一天。
@@ -581,6 +641,10 @@ ON CONFLICT (gateway_client_id, window_start) DO UPDATE
  WHERE client_rate_window.request_count < :rpm_limit      -- 已达上限则 DO UPDATE 不执行
 RETURNING request_count;
 -- 返回 0 行 → 429
+-- ⚠️ **`rpm_limit IS NULL`（不限速）时不得执行本语句**（第 17 轮 [high]）：
+--    SQL 三值逻辑下 `count < NULL` 恒为 UNKNOWN，DO UPDATE 永不执行，
+--    行已存在后每次都返回 0 行 → 一个「不限速」的凭证从第二个请求起全部 429。
+--    正确做法：应用层判 rpm_limit IS NULL 则**整段跳过 B 阶段**（连计数也不必写）。
 ```
 
 ```sql
@@ -933,7 +997,7 @@ SELECT r.id, r.created_at, a.*
 > ⚠️ 顺序反了会误判：socket write 已返回、`downstream_write_completed` 的 outbox 行已写但**尚未投递**时，`attempts.downstream_write_completed_at` 仍是 NULL；若恢复扫描先跑，会把一个**已经完整写完**的请求判成 ③c/`interrupted`。
 > 该跳过条件**已写进上面的 SQL 本体**（`NOT EXISTS` 反连接），不是仅存在于说明里——照 SQL 实现即正确。
 
-捞出后**按"上游发出了吗、见到首字了吗"两个事实分流**，每种情形都推到**终态**并在**同一个 `finalize` 事务**（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)）内终结配额预留：
+捞出后调用 **`finalize_recovery`**（骨架同 `finalize_upstream`，但**执行 ⑤ 写 `requests.final_status`**），**按"上游发出了吗、见到首字了吗"两个事实分流**，每种情形都推到**终态**并在**同一个 `finalize` 事务**（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)）内终结配额预留：
 
 | # | 对应 [03 §3.0](./03-upstream-layer.md) | 判据（读 attempt 的三个事实列） | attempt 终态 | request 终态 | reservation | 告警 |
 | --- | --- | --- | --- | --- | --- | --- |

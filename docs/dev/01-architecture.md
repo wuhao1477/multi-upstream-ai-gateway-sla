@@ -79,6 +79,10 @@
 | 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
 | **`finalize_upstream`**（终帧到达时） | **直写表**：`attempts.terminal_event` + `attempt_usage` + reservation 结算 + `attempt_status` 终态。**`requests.final_status` 保持 `pending`** | **同步**（不经 outbox），在放行终帧字节之前 |
 | **`finalize_delivery`**（socket write 返回后） | `downstream_write_completed_at`，再据它推 `requests.final_status` | 异步，经 **outbox**（不涉及计费） |
+| **`finalize_abort`**（取消／断流／内部超时／全候选不可用） | attempt 终态 + `cancel_reason` + **`requests.final_status`** + reservation 结算 + canary 释放 | **同步** |
+| **`finalize_recovery`**（恢复扫描） | 同上，参数取自 [02 §4.2bis](./02-data-model.md) 分流表 | 后台任务 |
+
+> **四个终结入口，只有 `finalize_upstream` 不写 `requests.final_status`**（它跑在字节放行前，交付未知；写了 K4 就不可达）。其余三者跑在"本请求已无后续"之时**必须写**，否则 request 永久 `pending`。`client_disconnect` → `canceled`，**不计入 SLA 失败**（PRD 术语）。
 
 > ⚠️ **关单必须两阶段，不能一步到位**（第 12/13 轮 [critical]）：若在终帧到达时就把 `final_status` 写成 `completed`，那一刻字节**还没写给下游**；随后崩在 K4 窗口时 request 已是终态，恢复扫描的 `WHERE final_status='pending'` 闸门再也改不动它 —— **③c/K4 分支被正常路径整个绕过**。完整 SQL 与幂等约束见 [02 §2bis](./02-data-model.md)。
 

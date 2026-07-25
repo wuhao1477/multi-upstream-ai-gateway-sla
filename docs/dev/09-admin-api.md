@@ -109,7 +109,7 @@ type ParamMeta struct {
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
-| `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`/`rpm_limit`/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
+| `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`（NULL=不限额）/`rpm_limit`（**NULL=不限速**，此时跳过 RPM 闸）/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
 | `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
