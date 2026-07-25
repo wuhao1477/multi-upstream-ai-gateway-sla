@@ -16,7 +16,7 @@
 
 | 平面 | 端点前缀 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| 数据平面 | `/v1/*`（chat_completions、responses） | 上游业务 API Key | 承载真实请求（[03](./03-upstream-layer.md)） |
+| 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用 `upstream_keys.secret`**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
 | 健康 | `/healthz` | 无 | LB 探针（[06](./06-deployment-and-operations.md)） |
 | **管理平面** | **`/admin/*`** | **独立管理令牌**（非业务 Key） | 本篇；配置读写、策略、审计查询 |
 
@@ -106,6 +106,10 @@ type ParamMeta struct {
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
+| `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`/`rpm_limit`/`expires_at`（[02 §2bis](./02-data-model.md)） | **M0** |
+| `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
+| `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
+| `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
 
 ---
 

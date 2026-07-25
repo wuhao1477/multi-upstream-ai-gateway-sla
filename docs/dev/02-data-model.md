@@ -53,6 +53,14 @@ CREATE DOMAIN usd_amount AS NUMERIC(20,10);
 ### 1.1 渠道 / 真实上游 / 账号 / Key / 模型
 
 ```sql
+-- 真实上游 / 供应商（FR-002/044）：多个渠道可共享同一官方上游 → 故障域根
+-- ⚠️ 必须先于 channels 创建（channels 有外键指向它）
+CREATE TABLE upstream_providers (
+  id      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name    TEXT NOT NULL,          -- 如 openai/anthropic 官方供应商
+  note    TEXT
+);
+
 -- 渠道（FR-001/002/004）：可持续新增/停用/恢复
 CREATE TABLE channels (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -65,13 +73,6 @@ CREATE TABLE channels (
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- 真实上游 / 供应商（FR-002/044）：多个渠道可共享同一官方上游 → 故障域根
-CREATE TABLE upstream_providers (
-  id      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  name    TEXT NOT NULL,          -- 如 openai/anthropic 官方供应商
-  note    TEXT
 );
 
 -- 账号（FR-002/003/020/022）：一账号可共享多 Key、共享余额
@@ -181,6 +182,9 @@ CREATE INDEX idx_bindings_channel     ON bindings(channel_id);
 > FR-062/117：调用方通过选择**对外模型别名**选择策略（SLA 等级、是否允许测活）。业务不逐请求标注敏感属性。策略需版本化可回滚（FR-104）、全部可配置 + 关键项二次确认（FR-115）。
 
 ```sql
+-- ⚠️ routing_policies 必须先于 model_aliases 创建（后者有外键指向它），
+-- 定义见下方"路由策略"；此处仅提示建表顺序，实际 DDL 在 migrations/ 中按依赖排序。
+
 -- 对外模型别名（FR-062/117、AC-25）：如 gpt-5.5（可测活） vs gpt-5.5-sla-1（禁测活）
 CREATE TABLE model_aliases (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -261,6 +265,54 @@ CREATE INDEX idx_config_active    ON config_params(scope_type, scope_id, param_k
 ```
 
 **服务 FR/AC**：FR-062、FR-090/091、FR-104、FR-115/116/117；AC-25（可测活 vs 禁测活别名）、AC-26（协议由 request_type 承载）。
+
+---
+
+## 2bis. 网关调用方凭证域（**入站鉴权**，对抗性审查新增）
+
+> **此前的空白**：设计里唯一的密钥模型是 `upstream_keys.secret`——那是**我们打上游用的**。`/v1/*` 的入站鉴权从未定义，开发只能二选一：复用上游 Key（把高价值凭证暴露给调用方）或不鉴权（**任何能访问端口的人都能烧额度**）。两者都不可接受。
+
+**铁律：`upstream_keys.secret` 严禁用作入站凭证。** 入站与出站是两套完全独立的凭证体系。
+
+```sql
+-- 网关调用方凭证（入站）：只存哈希，永不存明文
+CREATE TABLE gateway_clients (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name          TEXT NOT NULL,                 -- 调用方标识（如 "codex-cli-local"）
+  tenant_id     TEXT,                          -- 关联租户（个人场景可空）
+  -- ⚠️ 与上游 Key 不同：入站凭证**只存哈希**（Argon2id/bcrypt），明文仅在签发时返回一次
+  secret_hash   TEXT NOT NULL,
+  secret_prefix TEXT NOT NULL,                 -- 明文前 8 位，供展示与定位（如 "gw-a1b2c3"）
+  -- 授权范围
+  allowed_aliases TEXT[],                      -- 可用的模型别名；NULL=全部（FR-062/117）
+  -- 配额（防单个调用方烧光额度）
+  quota_daily_usd usd_amount,                  -- 日费用上限；NULL=不限
+  rpm_limit     INTEGER,                       -- 每分钟请求数上限
+  -- 生命周期
+  status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','revoked','expired')),
+  expires_at    TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at    TIMESTAMPTZ,
+  revoke_reason TEXT,
+  last_used_at  TIMESTAMPTZ,                   -- 审计：最近使用时间
+  UNIQUE (secret_prefix)
+);
+
+CREATE INDEX idx_gwclient_active ON gateway_clients(status) WHERE status='active';
+```
+
+**鉴权流程**（`protocol` 层，先于任何调度）：
+
+1. 取 `Authorization: Bearer <token>` → 按 `secret_prefix` 定位候选行 → 校验 `secret_hash`。
+2. 校验 `status='active'` 且未过期 → 否则 **401**（已吊销/过期）。
+3. 校验请求的模型别名 ∈ `allowed_aliases` → 否则 **403**（越权）。
+4. 校验 `rpm_limit` 与 `quota_daily_usd` → 超限 **429**。
+5. 通过后才进入 policy/selector；`requests.tenant_id` 取自该凭证。
+
+**签发与轮换**（[09](./09-admin-api.md) 管理 API）：签发时生成随机明文 → 存哈希 → **明文只返回一次**；吊销即置 `status='revoked'` 并记 `revoked_at/revoke_reason`；轮换 = 新签发 + 旧的宽限期后吊销。
+
+**服务 FR/AC**：FR-094（不展示完整凭证）、FR-113（**上游 Key 明文 ≠ 入站凭证明文**，入站强制哈希）；新增 AC 见 [14](./14-acceptance-matrix.md)。
 
 ---
 
@@ -845,6 +897,22 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 -- 保留策略：DETACH 后 DROP 超过 180 天（7 分区）的最老月
 -- ALTER TABLE requests DETACH PARTITION requests_2026_01; DROP TABLE requests_2026_01;
 ```
+
+### 9.1bis DDL 可执行性门禁（**必须做，已三次栽在这里**）
+
+> 本文档的 DDL 曾出现三类**光看不出、一跑就炸**的错误：`attempt_usage` 双主键、`is_stale` 用 `now()` 做 stored generated column、`channels` 外键前向引用未创建的 `upstream_providers`。**人眼评审挡不住这类问题。**
+
+**门禁规则（M0 起生效，纳入 CI）**：
+
+1. `migrations/` 的完整 DDL **必须在一次性 PostgreSQL 实例上真实执行成功**，才算 schema 基线通过。
+2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 执行一遍 `sqlc generate` → 全部成功才绿。
+3. 本文档的 DDL 与 `migrations/` **以后者为准**；文档变更若涉及 DDL，须同步迁移文件并通过门禁。
+4. 附加断言（[9.2](#92-保留策略配置化) 的 FR-112 守卫同批执行）：账本表禁止出现 `body/messages/prompt/headers` 命名列。
+
+> 建表顺序原则：**被引用的表先建**。当前依赖链为
+> `upstream_providers → channels → upstream_accounts → upstream_keys → models → cache_scopes → bindings`、
+> `routing_policies → model_aliases → sla_targets`、
+> `requests → attempts → attempt_usage / ledger_outbox`。
 
 ### 9.2 保留策略配置化
 

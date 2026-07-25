@@ -31,8 +31,8 @@ multi-upstream-ai-gateway-sla/
 │   ├── policy/                # 别名→策略解析(FR-062/117)
 │   ├── selector/              # 候选过滤+排序+RoutePlan(05 §1)
 │   ├── executor/              # 流式执行、内容感知首字、期限、取消(03/05 §1.4;AC-31/32)
-│   ├── ledger/                # 逐 Attempt 账本、对账、errorMessage 归并、隐藏重试补算(03 §4.4)
-│   ├── steward/               # 测活/冷却/订阅倾斜/告警/错误预算(05 §2~5)
+│   ├── ledger/                # 逐 Attempt 账本 + outbox 持久化协议(01 §5.1, 02 §9.2bis)
+│   ├── steward/               # 冷却/样本门槛/余额信号/告警/错误预算(05 §3~5)
 │   ├── upstream/              # 自研上游对接层(03):字节透传 + 旁路观察
 │   │   ├── client.go          # Client 接口(03 §2)
 │   │   ├── passthrough.go     # 字节透传管道 + tee
@@ -61,9 +61,9 @@ multi-upstream-ai-gateway-sla/
 | 包 | 职责 | 主要来源 |
 | --- | --- | --- |
 | `protocol` | 入站 CC/Responses 端点；原样透传（不落正文 FR-112）；**会话标识 7 级提取**（02 §4.5） | FR-111、02 §4.5 |
-| `selector` | 候选过滤（顺序不可交换）+ 排序（用满倍率）+ RoutePlan（每跳期限）+ 接管准入/防抖动 | 05 §1 |
-| `executor` | SSE 逐事件解析 `HasVisibleContent`、内容感知 TTFT、期限到 `Close()` 传播取消 | 03 §4.3、AC-31/32 |
-| `ledger` | Attempt 账本(单一真相源)、取消口径归并、gateway_overhead 计算 | 02 §4 |
+| `selector` | 候选过滤（顺序不可交换）+ 排序（价格版本×倍率 + 会话粘性）+ RoutePlan（每跳期限）+ 接管准入/防抖动 | 05 §1 |
+| `executor` | 旁路观察 SSE 事件、内容感知 TTFT、期限到 `Close()` 传播取消（**不重组字节流**） | 03 §3、AC-31/32 |
+| `ledger` | Attempt 账本(单一真相源)、**outbox 写入与崩溃重放**、取消口径归并、gateway_overhead 计算 | 02 §4/§9.2bis、01 §5.1 |
 | `upstream` | 自研直连：字节透传、SSE 扫描、取消传播、usage 提取、协议能力探测 | 03 |
 | `store` | PG 访问（**`pgx` + `sqlc`**：手写 SQL 生成类型安全代码，零反射）、迁移、UUIDv7、月分区、内存快照重建；决策路径只读快照 | 02 §9、10 开放点3 |
 | `bootstrap` | 启动 `pg_try_advisory_lock` 选主 → 取到锁的 core 跑迁移与初始化，其余跳过轮询就绪 | 06 §2.2 |
@@ -76,10 +76,10 @@ multi-upstream-ai-gateway-sla/
 | 目标 | 内容 |
 | --- | --- |
 | `make build` | 编译 `cmd/sla-core`、`cmd/collector` 为静态二进制 |
-| `make test` | 单测；**含 03 §5.1 要求的 `updateRetryPolicy` 全字段常量校验**（防假设 2 坑重现） |
+| `make test` | 单测；含 SSE 扫描器判定用例（MOCK 场景集）与 outbox 重放幂等性用例 |
 | `make lint` | `golangci-lint` |
 | `make migrate` | 应用 `migrations/`；本地/CI 用一次性 PG |
-| **CI 门禁** | 构建 + 测试 + lint + **FR-112 不可存列断言**（[02 §9.2](./02-data-model.md)：账本表禁出现 `body/messages/prompt/headers` 列）+ 别名/config 加载冒烟 |
+| **CI 门禁** | 构建 + 测试 + lint + **DDL 真跑**（起临时 PG 执行全部 `migrations/` + 建分区 + `sqlc generate`，[02 §9.1bis](./02-data-model.md)）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)） |
 | 镜像 | `cmd/sla-core` 打最小镜像（distroless/alpine） |
 
 ---
@@ -91,8 +91,8 @@ multi-upstream-ai-gateway-sla/
 | `docker compose up` 一键起全栈 | `deploy/`、`cmd/sla-core` `/healthz` |
 | 上游直连打通、Responses 零丢失 | `internal/upstream`（[03 §10](./03-upstream-layer.md)） |
 | 停一个 core 实例服务不中断 | 无状态 + Caddy 摘除（`deploy/Caddyfile`） |
-| verify/ harness 对 beta5 跑通 | 现有 `verify/`（不动） |
-| CI：构建 + 加载 + 不可存列断言 | `.github/workflows/ci.yml`、`make test` |
+| Codex 实机打通 + mock 场景集接入 CI | `verify/mock_upstream.py`（[15 T1](./15-scope-and-preflight.md)） |
+| CI：构建 + **DDL 真跑** + 加载 + 不可存列 + 脱敏断言 | `.github/workflows/ci.yml`、`make test`、`make migrate` |
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
 | bootstrap 选主（避免双 core 重复迁移） | `internal/bootstrap` advisory lock；建议加双 core 并发冷启动的集成测试 |
 

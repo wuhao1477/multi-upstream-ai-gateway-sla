@@ -5,7 +5,7 @@
 | 状态 | 草案，待评审（M0 前定稿） |
 | 日期 | 2026-07-23 |
 | 形态 | **单机 Docker Compose**：Caddy LB + 2× sla-core（Go）+ PostgreSQL + collector。**无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
-| 约束 | 个人/内部使用；任一 sla-core 实例宕机不影响服务（FR-110）；上游直连，渠道凭证来自 PG（FR-113） |
+| 约束 | 个人/内部使用；**进程级冗余**：任一 sla-core 实例宕机不影响服务（FR-110/AC-27）。⚠️ 单机部署下 **Caddy / 宿主机 / 单 PG 为共享故障点**，一期不承诺整体可用性数字；上游直连，渠道凭证来自 PG（FR-113） |
 | 输入 | [01 架构](./01-architecture.md)、[00 硬约束](./00-overview-and-milestones.md)、[03 上游对接层](./03-upstream-layer.md)、[verify/](../../verify/README.md)、[ISSUE-001 beta5 适配表](../issues/ISSUE-001-tech-assumption-verification.md) |
 
 ---
@@ -127,7 +127,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 - [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部上游候选不可用时返回明确错误、不旁路（AC-27）。
 - [ ] **Codex 实机打通实验**（[15 T1](./15-scope-and-preflight.md)）：最小透传代理 + 真实 Codex CLI + 真实上游，抓包确认其实际请求/期望；结论回填 [13 §1](./13-research-reassessment.md)。
 - [ ] `verify/mock_upstream.py` 场景集接入 CI 作为透传层回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort）。
-- [ ] CI：Go 构建 + `config_params`/别名策略加载 + 不可存列 schema 断言。
+- [ ] CI：Go 构建 + **DDL 在临时 PG 真跑通过**（[02 §9.1bis](./02-data-model.md)）+ `config_params`/别名策略加载 + 不可存列断言 + 凭证脱敏断言。
 - [ ] `pg_dump`/restore 演练脚本就位。
 
 ---
