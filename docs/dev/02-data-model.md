@@ -318,6 +318,38 @@ CREATE TABLE gateway_clients (
 CREATE INDEX idx_gwclient_active ON gateway_clients(status) WHERE status='active';
 ```
 
+**跨实例配额执行**（对抗性审查发现：光有 `quota_daily_usd`/`rpm_limit` 字段无法执行——双 core 各自计数会被绕过，并发请求可在费用落账前同时通过检查）：
+
+```sql
+-- 日费用预留账：按 (client, 日期) 原子累加，多实例共享
+CREATE TABLE client_daily_spend (
+  gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id),
+  spend_date    DATE NOT NULL,
+  reserved_usd  usd_amount NOT NULL DEFAULT 0,  -- 已预留（请求发起时 +预估）
+  settled_usd   usd_amount NOT NULL DEFAULT 0,  -- 已结算（请求结束时按实际替换预留）
+  PRIMARY KEY (gateway_client_id, spend_date)
+);
+
+-- RPM 滑动窗口：同样落库，避免实例本地状态被 LB/重启绕过
+CREATE TABLE client_rate_window (
+  gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id),
+  window_start  TIMESTAMPTZ NOT NULL,           -- 分钟粒度对齐
+  request_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (gateway_client_id, window_start)
+);
+```
+
+**预留—结算协议**（防"落账前并发超限"）：
+
+| 时点 | 动作 |
+| --- | --- |
+| 请求进入 | 单事务内 `INSERT … ON CONFLICT DO UPDATE SET reserved_usd = reserved_usd + <预估>` 并**在同一语句返回新值**；超 `quota_daily_usd` 即回滚并 **429** |
+| RPM 校验 | 同事务 `UPDATE client_rate_window SET request_count = request_count + 1` 并判定上限；超限 **429** |
+| 请求结束 | 用实际费用替换预留：`reserved_usd -= 预估`、`settled_usd += 实际` |
+| 崩溃兜底 | 悬挂 attempt（§4.2bis）转 `unknown_billing` 时，其预留**保留不释放**（保守），由运维核对后修正 |
+
+> 关键点：**预留发生在请求发起前、且与检查在同一事务** —— 这才挡得住"两个并发请求都读到旧余额"。仅在结束时累加实际费用是挡不住的。
+
 **鉴权流程**（`protocol` 层，先于任何调度）：
 
 1. 取 `Authorization: Bearer <token>` → 按 `secret_prefix` 定位候选行 → 校验 `secret_hash`。
@@ -410,6 +442,7 @@ CREATE INDEX idx_mult_cur  ON multiplier_versions(binding_id, effective_at DESC)
 CREATE TABLE requests (
   id            UUID NOT NULL,                -- UUIDv7（时间有序，多实例无冲突，FR-110）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  gateway_client_id BIGINT NOT NULL REFERENCES gateway_clients(id), -- 入站调用方（FR-120）；配额归集与审计必需
   alias_id      BIGINT REFERENCES model_aliases(id), -- 调用方选的别名（承载策略，FR-062/117）
   policy_id     BIGINT REFERENCES routing_policies(id),
   sla_level     TEXT,                         -- 冗余快照，便于按等级统计（FR-090/091）
@@ -488,7 +521,7 @@ CREATE TABLE attempts (
 
   -- ── attempt 租约（§4.2bis 悬挂检测）──
   external_call_started_at TIMESTAMPTZ,       -- 上游请求实际发出的时刻；NULL=尚未发出（崩溃则未计费）
-  lease_heartbeat_at TIMESTAMPTZ,             -- 持有实例的心跳；停止更新即视为实例已死
+  lease_heartbeat_at TIMESTAMPTZ,             -- 持有实例的心跳；**插入 attempt 时即写入非 NULL**（防漏扫）
   lease_owner       TEXT,                     -- 持有该 attempt 的实例标识
 
   PRIMARY KEY (id, request_created_at)
@@ -507,28 +540,45 @@ CREATE TABLE attempts (
 | `lease_heartbeat_at` | 持有实例每 N 秒更新一次；**停更即视为实例已死** |
 | `lease_owner` | 持有该 attempt 的实例标识 |
 
-**恢复扫描**（启动时 + 周期性，与 outbox 重放并列）：
+**写入顺序（冻结，不可交换）**：
+
+```
+① INSERT attempt(status='pending', lease_owner, lease_heartbeat_at = now())   ← 心跳与行同时写，绝不留 NULL
+② UPDATE attempt SET external_call_started_at = now()                          ← 紧邻发请求之前
+③ 发出上游请求
+```
+
+> ②③ 之间的窗口内崩溃 → `external_call_started_at` 已置但请求可能未真正发出：**按"已发出"保守处理**（宁可标 `unknown_billing` 人工核对，不可漏判为未计费）。
+> `lease_heartbeat_at` 在 ① 即写入非 NULL，**杜绝"已发出但无心跳"的漏扫**。
+
+**恢复扫描**（启动时 + 周期性，与 outbox 重放并列）——**必须覆盖两类，缺一即产生永久 pending**：
 
 ```sql
--- 悬挂判定：仍 pending、已发出上游请求、但心跳超时
+-- ⚠️ 一条 SQL 同时捞两类：不可只写 external_call_started_at IS NOT NULL，
+--    否则"上游调用前崩溃"的 attempt 永远扫不到（对抗性审查 critical 发现）。
+-- ⚠️ 心跳判定必须含 IS NULL：SQL 的 < 对 NULL 恒不成立，
+--    单写 lease_heartbeat_at < cutoff 会漏掉心跳未写入即崩溃的行。
 SELECT * FROM attempts
 WHERE attempt_status = 'pending'
-  AND external_call_started_at IS NOT NULL
-  AND lease_heartbeat_at < now() - INTERVAL '60 seconds'
+  AND (lease_heartbeat_at IS NULL
+       OR lease_heartbeat_at < now() - INTERVAL '60 seconds')
 FOR UPDATE SKIP LOCKED;
 ```
 
+捞出后**按是否已发出上游请求分流**：
+
 | 情形 | 处置 |
 | --- | --- |
-| `external_call_started_at IS NULL` | 上游未发出 → 置 `failed`，**确定未计费** |
-| 已发出且心跳超时 | 置 **`unknown_billing`** + 触发**运维告警**（[02 §8](./02-data-model.md) `alert_events`，P2） |
+| `external_call_started_at IS NULL` | 上游**未发出** → 置 `failed`，**确定未计费**，无需告警 |
+| `external_call_started_at IS NOT NULL` | **可能已计费** → 置 **`unknown_billing`** + 触发运维告警（[§8](#8-告警与事件域合并持续事件) `alert_events`，P2） |
 
-→ `unknown_billing` 的 attempt **计入成本上限的保守估算**（按该 binding 价格版本估一次调用的费用），但**不计入成功率统计**；运维据告警人工核对上游账单后修正。
+→ `unknown_billing` 的 attempt **计入成本上限的保守估算**（按该 binding 的价格版本 × 倍率版本估一次调用费用），但**不计入成功率统计**；运维据告警人工核对上游账单后修正。
 
-**验收**：[AC-35](./14-acceptance-matrix.md) 已含三时点崩溃；**须补第四个时点——"上游请求发出后、首条 outbox 事件前"**，重启后该 attempt 应为 `unknown_billing` 且有告警。
+**验收**：[AC-35](./14-acceptance-matrix.md) 覆盖四个崩溃时点，其中"上游发出后、首条 outbox 前"须得到 `unknown_billing` + 告警，"上游调用前"须得到 `failed`。
 
 ```sql
-CREATE INDEX idx_attempts_stale_lease ON attempts(lease_heartbeat_at)
+-- 索引须覆盖两类扫描（含心跳为 NULL 的行）
+CREATE INDEX idx_attempts_stale_lease ON attempts(attempt_status, lease_heartbeat_at NULLS FIRST)
   WHERE attempt_status = 'pending';
 ```
 
