@@ -9,10 +9,10 @@
 | 事项 | 状态 |
 | --- | --- |
 | 产品需求 PRD | ✅ v1.3，16 项业务参数确认 + 运行时验证反馈已折入（ISSUE-003） |
-| 开源网关技术选型 | ✅ 唯一推荐 AxonHub 执行数据面 + 外部自研 SLA 决策核心（L0，不改源码） |
+| 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
-| AxonHub 6 项假设（ISSUE-001） | ✅ 源码级预验证 + Docker 运行时实跑完成（2026-07-23）：1/2/4 证实、3 风险证实、5 部分收口、6 退路稳固 |
+| AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
 
 ## 文档地图
 
@@ -25,12 +25,12 @@
 - [技术选型结论 TECHNICAL-SELECTION](docs/tech-selection/TECHNICAL-SELECTION.md)
 - [技术选型决策图 DECISION-MAP](docs/tech-selection/DECISION-MAP.md)
 - [候选仓库固定基线](docs/tech-selection/research/00-repository-baseline.md)
-- 逐仓库评估：[AxonHub](docs/tech-selection/research/axonhub.md)（推荐）、[Aether](docs/tech-selection/research/aether.md)、[OmniRoute](docs/tech-selection/research/omniroute.md)、[NewAPI](docs/tech-selection/research/newapi.md)、[Sub2API](docs/tech-selection/research/sub2api.md)、[Octopus 系列](docs/tech-selection/research/octopus.md)、[ccLoad](docs/tech-selection/research/ccload.md)、[zhfeng1/ai-gateway](docs/tech-selection/research/zhfeng1-ai-gateway.md)
+- 逐仓库评估（历史，转向后不再作为执行面候选）：[AxonHub](docs/tech-selection/research/axonhub.md)、[Aether](docs/tech-selection/research/aether.md)、[OmniRoute](docs/tech-selection/research/omniroute.md)、[NewAPI](docs/tech-selection/research/newapi.md)、[Sub2API](docs/tech-selection/research/sub2api.md)、[Octopus 系列](docs/tech-selection/research/octopus.md)、[ccLoad](docs/tech-selection/research/ccload.md)、[zhfeng1/ai-gateway](docs/tech-selection/research/zhfeng1-ai-gateway.md)
 - 横向分析：[能力覆盖矩阵](docs/tech-selection/research/capability-matrix.md)、[外部控制边界](docs/tech-selection/research/control-boundary.md)、[维护性判断](docs/tech-selection/research/maintenance.md)
 - [选型复审（2026-07-23）](docs/tech-selection/research/2026-07-resurvey.md) —— 新筛 10+ 家（LiteLLM/Bifrost/Portkey/gpt-load 等），未发现更优，维持推荐
 
 ### 专项调研（issues）
-- [ISSUE-001：AxonHub 6 项技术假设验证](docs/issues/ISSUE-001-tech-assumption-verification.md)
+- [ISSUE-001：AxonHub 6 项技术假设验证](docs/issues/ISSUE-001-tech-assumption-verification.md)（历史记录，转向依据）
 - [ISSUE-002：上游采集调研（第一阶段）](docs/issues/ISSUE-002-upstream-data-collection.md)
 - [ISSUE-002：四站实测探测结果](docs/issues/ISSUE-002-probe-results.md)
 - [ISSUE-002：多平台采集适配器设计](docs/issues/ISSUE-002-collector-adapter-design.md)
@@ -39,23 +39,26 @@
 
 ### 开发设计（2026-07-23 启动）
 - [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
-- [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、AxonHub 集成契约（Key-per-Channel）、请求时序、开放点
+- [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、sla-core 模块、上游直连、请求时序
 - [02 数据模型](docs/dev/02-data-model.md) —— PG 单库 schema：逐 Attempt 账本、订阅台账（双倍率）、价格版本、健康冷却、月分区保留
-- [03 GatewayAdapter 契约](docs/dev/03-gateway-adapter.md) —— 执行面接口 + AxonHub beta5 实现 + ccLoad 退路空壳
+- [03 上游对接层](docs/dev/03-upstream-layer.md) —— **自研直连**：字节透传 + 旁路观察、Codex 兼容硬约束、取消与超时
 - [04 采集器契约](docs/dev/04-collector-adapter.md) —— CollectorAdapter 接口 + 三家族字段映射 + 凭证生命周期状态机
 - [05 调度与经营策略](docs/dev/05-scheduling-and-operations.md) —— selector 排序/RoutePlan + steward 测活/冷却/订阅倾斜/告警
-- [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、AxonHub 集成、升级门禁（verify/ 准入）、备份保留、M0 部署清单
-- [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 部署开放点实测收口：PG 支持、多实例共 PG（双活可行/迁移串行）、Responses 透传
+- [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、上游直连与选主、版本治理、备份保留、M0 部署清单
+- [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 历史记录；其 Responses round-trip 损耗实测是转向的直接依据
 - [08 参考项目评估：zhfeng1/ai-gateway](docs/dev/08-ref-eval-zhfeng1-ai-gateway.md) —— 源码级评估：TTFT 品类通病佐证、网关开销测法、TPS 分母口径、不吸收清单
 - [09 管理 API 与设置面](docs/dev/09-admin-api.md) —— `/admin/*` 配置 API、关键项二次确认、策略元数据（FR-115 操作面）
 - [10 工程结构与构建](docs/dev/10-project-structure.md) —— Go 单仓布局、包边界、构建/CI 门禁、M0 交付物映射
+- [11 架构转向决策](docs/dev/11-decision-full-selfbuilt.md) —— **移除外部网关、彻底自研**的决策与依据
+- [12 可调试性设计](docs/dev/12-debuggability.md) —— 自研透传层排障：FR-112 约束下只存元数据
+- [13 调研资产重审](docs/dev/13-research-reassessment.md) —— Codex 三条硬约束；三项目在同一处翻车 → 字节透传
 
 ### 运行时验证
 - [verify/ — ISSUE-001 运行时验证 harness](verify/README.md)（本机 Docker 一键跑，含 mock 上游与自清理）
 
 ## 推荐架构（一句话）
 
-**客户端 → 自研 SLA 决策核心（同步请求路径，承担价格/余额/会话/缓存/测活/订阅额度决策）→ GatewayAdapter → stock AxonHub → 真实上游。** AxonHub 保持 L0 不改源码；订阅台账、双倍率、TTFT 判定、Attempt 账本由自研核心负责。
+**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（承担价格/余额/会话/缓存/测活/订阅额度决策）→ 自研上游透传层 → 真实上游。** 一期**无外部网关**（[11 转向](docs/dev/11-decision-full-selfbuilt.md)）；Responses 走**字节级透传**保真，订阅台账、双倍率、TTFT 判定、Attempt 账本全由自研核心负责。
 
 ## 关键约束
 

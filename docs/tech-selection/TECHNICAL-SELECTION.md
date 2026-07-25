@@ -13,6 +13,18 @@
 | AxonHub 源码侵入 | L0；不修改上游源码 |
 | 选型状态 | 通过架构选型；不等同于生产验收 |
 
+> ⚠️ **2026-07-25 重大更新：本文的选型结论已被取代。**
+>
+> 项目已转向**彻底自研上游对接层**，一期**移除 AxonHub 与 ccLoad**。决策、依据与影响面见 [11 架构转向决策](../dev/11-decision-full-selfbuilt.md)。
+>
+> **触发转向的关键证据**（均来自本轮选型之后的运行时实测）：
+> - AxonHub 的 Responses round-trip **吞掉 reasoning item 与 28 个顶层字段**（[07 §3bis](../dev/07-axonhub-runtime-probes.md)），而主力客户端 Codex 恰好依赖 reasoning；
+> - 我们本就关闭了 AxonHub 的重试/负载均衡/配额/首字指标，其执行账本还与自研账本重复需对账（[11 §1.1](../dev/11-decision-full-selfbuilt.md)）；
+> - 一期上游全是说 OpenAI 协议的 `sk-` key 中转站，AxonHub 最值钱的多协议翻译与订阅 OAuth **用不上**；
+> - LiteLLM / AxonHub / CLIProxyAPI 三个独立项目走"解析-重组"路线**全部在 Codex 兼容性上翻车**（[13 §5](../dev/13-research-reassessment.md)）。
+>
+> **本文仍然有效的部分**：候选调研事实、能力矩阵、控制边界分析、以及"决策与账本必须在自研核心、执行面只做受控转发"的架构判断——这条判断在转向后**被强化**而非推翻。
+
 ## 1. 最终推荐
 
 **唯一推荐：AxonHub 作为执行数据面，外部 SLA 决策核心负责逐请求资源决策。**
