@@ -16,9 +16,8 @@
                  ┌───────────────── 单机 Docker Compose ─────────────────┐
 客户端 → :443 Caddy(LB/TLS) → sla-core-a :8080 ┐
                             └→ sla-core-b :8080 ┘─直连→ ~20 上游渠道
-                                    │                        (stock beta5, retry 置零, 默认单实例)
                                     ├→ postgres :5432 (账本/台账/价格/健康，多实例共享)
-                                    └→ collector (子命令/独立容器) → 上游站点管理面
+                                    └→ collector (子命令) → 上游站点管理面
 ```
 
 | 服务 | 镜像/构建 | 端口 | 依赖 | 备注 |
@@ -53,6 +52,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 - 单个上游渠道故障 → `selector` 按健康状态摘除（[05 §3.1](./05-scheduling-and-operations.md) 冷却退避）。
 - **全部候选不可用** → 按等级排队等待后返回明确的"服务暂不可用"，**禁止旁路直连未授权渠道**（FR-110/AC-27、参数7）。
 - sla-core 实例故障 → Caddy 据 `/healthz` 摘除，另一实例继续服务（FR-110）。
+- ⚠️ **上游全不可用 ≠ 实例不健康**：此时实例仍应报 `/healthz` 健康并由请求路径返回明确错误；若反向把它判为不健康，Caddy 会摘光实例、客户端只看到 LB 层错误，故障被掩盖（详见 §6 健康语义分层）。
 
 ---
 
@@ -100,11 +100,23 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 
 | 面 | 做法 |
 | --- | --- |
-| 就绪/存活 | sla-core `/healthz`（PG 可达 + 至少一个上游渠道健康）；Caddy 据此摘除实例 |
+| 就绪/存活 | sla-core `/healthz` **只反映实例自身**：进程存活 + PG 可达 + 配置快照已加载。**绝不把上游渠道可用性计入**（见下方警示）；Caddy 据此摘除实例 |
 | 决策延迟 | 自监控 P99 决策开销 ≤50ms（FR-110）。**测法**：发往上游前多打一个时间戳，`决策/网关开销 = 总延迟 − 上游耗时`（对应 [02](./02-data-model.md) `attempts.full_latency_ms − upstream_latency_ms`）；超标告警 |
-| 账本对账滞后 | 监控 `attempts.reconciled=false` 积压（[02 idx_attempts_unrecon](./02-data-model.md)） |
-| 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（`is_stale`）；凭证失效告警 P2 |
+| 账本写入滞后 | 监控异步账本队列积压与写入延迟（转向自研后无对账环节，[11](./11-decision-full-selfbuilt.md)） |
+| 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（查 `collector_snapshots_v.is_stale` 视图）；凭证失效告警 P2 |
 | 业务告警 | P1/P2/P3 经 `alert_events` 出（[05 §5.2](./05-scheduling-and-operations.md)）；P1 不得延迟（FR-103） |
+
+> ⚠️ **健康语义必须分层（对抗性审查发现）**：若把"上游渠道可用性"计入 `/healthz`，则**全部上游不可用时两个 core 都会被判不健康 → Caddy 摘除全部实例 → 客户端收到的是 LB 层 502/503**，而不是我们设计的"明确不可用响应 + 事件编号 + 建议重试时间"（AC-15/AC-27），**账本不记录、告警不触发、故障被掩盖**。
+>
+> 因此三层语义严格分开：
+>
+> | 层 | 判据 | 失败后果 |
+> | --- | --- | --- |
+> | `/healthz`（LB 就绪） | 实例自身：进程 + PG 可达 + 快照已加载 | Caddy 摘除该实例，另一实例继续服务 |
+> | 渠道健康（selector 状态） | 各 binding 的健康度/冷却/余额/配额 | 该候选被排除出 RoutePlan，**不影响实例就绪** |
+> | 全部候选不可用 | selector 输出空候选集 | **请求路径**按等级排队后返回明确错误 + 事件编号，落账本、触发 P1 告警（§2.3、AC-15/27） |
+>
+> 另设 `GET /admin/health` 暴露渠道级健康（[09](./09-admin-api.md)），供运维观察——它与 `/healthz` 是两回事，**不参与 LB 判定**。
 
 ---
 
@@ -113,7 +125,8 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
 - [ ] 上游直连打通：真实上游发一次 Responses 流式请求，**35 字段与 reasoning item 零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 基线）。
 - [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部上游候选不可用时返回明确错误、不旁路（AC-27）。
-- [ ] verify/ harness 对当前 beta5 跑通（升级门禁基线）；**M0 起把 07 的 PG 共库 + Responses 渠道两项固化进 harness**（默认单实例，故不含"双实例并发迁移"项——那项仅在选择双实例部署时按 07 §2 runbook 验）。
+- [ ] **Codex 实机打通实验**（[15 T1](./15-scope-and-preflight.md)）：最小透传代理 + 真实 Codex CLI + 真实上游，抓包确认其实际请求/期望；结论回填 [13 §1](./13-research-reassessment.md)。
+- [ ] `verify/mock_upstream.py` 场景集接入 CI 作为透传层回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort）。
 - [ ] CI：Go 构建 + `config_params`/别名策略加载 + 不可存列 schema 断言。
 - [ ] `pg_dump`/restore 演练脚本就位。
 

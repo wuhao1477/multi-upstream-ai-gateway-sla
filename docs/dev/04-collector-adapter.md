@@ -64,7 +64,7 @@ type SourceMeta struct {
 	Endpoint   string        // 实际命中的端点，便于审计
 	FetchedAt  time.Time     // 查询时间
 	ValidUntil time.Time     // 过期时间；人工录入默认 FetchedAt+7d（FR-011）
-	Stale      bool          // 是否已过期 → 下游按"越旧越保守"降级
+	Stale      bool          // 是否已过期（**内存态判定**，不落库；库侧查 collector_snapshots_v 视图）→ 下游按"越旧越保守"降级
 }
 
 // ── 接口 ──
@@ -306,7 +306,7 @@ type SubscriptionQuota struct {
 | `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 |
 | `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 |
 | `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
-| `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）、`is_stale` | FR-011 |
+| `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
 
 > **ASXS 归集键差异**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。ASXS 无 group 概念，其 `group_id` 列填**套餐标识**（ASXS 按 `(user, plan)` 聚合，见 §3.4）；采集器负责把家族差异映射到统一列。
 

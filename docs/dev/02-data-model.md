@@ -389,7 +389,7 @@ CREATE TABLE attempts (
 -- attempt 级用量/费用（FR-058、FR-016/019；假设4 token+cost 已收口）
 -- 隐藏重试可能对应多条上游用量 → 用 attempt_id + upstream_seq 表达（FR-119）
 CREATE TABLE attempt_usage (
-  id                UUID PRIMARY KEY,
+  id                UUID NOT NULL,            -- UUIDv7（分区表主键须含分区键，见表尾复合 PK）
   attempt_id        UUID NOT NULL,
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键
   upstream_seq      SMALLINT NOT NULL DEFAULT 1, -- 第几次上游调用（隐藏重试时 >1，FR-119）
@@ -403,7 +403,10 @@ CREATE TABLE attempt_usage (
   -- 预估 vs 实际扣费差异（FR-016/019）：超容差标计费异常
   estimated_cost    usd_amount,
   cost_variance     usd_amount,               -- 实际-预估；无法归因差额单列（FR-019/AC-23）
-  PRIMARY KEY (id, request_created_at)
+  PRIMARY KEY (id, request_created_at),       -- 分区表：主键必须包含分区键
+  -- 指向 attempts 的复合外键（分区表间引用须带分区键）
+  FOREIGN KEY (attempt_id, request_created_at)
+      REFERENCES attempts (id, request_created_at)
 ) PARTITION BY RANGE (request_created_at);
 ```
 
@@ -723,9 +726,15 @@ CREATE TABLE collector_snapshots (
   payload         JSONB NOT NULL,               -- 归一后数值元数据（不存上游返回正文）
   data_source     TEXT NOT NULL,               -- auto_collect / manual（FR-011）
   fetched_at      TIMESTAMPTZ NOT NULL,
-  valid_until     TIMESTAMPTZ,                  -- 人工 7 天（FR-011）；过期按未知降级
-  is_stale        BOOLEAN GENERATED ALWAYS AS (valid_until < now()) STORED
+  valid_until     TIMESTAMPTZ                   -- 人工 7 天（FR-011）；过期按未知降级
+  -- ⚠️ 不设 is_stale 存储列：PG 的 GENERATED ... STORED 要求表达式 immutable，
+  -- 而 now() 非 immutable（且存量值也不会随时间自动变旧）。陈旧性一律**查询期计算**：
 );
+
+-- 陈旧性视图（替代原先非法的 is_stale 生成列）
+CREATE VIEW collector_snapshots_v AS
+  SELECT *, (valid_until IS NOT NULL AND valid_until < now()) AS is_stale
+  FROM collector_snapshots;
 
 -- 余额信号状态（FR-020~027；参数5 信号自适应识别）：非实时，后台校对 + 多判据
 CREATE TABLE balance_signals (
