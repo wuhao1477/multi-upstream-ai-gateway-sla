@@ -6,7 +6,7 @@
 | 日期 | 2026-07-23 |
 | 输入 | [PRD v1.3](../PRD.md)、[选型结论](../tech-selection/TECHNICAL-SELECTION.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md) |
 | 技术栈决策（2026-07-23 确认） | 自研核心 **Go**（存储层 **pgx + sqlc**）；状态存储 **PostgreSQL 单库**（一期不引 Redis）；部署 **单机 Docker Compose**（LB + **≥2 核心实例** + PG + collector，**无外部网关**）；文档按 docs/dev/ 分篇 |
-| 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；渠道须强校验为 `openai_responses`（[03](./03-upstream-layer.md)）；ccLoad 退路的 Codex 隐藏重试补算为必须项（FR-119） |
+| 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；上游对接走**字节级透传**保真 reasoning 与事件生命周期（[03](./03-upstream-layer.md)、[13 §1](./13-research-reassessment.md)）；自研层不做隐藏重试，一次外部调用严格对应一次上游调用（FR-119） |
 
 ## 1. 要建什么（一句话）
 

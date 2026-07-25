@@ -95,7 +95,7 @@ TPS **不用总耗时**，而用"总耗时 − 首字耗时"，即只算**生成
 
 `app/main.py:253-292` 对多种响应结构逐路径探测 usage：`usage.output_tokens_details.reasoning_tokens`、`usage.completion_tokens_details.reasoning_tokens`、`response.usage.*`、`message.usage.*` —— 覆盖 OpenAI Chat Completions / Responses / Anthropic 三种形态；另有 `parse_completed_response_from_sse` 逆序扫 SSE 找 `response.completed` 还原最终响应。
 
-**与我们的关系**：主路径我们从 AxonHub `usageLogs` 拿用量，用不上。但 **ccLoad 退路无渠道级定价、账本需自算成本**（[03 §6.1](./03-upstream-layer.md)），届时要从原始上游响应里抠 usage，这种"多路径探测 + 从 SSE 还原完成态"的写法可作参考。**优先级低，M1 之后再说。**
+**与我们的关系（2026-07-25 转向后升值）**：自研直连后 **usage 必须由我们自己从上游响应里提取**（[03 §7](./03-upstream-layer.md)），而上游格式各异——这种"多路径探测 usage + 从 SSE 还原完成态"的写法**从低优先级参考升为直接可用的实现思路**。
 
 ---
 
@@ -114,7 +114,7 @@ TPS **不用总耗时**，而用"总耗时 − 首字耗时"，即只算**生成
 | 1 | 网关/决策自身开销的度量法 = 总延迟 − 上游耗时 | [06 §6](./06-deployment-and-operations.md) 可观测表补「测法」；[02](./02-data-model.md) `attempts` 加 `upstream_latency_ms` 列并注明开销推导 | ✅ 已落地 |
 | 2 | `output_tokens_per_s` 分母 = 总延迟 − 内容感知 TTFT | [02](./02-data-model.md) `attempts.output_tokens_per_s` 注明分母口径（只算生成阶段，避免慢首字被误判为生成慢） | ✅ 已落地 |
 | 3 | 「TTFT 品类通病」作为第三方佐证 | [ISSUE-001 运行时验证总结](../issues/ISSUE-001-tech-assumption-verification.md) 第 2 条补一句：三个独立实现无一内容感知，判定为品类系统性通病 | ✅ 已落地（**未改任何结论**，仅加佐证） |
-| 4 | 多形态 usage 提取思路记入 ccLoad 退路账本自算 | 03 §6 | ⏸ **暂不动**：M1 之后真要启用 ccLoad 退路时再说 |
+| 4 | 多形态 usage 提取思路 | [03 §7](./03-upstream-layer.md) | ✅ **转向后已升为主路径需要**：自研直连须自行提取 usage，该思路直接可用（M1 实现时参考） |
 
 ---
 

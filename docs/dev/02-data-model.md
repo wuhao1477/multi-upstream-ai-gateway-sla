@@ -463,7 +463,7 @@ CREATE TABLE session_prefix_ledger (
 
 - ⚠️ **序 3/5 在"经 AxonHub 的响应"中不可用**（[07 §3bis](./07-axonhub-runtime-probes.md) 真实上游实测）：AxonHub 的 Responses round-trip 把顶层字段从 35 砍到 7，`prompt_cache_key` 与 `previous_response_id` **均被丢弃**。
   - **对请求侧提取无影响**：序 3/5 提取的是**调用方发来的请求体**，由我方 `protocol` 层在转发前读取，不经过 AxonHub。
-  - **对响应侧回写有影响**：若想从上游响应里回收这些值（如把上游生成的 `prompt_cache_key` 记入缓存作用域），**经 AxonHub 拿不到**，须 `protocol` 层直连或改用请求侧值。
+  - **响应侧回写现已可用**：转向自研后走**字节级透传**（[03 §1](./03-upstream-layer.md)），上游响应的 `prompt_cache_key`/`previous_response_id` 原样保留，可从旁路观察中回收记入缓存作用域。
   - **主力路径不受影响**：Codex 走序 1/2 的 **HTTP 头**，AxonHub 不改头部。
 - 序 3~5 在 body 中，需解析请求体——**FR-112 禁止的是"存储"正文，不禁止读取**；提取后只落 `requests.session_id` 这一个标识值，正文不入库。头部来源（序 1/2/6）无需碰 body，优先级更高也更省。
 - 序 7 的退化是**有意的**：宁可少统计一条前缀首字，也不能用"IP+Key+模型"这类拼接键把并发的不同会话错误归并（会让 FR-050/051 的前缀平均失真）。

@@ -1,5 +1,10 @@
 # ISSUE-001 运行时验证 harness
 
+> ⚠️ **2026-07-25 定位变更**：项目已转向**彻底自研上游对接层**、移除 AxonHub/ccLoad（见 [11 转向决策](../docs/dev/11-decision-full-selfbuilt.md)）。
+>
+> - **本 harness 的 AxonHub 部分转为历史记录**：其六假设验证结论（尤其假设 3 首字非可见内容、Responses round-trip 吞 reasoning）是**转向的直接依据**，不再作为升级准入门禁。
+> - **`mock_upstream.py` 仍然有效且升值**：其场景集（role-only 首帧 / 空 SSE / 慢首帧 / 心跳 / 500 / abort）**转为自研透传层的测试夹具**，用于验证内容感知首字判定（AC-31）与取消传播（AC-32），见 [03 §10](../docs/dev/03-upstream-layer.md)。
+
 在**你本机（装了 Docker Desktop 的 Mac）**上跑，用来把 [ISSUE-001](../docs/issues/ISSUE-001-tech-assumption-verification.md) 的 6 项假设从"源码级"收口到"运行时"。跑完用 `cleanup.sh` 清理干净。
 
 > 说明：本 harness 已于 2026-07-23 在本机 Docker（OrbStack / AxonHub `v1.0.0-beta5` / SQLite）**实跑完成**，逐项结论回填在 [ISSUE-001](../docs/issues/ISSUE-001-tech-assumption-verification.md) 文末。脚本已据 beta5 的实际 GraphQL schema 适配（端点 `/admin/graphql`、relay guid、渠道需 `updateChannelStatus` 启用、`usageLogs`、`saveChannelModelPrices` 定价等，详见 ISSUE-001「beta5 schema 适配」表）。今后升级 AxonHub 重跑时若报字段/端点错误，按该表核对修正。

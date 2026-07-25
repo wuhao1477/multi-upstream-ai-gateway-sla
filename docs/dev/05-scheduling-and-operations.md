@@ -24,7 +24,7 @@
 | 2 | 模型能力 | 只留 `channel_models.enabled` 且满足请求所需能力（流式/工具/多模态）的 binding | FR-005/006 |
 | 3 | 数据许可 | 一期默认全允许（参数8 取消白名单，FR-093 降为可选）；启用时按数据级别过滤 | FR-093（可选） |
 | 4 | 健康/样本 | 排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底） | FR-043/046、参数11 |
-| 5 | 余额/配额 | 排除 `balance_state∈{exhausted,critical}`；**配额 `unknown` 默认保守排除**（FR-118，自研层补，网关不排除） | FR-020~027、**FR-118** |
+| 5 | 余额/配额 | 排除 `balance_state∈{exhausted,critical}`；**配额 `unknown` 默认保守排除**（FR-118，由自研 selector 实现） | FR-020~027、**FR-118** |
 | 6 | 价格新鲜度 | 价格 `queried_at` 超 48h 的 binding 退出"低价优选"，仅作保底（参数10 方向：越旧越保守） | FR-014/015、参数10 |
 | 7 | 容量保留 | 扣除接管保留容量与金级保留容量后仍有余量（§4.3） | 参数12 |
 
