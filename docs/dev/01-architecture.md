@@ -32,7 +32,7 @@
 | `executor` | 按 RoutePlan 逐 Attempt 执行：**字节透传 + 旁路观察**→内容感知首字判定（排除 role-only/空 delta/注释心跳）→期限内未见有效首字则取消本跳并切下一 Binding；已提交有效内容后不再切换 | AC-31/32；判定逻辑可借鉴 AxonHub `hasResponseContent` 思路（[13 §2.1](./13-research-reassessment.md)） |
 | `upstream` | **自研上游对接层**：请求转发、SSE 字节透传、取消传播、usage 提取、协议能力探测。详见 [03](./03-upstream-layer.md) | FR-111/119、AC-31/32 |
 | `ledger` | Attempt 账本写入：**关键事实同步直写 PG**（意图、首字、终帧/usage/结算——见 §5.1），仅 `downstream_*`/`cancel` 经 outbox 异步投递。**单一真相源，无对账环节** | FR-097/098、FR-058 |
-| `steward` | 冷却/样本门槛、余额信号识别（参数 5 多策略）、告警 P1～P3。⏭ 测活预算体系移二期（[15 S1](./15-scope-and-preflight.md)） | 参数 5/11/16 |
+| `steward` | 冷却/样本门槛、余额信号识别（参数 5 多策略）、告警 P1～P3、**渠道验证双轨**（canary + 主动测活及其预算体系，[05 §2](./05-scheduling-and-operations.md)） | 参数 3/5/6/11/16、FR-060~067 |
 
 ## 3. 上游对接（自研直连）
 
