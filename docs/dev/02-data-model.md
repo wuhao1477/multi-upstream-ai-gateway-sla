@@ -669,6 +669,19 @@ SELECT count(*) AS closed FROM att;   -- 应用层断言 = 1，否则 ROLLBACK
 COMMIT;
 ```
 
+**接管的执行顺序被冻结为**（第 25 轮 [high]）：
+
+```text
+期限到达 → ① Stream.Close() 传播取消到上游（止损优先，AC-32）
+        → ② closeout_attempt(hopN)      —— 收尾本跳：终态 + 费用行 + 释放 claim
+        → ③ dispatch_next(hopN+1)       —— 插入下一跳 attempt
+        → ④ 才发起 hopN+1 的上游调用
+```
+
+- **两者不要求同事务**：崩在 ② 与 ③ 之间是安全的——hop1 已收尾、hop2 尚未插入，恢复扫描按最后一跳（此时是 hop1，已终态）走 §4.2bis，`requests.final_status` 仍 `pending` 会被 `finalize_recovery` 关掉。
+- **顺序不可颠倒**：若先 `dispatch_next` 再 `closeout_attempt`，崩在中间会留下「hop1 非终态 + hop2 已插入」，恢复的 ⓐ 分支虽能把 hop1 判成 `canceled_by_sla`，但**它的费用行不会被写**（`closeout_attempt` 没跑），Σ 汇总时 hop1 只能按估算计入，精度无谓损失。
+- **① 必须最先**：先止损再记账，避免上游继续生成产生额外费用（AC-32 要求取消传播 <1s）。
+
 **`actual_usd(request) = Σ 该 request 全部 attempt` 是所有结算入口的统一规则**（不只恢复路径）：
 
 | 入口 | 结算金额 |
@@ -1359,13 +1372,16 @@ SELECT r.id, r.created_at, a.*
 | ⓪b | — | 无 attempt 且 `stage='reservation_rejected'` | — | `failed` | 无预留 → 跳过闸门 | 无（429 已回给调用方） |
 | ⓪c | — | 无 attempt 且 `stage='authenticated'`（**C′ 之后、selector 之前崩溃**） | — | `failed` | 无预留 → 跳过闸门 | P3（内部中断，非用户可见错误） |
 | ⓪d | — | 无 attempt 且 `stage='planned'`（**selector 之后、预留之前崩溃**） | — | `failed` | 无预留 → 跳过闸门 | P3 |
-| ① | — | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**） | 无（确定未计费） |
+| ① | — | **该 request 的全部 attempt 都未发出**（不存在 `external_call_started_at IS NOT NULL` 的行） | `failed` | `failed` | `abandoned`（**释放预留**，`settled_usd` 不加） | 无（确定未计费） |
+| ①bis | — | 最后一跳未发出，但**此前有 attempt 已发出**（多跳接管场景） | 末跳 `failed`；前序跳按 ⓐ | `failed` | **`settled`**，`actual_usd` = Σ 已有 attempt（**不可 `abandoned`**——hop1 的钱已经花了） | P3 |
 | ② | **K1** | `external_call_started_at NOT NULL` 且 `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`，全跳汇总，`needs_manual_review=true` | **P2** |
 | ③b1 | **K2** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`，全跳汇总，待核对 | **P3** |
 | ③b2 | **K3** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at NOT NULL` | `interrupted` | **`interrupted`** | `settled`，全跳汇总，待核对 | **P3** |
 | ③c | **K4** | `terminal_event NOT NULL`、`downstream_write_completed_at IS NULL` | **由 `terminal_event` 决定**：`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`** | **`interrupted`** | `settled`，用**实际值**，`needs_manual_review=false` | 无 |
 
 > **没有"全部写完"这一恢复分支**（第 14 轮 [high] 修正）：`finalize_delivery` 把「写 `downstream_write_completed_at`」与「推 `final_status`」放在**同一事务**，因此**不存在**「列已非空但 request 仍 `pending`」的稳定状态——曾经的 ③a／③d 是**不可达分支**，已删除。已写完的请求由**启动时先 drain outbox** 收口，根本不进恢复扫描。
+>
+> ⚠️ **① 的判据必须是 request 级，不能只看最后一跳**（第 25 轮 [high]）：多跳接管下 hop1 已发出（可能已计费）、hop2 刚插入未发出时崩溃，末跳确实 `external_call_started_at IS NULL`，但整笔预留**不能 `abandoned`** —— 那会把 hop1 已花的钱直接抹掉。故 ① 要求"**全部** attempt 都未发出"，否则走 ①bis 按 `settled` + Σ 结算。
 >
 > ⚠️ 三个事实列、三次判定，**任何一个都不能由 `attempt_status` 反推**（两阶段关单后 attempt 可能已是终态）：
 > ① `response_committed_at` 分 ② 与 ③；② `terminal_event` 分 ③b 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
@@ -1419,7 +1435,10 @@ last AS (
 -- ⓒ reservation **条件结算**（不是闸门）：仍 reserved 才结算；已 settled（K4）则跳过
 resv AS (
   UPDATE client_reservations r
-     SET state='settled', actual_usd=:actual_usd, settle_event_key=:event_key,
+     -- ⚠️ 终态**参数化**（第 25 轮 [high]）：原先硬编码 'settled'，与恢复表 ① 要求的
+     --    'abandoned' 直接矛盾 —— 按表实现漏计 hop1、按 SQL 实现不满足 AC-35 的 abandoned 断言。
+     SET state=:resv_terminal,                    -- 'settled' | 'abandoned'
+         actual_usd=:actual_usd, settle_event_key=:event_key,
          needs_manual_review=:needs_review, settled_at=now()
     FROM req
    WHERE r.request_id = req.id AND r.state = 'reserved'
@@ -1427,8 +1446,10 @@ resv AS (
 ),
 agg AS (
   UPDATE client_daily_spend d
-     SET reserved_usd = d.reserved_usd - s.estimated_usd,
-         settled_usd  = d.settled_usd  + COALESCE(s.actual_usd, 0)
+     SET reserved_usd = d.reserved_usd - s.estimated_usd,     -- 两种终态都扣回预留
+         settled_usd  = d.settled_usd
+                      + CASE WHEN :resv_terminal = 'settled'  -- 仅 settled 才记入已花费
+                             THEN COALESCE(s.actual_usd, 0) ELSE 0 END
     FROM resv s
    WHERE d.gateway_client_id = s.gateway_client_id AND d.spend_date = s.spend_date
   RETURNING 1

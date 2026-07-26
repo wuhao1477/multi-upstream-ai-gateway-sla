@@ -51,8 +51,9 @@
 1 protocol 收请求(提取会话标识) → policy 解析别名 → selector 产出 RoutePlan [B1(期限5s), B2(期限8s)]
 2 executor 用 B1 的渠道 Key 直连上游，字节流暂不提交给下游；旁路观察每个 SSE 事件
 3 5s 内旁路未见 ShouldCommit（role-only/元事件/心跳不算；工具调用/拒答/空终态都算）→ Close() 拆上游连接止损，切 B2
-4 起 B2 → 旁路首次 ShouldCommit=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换；TTFT 另由 HasTTFTOutput 打点（空响应则留 NULL）
-5 关单：Attempt#1(canceled_by_sla)、Attempt#2(committed) 落账；usage 取自旁路终帧
+4 收尾 B1（closeout_attempt：终态+费用行+释放 canary claim）→ 插入 B2 的 attempt（dispatch_next）→ 才发起 B2
+5 起 B2 → 旁路首次 ShouldCommit=true → 提交响应头+已缓冲字节 → 此后纯透传，不再切换；TTFT 另由 HasTTFTOutput 打点（空响应则留 NULL）
+6 关单：Attempt#1(canceled_by_sla)、Attempt#2(completed) 落账；`actual_usd` = **两跳汇总**（[02](./02-data-model.md)）
 ```
 
 > 关键：第 2~4 步全程**字节级透传**，`executor` 只在旁路读事件元数据做判定，**不重组流**（[03 §3](./03-upstream-layer.md)）。
