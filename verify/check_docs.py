@@ -221,9 +221,13 @@ for f, body in ALLDEV.items():
         if "COMMIT;" in blk and re.search(r"(应用层断言|否则\s*ROLLBACK|一律\s*ROLLBACK)", blk):
             ln = body[:m.start()].count("\n") + 1
             tx_bad.append(f"{os.path.basename(f)}:{ln} 块内 COMMIT 与同块的「应用层断言/否则 ROLLBACK」矛盾")
-    for m in re.finditer(r"(quota_ok|capacity_ok|exp_ok)[^\n]{0,80}三值", body):
-        ln = body[:m.start()].count("\n") + 1
-        tx_bad.append(f"{os.path.basename(f)}:{ln} 仍称「三值」（已改四值）")
+    # dispatch 返回值早期是三值，改四值后各处措辞与旧字段名反复残留
+    for pat, why in [(r"canary_ok", "旧字段名 canary_ok（应为 exp_ok）"),
+                     (r"三值分支", "仍称「三值分支」（已改四值）"),
+                     (r"(quota_ok|capacity_ok|exp_ok)[^\n]{0,80}三值", "返回值仍称三值")]:
+        for m in re.finditer(pat, body):
+            ln = body[:m.start()].count("\n") + 1
+            tx_bad.append(f"{os.path.basename(f)}:{ln} {why}")
 report("事务骨架残留（块内 COMMIT / 旧三值）", sorted(set(tx_bad)))
 
 

@@ -647,7 +647,7 @@ req      锁 requests(stage='planned', final_status='pending')
 
 **为什么是这个顺序**：钱最贵（拿不到就直接拒），容量次之（可以换个渠道），实验额度最轻（抢不到就退回普通路径）。反过来排会在拿不到钱时白占容量与实验额度。
 
-**四值返回与分支**（扩展自原三值）：
+**四值返回与分支**（`quota_ok` / `capacity_ok` / `exp_ok` / `advanced`）：
 
 | `quota_ok` | `capacity_ok` | `exp_ok` | `advanced` | 处置 |
 | --- | --- | --- | --- | --- |
@@ -1158,24 +1158,18 @@ adv AS (
 SELECT (SELECT count(*) FROM claimed) AS quota_ok,
        (SELECT count(*) FROM cap)     AS capacity_ok,
        (SELECT count(*) FROM adv)     AS advanced;   -- 普通路径 exp_ok 恒填 1
--- ⚠️ **块内不写 COMMIT**（第 23 轮 [high]）：分支表要求 `canary_ok=0` 时 ROLLBACK，
---    若 SQL 先 COMMIT，已递增的 `reserved_usd` 就被提交下去了。
---    提交与否**一律由应用层依三值分支决定**。
+-- ⚠️ **块内不写 COMMIT**：分支表要求 `exp_ok=0` / `capacity_ok=0` 时 ROLLBACK，
+--    若 SQL 先 COMMIT，已递增的 `reserved_usd` 与容量计数就被提交下去了。
+--    提交与否**一律由应用层依四值分支决定**（见上方统一编排）。
 -- ⚠️ 上式是**普通路径**：普通请求没有 canary/probe 的 CTE，无条件读取会语法错。
 --    ⚠️ 但本式**尚未包含 capacity 占用** —— 完整顺序见上方「三套 claim 的统一编排」，
 --    实现时以那一节为准：req→quota→resv→**cap**→exp→att→adv。
 ```
 
-**应用层据三值分支**：
+**应用层据四值分支**（与上方[统一编排](#三套-claim-的统一编排)同一张表，此处不重复列——以那一节为准）：
+`quota_ok=0` → 429；`capacity_ok=0` → **换候选**；`exp_ok=0` → canary 回落普通路径 / probe 跳过；四值全 1 → 提交。
 
-| quota_ok | canary_ok | advanced | 处置 |
-| --- | --- | --- | --- |
-| 0 | — | 0 | **ROLLBACK → 429**（日配额不足），另起事务写 `stage='reservation_rejected'` |
-| 1 | 0 | 0 | **ROLLBACK → 不报错**，把该 canary binding 移出本次候选，**按正常排序重新 dispatch** |
-| 1 | 1 | 1 | 提交，发起上游调用 |
-| 其他组合 | — | — | 视为异常 → ROLLBACK + P2 告警（不应出现） |
-
-**canary 路径的 dispatch**（⚠️ 第 31 轮澄清：本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
+**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
@@ -1244,7 +1238,7 @@ SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
 | --- | --- | --- | --- |
 | C′ 落 `requests` | `protocol` | **请求 goroutine（同步）** | 返回 500，不进调度 |
 | B 阶段 RPM 闸 | `protocol` | 同上 | 0 行 → 429 |
-| `dispatch`（首跳） | `executor` | 同上，**发上游调用前** | 三值分支：配额 0 → 429；canary 0 → 回落非 canary 重试；异常 → 500 |
+| `dispatch`（首跳） | `executor` | 同上，**发上游调用前** | 四值分支：`quota_ok=0` → 429；`capacity_ok=0` → 换候选；`exp_ok=0` → 回落非 canary / probe 跳过；异常 → 500 |
 | `commit_first_actionable` | `executor` | 同上，**放行首字节前** | 中断下游流（[03 §3.0](./03-upstream-layer.md)） |
 | `finalize_upstream` | `executor` | 同上，**放行终帧前** | 中断下游流，按 ③b2 结算 |
 | `closeout_attempt` | `executor` | 同上，接管时 | 记 P2 告警；**不阻塞**下一跳（恢复扫描会兜底） |
@@ -2289,6 +2283,8 @@ claimed AS (
      AND (lim.concurrency_limit IS NULL                      -- 未登记 → 不设闸
           OR h.concurrency_inflight < floor(lim.concurrency_limit * :ceiling))
      AND (lim.rpm_limit IS NULL
+          OR h.rpm_window_start IS NULL                       -- ⚠️ 首个窗口：NULL 必须显式放行，
+                                                              --    否则 `<` 恒 UNKNOWN → 永远 0 行
           OR h.rpm_window_start < date_trunc('minute', now())
           OR h.rpm_used < floor(lim.rpm_limit * :ceiling))
   RETURNING h.binding_id)
