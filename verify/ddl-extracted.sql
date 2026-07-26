@@ -415,6 +415,9 @@ CREATE TABLE attempts (
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键，与 requests 对齐
   attempt_no        SMALLINT NOT NULL,        -- 该请求内第几跳（1=主，2=接管…）
   binding_id        BIGINT NOT NULL REFERENCES bindings(id), -- 渠道+key+url（路由资源）
+  -- 该跳的费用上界（第 37 轮补）：恢复结算要按「已终结但无用量 → 该跳单跳保守估算」汇总，
+  -- 而 RoutePlanEntry.SingleHopUSD 只在**内存**里——崩溃后恢复任务读不到它。必须落库。
+  single_hop_est_usd nonneg_usd,
   price_version_id  UUID REFERENCES price_versions(id),      -- 决策时的**基础价**版本（FR-013/AC-02）
   multiplier_version_id UUID REFERENCES multiplier_versions(id), -- 决策时的**倍率**版本（binding 级）
   -- 两者合起来才是该 attempt 的完整计价输入，缺一不可复算
@@ -776,7 +779,10 @@ CREATE TABLE capacity_claims (
   binding_id    BIGINT NOT NULL REFERENCES bindings(id),
   request_id    UUID NOT NULL,
   attempt_id    UUID NOT NULL,
-  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','probe')),
+  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','canary','probe')),
+                -- ⚠️ 第 37 轮补 'canary'：文档说 kind 由 RoutePlanEntry.Role 推出，
+                --    而 Role 含 canary，原枚举却没有 → CHECK 直接拒绝。
+                --    canary 的天花板取 `capacity_ceiling_normal`（65%）——它是无承诺流量。
   lease_owner   TEXT NOT NULL,
   lease_expires_at TIMESTAMPTZ NOT NULL,
   state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),

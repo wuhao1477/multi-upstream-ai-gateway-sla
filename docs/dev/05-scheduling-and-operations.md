@@ -79,7 +79,8 @@ type RoutePlanEntry struct {
     MultiplierVersionID string    // 决策时的倍率版本   → attempts.multiplier_version_id
     Role                string    // 'primary' | 'takeover' | 'retry' | 'canary' | 'probe'
     DeadlineMs          int       // 本跳期限
-    SingleHopUSD        float64   // 本跳上界（供 closeout/recovery 估算该跳费用）
+    SingleHopUSD        float64   // 本跳上界 → **必须落 `attempts.single_hop_est_usd`**（[02](./02-data-model.md)）：
+                                  // 恢复任务在崩溃后读不到内存里的 RoutePlan
     ClaimIntent         string    // ''（无）| 'canary' | 'probe' —— 决定 dispatch 走哪个变体
     CachePredicted      float64   // FR-056 预测命中率，入 decision_snapshot
     CacheTarget         float64   // 对应目标值，入 decision_snapshot
@@ -502,12 +503,15 @@ VALUES (:alert_id /* UUIDv7 */, :key, :cat, :sev, 'open', now(), now(), 1, :payl
 ON CONFLICT (dedup_key) WHERE state <> 'closed'      -- 部分唯一索引 uq_alert_active
 DO UPDATE SET last_seen_at = now(),
               occurrence_count = alert_events.occurrence_count + 1,
-              severity = CASE WHEN severity_rank(EXCLUDED.severity)
-                               < severity_rank(alert_events.severity)
-                              THEN EXCLUDED.severity ELSE alert_events.severity END
+              -- ⚠️ 内联 CASE，**不依赖任何自定义函数**（第 37 轮：上一版写
+              --    severity_rank()，但全库没有 CREATE FUNCTION，照抄跑不了）
+              severity = CASE
+                WHEN alert_events.severity = 'P1' OR EXCLUDED.severity = 'P1' THEN 'P1'
+                WHEN alert_events.severity = 'P2' OR EXCLUDED.severity = 'P2' THEN 'P2'
+                ELSE 'P3' END
 RETURNING id, state;
--- severity_rank: P1→1, P2→2, P3→3；**数值越小越严重**，故取 min 即"升级不降级"。
--- 实现为 SQL 函数或应用层 CASE 均可，但**不得**直接比较 TEXT。
+-- 语义：**升级不降级**。不可用 GREATEST —— severity 是 TEXT，
+-- 'P1'<'P2'<'P3' 的字典序与严重度**恰好相反**，GREATEST 会让 P1 被 P3 覆盖。
 COMMIT;
 ```
 

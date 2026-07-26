@@ -271,7 +271,33 @@ for f, body in ALLDEV.items():
             for c in re.findall(r"(?:^|,)\s*([a-z_][a-z0-9_]*)\s*=", dm.group(2)):
                 if c not in DDL_COLS[t]:
                     col_bad.append(f"{os.path.basename(f)}:{ln0} {t} DO UPDATE SET {c} —— 该列不在 DDL")
-report("事务 SQL 引用的列存在于 DDL", sorted(set(col_bad)))
+# 同类：引用了没有 CREATE FUNCTION 的自定义函数；以及 PL/pgSQL 专有语法
+PG_BUILTIN = {
+    "count", "coalesce", "greatest", "least", "now", "date_trunc", "floor", "ceil",
+    "max", "min", "sum", "avg", "abs", "nullif", "percentile_disc", "length",
+    "to_char", "extract", "gen_random_uuid", "concat", "round", "sqrt",
+}
+DEFINED_FN = set(re.findall(r"CREATE (?:OR REPLACE )?FUNCTION (\w+)", sql))
+for f, body in ALLDEV.items():
+    for m in re.finditer(r"```sql\n(.*?)```", body, re.S):
+        blk, ln0 = m.group(1), body[:m.start()].count("\n") + 1
+        # ⚠️ 只在**表达式位置**认函数调用（= 前 / SET 后 / WHERE 中 / SELECT 列表），
+        #    否则 `INSERT INTO t(col…)`、`REFERENCES t(id)`、`CREATE TABLE t (…)`
+        #    都会被当成函数调用 —— 第一版就是这么报了 76 条全误报。
+        KNOWN_TABLES = set(DDL_COLS) | {"pg_try_advisory_lock"}
+        for fm in re.finditer(r"(?:=|,|\(|\bSET\b|\bWHEN\b|\bTHEN\b|\bAND\b|\bOR\b)\s*"
+                              r"([a-z_][a-z0-9_]{2,})\s*\(", blk):
+            fn = fm.group(1)
+            if fn in PG_BUILTIN or fn in DEFINED_FN or fn in KNOWN_TABLES:
+                continue
+            if fn in {"select", "values", "case", "interval", "cast", "exists", "partition"}:
+                continue
+            col_bad.append(f"{os.path.basename(f)}:{ln0} 调用了未定义的函数 {fn}()")
+        # 去掉 -- 注释后再判，否则「说明为什么不能用 SELECT INTO」的注释本身会命中
+        code_only = "\n".join(re.sub(r"--.*$", "", l) for l in blk.split("\n"))
+        if re.search(r"SELECT[^;]*?\bINTO\s+:", code_only, re.S):
+            col_bad.append(f"{os.path.basename(f)}:{ln0} 用了 PL/pgSQL 专有的 `SELECT … INTO :var`，普通连接跑不了")
+report("事务 SQL 引用的列/函数存在于 DDL", sorted(set(col_bad)))
 
 
 # ── 6 AC 计数自洽 ───────────────────────────────────────

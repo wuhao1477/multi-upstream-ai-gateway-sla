@@ -739,9 +739,10 @@ cap AS (
 -- canary 路径同首跳：此处可挂 canary_claimed / claim_ins 两个 CTE
 att AS (
   INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
-                       price_version_id, multiplier_version_id, role,
+                       single_hop_est_usd, price_version_id, multiplier_version_id, role,
                        attempt_status, lease_owner, lease_heartbeat_at)
   SELECT :attempt_id, req.id, req.created_at, :n, :binding_id,
+         :single_hop_est_usd,
          :price_version_id, :multiplier_version_id, :role,   -- 'takeover' | 'retry' | 'canary'
          'pending', :owner, now()
     FROM req, cap                       -- ⚠️ 依赖 cap：容量拿不到就不落 attempt
@@ -964,18 +965,21 @@ BEGIN;
 --       a) 两个不同 event_key 的并发修正会读到同一个旧值，各自把 (new-old) 加进聚合，
 --          旧值 10、并发改 12 和 13 → 聚合变 15，而 reservation 只能是 12 或 13，永久失真；
 --       b) 参数填错可以改到**别的客户或别的日期**的聚合值。
-SELECT gateway_client_id, spend_date, actual_usd
-  INTO :cid, :date, :old_actual
-  FROM client_reservations
- WHERE request_id = :rid AND state = 'settled'
-   FOR UPDATE;                                   -- 未命中（不存在/仍 reserved）→ 报错回滚
+-- ⚠️ 第 37 轮：`SELECT ... INTO :var` 是 PL/pgSQL 语法，**普通客户端连接跑不了**。
+--    改为 CTE 派生：locked 既加行锁，又把 client/日期/旧值传给后续语句。
+WITH locked AS (
+  SELECT gateway_client_id, spend_date, actual_usd
+    FROM client_reservations
+   WHERE request_id = :rid AND state = 'settled'
+     FOR UPDATE                                  -- 空结果 → 后续全不执行（等价于回滚）
+),
 -- (2)(3) 幂等闸门与后续更新**必须绑定在同一条语句里**（第 17 轮 [high]）：
 --     原版把 gating 只写在注释（"仅当影响行数=1 才执行"），SQL 本体没表达 →
 --     同一 event_key 携带**不同** new_actual_usd 重试时，INSERT 被 DO NOTHING 吃掉，
 --     后面两个 UPDATE 却照跑，聚合与 reservation 被二次改写。
 WITH inserted AS (
   INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
-  VALUES (:event_key, :rid, :old_actual, :new_actual, :operator, :reason)
+  SELECT :event_key, :rid, l.actual_usd, :new_actual, :operator, :reason FROM locked l
   ON CONFLICT (event_key) DO NOTHING
   RETURNING request_id, old_actual_usd, new_actual_usd
 ),
@@ -983,7 +987,8 @@ agg AS (
   UPDATE client_daily_spend d
      SET settled_usd = d.settled_usd + (i.new_actual_usd - i.old_actual_usd)  -- 差额
     FROM inserted i
-   WHERE d.gateway_client_id = :cid AND d.spend_date = :date                  -- 均派生自锁定行
+   WHERE d.gateway_client_id = (SELECT gateway_client_id FROM locked)
+     AND d.spend_date        = (SELECT spend_date FROM locked)                -- 均派生自锁定行
   RETURNING 1
 )
 UPDATE client_reservations r
@@ -1174,9 +1179,10 @@ cap AS (
 ),
 att AS (
   INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
-                       price_version_id, multiplier_version_id, role,
+                       single_hop_est_usd, price_version_id, multiplier_version_id, role,
                        attempt_status, lease_owner, lease_heartbeat_at)
   SELECT :attempt_id, :rid, :rcat, 1, :binding_id,
+         :single_hop_est_usd,                    -- 取自 RoutePlanEntry.SingleHopUSD
          :price_version_id, :multiplier_version_id, :role,
          'pending', :owner, now() FROM cap        -- ⚠️ 依赖 cap，容量拿不到就不落 attempt
   RETURNING request_id
@@ -1471,6 +1477,9 @@ CREATE TABLE attempts (
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键，与 requests 对齐
   attempt_no        SMALLINT NOT NULL,        -- 该请求内第几跳（1=主，2=接管…）
   binding_id        BIGINT NOT NULL REFERENCES bindings(id), -- 渠道+key+url（路由资源）
+  -- 该跳的费用上界（第 37 轮补）：恢复结算要按「已终结但无用量 → 该跳单跳保守估算」汇总，
+  -- 而 RoutePlanEntry.SingleHopUSD 只在**内存**里——崩溃后恢复任务读不到它。必须落库。
+  single_hop_est_usd nonneg_usd,
   price_version_id  UUID REFERENCES price_versions(id),      -- 决策时的**基础价**版本（FR-013/AC-02）
   multiplier_version_id UUID REFERENCES multiplier_versions(id), -- 决策时的**倍率**版本（binding 级）
   -- 两者合起来才是该 attempt 的完整计价输入，缺一不可复算
@@ -2278,7 +2287,10 @@ CREATE TABLE capacity_claims (
   binding_id    BIGINT NOT NULL REFERENCES bindings(id),
   request_id    UUID NOT NULL,
   attempt_id    UUID NOT NULL,
-  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','probe')),
+  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','canary','probe')),
+                -- ⚠️ 第 37 轮补 'canary'：文档说 kind 由 RoutePlanEntry.Role 推出，
+                --    而 Role 含 canary，原枚举却没有 → CHECK 直接拒绝。
+                --    canary 的天花板取 `capacity_ceiling_normal`（65%）——它是无承诺流量。
   lease_owner   TEXT NOT NULL,
   lease_expires_at TIMESTAMPTZ NOT NULL,
   state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
@@ -2296,6 +2308,7 @@ CREATE INDEX idx_capacity_active ON capacity_claims(binding_id) WHERE state = 'a
 | `committed` | `limit × 85%`（65% + 承诺 20%） | 承诺流量可用自己的保留 |
 | `takeover` | `limit × 95%`（+ 接管 10%） | 接管是 SLA 最后防线，天花板最高 |
 | `probe` | `limit × 70%`（65% + 测活 5%） | 探索不得伤主流量 |
+| `canary` | `limit × 65%`（同 normal） | canary 用的是本就要发的无承诺请求，不额外占保留 |
 
 **原子占用**（与 dispatch 同事务，`kind` 由 `RoutePlanEntry.Role` 推出）：
 
