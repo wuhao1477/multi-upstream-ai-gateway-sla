@@ -85,7 +85,7 @@ L1 是关键设计：**只记"第 3 个事件在 517ms 到达、类型 output_te
 | 能力 | 形态 |
 | --- | --- |
 | L1 事件轨迹查询 | `GET /admin/debug/trace/{request_id}` —— 返回该请求各 attempt 的 SSE 事件元数据序列（内存缓冲，最近 N 条） |
-| L2 抓包开关 | `config_params` 里的关键项（`is_critical=true`，需二次确认，[09 §3](./09-admin-api.md)）：`debug_capture_enabled` / `debug_capture_max_bytes` / `debug_capture.ttl_minutes` |
+| L2 抓包开关 | `config_params` 里的关键项（`is_critical=true`，需二次确认，[09 §3](./09-admin-api.md)）：`debug_capture_enabled` / `debug_capture_max_bytes` / `debug_capture_ttl_minutes` |
 | 取消传播验证 | 事件轨迹里记录"取消发起时刻"与"上游连接关闭时刻"，直接印证 AC-32 |
 | mock 上游复用 | `verify/mock_upstream.py`（role-only 首帧 / 空 SSE / 慢首帧 / 心跳 / 500 / abort）**转为自研透传层的测试夹具**——[11 §3](./11-decision-full-selfbuilt.md) 已说明其仍有效 |
 

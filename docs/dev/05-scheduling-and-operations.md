@@ -189,7 +189,7 @@ RETURNING canary_used_in_window, canary_inflight;
 ```
 
 - **返回 0 行 = 未抢到额度** → **不走 canary**，按正常排序选 binding。抢不到是常态，不是错误。
-  > 落到事务层：dispatch 链会分别返回 `quota_ok` / `canary_ok` / `advanced` 三值（[02 §2bis](./02-data-model.md)）。**`canary_ok=0` 必须 ROLLBACK 后按非 canary 候选重新 dispatch，不得当成 429** —— 二者混判会在 canary 并发竞争时拒绝本可服务的请求。
+  > 落到事务层：dispatch 链会分别返回 `quota_ok` / `capacity_ok` / `exp_ok` / `advanced` **四值**（[02 §2bis](./02-data-model.md)）。**`canary_ok=0` 必须 ROLLBACK 后按非 canary 候选重新 dispatch，不得当成 429** —— 二者混判会在 canary 并发竞争时拒绝本可服务的请求。
 - **claim 必须与 attempt 同事务，并有可持久化的所有者**（第 9 轮 [high]）：
 
 > ⚠️ 上一版只递增匿名计数、且与 attempt 插入分属两个事务 → ⓐ 崩溃在「claim 成功、attempt 未落库」之间会**永久泄漏 inflight**；ⓑ 兜底规则写成「该 binding 无存活 canary attempt 则归零」，会与**尚未插入 attempt 的正常 claimant** 竞态——提前归零后第二个请求即可进入，`canary_max_concurrent=1` 当场被突破。

@@ -549,10 +549,18 @@ dec AS (
   RETURNING 1)
 -- ⑤ request 终态：**仅 finalize_abort / finalize_recovery 传非空 :request_terminal**；
 --    finalize_upstream 传 NULL，本句自然影响 0 行（那时交付结果未知，写了会让 K4 不可达）
-UPDATE requests r SET final_status = :request_terminal
-  FROM settled
- WHERE r.id = :rid AND r.final_status = 'pending' AND :request_terminal IS NOT NULL;
-COMMIT;
+, upd AS (
+  UPDATE requests r SET final_status = :request_terminal
+    FROM settled
+   WHERE r.id = :rid AND r.final_status = 'pending' AND :request_terminal IS NOT NULL
+  RETURNING r.id)
+SELECT (SELECT count(*) FROM settled) AS settled_n,
+       (SELECT count(*) FROM att)     AS att_n,
+       (SELECT count(*) FROM upd)     AS request_updated;
+-- ⚠️ **块内不写 COMMIT**（第 34 轮修正：原版紧跟 COMMIT，与下方"应用层按三态
+--    COMMIT/ROLLBACK"直接矛盾——先提交就没得选了）。且原版末尾是裸 UPDATE 无
+--    RETURNING，`finalize_upstream` 传 NULL 终态时它影响 0 行，应用层拿不到任何计数。
+--    提交与否一律由应用层依下表三态判定。
 ```
 
 **每跳结束必须同步写该跳终态**（本轮自查发现）：SLA 接管取消 hop1 时，`attempt_status='canceled_by_sla'` 与 `cancel_reason='sla_takeover'` **必须同步直写**，不能只经 outbox 异步记 `cancel_reason`——否则 hop2 关单时 hop1 仍是 `committed`，任何批量语句都会误判它。`cancel_propagated` 等纯观测字段仍可异步。
@@ -707,7 +715,7 @@ att AS (
   RETURNING id
 )
 SELECT count(*) AS inserted FROM att;          -- 应用层断言 = 1，否则 ROLLBACK 并放弃该跳
-COMMIT;
+-- ⚠️ 块内不写 COMMIT：同上
 ```
 
 - **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（[stage 推进协议](#stage-的推进协议)）。
@@ -809,7 +817,7 @@ dec AS (
    WHERE h.binding_id = b.binding_id
   RETURNING 1)
 SELECT count(*) AS closed FROM att;   -- 应用层断言 = 1，否则 ROLLBACK
-COMMIT;
+-- ⚠️ 块内不写 COMMIT：断言在应用层，先提交就回滚不了
 ```
 
 **接管的执行顺序被冻结为**（第 25 轮 [high]）：
@@ -1107,8 +1115,14 @@ cap_res AS (          -- 【变体 A：已登记容量】条件 UPDATE 原子递
          concurrency_inflight = h.concurrency_inflight + 1
     FROM resv, bindings bd
    WHERE h.binding_id = :binding_id AND bd.id = h.binding_id
-     AND h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling)
-     AND (h.rpm_window_start < date_trunc('minute', now())
+     -- ⚠️ 两列**各自可能单独为 NULL**（只登记了 RPM 或只登记了并发），
+     --    且 rpm_window_start 首次为 NULL —— 三种情形都必须显式放行，
+     --    否则「只登记并发」的 binding 会因 rpm 条件恒 UNKNOWN 而永远拿不到容量。
+     AND (bd.concurrency_limit IS NULL
+          OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling))
+     AND (bd.rpm_limit IS NULL
+          OR h.rpm_window_start IS NULL
+          OR h.rpm_window_start < date_trunc('minute', now())
           OR h.rpm_used < floor(bd.rpm_limit * :ceiling))
   RETURNING h.binding_id
 ),
@@ -1165,6 +1179,11 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
+-- ⚠️ 第 34 轮修正：canary 链此前 canary_claimed 依赖 resv 而非 cap →
+--    容量已满时仍会抢到 canary 名额并落 attempt。固定链为
+--    req → quota → resv → cap_res → cap → canary_claimed → claim_ins → att → adv，
+--    返回 quota_ok / capacity_ok / exp_ok / advanced **四值**。
+-- （cap_res / cap 两段与普通路径完全相同，此处不重复；见上方主链）
 canary_claimed AS (          -- resource_health 条件 UPDATE：窗口翻转 + 次数 + inflight
   UPDATE resource_health h
      SET canary_window_start = CASE WHEN h.canary_window_start IS NULL
@@ -1174,7 +1193,7 @@ canary_claimed AS (          -- resource_health 条件 UPDATE：窗口翻转 + �
                                        OR h.canary_window_start < date_trunc('hour', now())
                                       THEN 1 ELSE h.canary_used_in_window + 1 END,
          canary_inflight = h.canary_inflight + 1
-    FROM resv
+    FROM cap                       -- ⚠️ 依赖 cap，不是 resv：容量拿不到就不该抢 canary 名额
    WHERE h.binding_id = :binding_id AND h.health_state = 'canary'
      AND h.canary_inflight < :max_concurrent
      AND (h.canary_window_start IS NULL
@@ -1191,9 +1210,10 @@ claim_ins AS (
 )
 -- att 改为 FROM claim_ins（而非 FROM resv），其余同普通路径
 SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
-       (SELECT count(*) FROM canary_claimed) AS canary_ok,
+       (SELECT count(*) FROM cap)            AS capacity_ok,
+       (SELECT count(*) FROM canary_claimed) AS exp_ok,
        (SELECT count(*) FROM adv)            AS advanced;
--- 同样**不在块内 COMMIT**
+-- 同样**不在块内 COMMIT**；四值分支见上方统一编排表
 ```
 
 > **为什么必须同事务**（第 21 轮 [high]）：[05 §2.0](./05-scheduling-and-operations.md) 要求 claim 与 attempt 同事务；分开写则崩在中间会泄漏 `canary_inflight`。
@@ -1728,7 +1748,7 @@ fin AS (
   RETURNING r.id
 )
 SELECT count(*) AS closed FROM fin;                   -- 应用层断言 = 1，否则 ROLLBACK
-COMMIT;
+-- ⚠️ 块内不写 COMMIT：同上
 ```
 
 - **ⓒ 是"条件执行"而非"闸门"**：K4 时 reservation 已 `settled`，`resv`/`agg` 返回 0 行是**正常的**，不影响 ⓔ 关单。

@@ -208,6 +208,25 @@ for f, body in ALLDEV.items():
 report("跨文档引用（配置键/端点）", sorted(set(ref_bad)))
 
 
+# ── 5quater 事务骨架的两类反复出现的残留 ────────────────
+# ① 块内 COMMIT：本项目所有多语句事务的提交与否都由应用层按返回值决定，
+#    块内写死 COMMIT 会让"任一为 0 则 ROLLBACK"的规则失效（已出现 3 次）。
+# ② 旧三值：dispatch 早期返回三值，改四值后各处措辞未同步（已出现 2 次）。
+tx_bad = []
+for f, body in ALLDEV.items():
+    for m in re.finditer(r"```sql\n(.*?)```", body, re.S):
+        blk = m.group(1)
+        # 只报**自相矛盾**的：块内写死 COMMIT，同一块里却又写「应用层断言/否则 ROLLBACK」。
+        # 正当的单一事务（无条件回滚语义）照常 COMMIT，不报。
+        if "COMMIT;" in blk and re.search(r"(应用层断言|否则\s*ROLLBACK|一律\s*ROLLBACK)", blk):
+            ln = body[:m.start()].count("\n") + 1
+            tx_bad.append(f"{os.path.basename(f)}:{ln} 块内 COMMIT 与同块的「应用层断言/否则 ROLLBACK」矛盾")
+    for m in re.finditer(r"(quota_ok|capacity_ok|exp_ok)[^\n]{0,80}三值", body):
+        ln = body[:m.start()].count("\n") + 1
+        tx_bad.append(f"{os.path.basename(f)}:{ln} 仍称「三值」（已改四值）")
+report("事务骨架残留（块内 COMMIT / 旧三值）", sorted(set(tx_bad)))
+
+
 # ── 6 AC 计数自洽 ───────────────────────────────────────
 m14 = open("docs/dev/14-acceptance-matrix.md").read()
 cnt = []
