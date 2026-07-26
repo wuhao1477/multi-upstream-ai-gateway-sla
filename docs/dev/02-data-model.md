@@ -570,11 +570,19 @@ SELECT (SELECT count(*) FROM settled) AS settled_n,
 > 与 [AC-33](./14-acceptance-matrix.md) 要求的"同一 `settle_event_key` 重放、连接中断后重试须幂等"**直接矛盾**——
 > 已提交后的重试必然 `state≠'reserved'`，两个计数都是 0，按原文会被当成异常告警而不是幂等成功）：
 >
-> | `settled` | 判定 | 处置 |
-> | --- | --- | --- |
-> | 1 | `applied` | COMMIT |
-> | 0 且该 `request_id` 的 reservation 已是终态、且 `settle_event_key` 与本次相同 | `already_applied_same_event` | COMMIT（幂等成功，**不告警**） |
-> | 0 且不满足上一行 | `conflict_or_not_found` | **ROLLBACK + P2 告警** |
+> ⚠️ **必须同时看 `settled_n` 与 `att_n`**（第 36 轮）：只看 `settled` 时，
+> `settled_n=1 且 att_n=0` 会**提交 reservation 与聚合、却没终结 attempt/usage**——
+> 钱结了、单没关，恢复扫描随后又会把它当悬挂处理。
+>
+> | `settled_n` | `att_n` | 判定 | 处置 |
+> | --- | --- | --- | --- |
+> | 1 | 1 | `applied` | COMMIT |
+> | 1 | 0 | **异常**（attempt 不存在 / 不属该 request / 已终态） | **ROLLBACK + P2 告警** |
+> | 0 | — | 该 reservation 已终态且 `settle_event_key` 与本次相同 → `already_applied_same_event` | COMMIT（幂等成功，**不告警**） |
+> | 0 | — | 不满足上一行 → `conflict_or_not_found` | **ROLLBACK + P2 告警** |
+>
+> **claim 释放同受此约束**：`att_n=0` 时整事务回滚，三张 claim 表自然不会被误放
+> （否则会出现"attempt 还在跑、占用已释放"，容量与 canary 计数双双失真）。
 >
 > CTE 不会因某一步 0 行而自动回滚，故提交与否**必须由应用层依上表决定**。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
 
@@ -703,6 +711,31 @@ resv_ok AS (                                   -- 预留仍有效才允许再发
   SELECT 1 FROM client_reservations r, req
    WHERE r.request_id = req.id AND r.state = 'reserved'
 ),
+-- ⚠️ **接管跳同样要占容量**（第 36 轮：此前漏了）——`capacity_claims.kind='takeover'`，
+--    天花板 95%（比 normal 高，接管是 SLA 最后防线）。两个 CTE 与首跳同形：
+cap_res AS (   -- 已登记容量：条件 UPDATE 原子递增；未登记：SELECT :binding_id FROM resv_ok 直通
+  UPDATE resource_health h
+     SET rpm_window_start = CASE WHEN h.rpm_window_start IS NULL
+                                  OR h.rpm_window_start < date_trunc('minute', now())
+                                 THEN date_trunc('minute', now()) ELSE h.rpm_window_start END,
+         rpm_used = CASE WHEN h.rpm_window_start IS NULL
+                          OR h.rpm_window_start < date_trunc('minute', now())
+                         THEN 1 ELSE h.rpm_used + 1 END,
+         concurrency_inflight = h.concurrency_inflight + 1
+    FROM resv_ok, bindings bd
+   WHERE h.binding_id = :binding_id AND bd.id = h.binding_id
+     AND (bd.concurrency_limit IS NULL
+          OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling_takeover))
+     AND (bd.rpm_limit IS NULL OR h.rpm_window_start IS NULL
+          OR h.rpm_window_start < date_trunc('minute', now())
+          OR h.rpm_used < floor(bd.rpm_limit * :ceiling_takeover))
+  RETURNING h.binding_id),
+cap AS (
+  INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
+                              lease_owner, lease_expires_at)
+  SELECT :cap_claim_id, binding_id, :rid, :attempt_id, 'takeover', :owner,
+         now() + interval '60 seconds' FROM cap_res
+  RETURNING request_id),
 -- canary 路径同首跳：此处可挂 canary_claimed / claim_ins 两个 CTE
 att AS (
   INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
@@ -711,10 +744,12 @@ att AS (
   SELECT :attempt_id, req.id, req.created_at, :n, :binding_id,
          :price_version_id, :multiplier_version_id, :role,   -- 'takeover' | 'retry' | 'canary'
          'pending', :owner, now()
-    FROM req, resv_ok
+    FROM req, cap                       -- ⚠️ 依赖 cap：容量拿不到就不落 attempt
   RETURNING id
 )
-SELECT count(*) AS inserted FROM att;          -- 应用层断言 = 1，否则 ROLLBACK 并放弃该跳
+SELECT (SELECT count(*) FROM cap) AS capacity_ok,
+       (SELECT count(*) FROM att) AS inserted;
+--   capacity_ok=0 → **换 RoutePlan 下一个候选**（不是错误、不是 429）          -- 应用层断言 = 1，否则 ROLLBACK 并放弃该跳
 -- ⚠️ 块内不写 COMMIT：同上
 ```
 
@@ -1162,14 +1197,13 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 --    若 SQL 先 COMMIT，已递增的 `reserved_usd` 与容量计数就被提交下去了。
 --    提交与否**一律由应用层依四值分支决定**（见上方统一编排）。
 -- ⚠️ 上式是**普通路径**：普通请求没有 canary/probe 的 CTE，无条件读取会语法错。
---    ⚠️ 但本式**尚未包含 capacity 占用** —— 完整顺序见上方「三套 claim 的统一编排」，
---    实现时以那一节为准：req→quota→resv→**cap**→exp→att→adv。
+--    完整顺序见上方「三套 claim 的统一编排」：req→quota→resv→cap_res→cap→exp→att→adv。
 ```
 
 **应用层据四值分支**（与上方[统一编排](#三套-claim-的统一编排)同一张表，此处不重复列——以那一节为准）：
 `quota_ok=0` → 429；`capacity_ok=0` → **换候选**；`exp_ok=0` → canary 回落普通路径 / probe 跳过；四值全 1 → 提交。
 
-**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
+**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回四值：
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
@@ -2501,6 +2535,7 @@ CREATE TABLE alert_events (
   suggested_action TEXT,                        -- 建议处置（FR-101）
   state           TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','acknowledged','recovering','closed')),
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- 同因重复发生时刷新（[05 §5.2bis](./05-scheduling-and-operations.md) 合并事务）
   acknowledged_at TIMESTAMPTZ,
   closed_at       TIMESTAMPTZ,
   -- ⚠️ 不可用 UNIQUE(dedup_key, state)（对抗性审查发现）：state 不同即视为不同行，

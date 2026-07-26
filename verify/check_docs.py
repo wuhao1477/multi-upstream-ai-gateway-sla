@@ -231,6 +231,49 @@ for f, body in ALLDEV.items():
 report("事务骨架残留（块内 COMMIT / 旧三值）", sorted(set(tx_bad)))
 
 
+# ── 5quinquies 事务 SQL 引用的列是否存在于 DDL ───────────
+# 第 36 轮：05 的告警写入 SQL 引用 alert_events.last_seen_at，而 DDL 没这列；
+# 同一段还省略了无 DEFAULT 的 id。第 4 类只查 `表.列` 反引号写法，
+# 覆盖不到 SQL 语句里的裸列名 → 补这一类。
+DDL_COLS = {}
+for tm in re.finditer(r"CREATE TABLE (\w+) \((.*?)\n\)", sql, re.S):
+    cols = set(re.findall(r"^\s{2}(\w+)\s+[A-Za-z]", tm.group(2), re.M))
+    DDL_COLS[tm.group(1)] = cols
+
+col_bad = []
+for f, body in ALLDEV.items():
+    for m in re.finditer(r"```sql\n(.*?)```", body, re.S):
+        blk = m.group(1)
+        ln0 = body[:m.start()].count("\n") + 1
+        # INSERT INTO t (a, b, c)
+        for im in re.finditer(r"INSERT INTO (\w+)\s*\(([^)]*)\)", blk):
+            t = im.group(1)
+            if t not in DDL_COLS:
+                continue
+            for c in re.findall(r"\b([a-z_][a-z0-9_]*)\b", im.group(2)):
+                if c not in DDL_COLS[t]:
+                    col_bad.append(f"{os.path.basename(f)}:{ln0} INSERT {t}({c}) —— 该列不在 DDL")
+        # UPDATE t ... SET a = ...
+        for um in re.finditer(r"UPDATE (\w+)[^\n]*\n?\s*SET\s+(.*?)(?:\n\s*(?:FROM|WHERE|RETURNING)|$)",
+                              blk, re.S):
+            t = um.group(1)
+            if t not in DDL_COLS:
+                continue
+            for c in re.findall(r"(?:^|,)\s*([a-z_][a-z0-9_]*)\s*=", um.group(2)):
+                if c not in DDL_COLS[t]:
+                    col_bad.append(f"{os.path.basename(f)}:{ln0} UPDATE {t} SET {c} —— 该列不在 DDL")
+        # ON CONFLICT ... DO UPDATE SET —— 表名取自其所属的 INSERT INTO
+        for dm in re.finditer(r"INSERT INTO (\w+).*?DO UPDATE SET\s+(.*?)(?:\n\s*(?:WHERE|RETURNING)|;)",
+                              blk, re.S):
+            t = dm.group(1)
+            if t not in DDL_COLS:
+                continue
+            for c in re.findall(r"(?:^|,)\s*([a-z_][a-z0-9_]*)\s*=", dm.group(2)):
+                if c not in DDL_COLS[t]:
+                    col_bad.append(f"{os.path.basename(f)}:{ln0} {t} DO UPDATE SET {c} —— 该列不在 DDL")
+report("事务 SQL 引用的列存在于 DDL", sorted(set(col_bad)))
+
+
 # ── 6 AC 计数自洽 ───────────────────────────────────────
 m14 = open("docs/dev/14-acceptance-matrix.md").read()
 cnt = []

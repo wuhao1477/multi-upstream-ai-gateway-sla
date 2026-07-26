@@ -924,6 +924,7 @@ CREATE TABLE alert_events (
   suggested_action TEXT,                        -- 建议处置（FR-101）
   state           TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','acknowledged','recovering','closed')),
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- 同因重复发生时刷新（[05 §5.2bis](./05-scheduling-and-operations.md) 合并事务）
   acknowledged_at TIMESTAMPTZ,
   closed_at       TIMESTAMPTZ,
   -- ⚠️ 不可用 UNIQUE(dedup_key, state)（对抗性审查发现）：state 不同即视为不同行，

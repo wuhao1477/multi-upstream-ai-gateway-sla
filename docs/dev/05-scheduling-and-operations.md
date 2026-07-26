@@ -279,14 +279,38 @@ WITH
                          WHERE pc.state='active' AND pc.lease_expires_at > now()
                            AND r.tenant_id = :tenant)
                        < :tenant_probe_concurrency),
-  -- ③ 六者全过才插 claim
+  -- ③ 容量占用（第 36 轮补：探测同样要占上游容量，kind='probe'、天花板 70%）
+  cap_res AS (   -- 未登记容量时换成 SELECT :bid AS binding_id FROM g 直通
+    UPDATE resource_health h
+       SET rpm_window_start = CASE WHEN h.rpm_window_start IS NULL
+                                    OR h.rpm_window_start < date_trunc('minute', now())
+                                   THEN date_trunc('minute', now()) ELSE h.rpm_window_start END,
+           rpm_used = CASE WHEN h.rpm_window_start IS NULL
+                            OR h.rpm_window_start < date_trunc('minute', now())
+                           THEN 1 ELSE h.rpm_used + 1 END,
+           concurrency_inflight = h.concurrency_inflight + 1
+      FROM g, t, u, b, e, c, bindings bd
+     WHERE h.binding_id = :bid AND bd.id = h.binding_id
+       AND (bd.concurrency_limit IS NULL
+            OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling_probe))
+       AND (bd.rpm_limit IS NULL OR h.rpm_window_start IS NULL
+            OR h.rpm_window_start < date_trunc('minute', now())
+            OR h.rpm_used < floor(bd.rpm_limit * :ceiling_probe))
+    RETURNING h.binding_id),
+  cap AS (
+    INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
+                                lease_owner, lease_expires_at)
+    SELECT :cap_claim_id, binding_id, :rid, :attempt_id, 'probe', :owner,
+           now() + interval '60 seconds' FROM cap_res
+    RETURNING request_id),
+  -- ④ 七者全过才插 probe claim
   claim AS (
     INSERT INTO probe_claims(claim_id, binding_id, template_id, request_id, attempt_id,
                              lease_owner, lease_expires_at)
     SELECT :claim_id, :bid, :template_id, :rid, :attempt_id, :owner, now() + interval '60 seconds'
-      FROM g, t, u, b, e, c                      -- 任一 CTE 为空 → 笛卡尔积为空 → 不插
+      FROM cap                                   -- 任一前置 CTE 为空 → 链断 → 不插
     RETURNING request_id),
-  -- ④ attempt 与 claim 同事务（意图先行）
+  -- ⑤ attempt 与 claim 同事务（意图先行）
   att AS (
     INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
                          price_version_id, multiplier_version_id, role,
@@ -297,11 +321,13 @@ WITH
 SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
        (SELECT count(*) FROM u)   AS u_ok,  (SELECT count(*) FROM b) AS b_ok,
        (SELECT count(*) FROM e)   AS e_ok,  (SELECT count(*) FROM c) AS c_ok,
+       (SELECT count(*) FROM cap) AS capacity_ok,
        (SELECT count(*) FROM att) AS dispatched;
 -- ⚠️ **块内不写 COMMIT**（第 33 轮修正：原版紧跟 COMMIT，而下一行又要求
 --    任一值为 0 时 ROLLBACK —— 先提交就回滚不了，预算已扣、claim 没插）。
 --    提交与否**一律由应用层依返回值决定**，与 dispatch 同纪律。
 -- 应用层：`dispatched=1` 才 COMMIT 并发起探测；**任何一值为 0 一律 ROLLBACK**
+--   capacity_ok=0 → 该 binding 上游容量已满，本轮跳过它（不是错误）
 --   （否则预算已扣、claim 却没插 —— 额度白白漏掉）
 --   g/t/u/b=0 → 该维预算耗尽；e=0 → 错误预算超限，暂停全部测活；c=0 → 该租户已有在飞探测
 ```
@@ -467,13 +493,21 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 
 ```sql
 BEGIN;
-INSERT INTO alert_events (dedup_key, category, severity, state, started_at, last_seen_at, payload)
-VALUES (:key, :cat, :sev, 'open', now(), now(), :payload)
+-- ⚠️ `id` 无 DEFAULT（UUIDv7 由应用层生成），必须显式给；`severity` 是 TEXT，
+--    直接 GREATEST 会按字典序比较（'P1' < 'P2' < 'P3'），**恰好与严重度相反** ——
+--    P1 最严重却会被 P3 覆盖。改用显式 rank 函数。
+INSERT INTO alert_events (id, dedup_key, category, severity, state,
+                          started_at, last_seen_at, occurrence_count, payload)
+VALUES (:alert_id /* UUIDv7 */, :key, :cat, :sev, 'open', now(), now(), 1, :payload)
 ON CONFLICT (dedup_key) WHERE state <> 'closed'      -- 部分唯一索引 uq_alert_active
 DO UPDATE SET last_seen_at = now(),
               occurrence_count = alert_events.occurrence_count + 1,
-              severity = GREATEST(alert_events.severity, EXCLUDED.severity)  -- 升级不降级
+              severity = CASE WHEN severity_rank(EXCLUDED.severity)
+                               < severity_rank(alert_events.severity)
+                              THEN EXCLUDED.severity ELSE alert_events.severity END
 RETURNING id, state;
+-- severity_rank: P1→1, P2→2, P3→3；**数值越小越严重**，故取 min 即"升级不降级"。
+-- 实现为 SQL 函数或应用层 CASE 均可，但**不得**直接比较 TEXT。
 COMMIT;
 ```
 
