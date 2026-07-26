@@ -79,7 +79,7 @@ multi-upstream-ai-gateway-sla/
 | `make test` | 单测；含 SSE 扫描器判定用例（MOCK 场景集）与 outbox 重放幂等性用例 |
 | `make lint` | `golangci-lint` |
 | `make migrate` | 应用 `migrations/`；本地/CI 用一次性 PG |
-| **CI 门禁** | 构建 + 测试 + lint + **DDL 真跑**（起临时 PG 执行全部 `migrations/` + 建分区 + `sqlc generate`，[02 §9.1bis](./02-data-model.md)）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)） |
+| **CI 门禁** | 构建 + 测试 + lint + **DDL 真跑**（`verify/ddl-check.sh`：抽取 02 的全部 DDL 在 postgres:16 上执行 + 匿名 401 聚合回归；M0 后扩为 `migrations/` + 建分区 + `sqlc generate`，[02 §9.1bis](./02-data-model.md)）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)） |
 | 镜像 | `cmd/sla-core` 打最小镜像（distroless/alpine） |
 
 ---

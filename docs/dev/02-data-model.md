@@ -2100,6 +2100,11 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 | **索引早于表** | `CREATE INDEX ... ON X` 必须晚于 `CREATE TABLE X` | `idx_outbox_undelivered ON ledger_outbox` 写在 §4.2bis，而 `ledger_outbox` 定义在 §9.2bis |
 | **代码块纯净** | ` ```sql ` 块内不得出现 Markdown（`>` / `|` / `**` / `#`） | 第 16 轮在 `alert_events` 后混入三行引用 |
 
+> **已实测（2026-07-26）**：`verify/ddl-check.sh` 从本文件抽出全部 **88 条 DDL**，在 `postgres:16` 上以 `ON_ERROR_STOP=1` 执行**通过**，建出 45 个 public 对象（44 表 + 1 视图，另含 2 域 + 41 索引）。
+> 脚本同时做一条**回归断言**——第 18 轮那个 critical 的实际行为：`auth_rejections` 的**匿名 401**（`gateway_client_id` 与 `secret_prefix` 全 NULL）可写入，且同分钟同组合经 `ON CONFLICT` 只增计数不新增行（1 行 / 计数 2），`UNIQUE NULLS NOT DISTINCT` 语义符合预期。**这是实测，不再是推断。**
+>
+> ⚠️ **该脚本的边界**：只验证「建表能否跑通」。**不验证**分区子表创建、分区表上的外键行为、以及事务骨架里那些带 `:参数` 的伪 SQL —— 后者必须在 M0 用真实查询覆盖，不能因为本脚本绿了就认为账本逻辑已验证。
+>
 > 这三类都**不是语义争议，是机器可判定的**：CI 从文档抽取全部 ```sql 块按出现顺序拼成迁移、在临时 PG 上真跑一遍即可全部暴露。**本节的价值就在于它不依赖人读**——前 17 轮的人工审查都没发现这两处顺序问题。
 
 ### 9.2 保留策略配置化
