@@ -468,17 +468,24 @@ agg AS (
    WHERE d.gateway_client_id = s.gateway_client_id AND d.spend_date = s.spend_date
   RETURNING 1
 ),
+req AS (
+  -- ⚠️ 第 22 轮 [high]：`att` 原先只按 `a.id=:attempt_id` 更新，**不校验它属于 :rid** →
+  --    参数错配时会「结算 A 请求、终结 B 请求的 attempt」。故先锁 requests 派生分区键。
+  SELECT id, created_at FROM requests WHERE id = :rid AND created_at = :rcat FOR UPDATE
+),
 att AS (
-  -- ③ 本跳 attempt 终态（按 attempt_id，不可按 request_id 批量——多跳会误伤历史跳）
+  -- ③ 本跳 attempt 终态（按 attempt_id，且**必须校验归属**；不可按 request_id 批量——多跳会误伤历史跳）
   UPDATE attempts a
      SET attempt_status = :attempt_terminal,
          terminal_event = :terminal_event,
          upstream_terminal_at = :upstream_terminal_at,
          content_aware_ttft_ms = COALESCE(a.content_aware_ttft_ms, :ttft_ms),
          ended_at = now()
-    FROM settled
-   WHERE a.id = :attempt_id AND a.attempt_status IN ('pending','committed')
-  RETURNING a.id
+    FROM settled, req
+   WHERE a.id = :attempt_id
+     AND a.request_id = req.id AND a.request_created_at = req.created_at   -- 归属校验
+     AND a.attempt_status IN ('pending','committed')
+  RETURNING a.id, a.request_created_at
 ),
 usage_ins AS (
   -- ③bis usage 同事务落库；**必须显式带 cost_source**（第 21 轮 [high]：
@@ -487,7 +494,7 @@ usage_ins AS (
                              prompt_tokens, completion_tokens, total_tokens,
                              prompt_cached_tokens, total_cost, estimated_cost,
                              cost_variance, cost_source)
-  SELECT :usage_id, :attempt_id, :request_created_at, 1,
+  SELECT :usage_id, att.id, att.request_created_at, 1,   -- 分区键取自 att，不再单独传参
          :prompt, :completion, :total, :cached, :cost, :est, :cost - :est,
          :cost_source                       -- 'upstream' | 'estimated'，由调用方按是否收到真实 usage 决定
     FROM att                                -- 仅当 ③ 生效才插
@@ -520,7 +527,8 @@ COMMIT;
 
 **每跳结束必须同步写该跳终态**（本轮自查发现）：SLA 接管取消 hop1 时，`attempt_status='canceled_by_sla'` 与 `cancel_reason='sla_takeover'` **必须同步直写**，不能只经 outbox 异步记 `cancel_reason`——否则 hop2 关单时 hop1 仍是 `committed`，任何批量语句都会误判它。`cancel_propagated` 等纯观测字段仍可异步。
 
-> **`finalize` 的入参只有** `request_id`、**`attempt_id`**、`new_state`、`actual_usd`、`event_key`、`needs_review`、两个终态。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
+> **`finalize` 的入参**：`request_id`、`request_created_at`（分区键，锁 requests 用）、`attempt_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、`terminal_event`、`upstream_terminal_at`、`ttft_ms`、`cost_source` 与 usage 各列、两个终态。
+> **末尾须 `RETURNING` 并由应用层断言 `settled=1 AND att=1`**，否则 `ROLLBACK`——CTE 不会因某一步 0 行而自动回滚。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
 
 **三个终结入口，覆盖全部收尾路径**（第 17 轮 [critical]：此前只定义了"终帧到达"这一条正常路径，**取消/断流/超时结束的请求没有任何终结事务**，会残留 `pending` + `reserved`；恢复扫描也没有写 `requests.final_status` 的载体）：
 
@@ -574,6 +582,39 @@ actual_usd(被取消的 attempt) =
 
 > ⚠️ `sla_takeover` 是**唯一不终结 request** 的取消原因：它只结束当前 attempt，请求继续。其余取消原因都意味着"本请求到此为止"，必须走 `finalize_abort`。
 > **验收**：[AC-30/AC-32](./14-acceptance-matrix.md) 须断言——客户端断开后 `requests.final_status='canceled'`、`client_reservations.state≠'reserved'`、`client_daily_spend.reserved_usd` 已扣回、canary claim 已释放，且该请求**不计入 SLA 失败**。
+
+**接管跳（hop2/hop3…）的插入事务 `dispatch_next`**（第 22 轮 [high]：上面只定义了**首跳**——`attempt_no=1` 且要求 `stage='planned'`。请求进入 `dispatched` 后这条 SQL 再也插不进新 attempt，而 RoutePlan 接管要求**每跳都先落 attempt 再发请求**（[01 §5.1](./01-architecture.md) 意图先行），此前没有任何事务承载它）：
+
+```sql
+BEGIN;
+WITH req AS (
+  SELECT id, created_at FROM requests
+   WHERE id = :rid AND created_at = :rcat
+     AND stage = 'dispatched' AND final_status = 'pending'   -- 已首跳、单子未关
+   FOR UPDATE
+),
+resv_ok AS (                                   -- 预留仍有效才允许再发一跳
+  SELECT 1 FROM client_reservations r, req
+   WHERE r.request_id = req.id AND r.state = 'reserved'
+),
+-- canary 路径同首跳：此处可挂 canary_claimed / claim_ins 两个 CTE
+att AS (
+  INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
+                       price_version_id, multiplier_version_id, role,
+                       attempt_status, lease_owner, lease_heartbeat_at)
+  SELECT :attempt_id, req.id, req.created_at, :n, :binding_id,
+         :price_version_id, :multiplier_version_id, :role,   -- 'takeover' | 'retry' | 'canary'
+         'pending', :owner, now()
+    FROM req, resv_ok
+  RETURNING id
+)
+SELECT count(*) AS inserted FROM att;          -- 应用层断言 = 1，否则 ROLLBACK 并放弃该跳
+COMMIT;
+```
+
+- **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（[stage 推进协议](#stage-的推进协议)）。
+- **不追加预留**：预留在首跳已按 RoutePlan **全部跳**求和（见上方上界算法），接管跳不再动聚合。
+- **`attempt_no` 由 `UNIQUE (request_id, request_created_at, attempt_no)` 保证不重复**——并发重复插入会撞唯一约束而失败，正是期望行为。
 
 **关单必须两阶段：`finalize_upstream` → `finalize_delivery`**（第 12 轮 [critical]）：
 
@@ -810,25 +851,41 @@ adv AS (
    WHERE r.id = att.request_id AND r.created_at = :rcat
   RETURNING r.id
 )
-SELECT count(*) AS advanced FROM adv;                     -- ⚠️ 应用层断言 = 1，否则 ROLLBACK
+-- ⚠️ 必须**分别**返回三类结果（第 22 轮 [high]）：canary 抢不到**不是错误**
+--    （[05 §2.0](./05-scheduling-and-operations.md)：抢不到是常态，应回落到正常排序），
+--    与"配额不足"混为一谈会在 canary 并发竞争时**拒绝本可服务的请求**。
+SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
+       (SELECT count(*) FROM canary_claimed) AS canary_ok,   -- 仅 canary 路径有此 CTE
+       (SELECT count(*) FROM adv)            AS advanced;
 COMMIT;
--- ⚠️ **canary 请求（`role='canary'`）必须在同一条链里再挂两个 CTE**（第 21 轮 [high]）：
---    [05 §2.0](./05-scheduling-and-operations.md) 要求 claim 与 attempt 同事务，
---    而本事务此前只含 reservation/attempt/stage → 按本 SQL 实现 canary 会缺 claim，
---    按 05 单独实现又会与预留事务分裂（崩在中间就泄漏）。故插在 resv 与 att 之间：
---      canary_claimed AS (   -- resource_health 的条件 UPDATE（窗口翻转+次数+inflight）
---        UPDATE resource_health ... FROM resv WHERE ... RETURNING binding_id),
---      claim_ins AS (
---        INSERT INTO canary_claims(claim_id, binding_id, request_id, attempt_id,
---                                  lease_owner, lease_expires_at)
---        SELECT :claim_id, binding_id, :rid, :attempt_id, :owner, now()+interval '60 seconds'
---          FROM canary_claimed RETURNING request_id)
---    并让 `att` 改为 `FROM claim_ins`。普通请求走原链（无这两个 CTE）。
---    **验收**：AC-08⑩ 与 AC-33 须断言五者（预留/claim/inflight/attempt/stage）同事务成败。
--- 五者同生同死：req/claimed 任一为空 → 后续全不执行 → advanced=0 → 回滚 → 429
--- `quota_daily_usd IS NULL`（不限额）时，claimed 的限额条件由应用层省略，其余链路不变
--- 预留失败（429）后**另起一个事务**写 `stage='reservation_rejected'`（本事务已回滚，不能在其中写）
 ```
+
+**应用层据三值分支**：
+
+| quota_ok | canary_ok | advanced | 处置 |
+| --- | --- | --- | --- |
+| 0 | — | 0 | **ROLLBACK → 429**（日配额不足），另起事务写 `stage='reservation_rejected'` |
+| 1 | 0 | 0 | **ROLLBACK → 不报错**，把该 canary binding 移出本次候选，**按正常排序重新 dispatch** |
+| 1 | 1 | 1 | 提交，发起上游调用 |
+| 其他组合 | — | — | 视为异常 → ROLLBACK + P2 告警（不应出现） |
+
+> **canary 请求（`role='canary'`）必须在同一条链里再挂两个 CTE**（第 21 轮 [high]）：
+>    [05 §2.0](./05-scheduling-and-operations.md) 要求 claim 与 attempt 同事务，
+>    而本事务此前只含 reservation/attempt/stage → 按本 SQL 实现 canary 会缺 claim，
+>    按 05 单独实现又会与预留事务分裂（崩在中间就泄漏）。故插在 resv 与 att 之间：
+>      canary_claimed AS (   -- resource_health 的条件 UPDATE（窗口翻转+次数+inflight）
+>        UPDATE resource_health ... FROM resv WHERE ... RETURNING binding_id),
+>      claim_ins AS (
+>        INSERT INTO canary_claims(claim_id, binding_id, request_id, attempt_id,
+>                                  lease_owner, lease_expires_at)
+>        SELECT :claim_id, binding_id, :rid, :attempt_id, :owner, now()+interval '60 seconds'
+>          FROM canary_claimed RETURNING request_id)
+>    并让 `att` 改为 `FROM claim_ins`。普通请求走原链（无这两个 CTE）。
+>    **验收**：AC-08⑩ 与 AC-33 须断言五者（预留/claim/inflight/attempt/stage）同事务成败。
+> 五者同生同死：req/claimed 任一为空 → 后续全不执行 → advanced=0 → 回滚 → 429
+> `quota_daily_usd IS NULL`（不限额）时，claimed 的限额条件由应用层省略，其余链路不变
+> 预留失败（429）后**另起一个事务**写 `stage='reservation_rejected'`（本事务已回滚，不能在其中写）
+
 
 - `quota_daily_usd IS NULL`（不设日配额）时**跳过 D 的限额判断**，仍插入 reservation 行（记账与崩溃恢复需要它），`reserved_usd` 照常累加。
 - **D 必须在发起上游调用前完成**，与 [§5.1 意图先行](./01-architecture.md) 的 attempt 落库同属"发请求前的同步写"。
@@ -1218,6 +1275,79 @@ SELECT r.id, r.created_at, a.*
 > ⚠️ 三个事实列、三次判定，**任何一个都不能由 `attempt_status` 反推**（两阶段关单后 attempt 可能已是终态）：
 > ① `response_committed_at` 分 ② 与 ③；② `terminal_event` 分 ③b 与 ③c；③ `downstream_first_byte_written_at` 分 ③b1 与 ③b2。
 > 第 12 轮曾只读 `terminal_event`，把「首字写出未确认」（K2）也判成 `interrupted`，等于声称用户看到过截断流。
+
+**`finalize_recovery` 必须用 `requests` 作闸门，不能复用 reservation 闸门**（第 22 轮 [critical]，K4 不可达第四次出现）：
+
+> ⚠️ 第 21 轮把 `finalize` 骨架整条链改成 `FROM settled` 驱动（闸门 = reservation 的 `reserved → settled` 跃迁），修好了"迟到的 abort 篡改终态"。**但恢复路径不能复用这个闸门**：K4 的定义就是 `finalize_upstream` **已经结算过**（reservation 已是 `settled`），只差 `finalize_delivery` 没跑完。此时 `settled` CTE 返回 0 行 → 整条链一句不执行 → ⑤ 永远写不了 `requests.final_status` → **K4 永久 `pending`**。
+>
+> **根因**：reservation 状态是"钱结没结"的幂等键，而恢复要解决的是"**单子关没关**"。两者不是同一件事，不能共用闸门。
+
+```sql
+-- finalize_recovery：闸门是 requests，不是 reservation
+BEGIN;
+WITH req AS (
+  SELECT id, created_at FROM requests
+   WHERE id = :rid AND created_at = :rcat AND final_status = 'pending'
+   FOR UPDATE                                        -- 唯一闸门：单子还没关
+),
+-- ⓐ 非最后一跳的非终态 attempt → 必然是被接管取消的
+prev AS (
+  UPDATE attempts a SET attempt_status = 'canceled_by_sla',
+         cancel_reason = COALESCE(a.cancel_reason,'sla_takeover'),
+         canceled_by_sla = true, ended_at = now()
+    FROM req
+   WHERE a.request_id = req.id AND a.request_created_at = req.created_at
+     AND a.attempt_status IN ('pending','committed') AND a.attempt_no < :last_attempt_no
+  RETURNING a.id
+),
+-- ⓑ 最后一跳 → 按 §4.2bis 分流表定终态
+last AS (
+  UPDATE attempts a SET attempt_status = :attempt_terminal, ended_at = now()
+    FROM req
+   WHERE a.id = :last_attempt_id AND a.request_id = req.id
+     AND a.attempt_status IN ('pending','committed')
+  RETURNING a.id
+),
+-- ⓒ reservation **条件结算**（不是闸门）：仍 reserved 才结算；已 settled（K4）则跳过
+resv AS (
+  UPDATE client_reservations r
+     SET state='settled', actual_usd=:actual_usd, settle_event_key=:event_key,
+         needs_manual_review=:needs_review, settled_at=now()
+    FROM req
+   WHERE r.request_id = req.id AND r.state = 'reserved'
+  RETURNING r.gateway_client_id, r.spend_date, r.estimated_usd, r.actual_usd
+),
+agg AS (
+  UPDATE client_daily_spend d
+     SET reserved_usd = d.reserved_usd - s.estimated_usd,
+         settled_usd  = d.settled_usd  + COALESCE(s.actual_usd, 0)
+    FROM resv s
+   WHERE d.gateway_client_id = s.gateway_client_id AND d.spend_date = s.spend_date
+  RETURNING 1
+),
+-- ⓓ 释放该 request 名下**全部**残留 claim（按 binding 计数扣减）
+rel AS (
+  UPDATE canary_claims c SET state='released', released_at=now()
+    FROM req WHERE c.request_id = req.id AND c.state='active'
+  RETURNING c.binding_id
+),
+rel_agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id),
+dec AS (
+  UPDATE resource_health h SET canary_inflight = GREATEST(h.canary_inflight - g.n, 0)
+    FROM rel_agg g WHERE h.binding_id = g.binding_id RETURNING 1
+),
+-- ⓔ 关单（本事务的目的）
+fin AS (
+  UPDATE requests r SET final_status = :request_terminal
+    FROM req WHERE r.id = req.id AND r.created_at = req.created_at
+  RETURNING r.id
+)
+SELECT count(*) AS closed FROM fin;                   -- 应用层断言 = 1，否则 ROLLBACK
+COMMIT;
+```
+
+- **ⓒ 是"条件执行"而非"闸门"**：K4 时 reservation 已 `settled`，`resv`/`agg` 返回 0 行是**正常的**，不影响 ⓔ 关单。
+- **金额不重复计入**：`agg` 只在本次真正发生 `reserved → settled` 跃迁时才动聚合，与 `finalize_upstream` 天然互斥。
 
 **`finalize_recovery` 是唯一按 request 批量终结的入口**，且必须**分跳给不同终态**（本轮自查发现）：
 
