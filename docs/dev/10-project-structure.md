@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 草案，待评审（M0 开工即用） |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 定位 | 补齐设计审查发现的空缺：M0 首个交付物是"Go 工程骨架"，但此前无目录/包/构建约定。本篇定 module、目录布局、包边界、构建与 CI |
 | 输入 | [00 里程碑](./00-overview-and-milestones.md)、[01 架构六模块](./01-architecture.md)、[03 上游对接层](./03-upstream-layer.md)、[04 CollectorAdapter](./04-collector-adapter.md)、[06 部署](./06-deployment-and-operations.md)、[09 管理 API](./09-admin-api.md) |
@@ -116,15 +116,22 @@ multi-upstream-ai-gateway-sla/
 
 ## 4. M0 交付物映射（[00 M0 退出标准](./00-overview-and-milestones.md) → 本结构）
 
+> ⚠️ **本表曾把上游相关项列为 M0，与 [00](./00-overview-and-milestones.md) 的「M0 只做骨架与入站侧」冲突**（PM 评估指出）。已按 00 对齐。
+
 | M0 退出标准 | 落在 |
 | --- | --- |
 | `docker compose up` 一键起全栈 | `deploy/`、`cmd/sla-core` `/healthz` |
-| 上游直连打通、Responses 零丢失 | `internal/upstream`（[03 §10](./03-upstream-layer.md)） |
+| Caddy 只代理 `/v1/*` 与 `/healthz` | `deploy/Caddyfile`（[06 §1](./06-deployment-and-operations.md)） |
 | 停一个 core 实例服务不中断 | 无状态 + Caddy 摘除（`deploy/Caddyfile`） |
-| Codex 实机打通 + mock 场景集接入 CI | `verify/mock_upstream.py`（[15 T1](./15-scope-and-preflight.md)） |
-| CI：构建 + **DDL 真跑** + 加载 + 不可存列 + 脱敏断言 | `.github/workflows/ci.yml`、`make test`、`make migrate` |
+| M0 固定种子加载 + 种子校验断言 | `migrations/0002_seed_m0.sql`、`internal/bootstrap` |
+| 入站鉴权与配额基础（AC-27 + AC-33-M0） | `internal/protocol`、`internal/admin`、`internal/store` |
+| `system-probe` 内置凭证（外呼必拒、不可吊销） | `migrations/0002_seed_m0.sql`、`internal/admin` |
+| CI：构建 + **DDL 真跑**（`verify/ddl-check.sh`）+ 加载 + 不可存列 + 脱敏断言 | `.github/workflows/ci.yml`、`make test`、`make migrate` |
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
 | bootstrap 选主（避免双 core 重复迁移） | `internal/bootstrap` advisory lock；建议加双 core 并发冷启动的集成测试 |
+
+**移入 M1**（此前误列在本表）：上游直连打通与 Responses 保真 diff（`internal/upstream`）、`verify/mock_upstream.py` 场景集接入 CI。
+**M0 期间并行但非门禁**：Codex 实机 spike（[15 T1](./15-scope-and-preflight.md)）。
 
 ---
 

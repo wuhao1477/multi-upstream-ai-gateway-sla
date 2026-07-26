@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 草案，待评审（M1 随上游对接层一并落地） |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-25 |
 | 缘起 | [11 转向决策](./11-decision-full-selfbuilt.md)后上游调用由自研透传层执行——**出问题不再有 AxonHub 的界面和 execution 记录可看，排障能力必须自己建** |
 | 参考 | [zhfeng1/ai-gateway](https://github.com/zhfeng1/ai-gateway)（提交 `3bf7431`，无 LICENSE，**仅借鉴思路不复制代码**）；其评估见 [08](./08-ref-eval-zhfeng1-ai-gateway.md) |

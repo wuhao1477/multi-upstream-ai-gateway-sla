@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 草案，待评审 |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 输入 | [PRD v1.3](../PRD.md)（**§2.1 为分期真相源**）、[11 转向决策](./11-decision-full-selfbuilt.md)、[13 调研重审](./13-research-reassessment.md)、[15 范围与隐患](./15-scope-and-preflight.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md) |
 | 技术栈决策（2026-07-23 确认） | 自研核心 **Go**（存储层 **pgx + sqlc**）；状态存储 **PostgreSQL 单库**（一期不引 Redis）；部署 **单机 Docker Compose**（LB + **≥2 核心实例** + PG + collector，**无外部网关**）；文档按 docs/dev/ 分篇 |
@@ -41,7 +41,34 @@
 > **不属于 M0**：上游透传、Responses 35 字段 diff、Codex 实机、mock 场景集、日费用预留/结算/人工修正——这些依赖上游对接层与账本，**全部属 M1**（[03 §10](./03-upstream-layer.md)）。
 > [06 §7 部署清单](./06-deployment-and-operations.md) 中列出的上游相关项同属 M1，勿按 M0 验收。
 >
-> **M0 固定种子**（避免开发自行发明）：1 个 canonical model（`gpt-5.5`，须填 `max_input_tokens`/`max_output_tokens`）；3 个别名 → `gpt-5.5`（`probe_allowed=true`）、`gpt-5.5-sla-1`（`probe_allowed=false`）、`gpt-5.5-cheap`（`probe_allowed=true`）；各自映射一条 `routing_policies`（一期单级 SLA，`conflict_order` 分别为 SLA>缓存>成本 / SLA>成本>缓存 / 成本>缓存>SLA）；一行 `sla_targets` 默认值。 |
+> **M0 固定种子（冻结，开发照抄即可）** —— 迁移脚本 `migrations/0002_seed_m0.sql`：
+>
+> **① 模型**（1 条）：`canonical_name='gpt-5.5'`，`max_input_tokens=272000`、`max_output_tokens=128000`
+> （两列**必填**，为空则该模型全部 binding 不进候选，[02 §2bis](./02-data-model.md)）。
+>
+> **② 策略 + 别名**（3 组，一一对应）：
+>
+> | 别名 | 策略 `name` | `is_committed` | `canary_eligible` | `probe_allowed` | `conflict_order` | `no_resource_wait_ms` |
+> | --- | --- | --- | --- | --- | --- | --- |
+> | `gpt-5.5-sla-1` | `committed-default` | **true** | false | false | `["sla","cache","cost"]` | 15000 |
+> | `gpt-5.5` | `standard` | false | **true** | **true** | `["sla","cost","cache"]` | 5000 |
+> | `gpt-5.5-cheap` | `cost-first` | false | **true** | **true** | `["cost","cache","sla"]` | 0 |
+>
+> 三行都满足 `CHECK (NOT (is_committed AND (canary_eligible OR probe_allowed)))`。
+> **金/银/铜只是这三行的历史别名，不再承载语义** —— 调度一律读上表的布尔字段。
+>
+> **③ `sla_targets`（唯一一行，对应唯一承诺策略）**：
+>
+> | `policy_id` | `metric` | `target_value` | `window_spec` | 其余维度 |
+> | --- | --- | --- | --- | --- |
+> | → `committed-default` | `ttft_p95_ms` | **5000** | `1d` | `model_id`/`request_type`/`tenant_id` 全 NULL（= 不细分） |
+>
+> - **只配一档**：一期"单级 SLA"= 单一**承诺**等级；另两条策略 `is_committed=false`，**不得**有 `sla_targets` 行（空承诺）。
+> - **5000ms 的来源**：前缀平均 ≤10s 的目标下，单跳 P95 取 5s 为接管留余量（[05 §1.3](./05-scheduling-and-operations.md)）。
+> - **AC-06/AC-09 的"TTFT 达标"= 该行**：`ttft_p95_ms <= 5000`，窗口 `1d`。**判据唯一，不得另立。**
+>
+> **④ 种子校验断言**（CI，M0 门禁）：
+> `is_committed=true` 的策略**必须**有对应 `sla_targets` 行；`is_committed=false` 的**必须没有**。
 | **M1 上游直连 + 账本 v1** | 自研上游透传层（字节透传 + 旁路观察）；OpenAI CC/Responses；Attempt 账本落 PG（单一真相源） | FR-111/119、AC-26/31/32 | ① REAL：Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**；② 账本 usage 来自旁路终帧且与上游一致；③ **AC-01/16/26/30/31/32 + AC-35 全通过**（[14 验收矩阵](./14-acceptance-matrix.md) M1 集，共 7 条）；④ **AC-35 崩溃恢复不可跳过**——账本首版必须同时交付 request 级恢复扫描与两阶段关单，否则 K1~K4 全部不可验 |
 | **M2 流式 SLA 核心** | 内容感知 TTFT、动态期限、首字前接管、mid-stream 取消传播、取消口径归并 | 硬约束 4/5/7，AC-30～32 | ① MOCK 场景全绿（role-only/心跳/空 SSE/慢首字/中断/abort）；② **AC-06/07/12/15/25 全通过**（[14](./14-acceptance-matrix.md) M2 集，共 5 条；**AC-07 缓存切换损失预测已于 2026-07-26 拉入一期**）；③ 内容感知 TTFT 在三类元事件场景下**均不出现 ≈0ms** |
 | **M3 元数据采集** | 三家族采集器、价格版本、余额信号识别（**订阅台账/双倍率/倾斜三道闸移入二期**，[15](./15-scope-and-preflight.md)） | FR-010/011/020～027、AC-28/29 | ① 4 家实测站点采集跑通且 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；② **AC-02/03/04/05/17/19/28/29 全通过**（订阅相关 AC-20~24 移入二期） |
