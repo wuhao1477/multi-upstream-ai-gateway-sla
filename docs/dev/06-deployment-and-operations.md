@@ -14,7 +14,8 @@
 
 ```
                  ┌───────────────── 单机 Docker Compose ─────────────────┐
-客户端 → :443 Caddy(LB/TLS) → sla-core-a :8080 ┐
+客户端 → :443 Caddy(LB/TLS) → sla-core-a :8080 ┐   ← 只代理 /v1/* 与 /healthz
+运维 → 容器网络/本机直连 ────→ /admin/* 与 /metrics（不经 Caddy）
                             └→ sla-core-b :8080 ┘─直连→ ~20 上游渠道
                                     ├→ postgres :5432 (账本/台账/价格/健康，多实例共享)
                                     └→ collector (子命令) → 上游站点管理面
@@ -22,7 +23,7 @@
 
 | 服务 | 镜像/构建 | 端口 | 依赖 | 备注 |
 | --- | --- | --- | --- | --- |
-| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例 |
+| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做管理面鉴权体系（[决议](#) 确认仅本人使用），**网络边界就是唯一的边界**，代理出去等于裸奔 |
 | `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres | 无本地状态；`/healthz` 就绪探针；**内含自研上游透传层**（[03](./03-upstream-layer.md)）。**必须 ≥2 实例**（FR-110） |
 | `postgres` | postgres:16 | 5432 | — | 单库；账本/台账/价格/健康（单一真相源） |
 | `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
@@ -96,6 +97,17 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 
 ---
 
+### 5bis. 最小告警外发（M4，FR-103 的可达性保障）
+
+`alert_events` 落库**之后**，单条 HTTP POST 到 IM webhook：
+
+- URL 走 `config_params['alert_webhook_url']`，为空则不外发；
+- **失败仅记日志、不重试、不阻塞落库** —— 告警通道故障绝不能拖垮请求路径；
+- ⚠️ 但"仅记日志"意味着**静默失败**：webhook 挂了没人知道，P1 的 15 分钟就又回到纸面。故**必须**同时递增 `alert_webhook_failed_total`（§6 指标清单），并对该计数本身设一条告警规则。
+- 一期只发 P1；P2/P3 仍靠 `/admin/alerts` 查询。
+
+---
+
 ## 6. 可观测性与健康
 
 | 面 | 做法 |
@@ -107,7 +119,23 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 | **取消成本敞口** | 客户端取消时拿不到终帧 usage，成本按旁路字节数估算（[02 §2bis](./02-data-model.md)）→ 监控 `取消请求占比` 与 `取消请求估算成本 / 总成本`；后者超阈值（默认 15%）触发 **P3**，提示抽样核对上游账单并调整 `cancel_cost_safety`。**转向自研后无对账环节，该误差不会被自动纠正**，只能靠这条监控暴露 |
 | 账本写入滞后 | **关键账本事实是同步直写**（[01 §5.1](./01-architecture.md)），故这里监控的是 **outbox 未投递积压**（`ledger_outbox.delivered_at IS NULL` 的行数与最老行龄）与投递延迟。积压增长意味着 `finalize_delivery` 落后 → request 终态迟迟不落定 |
 | 采集健康 | 凭证状态（`collector_credentials.status`）、快照陈旧率（查 `collector_snapshots_v.is_stale` 视图）；凭证失效告警 P2 |
-| 业务告警 | P1/P2/P3 经 `alert_events` 出（[05 §5.2](./05-scheduling-and-operations.md)）；P1 不得延迟（FR-103） |
+| 业务告警 | P1/P2/P3 经 `alert_events` 出（[05 §5.2](./05-scheduling-and-operations.md)）；P1 不得延迟（FR-103）。写入路径（含 `dedup_key` 同因合并与生命周期行锁）**M3 交付**，M4 只补经营闭环类 |
+| **指标暴露** | sla-core 暴露 **Prometheus 文本端点 `/metrics`**，**仅内网监听**（与 `/admin` 同边界，Caddy 不代理）。`deploy/` 附**可选** `prometheus`(+grafana) compose profile，**默认不启动** —— 一期不自建面板，M4 压测直接从 `/metrics` 取数 |
+
+**`/metrics` 必须暴露的指标**（清单即上表各项 + 下列）：
+
+| 指标 | 类型 | 用途 |
+| --- | --- | --- |
+| `gateway_overhead_ms`（P50/P99） | histogram | FR-110 自监控 |
+| `downstream_ttft_delay_ms` / `downstream_finish_delay_ms` | histogram | 两次同步写的真实代价（AC-34/36 门禁） |
+| `pg_commit_latency_ms`、`pg_pool_wait_ms`、`pg_pool_exhausted_total` | histogram/counter | 同步写在请求路径上，池耗尽会直接表现为首字变慢 |
+| **`cache_hit_rate`**（按 binding / cache_scope） | gauge | `cache_switch_min_hit_rate=0.6` 可调优的前提是有数可看 |
+| `outbox_undelivered`、`outbox_oldest_age_s` | gauge | `finalize_delivery` 落后 → request 终态迟迟不落定 |
+| `canary_inflight`、`probe_budget_used` | gauge | 两轨验证的实时占用 |
+| **`alert_webhook_failed_total`** | counter | 见 §6bis：webhook 静默失败时唯一的可见信号 |
+| `requests_by_final_status` | counter | SLA 聚合与错误预算 |
+
+> 🔒 `/metrics` **不得**包含任何凭证、URL 中的 key、请求正文片段（与 [12 §6](./12-debuggability.md) 脱敏同标准）。
 
 > ⚠️ **健康语义必须分层（对抗性审查发现）**：若把"上游渠道可用性"计入 `/healthz`，则**全部上游不可用时两个 core 都会被判不健康 → Caddy 摘除全部实例 → 客户端收到的是 LB 层 502/503**，而不是我们设计的"明确不可用响应 + 事件编号 + 建议重试时间"（AC-15/AC-27），**账本不记录、告警不触发、故障被掩盖**。
 >
@@ -125,13 +153,25 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 
 ## 7. M0 部署清单（退出标准）
 
+> ⚠️ **2026-07-26 裁决澄清**：此前本清单混入了上游相关项，与 [00](./00-overview-and-milestones.md) 的「M0 只做骨架与入站侧」冲突，开发无从判断 M0 到底要交付什么。**以下清单已按 00 对齐**——上游透传、35 字段 diff、mock 场景集全部移入 M1。
+
+**M0 门禁（必须全绿才算退出）**：
+
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
-- [ ] 上游直连打通：真实上游发一次 Responses 流式请求，**35 字段与 reasoning item 零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 基线）。
-- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部上游候选不可用时返回明确错误、不旁路（AC-27）。
-- [ ] **Codex 实机打通实验**（[15 T1](./15-scope-and-preflight.md)）：最小透传代理 + 真实 Codex CLI + 真实上游，抓包确认其实际请求/期望；结论回填 [13 §1](./13-research-reassessment.md)。
-- [ ] `verify/mock_upstream.py` 场景集接入 CI 作为透传层回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort）。
-- [ ] CI：Go 构建 + **DDL 在临时 PG 真跑通过**（[02 §9.1bis](./02-data-model.md)）+ `config_params`/别名策略加载 + 不可存列断言 + 凭证脱敏断言。
+- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。
+- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部候选不可用时返回明确错误、不旁路（AC-27）。
+- [ ] 加载 M0 固定种子（1 model + 3 别名 + 策略 + `sla_targets`）并经 `GET /admin/config` 回显一致。
+- [ ] 种子校验断言：**`is_committed=true` 的策略必须有对应 `sla_targets` 行**（禁止空承诺）。
+- [ ] `system-probe` 内置凭证已创建，且 `/v1/*` 用它鉴权**必被拒**、`/admin/clients` 吊销它**返回 403**。
+- [ ] AC-27 与 **AC-33 的 M0 子集**通过（401/403/429、RPM 跨实例、重启不清零、`rpm_limit IS NULL` 不限速、凭证脱敏、匿名 401 落库）。
+- [ ] CI：Go 构建 + **DDL 在临时 PG 真跑通过**（`verify/ddl-check.sh`）+ 别名策略加载 + 不可存列断言 + 凭证脱敏断言。
 - [ ] `pg_dump`/restore 演练脚本就位。
+
+**M0 期间并行、但不作门禁**：
+
+- [ ] **Codex 实机 spike**（[15 T1](./15-scope-and-preflight.md)）：临时最小透传脚本 + 真实 Codex CLI + 真实上游抓包。timebox 2~3 天；**必答**「Codex 请求的模型名从哪来」（决定 `/v1/models` 合成会不会 404 打不通）与「35 字段是否零丢失」。跑不通则记录阻塞，**不拖 M0**。
+
+**移入 M1**：上游直连打通与 35 字段 diff、`verify/mock_upstream.py` 场景集接入 CI（[14 §1bis](./14-acceptance-matrix.md) 已冻结 12 个场景与 diff 规范）。
 
 ---
 

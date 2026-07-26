@@ -313,7 +313,26 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 | 1 | **SSE 事件生命周期必须完整**（`created→in_progress→output_item.added→content_part.added→delta…→completed`） | **字节透传天然满足** —— 上游发什么原样到达。**这正是不做重组的核心理由**（LiteLLM 漏 4 个事件致 Codex 报 `OutputTextDelta without active item`） |
 | 2 | `function_call.status` 须为 `in_progress` 而非 `completed` | 透传不改 → 天然满足 |
 | 3 | 响应头 `x-codex-*`（限流快照）、`x-models-etag`、**`x-codex-turn-state`（会话粘性令牌，须跨轮回放）**、request id | **白名单透传**（§5） |
-| 4 | `GET /v1/models` 全量透传 | `Client.Models()` |
+| 4 | ~~`GET /v1/models` 全量透传~~ | ⛔ **本条契约于 2026-07-26 被显式推翻**：改为**由网关合成**，见下方说明 |
+
+> **推翻理由与适用边界**：字节透传硬约束保护的是 **SSE 响应流保真**（[13 §5](./13-research-reassessment.md) 三个项目翻车全在流式重组上）。`/v1/models` 是**控制面元数据**，不在该红线内。反之若透传真实模型目录，调用方会看到上游真名并直接用它请求——[FR-117](../PRD.md) 整套「别名即策略载体」会**当场失效**（别名的 SLA 等级、测活资格、数据许可全绕过）。
+>
+> **合成规则**：
+>
+> | 场景 | 行为 |
+> | --- | --- |
+> | `GET /v1/models` | 返回该凭证 `allowed_aliases` 内**已启用**的别名，OpenAI models 格式 |
+> | `GET /v1/models/{alias}` | 单查；非别名同样 404 |
+> | 请求体里的模型名不是别名 | **404**（不存在） |
+> | 是别名但不在该凭证 `allowed_aliases` 内 | **403**（越权，与 [AC-33](./14-acceptance-matrix.md) 一致） |
+> | `x-models-etag` | **我方按别名表版本自生成**，不透传上游值 |
+> | `If-None-Match` 命中 | 返回 **304**，body 为空 —— 否则 Codex 每次刷新都拿全量，etag 形同虚设 |
+>
+> **`Client.Models()` 不删除**：降级为**协议能力探测与管理面**用途（比对上游真实目录与我方登记是否漂移），**不对外暴露**。
+>
+> ⚠️ **残余风险（必须在 M0 spike 验掉）**：Codex 请求的模型名**未必来自 `/v1/models`**，也可能来自它自己的配置文件。若那个名字不在别名表 → 404 → **Codex 直接不可用**。故：
+> 1. spike 的**必答项**是「Codex 实际请求的模型名从哪来」，不是软性的「接受度」；
+> 2. 预留 `alias_passthrough`（`config_params`，**默认关闭**）：开启后，未命中别名的模型名按同名直连放行，作为兜底逃生门。这会绕过别名策略，**仅限 spike 结论不利时临时启用**。
 
 ---
 
@@ -322,7 +341,7 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 | 方向 | 规则 |
 | --- | --- |
 | 请求头（下游→上游） | 剔除 hop-by-hop（`Connection`/`Transfer-Encoding`/`Keep-Alive` 等）；**覆盖** `Authorization` 为该 Binding 的上游 Key；保留 `session_id`/`conversation_id`/`X-Claude-Code-Session-Id` 等会话标识（[02 §4.5](./02-data-model.md) 提取后仍原样转发） |
-| 响应头（上游→下游） | **默认透传**，仅剔除 hop-by-hop 与 `Content-Length`（流式重算）；`x-codex-*`/`x-models-etag`/`x-codex-turn-state` **必须保留**（§4） |
+| 响应头（上游→下游） | **默认透传**，仅剔除 hop-by-hop 与 `Content-Length`（流式重算）；`x-codex-*`/`x-codex-turn-state` **必须保留**（§4）；⚠️ **`x-models-etag` 例外——由我方自生成、不透传上游值**（§4 第 4 条） |
 | 日志/抓包 | `Authorization` 等凭证头**永不落盘**（[12 §6](./12-debuggability.md)） |
 
 ---

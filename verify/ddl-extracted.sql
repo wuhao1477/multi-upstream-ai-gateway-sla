@@ -26,6 +26,10 @@ CREATE TABLE upstream_accounts (
   channel_id    BIGINT NOT NULL REFERENCES channels(id),
   external_user_id TEXT,          -- NewAPI 数字用户ID（New-API-User 头必需，ISSUE-002 §3.1）
   balance_group_key TEXT,         -- 共享余额分组键：同 key 的多账号/多Key 只算一次余额（FR-022/AC-04）
+  -- 人工停用（五层停用开关之一）
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+  disabled_reason TEXT,
+  disabled_until  TIMESTAMPTZ,    -- NULL = 无限期停用，须人工恢复
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -91,6 +95,9 @@ CREATE TABLE fault_domains (
   id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   kind   TEXT NOT NULL CHECK (kind IN ('provider','proxy','account','region','network')),
   label  TEXT NOT NULL,
+  -- 域级停用：selector 排除该域下**全部** binding（一次操作隔离整个故障域）
+  disabled_until  TIMESTAMPTZ,
+  disabled_reason TEXT,
   UNIQUE (kind, label)
 );
 
@@ -102,7 +109,13 @@ CREATE TABLE bindings (
   model_id      BIGINT NOT NULL REFERENCES models(id),
   region        TEXT,
   cache_scope_id BIGINT REFERENCES cache_scopes(id),
-  effective_url TEXT NOT NULL,    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
+  effective_url TEXT NOT NULL,
+  -- 人工停用（selector 过滤序 4 前置判据）
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  -- 容量登记（B9）：保留策略的基数来源。**两列皆空 = 该渠道不启用任何容量保留**
+  rpm_limit     INTEGER,                        -- 该 binding 的每分钟请求上限（登记或采集器回填）
+  concurrency_limit INTEGER,                    -- 并发上限
+  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- ⚠️ 必须 NULLS NOT DISTINCT（第 19 轮 [high]）：PostgreSQL 普通 UNIQUE 允许多行 NULL，
   --    region/cache_scope_id 可空 → 「无地区、无缓存作用域」的同一 binding 可被重复创建，
@@ -128,7 +141,16 @@ CREATE TABLE routing_policies (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name           TEXT NOT NULL,               -- 如 sla-gold / sla-silver / sla-bronze（仅默认模板，可自定义）
   sla_level      TEXT NOT NULL,               -- 等级名可配置（DECISIONS 参数1：等级数量/数值全自定义）
-  probe_allowed  BOOLEAN NOT NULL DEFAULT false, -- 该别名是否允许测活（FR-062，*-sla-* 默认禁测活）
+  -- ⚠️ 调度与实验流量判断**一律读下面三个显式字段，不读 sla_level 名字**（2026-07-26 决议）：
+  --    一期"单级 SLA"= 单一**承诺**等级；金/银/铜只是 M0 默认模板名，不承载语义。
+  --    二期加等级时结构零改动。
+  is_committed     BOOLEAN NOT NULL DEFAULT false, -- 该策略对外有 SLA 承诺（须有对应 sla_targets 行）
+  canary_eligible  BOOLEAN NOT NULL DEFAULT false, -- 可被 canary 放量（FR-121）
+  probe_allowed  BOOLEAN NOT NULL DEFAULT false,   -- 可被主动测活选中（FR-060~067）
+  -- 承诺别名**永不进任何实验流量**：canary 与主动测活都挡掉。
+  -- 只写 NOT(canary_eligible AND is_committed) 不够——那样承诺别名仍可能被主动测活选中。
+  CONSTRAINT committed_excludes_experiments
+    CHECK (NOT (is_committed AND (canary_eligible OR probe_allowed))), -- 该别名是否允许测活（FR-062，*-sla-* 默认禁测活）
   -- 冲突优先序可配置（DECISIONS 参数2）：默认 金 SLA>缓存>成本…
   conflict_order JSONB NOT NULL DEFAULT '["sla","cache","cost"]',
   -- 全渠道不可用排队上限（§11 默认：金15s/银5s/铜0s，可配置）
@@ -212,7 +234,10 @@ CREATE TABLE gateway_clients (
                                                -- `count < NULL` 恒为 UNKNOWN → DO UPDATE 不执行 → 第二个请求起全部误 429）
   -- 生命周期
   status        TEXT NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active','revoked','expired')),
+                  CHECK (status IN ('active','revoked','expired','system_internal')),
+                  -- system_internal：内置凭证，**鉴权层硬拒外部调用**（只能由 steward 在进程内使用）
+  is_system     BOOLEAN NOT NULL DEFAULT false,  -- 保护标记：/admin/clients 的吊销/轮换/删除**必须拒绝**它
+                                                 -- 否则一次误操作就让主动测活整体失效
   expires_at    TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_at    TIMESTAMPTZ,

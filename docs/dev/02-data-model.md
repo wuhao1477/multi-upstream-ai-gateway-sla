@@ -90,6 +90,10 @@ CREATE TABLE upstream_accounts (
   channel_id    BIGINT NOT NULL REFERENCES channels(id),
   external_user_id TEXT,          -- NewAPI 数字用户ID（New-API-User 头必需，ISSUE-002 §3.1）
   balance_group_key TEXT,         -- 共享余额分组键：同 key 的多账号/多Key 只算一次余额（FR-022/AC-04）
+  -- 人工停用（五层停用开关之一）
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+  disabled_reason TEXT,
+  disabled_until  TIMESTAMPTZ,    -- NULL = 无限期停用，须人工恢复
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -169,6 +173,9 @@ CREATE TABLE fault_domains (
   id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   kind   TEXT NOT NULL CHECK (kind IN ('provider','proxy','account','region','network')),
   label  TEXT NOT NULL,
+  -- 域级停用：selector 排除该域下**全部** binding（一次操作隔离整个故障域）
+  disabled_until  TIMESTAMPTZ,
+  disabled_reason TEXT,
   UNIQUE (kind, label)
 );
 
@@ -182,7 +189,13 @@ CREATE TABLE bindings (
   model_id      BIGINT NOT NULL REFERENCES models(id),
   region        TEXT,
   cache_scope_id BIGINT REFERENCES cache_scopes(id),
-  effective_url TEXT NOT NULL,    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
+  effective_url TEXT NOT NULL,
+  -- 人工停用（selector 过滤序 4 前置判据）
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  -- 容量登记（B9）：保留策略的基数来源。**两列皆空 = 该渠道不启用任何容量保留**
+  rpm_limit     INTEGER,                        -- 该 binding 的每分钟请求上限（登记或采集器回填）
+  concurrency_limit INTEGER,                    -- 并发上限
+  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- ⚠️ 必须 NULLS NOT DISTINCT（第 19 轮 [high]）：PostgreSQL 普通 UNIQUE 允许多行 NULL，
   --    region/cache_scope_id 可空 → 「无地区、无缓存作用域」的同一 binding 可被重复创建，
@@ -224,7 +237,16 @@ CREATE TABLE routing_policies (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name           TEXT NOT NULL,               -- 如 sla-gold / sla-silver / sla-bronze（仅默认模板，可自定义）
   sla_level      TEXT NOT NULL,               -- 等级名可配置（DECISIONS 参数1：等级数量/数值全自定义）
-  probe_allowed  BOOLEAN NOT NULL DEFAULT false, -- 该别名是否允许测活（FR-062，*-sla-* 默认禁测活）
+  -- ⚠️ 调度与实验流量判断**一律读下面三个显式字段，不读 sla_level 名字**（2026-07-26 决议）：
+  --    一期"单级 SLA"= 单一**承诺**等级；金/银/铜只是 M0 默认模板名，不承载语义。
+  --    二期加等级时结构零改动。
+  is_committed     BOOLEAN NOT NULL DEFAULT false, -- 该策略对外有 SLA 承诺（须有对应 sla_targets 行）
+  canary_eligible  BOOLEAN NOT NULL DEFAULT false, -- 可被 canary 放量（FR-121）
+  probe_allowed  BOOLEAN NOT NULL DEFAULT false,   -- 可被主动测活选中（FR-060~067）
+  -- 承诺别名**永不进任何实验流量**：canary 与主动测活都挡掉。
+  -- 只写 NOT(canary_eligible AND is_committed) 不够——那样承诺别名仍可能被主动测活选中。
+  CONSTRAINT committed_excludes_experiments
+    CHECK (NOT (is_committed AND (canary_eligible OR probe_allowed))), -- 该别名是否允许测活（FR-062，*-sla-* 默认禁测活）
   -- 冲突优先序可配置（DECISIONS 参数2）：默认 金 SLA>缓存>成本…
   conflict_order JSONB NOT NULL DEFAULT '["sla","cache","cost"]',
   -- 全渠道不可用排队上限（§11 默认：金15s/银5s/铜0s，可配置）
@@ -333,7 +355,10 @@ CREATE TABLE gateway_clients (
                                                -- `count < NULL` 恒为 UNKNOWN → DO UPDATE 不执行 → 第二个请求起全部误 429）
   -- 生命周期
   status        TEXT NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active','revoked','expired')),
+                  CHECK (status IN ('active','revoked','expired','system_internal')),
+                  -- system_internal：内置凭证，**鉴权层硬拒外部调用**（只能由 steward 在进程内使用）
+  is_system     BOOLEAN NOT NULL DEFAULT false,  -- 保护标记：/admin/clients 的吊销/轮换/删除**必须拒绝**它
+                                                 -- 否则一次误操作就让主动测活整体失效
   expires_at    TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_at    TIMESTAMPTZ,
@@ -903,6 +928,34 @@ CREATE TABLE auth_rejections (
 > **告警**：单窗口 `revoked`/`bad_secret` 计数超阈值 → **P2**（疑似凭证泄露或被爆破）；`alias_forbidden` 持续出现 → P3（调用方配置错误）。阈值走 `config_params`。
 >
 > **服务 FR/AC**：FR-120（使用审计）、FR-094（不展示完整凭证）；[AC-33](./14-acceptance-matrix.md) 须断言 401/403 **不产生 `requests` 行**、但 `auth_rejections` 计数递增。
+
+**内置探测凭证 `system-probe`**（主动测活需要一个记账主体——`requests.gateway_client_id` 是 NOT NULL，而探测请求不属于任何真实调用方）：
+
+```sql
+-- 迁移种子创建，不经 /admin/clients
+INSERT INTO gateway_clients (name, secret_hash, secret_prefix, status, is_system,
+                             allowed_aliases, quota_daily_usd, rpm_limit,
+                             tenant_id, region, business_tier, data_class)
+VALUES ('system-probe',
+        '<不可用的哨兵值>', 'sys-probe',      -- 无有效明文，外部永远无法通过鉴权
+        'system_internal', true,
+        NULL,                                  -- ⚠️ 见下：别名范围
+        NULL,                                  -- 不占任何日配额（由 probe_budget_windows 约束）
+        60,                                    -- ⚠️ 见下：必须设 RPM
+        'system', '*', 'internal', 'internal');
+```
+
+**三项容易漏掉的属性**（缺任一都会出问题）：
+
+| 属性 | 取值 | 不这么设会怎样 |
+| --- | --- | --- |
+| `allowed_aliases` | **NULL（全部别名）**，但探测目标由 `probe_templates.model_id` 决定 | 若按普通凭证理解成"限定几个别名"，新增模型时探测会静默失效；设 NULL 是因为**探测的准入由测活资格与预算控制，不由别名白名单控制** |
+| `rpm_limit` | **必须设**（默认 60），不可留 NULL | NULL = 不限速（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增) B 阶段整段跳过）→ 探测风暴无上限，五维预算只管钱不管速率 |
+| 四维数据许可属性 | `tenant='system'`、`data_class='internal'` 等**显式填写** | 全 NULL → 求值时按 `'*'` 处理；二期开启 `data_policy_enabled` 后，探测可能被**我们自己的规则**挡掉，且排障时看不出原因 |
+
+- **鉴权层硬拒**：`status='system_internal'` 的凭证，`/v1/*` 入口**直接 401**，不做哈希比对（它的 `secret_hash` 本就是哨兵值）。
+- **管理接口保护**：`/admin/clients/{id}/revoke`、`/rotate`、删除操作遇 `is_system=true` 一律 **403**（[09](./09-admin-api.md)）。
+- **报表单独归因**：探测消费在成本报表中按 `requests.probe_kind='probe'` 单列，**不混入业务口径**（FR-072 的"计入实际成功成本"仍成立——它进总成本，只是分开展示）。
 
 **鉴权与预留的执行顺序**（第 9 轮 [critical] 修正）：
 
@@ -2000,12 +2053,15 @@ PredictCacheHitRate(session, candidate_binding):
        → 预测 = 0（本轮必然全量重算）
          ——**下一轮**起才会重新积累，故切换代价 ≈ 本轮 cacheable_tokens × 输入单价
 
-  目标值 target = sla_targets WHERE metric='cache_hit_rate' AND sla_level=该请求等级
+  目标值 target = config_params['cache_switch_min_hit_rate']   -- 默认 0.6，全局单值
   抑制条件：预测 < target AND 不存在"更高等级 SLA 要求接管"的理由
 ```
 
 - **切换代价入决策快照**：`decision_snapshot.excluded[]` 记 `{binding, reason:'cache_switch_loss', predicted, target, est_extra_cost_usd}` —— [AC-07](./14-acceptance-matrix.md) 要断言这三个数**真的被算出来了**，而不是只有一个布尔。
-- **`sla_targets` 须有一行 `metric='cache_hit_rate'`**：一期单级 SLA，默认目标由 `config_params` 给（建议 0.6，长会话场景实测后调整）。**这是配置项不是硬编码**。
+- **目标值只有一个来源：`config_params['cache_switch_min_hit_rate']`（默认 0.6）**。
+  > ⚠️ 这里刻意**不放进 `sla_targets`**：`sla_targets` 承载的是**对外 SLA 承诺**，而缓存命中率一期**不对外承诺**（≥90% 的承诺推二期，[PRD §11](../PRD.md)）。
+  > 它只是**内部的切换抑制阈值** —— 混进 `sla_targets` 会让人误以为我们承诺了缓存命中率，也会因为要按等级查而与「不读等级名」的决议冲突。
+  > 0.6 是待实测的起点值，长会话场景跑一段后按 `/metrics` 的实际命中率调整（[06 §6](./06-deployment-and-operations.md)）。
 - **为何分母是 `cacheable_prompt_tokens` 而非 `prompt_tokens`**：可缓存的只有固定前缀（系统提示、工具定义、历史轮次），用户本轮新增内容不可缓存。用 `prompt_tokens` 作分母会随会话变长而系统性低估命中率，越是长会话越失真 —— 而长会话正是本项目的主场景。
 - **上游不回 `prompt_cached_tokens` 时**：该窗口不计入统计（`cacheable_tokens` 不累加），预测退回全局中位数；**不可**把缺失当成 0 命中，否则会误判所有该类渠道。
 

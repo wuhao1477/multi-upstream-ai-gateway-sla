@@ -99,7 +99,7 @@ type ParamMeta struct {
 
 | 端点 | 作用 | 里程碑 |
 | --- | --- | --- |
-| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`/`bindings`，供上游对接层读取，[03](./03-upstream-layer.md)）。**只引用已登记的 `model_id`，不在此隐式创建模型**——模型走 `/admin/models` | M1 |
+| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`/`bindings`，含 `rpm_limit`/`concurrency_limit` 容量登记与 `enabled` 停用开关）。⚠️ **列表与详情须显式标注「未登记容量 → 保留未生效」**（[05 §4.3](./05-scheduling-and-operations.md)），供上游对接层读取，[03](./03-upstream-layer.md)）。**只引用已登记的 `model_id`，不在此隐式创建模型**——模型走 `/admin/models` | M1 |
 | `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
 | `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
@@ -107,12 +107,14 @@ type ParamMeta struct {
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
+| `GET /admin/ledger/reconciliation?scope=account\|key\|model&from=&to=` | **计费对账**（FR-019）：聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed` | M3 |
+| `GET /v1/models`、`GET /v1/models/{alias}` | **数据面**端点，非管理面。由网关**合成**（[03 §4](./03-upstream-layer.md)）：返回该凭证 `allowed_aliases` 内的启用别名；非别名 404、越权 403；`x-models-etag` 我方自生成并支持 `If-None-Match` → 304 | M1 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
 | `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`（NULL=不限额）/`rpm_limit`（**NULL=不限速**，此时跳过 RPM 闸）/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
-| `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效 | **M0** |
-| `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销 | M1 |
+| `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效。⚠️ **遇 `is_system=true` 返回 403** —— 内置 `system-probe` 被误吊销会让主动测活整体静默失效 | **M0** |
+| `POST /admin/clients/{id}/rotate` | 轮换 = 新签发 + 旧凭证宽限期后自动吊销。⚠️ **`is_system=true` 同样 403** | M1 |
 | `GET /admin/reservations?needs_review=true` | 列出待人工核对的保守结算（`unknown_billing`/`interrupted` 崩溃恢复产生，[02 §2bis](./02-data-model.md)） | M1 |
 | `POST /admin/reservations/{request_id}/adjust` | 运维核对上游账单后修正实际费用。走**独立的 `adjust` 事务**（`FOR UPDATE` 锁定 reservation → 从锁定行派生 client/日期/旧值 → 按差额修正聚合），**不是 `finalize`**——`finalize` 的闸门是 `state='reserved'`，而待核对行早已是 `settled`，走它必然 0 行无效。入参只有 `new_actual_usd`/`event_key`/`operator`/`reason`，且 **`new_actual_usd < 0` 直接 400**；**client 与日期不可由调用方指定**，且**严禁直接改 `client_daily_spend`** | M1 |
 | `GET/POST/DELETE /admin/data-policies` | 数据许可规则 CRUD（[02 §2ter](./02-data-model.md)，FR-093）。开关 `data_policy_enabled` 默认 `false`，走 §3 二次确认 | M4 |

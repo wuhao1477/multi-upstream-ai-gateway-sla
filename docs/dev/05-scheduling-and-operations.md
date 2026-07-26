@@ -23,10 +23,10 @@
 | 1 | 别名 → 策略 | 由 `model_aliases.policy_id` 定 SLA 等级与测活资格；别名即策略载体 | FR-062/117、AC-25 |
 | 2 | 模型能力**与协议** | 按**请求协议**查 `channel_models(channel_id, model_id, protocol)`：只留 `enabled AND support='supported'` 且满足流式/工具需求的 binding。⚠️ 实测存在**非对称支持**（同模型 Responses 通、CC 返 503），不可假设两协议都可用 | FR-005/006、[02 §1.1](./02-data-model.md) |
 | 3 | 数据许可 | 按 [02 §2ter `data_policies`](./02-data-model.md) 四维求值（deny 一票否决 → 顺序无关）。**开关 `data_policy_enabled` 默认 `false` → 一期放行全部**；排除原因入 `decision_snapshot` | FR-093（P1，默认关）、AC-14 |
-| 4 | 健康/样本 | 排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底）；**`canary` 态仅在 §2.0 五条准入全满足时才作为本次主渠道**（这是它获得样本的唯一途径） | FR-043/046、参数11 |
+| 4 | 人工停用 → 健康/样本 | **先排除人工停用**：`bindings.enabled=false`、其账号 `status='disabled'`、其故障域 `disabled_until > now()`（三处任一命中即排除，[02](./02-data-model.md)）；再排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底）；**`canary` 态仅在 §2.0 五条准入全满足时才作为本次主渠道**（这是它获得样本的唯一途径） | FR-043/046、参数11 |
 | 5 | 余额/配额 | 见下方 §1.1bis 的四条判据（**以保守下限而非标称余额判定**） | FR-020~027、**FR-026**、**FR-118** |
 | 6 | 价格新鲜度 | 价格 `queried_at` 超 48h 的 binding 退出"低价优选"，仅作保底（参数10 方向：越旧越保守） | FR-014/015、参数10 |
-| 7 | 容量保留 | 扣除接管保留容量与金级保留容量后仍有余量（§4.3） | 参数12 |
+| 7 | 容量保留 | 扣除接管保留与**承诺保留**（`is_committed` 策略专用）后仍有余量；**未登记容量的渠道不设保留、本层直接放行**（§4.3） | 参数12 |
 
 过滤后若候选为空 → 按 §3 全资源不可用处置。
 
@@ -140,7 +140,7 @@ type RoutePlanEntry struct {
 
 | # | 条件 | 默认值（`config_params` 可配） |
 | --- | --- | --- |
-| 1 | 仅**铜级或无 SLA 承诺**的别名参与 | 金/银**永不**参与 canary |
+| 1 | 该请求别名的策略 **`canary_eligible=true`** | **读显式字段，不读等级名**；`is_committed=true` 的策略被 CHECK 约束焊死为不可 canary（[02](./02-data-model.md)） |
 | 2 | 该 binding 本窗口已用 canary 数 < 上限 | `canary_max_per_hour = 20` |
 | 3 | 该 binding canary 并发 < 上限 | `canary_max_concurrent = 1` |
 | 4 | **存在健康的接管候选**（canary 失败能被接管补偿） | 无接管候选即不分配 |
@@ -268,9 +268,53 @@ RETURNING canary_used_in_window, canary_inflight;
 
 | 保留 | 默认 | 用途 |
 | --- | --- | --- |
-| 金级保留 | 每渠道 20% 容量（RPM+并发）仅金级可用 | 高价值不被日常挤占 |
+| 承诺保留 | 每渠道 20% 容量（RPM+并发）仅 `is_committed=true` 的策略可用 | 承诺流量不被日常挤占。**读策略字段不读等级名** |
 | 测活保留 | 测活 ≤ 全局容量 5%，且不占接管保留 | 探索不伤主流量 |
 | 接管保留 | 每模型 ≥ 一个健康快渠道的金级峰值并发 10% 专用接管 | SLA 最后防线（FR-029/032） |
+
+---
+
+### 4.3 容量保留的执行载体（一期降精度不降语义）
+
+> 此前 §4.2 只有三档保留比例，**没有任何执行机制** —— 容量基数从哪来、谁扣减、并发怎么算，全都没定义。
+
+**容量基数来源**：`bindings.rpm_limit` / `concurrency_limit`（[02](./02-data-model.md)），由 `/admin/bindings` 人工登记，或采集器的 `RateLimit()` 自动回填（`capacity_source` 记来源）。
+
+**⚠️ 未登记容量 = 该渠道不启用任何保留**（明示的降级）：
+
+| 情形 | 行为 |
+| --- | --- |
+| 两列皆空 | 过滤序 7 **直接放行**，不做任何保留判定 |
+| 已登记 | 按 §4.2 三档比例扣减，用与 canary 同构的 **DB 原子计数**执行 |
+
+- **为什么允许这种降级**：多数中转站不公开 RPM/并发上限，强行要求登记会让大部分渠道不可用。宁可"没保留"也不要"假装有保留"。
+- **必须让运维看见**：`/admin/bindings` 列表与渠道详情**须显式标注"未登记容量 → 保留未生效"**（[09](./09-admin-api.md)）。否则运维会以为保留在工作，而实际金级流量随时可能被日常请求挤掉。
+- **只对"启用保留"的渠道加闸**：普通渠道不走这条 DB 原子路径，保住 [FR-110](../PRD.md) 的 P99≤50ms —— 加闸的渠道数量由运维登记量控制，是可预期的。
+- **验收前置**：[AC-18](./14-acceptance-matrix.md) 的测试种子**必须登记容量**，否则保留层被放行、该 AC 无从验证。
+
+---
+
+### 4.4 计费异常检测（FR-016，M3）
+
+**判据**（滚动窗口内按 binding 聚合）：
+
+```text
+偏差率 = abs(Σ cost_variance) / Σ estimated_cost
+超容差 ⟺ 偏差率 > billing_variance_tolerance   （默认 0.05，config_params，**关键项走二次确认**）
+```
+
+⚠️ **除零保护**：`Σ estimated_cost` 可能为 0（免费渠道、估算失败、上游返回 0 token）。故：
+
+| 情形 | 判据 |
+| --- | --- |
+| `Σ estimated_cost >= billing_min_base`（默认 $0.01） | 用上面的**比率**判定 |
+| `Σ estimated_cost < billing_min_base` | 改用**绝对差额**：`abs(Σ cost_variance) > billing_abs_tolerance`（默认 $0.05） |
+
+**触发后**：`alert_events(category='billing_anomaly', severity='P2')` + 该 binding **退出低价优选**（仍可作保底），`decision_snapshot.excluded[]` 记 `billing_anomaly`。
+
+**恢复条件**（二选一）：人工确认；或连续 `billing_recovery_streak`（默认 20）次结算一致。
+
+**对账查询**：`GET /admin/ledger/reconciliation`（[09](./09-admin-api.md)）——按 account/key/model 聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed`（FR-019）。
 
 ---
 
