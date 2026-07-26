@@ -53,6 +53,9 @@ const (
 	CapKeys               Capability = "keys"
 	CapGroups             Capability = "groups"
 	CapSubscriptionQuotas Capability = "subscription_quotas"
+	// ⏭ 一期**所有站型**一律返回 unsupported（订阅制整体移入二期，[15 §1.2](./15-scope-and-preflight.md)）。
+	//    此前 Sub2API/ASXS 的 Capabilities() 标 supported 而 FetchSubscriptionQuotas 又返回
+	//    ErrUnsupported —— 自相矛盾，且 M3 的 AC-28 要求「能力矩阵与实现一致」，照原文必挂（第 18 轮 [high]）。
 	CapPricing            Capability = "pricing"
 )
 
@@ -241,7 +244,7 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: supported, groups: supported, pricing: degraded, subscription_quotas: supported}
+{account: supported, keys: supported, groups: supported, pricing: degraded, subscription_quotas: **unsupported（一期）**}
 ```
 （价格倍率经 `/api/v1/groups/available.rate_multiplier` 与分组耦合，非独立价格表，标 `degraded`。）
 
@@ -273,7 +276,7 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: unsupported, groups: unsupported, pricing: degraded, subscription_quotas: supported}
+{account: supported, keys: unsupported, groups: unsupported, pricing: degraded, subscription_quotas: **unsupported（一期）**}
 ```
 （ASXS 无独立 Key/分组管理视图；价格并入套餐 products，标 `degraded`。）
 

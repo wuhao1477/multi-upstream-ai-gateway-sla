@@ -462,8 +462,18 @@ UPDATE client_daily_spend d
 --       首字前接管场景下 hop1 已被 SLA 取消、hop2 成功，若按 request_id 批量更新，
 --       尚未落终态的 hop1 会被一并写成 hop2 的终态（`completed`）→
 --       一个被取消的跳被记成渠道成功，污染 binding 成功率、冷却与 AC-30/32。
-UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
+UPDATE attempts
+   SET attempt_status = :attempt_terminal,
+       terminal_event = :terminal_event,          -- ⚠️ 必须在此写（第 18 轮 [high]）：
+       upstream_terminal_at = :upstream_terminal_at,  --    §4.2bis 的 ③b/③c 分流完全依赖它，
+       content_aware_ttft_ms = COALESCE(content_aware_ttft_ms, :ttft_ms),
+       ended_at = now()                           --    骨架原先只改 attempt_status，该事实无人写入
  WHERE id = :attempt_id AND attempt_status IN ('pending','committed');
+-- ③bis usage 同事务落库（幂等：主键 (attempt_id, upstream_seq) 冲突即跳过）
+INSERT INTO attempt_usage (attempt_id, upstream_seq, prompt_tokens, completion_tokens,
+                           cached_tokens, total_cost, estimated_cost, cost_variance)
+VALUES (:attempt_id, 1, :prompt, :completion, :cached, :cost, :est, :cost - :est)
+ON CONFLICT (attempt_id, upstream_seq) DO NOTHING;
 -- ④ 释放**本跳**的 canary 占用；按 attempt_id，且用 **GROUP BY 计数**扣减。
 --    ⚠️ 不可写成 `UPDATE ... FROM rel WHERE h.binding_id = rel.binding_id` 直接 -1：
 --       rel 若有多行指向同一 binding，PostgreSQL 的 UPDATE…FROM 对同一目标行**只应用一次**
@@ -670,7 +680,11 @@ CREATE TABLE auth_rejections (
   reason        TEXT NOT NULL CHECK (reason IN
                   ('no_credential','bad_secret','revoked','expired','alias_forbidden')),
   count         INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (window_start, gateway_client_id, secret_prefix, reason)
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- ⚠️ 不可把可空列放进 PRIMARY KEY（第 18 轮 [critical]）：PostgreSQL 的主键列强制 NOT NULL，
+  --    而**匿名 401**（无凭证、无法定位前缀）恰恰两列都为 NULL → 审计行根本写不进去，AC-33 必败。
+  --    改用代理主键 + NULLS NOT DISTINCT 唯一索引实现"每分钟每组合一行"的聚合语义。
+  UNIQUE NULLS NOT DISTINCT (window_start, gateway_client_id, secret_prefix, reason)
 );
 ```
 
@@ -840,7 +854,17 @@ CREATE TABLE price_change_log (
 ```
 
 - **不可覆盖**：两表均仅 INSERT。「当前生效价」= 该 `(channel,model)` 下 `effective_at<=now()` 的最新 `price_versions` 行；「当前生效倍率」= 该 `binding_id` 下最新 `multiplier_versions` 行。
-- **成本计算**：`成本 = 基础价 × 倍率 × token`；**两个版本 id 都必须落到 attempt**，历史复算时同时取回才能还原当时的完整计价输入（FR-013/AC-02）。
+- **成本计算**（第 18 轮 [high] 修正）：
+  ```
+  成本 = token 数 / unit_tokens(billing_unit) × 基础价 × 倍率
+         其中 unit_tokens: per_1m_token → 1_000_000
+                           per_1k_token → 1_000
+                           per_token    → 1
+  ```
+  > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而 `billing_unit` 默认就是 `per_1m_token`——照原式实现会把每一笔成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
+  > **实现要求**：入库时**不做**归一（保留上游原始口径便于对账与排障），缩放只发生在算成本的这一处，且 `unit_tokens` 必须由 `billing_unit` 查表得出，**不得硬编码**。
+  > **CI 断言**：给定 `per_1m_token` 单价 3.0、1000 token → 成本必须是 `0.003` 而非 `3000`。
+- **两个版本 id 都必须落到 attempt**，历史复算时同时取回才能还原当时的完整计价输入（FR-013/AC-02）。
 - 价格过期/查询失败保守处理（FR-015）由决策层用 `queried_at` 判新鲜度（§11 默认 6h/24h/48h），不在本表建标志位。
 
 **索引**
@@ -877,6 +901,15 @@ CREATE TABLE requests (
   -- 决策快照（FR-097）：候选/排除原因/选择——元数据 JSON，不含正文
   decision_snapshot JSONB,                    -- {candidates:[...], excluded:[{binding,reason}], chosen, cache_pred, balance, capacity}
   -- 请求级结果（FR-098）：最终对外结果
+  -- 请求推进到哪一阶段（第 18 轮 [critical]）：C′ 提前插入 requests 后，
+  -- 崩溃可能发生在 selector **之前** —— 此时零 attempt、无预留、无 decision_snapshot，
+  -- 与「全候选不可用」「预留失败 429」外观完全相同，恢复扫描无从区分该判 unavailable 还是 failed。
+  stage         TEXT NOT NULL DEFAULT 'authenticated'
+                  CHECK (stage IN ('authenticated',      -- C′ 已落库，尚未进 selector
+                                   'planned',            -- selector 已产出非空 RoutePlan
+                                   'no_candidates',      -- selector 输出空候选集
+                                   'reservation_rejected',-- D 阶段原子预留返回 0 行（429）
+                                   'dispatched')),       -- 已发起上游调用（至少一条 attempt）
   final_status  TEXT NOT NULL DEFAULT 'pending'
                   CHECK (final_status IN ('pending','completed','failed','canceled','unavailable','interrupted')),
                   -- ⚠️ 'pending' 是**唯一非终态**；恢复扫描必须把它推到某个终态并同步终结
@@ -1080,7 +1113,9 @@ SELECT r.id, r.created_at, a.*
 
 | # | 对应 [03 §3.0](./03-upstream-layer.md) | 判据（读 attempt 的三个事实列） | attempt 终态 | request 终态 | reservation | 告警 |
 | --- | --- | --- | --- | --- | --- | --- |
-| ⓪ | — | **该 request 无任何 attempt**（全候选不可用／预留失败 429） | — | `unavailable`（无候选）／`failed`（预留失败） | 无预留行 → **跳过闸门**，直接写 request 终态 | P1（无候选时，AC-15） |
+| ⓪a | — | 无 attempt 且 `stage='no_candidates'` | — | `unavailable` | 无预留 → 跳过闸门 | **P1**（AC-15） |
+| ⓪b | — | 无 attempt 且 `stage='reservation_rejected'` | — | `failed` | 无预留 → 跳过闸门 | 无（429 已回给调用方） |
+| ⓪c | — | 无 attempt 且 `stage='authenticated'`（**C′ 之后、selector 之前崩溃**） | — | `failed` | 无预留 → 跳过闸门 | P3（内部中断，非用户可见错误） |
 | ① | — | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**） | 无（确定未计费） |
 | ② | **K1** | `external_call_started_at NOT NULL` 且 `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`，全跳汇总，`needs_manual_review=true` | **P2** |
 | ③b1 | **K2** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`，全跳汇总，待核对 | **P3** |
@@ -1224,7 +1259,10 @@ CREATE TABLE session_prefix_ledger (
   target_ms         INTEGER,                 -- 本轮目标（默认前缀均 ≤10s，§11）
   met_target        BOOLEAN,                 -- 每轮结束达标判定（FR-051）
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (session_id, turn_no)
+  PRIMARY KEY (session_id, turn_no),
+  -- ⚠️ 恢复扫描用 max(attempt_no) 判定「最后一跳」，无此约束时重复 attempt_no 会让最后一跳不唯一，
+  --    同一 request 可能被处理多次（第 18 轮 [high]）
+  UNIQUE (request_id, request_created_at, attempt_no)
 );
 ```
 
