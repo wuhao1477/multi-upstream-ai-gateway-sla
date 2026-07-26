@@ -513,12 +513,31 @@ COMMIT;
 
 | `cancel_reason` | request 终态 | 计入 SLA 失败？ |
 | --- | --- | --- |
-| `client_disconnect` | **`canceled`** | **否**——用户主动取消，PRD 术语明确不计入 |
+| `client_disconnect` | **`canceled`**（attempt 记 **`canceled_by_client`**） | **否**——用户主动取消，PRD 术语明确不计入 |
 | `sla_takeover` | 不终结（本跳取消，请求继续走下一跳） | — |
 | `upstream_disconnect` | `failed`（`stream_broken=true` 时计流中断） | 是 |
 | `internal_timeout` | `failed` | 是 |
 | `upstream_error` | `failed` | 是 |
 | 全候选不可用（无 attempt 或全部失败） | `unavailable` | 是 |
+
+**取消时的费用口径**（本轮路径走查发现：`finalize_abort` 只定义了 request 终态，**没说 `actual_usd` 怎么算**——而取消时上游已生成的 token 照样计费，我们却因提前关连接而**永远拿不到终帧 usage**）：
+
+```
+actual_usd(被取消的 attempt) =
+    已知输入 token 上界 × 输入单价                     -- 与预留同源，len(RawBody) 或 max_input_tokens
+  + ceil(旁路已观测到的输出字节数 / 2) × 输出单价       -- 每 token ≥1 字节 → 除 2 是**下界**，
+                                                        -- 故乘安全系数 cancel_cost_safety（默认 1.3）
+  ) × 倍率版本
+```
+
+| 决策 | 理由 |
+| --- | --- |
+| **不用"单跳保守上界"**（recovery 用的那个） | 用户可能刚发出就取消，按整个上下文窗口预留额记账会**严重高估**，把配额吃光 |
+| **不标 `needs_manual_review`** | 客户端取消是**高频**操作，每次都挂人工核对不可行 |
+| **旁路字节数是可得的** | `Observation.Bytes` 已在逐事件统计（[03 §2](./03-upstream-layer.md)），无需额外机制 |
+
+> ⚠️ **这是近似值，且是本设计已知的成本误差敞口**（明示，不假装精确）：它既可能高估（安全系数）也可能低估（上游按其自己的分词计费）。因转向自研后**无对账环节**（账本即唯一真相源），该误差**无法被自动纠正**。
+> **缓解**：[06 §6](./06-deployment-and-operations.md) 增监控项——`取消请求占比` 与 `取消请求估算成本占总成本比`；后者超阈值（默认 15%）→ **P3**，提示人工抽样核对上游账单并调整 `cancel_cost_safety`。
 
 > ⚠️ `sla_takeover` 是**唯一不终结 request** 的取消原因：它只结束当前 attempt，请求继续。其余取消原因都意味着"本请求到此为止"，必须走 `finalize_abort`。
 > **验收**：[AC-30/AC-32](./14-acceptance-matrix.md) 须断言——客户端断开后 `requests.final_status='canceled'`、`client_reservations.state≠'reserved'`、`client_daily_spend.reserved_usd` 已扣回、canary claim 已释放，且该请求**不计入 SLA 失败**。
@@ -898,7 +917,15 @@ CREATE TABLE attempts (
                         'pending',            -- 已落意图，未提交
                         'committed',          -- 已提交输出给下游，流未结束
                         -- 终态
-                        'completed','failed','canceled_by_sla','unknown_billing','interrupted')),
+                        'completed','failed','canceled_by_sla','canceled_by_client',
+                        'unknown_billing','interrupted')),
+                      -- ⚠️ canceled_by_client：**客户端主动断开**（Codex 用户按 Ctrl-C 是高频操作）。
+                      --    此前枚举里没有它，三个可选项全错：记 canceled_by_sla 是语义错误
+                      --    （不是我们取消的）、记 failed 会污染渠道成功率（渠道没问题）、
+                      --    记 completed 更错。故单列一态：
+                      --      · **不计入**渠道成功率（不是渠道的锅，与 unknown_billing/interrupted 同档）
+                      --      · **不计入**用户 SLA 失败（PRD 术语：用户主动取消不计入）
+                      --      · 成本**计入**（上游已经生成的 token 照样收费）
                       -- ⚠️ unknown_billing：上游**已发出**但进程在写入首条 outbox 事件前崩溃 →
                       --    可能已计费、结果完全不明。
                       -- ⚠️ interrupted：已提交输出（见过首字）但**未见终帧**即崩溃 →
@@ -1124,7 +1151,7 @@ actual_usd(request) = Σ over 该 request 的所有 attempt:
    | TTFT | 首字统计 | 无 TTFT（未见首字） | **已记录的 `content_aware_ttft_ms` 照常计入**（那是真实观测值，用户真的等到了首字） |
 
    > **为什么两套口径方向相反**：进程崩溃是**我们的**故障，不是渠道的故障。计入用户 SLA 是诚实（用户确实失败了）；不计入渠道健康是准确（否则会冤枉一个健康渠道、把它冷却掉，故障范围反而扩大）。
-   > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
+   > **实现**：`resource_health` 的成功率/样本计数按 `attempt_status NOT IN ('unknown_billing','interrupted','canceled_by_client')` 过滤；SLA 聚合按 `requests.final_status` 算，**不过滤**。
    >
    > **`stream_break_rate` 的唯一判据**：
    > ```
