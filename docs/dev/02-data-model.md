@@ -618,6 +618,64 @@ actual_usd(被取消的 attempt) =
 > ⚠️ `sla_takeover` 是**唯一不终结 request** 的取消原因：它只结束当前 attempt，请求继续。其余取消原因都意味着"本请求到此为止"，必须走 `finalize_abort`。
 > **验收**：[AC-30/AC-32](./14-acceptance-matrix.md) 须断言——客户端断开后 `requests.final_status='canceled'`、`client_reservations.state≠'reserved'`、`client_daily_spend.reserved_usd` 已扣回、canary claim 已释放，且该请求**不计入 SLA 失败**。
 
+**三套 claim 的统一编排**（第 31 轮自查 [critical]：`capacity_claims`／`canary_claims`／`probe_claims` 分别定义在三处，每处都写"与 X 同构"，但**从未合进同一条 dispatch 链**；更要命的是 **capacity 是每个请求都要的**，却完全不在主链里，而释放侧的 `rel` CTE 只放 canary —— 另两套**永不释放，必然泄漏**）：
+
+**申请顺序（固定，不可交换）**：
+
+```text
+req      锁 requests(stage='planned', final_status='pending')
+ └→ quota    日配额原子预留        （钱）      失败 → 429
+ └→ resv     client_reservations
+ └→ cap      capacity_claims       （上游容量）失败 → **换候选**，不是 429
+ └→ exp      canary_claims 或 probe_claims（实验额度，仅对应 role 才有）失败 → 见下
+ └→ att      attempts
+ └→ adv      stage='dispatched'
+```
+
+**为什么是这个顺序**：钱最贵（拿不到就直接拒），容量次之（可以换个渠道），实验额度最轻（抢不到就退回普通路径）。反过来排会在拿不到钱时白占容量与实验额度。
+
+**四值返回与分支**（扩展自原三值）：
+
+| `quota_ok` | `capacity_ok` | `exp_ok` | `advanced` | 处置 |
+| --- | --- | --- | --- | --- |
+| 0 | — | — | 0 | ROLLBACK → **429**，另起事务写 `stage='reservation_rejected'` |
+| 1 | 0 | — | 0 | ROLLBACK → **该 binding 容量已满，换 RoutePlan 下一个候选重试**（不是错误） |
+| 1 | 1 | 0 | 0 | ROLLBACK → canary：**回落非 canary 候选**；probe：**本轮跳过该 binding** |
+| 1 | 1 | 1 | 1 | COMMIT，发起上游调用 |
+| 其余组合 | | | | ROLLBACK + P2 告警（不应出现） |
+
+> `exp_ok` 对普通请求恒为 1（该 CTE 不存在时应用层直接填 1）。
+
+**统一释放**（`finalize_upstream` / `finalize_abort` / `finalize_recovery` / `closeout_attempt` 的 `rel` 段**必须三张表都放**，此前只放了 canary）：
+
+```sql
+-- 释放本跳的全部占用；按 attempt_id（recovery 批量时按 request_id）
+WITH rel_cap AS (
+  UPDATE capacity_claims SET state='released', released_at=now()
+   WHERE attempt_id = :attempt_id AND state='active' RETURNING binding_id),
+     rel_can AS (
+  UPDATE canary_claims   SET state='released', released_at=now()
+   WHERE attempt_id = :attempt_id AND state='active' RETURNING binding_id),
+     rel_prb AS (
+  UPDATE probe_claims    SET state='released', released_at=now()
+   WHERE attempt_id = :attempt_id AND state='active' RETURNING binding_id),
+     -- 各自的计数扣减（都用 GROUP BY 计数，不可直接 -1）
+     cap_agg AS (SELECT binding_id, count(*) n FROM rel_cap GROUP BY binding_id),
+     can_agg AS (SELECT binding_id, count(*) n FROM rel_can GROUP BY binding_id)
+UPDATE resource_health h
+   SET concurrency_inflight = GREATEST(h.concurrency_inflight - COALESCE(c.n,0), 0),
+       canary_inflight      = GREATEST(h.canary_inflight      - COALESCE(k.n,0), 0)
+  FROM (SELECT binding_id FROM cap_agg UNION SELECT binding_id FROM can_agg) b
+  LEFT JOIN cap_agg c ON c.binding_id = b.binding_id
+  LEFT JOIN can_agg k ON k.binding_id = b.binding_id
+ WHERE h.binding_id = b.binding_id;
+-- probe 无 inflight 计数列（其上限靠 probe_budget_windows 的日计数），故只需标 released
+```
+
+- **`rpm_used` 不回退**：它是分钟窗口计数，释放并发不等于退还配额。
+- **崩溃恢复**：三张 claim 表由**同一个后台任务**回收（[05 §5bis](./05-scheduling-and-operations.md) 任务 7），判据都是 `state='active' AND lease_expires_at < now()`，扣减规则同上。
+- **验收**：[AC-08](./14-acceptance-matrix.md)⑩与 [AC-18](./14-acceptance-matrix.md) 须断言——一次 canary 请求结束后，`capacity_claims`、`canary_claims` **两张表**的行都已 `released`，且 `concurrency_inflight` 与 `canary_inflight` **都**归零；只放一张会让另一张的计数永久泄漏。
+
 **接管跳（hop2/hop3…）的插入事务 `dispatch_next`**（第 22 轮 [high]：上面只定义了**首跳**——`attempt_no=1` 且要求 `stage='planned'`。请求进入 `dispatched` 后这条 SQL 再也插不进新 attempt，而 RoutePlan 接管要求**每跳都先落 attempt 再发请求**（[01 §5.1](./01-architecture.md) 意图先行），此前没有任何事务承载它）：
 
 ```sql

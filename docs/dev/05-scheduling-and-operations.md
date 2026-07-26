@@ -483,6 +483,24 @@ COMMIT;
 
 > **快照刷新不在此表**：selector 读的内存快照由各任务写库后**主动推送**给本实例（或按 `config_params` 的 `snapshot_refresh_ms` 拉取），属实例内行为，不需要跨实例协调。
 
+### 5bis.0 `resource_health` 的并发写入分工（第 31 轮自查 [high]）
+
+> 全库有 **9 处**写 `resource_health`，横跨请求路径（claim/release）与三个后台任务（健康聚合、状态迁移、claim 回收）。此前**没有一处说明它们会不会互相覆盖** —— 开发只能自己猜要不要加锁，猜错就是计数错乱或死锁。
+
+**分工原则：按列切分，各改各的,不加行锁。**
+
+| 列 | 唯一写入者 | 写法 |
+| --- | --- | --- |
+| `concurrency_inflight`、`canary_inflight` | 请求路径的 claim / release，以及 claim 回收任务 | **只做 `+1` / `GREATEST(-n,0)` 增量**，从不整列覆盖 |
+| `rpm_used`、`rpm_window_start`、`canary_used_in_window`、`canary_window_start` | 请求路径的 claim | 条件 UPDATE 内翻转窗口 + 递增 |
+| `sample_count_*`、`p95_*`、`success_rate`、`low_confidence`、`last_sample_at` | **健康聚合 worker**（每 60s，advisory lock #1） | 整列覆盖（它是唯一写者） |
+| `health_state`、`observing_*`、`cooldown_*`、`consecutive_failures`、`canary_failures` | **健康聚合 worker 的状态迁移段**（同一事务） | 整列覆盖 |
+| `canary_since` | 状态迁移段 | 覆盖 |
+
+**因此三类写入天然不冲突**：增量列只被增量修改（PostgreSQL 行级写锁保证单条 UPDATE 原子），统计列只有一个写者。**不需要显式行锁,也不会死锁**——不同事务改同一行的不同列时，PG 仍会串行化该行的写，但因为都是短事务且无循环等待，不产生死锁。
+
+⚠️ **唯一需要注意的**：健康聚合的状态迁移会把 `health_state` 从 `canary` 改走，而此刻可能有 in-flight 的 canary claim。**不回收它们** —— 让它们正常跑完并释放（`canary_inflight` 自然归零）；新的 canary 因 `health_state` 已变而不再被分配。**不得**在状态迁移里强行清零 `canary_inflight`，那会让仍在执行的 claim 释放时把计数减成负数（虽有 `GREATEST` 兜底，但会掩盖真实占用）。
+
 ### 5bis.1 健康聚合 worker（每 60s）
 
 ```sql
