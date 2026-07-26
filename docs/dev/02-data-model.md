@@ -528,7 +528,17 @@ COMMIT;
 **每跳结束必须同步写该跳终态**（本轮自查发现）：SLA 接管取消 hop1 时，`attempt_status='canceled_by_sla'` 与 `cancel_reason='sla_takeover'` **必须同步直写**，不能只经 outbox 异步记 `cancel_reason`——否则 hop2 关单时 hop1 仍是 `committed`，任何批量语句都会误判它。`cancel_propagated` 等纯观测字段仍可异步。
 
 > **`finalize` 的入参**：`request_id`、`request_created_at`（分区键，锁 requests 用）、`attempt_id`、`new_state`、`actual_usd`、`event_key`、`needs_review`、`terminal_event`、`upstream_terminal_at`、`ttft_ms`、`cost_source` 与 usage 各列、两个终态。
-> **末尾须 `RETURNING` 并由应用层断言 `settled=1 AND att=1`**，否则 `ROLLBACK`——CTE 不会因某一步 0 行而自动回滚。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
+> **末尾须 `RETURNING`，由应用层按三态判定**（第 23 轮 [high]：原文写"断言 `settled=1 AND att=1` 否则 ROLLBACK"，
+> 与 [AC-33](./14-acceptance-matrix.md) 要求的"同一 `settle_event_key` 重放、连接中断后重试须幂等"**直接矛盾**——
+> 已提交后的重试必然 `state≠'reserved'`，两个计数都是 0，按原文会被当成异常告警而不是幂等成功）：
+>
+> | `settled` | 判定 | 处置 |
+> | --- | --- | --- |
+> | 1 | `applied` | COMMIT |
+> | 0 且该 `request_id` 的 reservation 已是终态、且 `settle_event_key` 与本次相同 | `already_applied_same_event` | COMMIT（幂等成功，**不告警**） |
+> | 0 且不满足上一行 | `conflict_or_not_found` | **ROLLBACK + P2 告警** |
+>
+> CTE 不会因某一步 0 行而自动回滚，故提交与否**必须由应用层依上表决定**。**`gateway_client_id`/`spend_date`/`estimated_usd` 一律由 `RETURNING` 派生**——与 `adjust` 同一条纪律。跨午夜的长请求因此天然把费用记在**预留那一天**。
 
 **三个终结入口，覆盖全部收尾路径**（第 17 轮 [critical]：此前只定义了"终帧到达"这一条正常路径，**取消/断流/超时结束的请求没有任何终结事务**，会残留 `pending` + `reserved`；恢复扫描也没有写 `requests.final_status` 的载体）：
 
@@ -635,6 +645,11 @@ UPDATE attempts
 -- ② 据该事实推 request 终态（幂等：只在 pending 时推一次）
 --    ⚠️ request_id / request_created_at **从 attempts 派生**，不由 payload 传（第 17 轮 [high]）：
 --       outbox 的 payload 只含 attempt_id/written_at，直接用 :rid 会依赖一次未说明的额外查询。
+-- ⚠️ 第 23 轮 [high]：条件不能只写 `final_status='pending'`。recovery 可能**先一步**把
+--    该 request 关成保守的 `interrupted`（K4 分支），迟到的 delivery 若只补写时间戳而不改终态，
+--    就会留下"写完事实存在、request 却是 interrupted"的错误 SLA 结论。
+--    真实交付事实**有权纠正**保守推定，但只允许 `interrupted → completed/failed` 这一个方向，
+--    不得把已确定的 completed/failed/canceled 改回去。
 UPDATE requests r
    SET final_status = CASE
          WHEN a.downstream_write_completed_at IS NOT NULL
@@ -646,7 +661,7 @@ UPDATE requests r
  WHERE a.id = :attempt_id
    AND r.id = a.request_id
    AND r.created_at = a.request_created_at                       -- 分区键对齐
-   AND r.final_status = 'pending';
+   AND r.final_status IN ('pending','interrupted');              -- 允许纠正保守终态
 COMMIT;
 ```
 
@@ -854,10 +869,13 @@ adv AS (
 -- ⚠️ 必须**分别**返回三类结果（第 22 轮 [high]）：canary 抢不到**不是错误**
 --    （[05 §2.0](./05-scheduling-and-operations.md)：抢不到是常态，应回落到正常排序），
 --    与"配额不足"混为一谈会在 canary 并发竞争时**拒绝本可服务的请求**。
-SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
-       (SELECT count(*) FROM canary_claimed) AS canary_ok,   -- 仅 canary 路径有此 CTE
-       (SELECT count(*) FROM adv)            AS advanced;
-COMMIT;
+SELECT (SELECT count(*) FROM claimed) AS quota_ok,
+       (SELECT count(*) FROM adv)     AS advanced;
+-- ⚠️ **块内不写 COMMIT**（第 23 轮 [high]）：分支表要求 `canary_ok=0` 时 ROLLBACK，
+--    若 SQL 先 COMMIT，已递增的 `reserved_usd` 就被提交下去了。
+--    提交与否**一律由应用层依三值分支决定**。
+-- ⚠️ 上式**是普通路径**：普通请求根本没有 `canary_claimed` 这个 CTE，
+--    无条件读取它会直接语法错。canary 路径见下方单独一段。
 ```
 
 **应用层据三值分支**：
@@ -869,22 +887,43 @@ COMMIT;
 | 1 | 1 | 1 | 提交，发起上游调用 |
 | 其他组合 | — | — | 视为异常 → ROLLBACK + P2 告警（不应出现） |
 
-> **canary 请求（`role='canary'`）必须在同一条链里再挂两个 CTE**（第 21 轮 [high]）：
->    [05 §2.0](./05-scheduling-and-operations.md) 要求 claim 与 attempt 同事务，
->    而本事务此前只含 reservation/attempt/stage → 按本 SQL 实现 canary 会缺 claim，
->    按 05 单独实现又会与预留事务分裂（崩在中间就泄漏）。故插在 resv 与 att 之间：
->      canary_claimed AS (   -- resource_health 的条件 UPDATE（窗口翻转+次数+inflight）
->        UPDATE resource_health ... FROM resv WHERE ... RETURNING binding_id),
->      claim_ins AS (
->        INSERT INTO canary_claims(claim_id, binding_id, request_id, attempt_id,
->                                  lease_owner, lease_expires_at)
->        SELECT :claim_id, binding_id, :rid, :attempt_id, :owner, now()+interval '60 seconds'
->          FROM canary_claimed RETURNING request_id)
->    并让 `att` 改为 `FROM claim_ins`。普通请求走原链（无这两个 CTE）。
->    **验收**：AC-08⑩ 与 AC-33 须断言五者（预留/claim/inflight/attempt/stage）同事务成败。
-> 五者同生同死：req/claimed 任一为空 → 后续全不执行 → advanced=0 → 回滚 → 429
-> `quota_daily_usd IS NULL`（不限额）时，claimed 的限额条件由应用层省略，其余链路不变
-> 预留失败（429）后**另起一个事务**写 `stage='reservation_rejected'`（本事务已回滚，不能在其中写）
+**canary 路径的 dispatch（单独一段可执行 SQL，与上面互斥选用）**：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
+
+```sql
+-- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
+canary_claimed AS (          -- resource_health 条件 UPDATE：窗口翻转 + 次数 + inflight
+  UPDATE resource_health h
+     SET canary_window_start = CASE WHEN h.canary_window_start IS NULL
+                                     OR h.canary_window_start < date_trunc('hour', now())
+                                    THEN date_trunc('hour', now()) ELSE h.canary_window_start END,
+         canary_used_in_window = CASE WHEN h.canary_window_start IS NULL
+                                       OR h.canary_window_start < date_trunc('hour', now())
+                                      THEN 1 ELSE h.canary_used_in_window + 1 END,
+         canary_inflight = h.canary_inflight + 1
+    FROM resv
+   WHERE h.binding_id = :binding_id AND h.health_state = 'canary'
+     AND h.canary_inflight < :max_concurrent
+     AND (h.canary_window_start IS NULL
+          OR h.canary_window_start < date_trunc('hour', now())
+          OR h.canary_used_in_window < :max_per_hour)
+  RETURNING h.binding_id
+),
+claim_ins AS (
+  INSERT INTO canary_claims(claim_id, binding_id, request_id, attempt_id,
+                            lease_owner, lease_expires_at)
+  SELECT :claim_id, binding_id, :rid, :attempt_id, :owner, now() + interval '60 seconds'
+    FROM canary_claimed
+  RETURNING request_id
+)
+-- att 改为 FROM claim_ins（而非 FROM resv），其余同普通路径
+SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
+       (SELECT count(*) FROM canary_claimed) AS canary_ok,
+       (SELECT count(*) FROM adv)            AS advanced;
+-- 同样**不在块内 COMMIT**
+```
+
+> **为什么必须同事务**（第 21 轮 [high]）：[05 §2.0](./05-scheduling-and-operations.md) 要求 claim 与 attempt 同事务；分开写则崩在中间会泄漏 `canary_inflight`。
+> **验收**：AC-08⑩ 与 AC-33 须断言五者（预留/claim/inflight/attempt/stage）同事务成败。
 
 
 - `quota_daily_usd IS NULL`（不设日配额）时**跳过 D 的限额判断**，仍插入 reservation 行（记账与崩溃恢复需要它），`reserved_usd` 照常累加。
@@ -1286,9 +1325,22 @@ SELECT r.id, r.created_at, a.*
 -- finalize_recovery：闸门是 requests，不是 reservation
 BEGIN;
 WITH req AS (
-  SELECT id, created_at FROM requests
-   WHERE id = :rid AND created_at = :rcat AND final_status = 'pending'
-   FOR UPDATE                                        -- 唯一闸门：单子还没关
+  SELECT r.id, r.created_at FROM requests r
+   WHERE r.id = :rid AND r.created_at = :rcat AND r.final_status = 'pending'
+     -- ⚠️ 第 23 轮 [high]：扫描与关单之间存在 TOCTOU —— `downstream_write_completed`
+     --    的 outbox 行可能在"扫描捞出之后、关单之前"完成投递，此时该请求其实已经写完了，
+     --    recovery 却仍会把它关成 `interrupted`。故**扫描判据必须在本事务内复核一遍**。
+     AND NOT EXISTS (
+       SELECT 1 FROM ledger_outbox o
+        WHERE o.attempt_id = :last_attempt_id
+          AND o.request_created_at = r.created_at
+          AND o.event_type IN ('downstream_first_byte','downstream_write_completed')
+          AND o.delivered_at IS NULL)
+     AND NOT EXISTS (                                 -- 租约复核：期间被续租则放弃本次恢复
+       SELECT 1 FROM attempts a
+        WHERE a.id = :last_attempt_id
+          AND a.lease_heartbeat_at > now() - INTERVAL '60 seconds')
+   FOR UPDATE                                        -- 闸门：单子还没关 + 判据仍成立
 ),
 -- ⓐ 非最后一跳的非终态 attempt → 必然是被接管取消的
 prev AS (

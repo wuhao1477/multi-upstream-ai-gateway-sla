@@ -176,7 +176,7 @@ RETURNING canary_used_in_window, canary_inflight;
 
 | 层 | 上限 | 落地 |
 | --- | --- | --- |
-| 全局 | 测活费用 ≤ 月度总请求费用 **2%**，且日封顶 = 月预算 ÷ 20 | 按 `attempt_usage` 滚动累计测活成本(probe_kind='probe') vs 全局费用 |
+| 全局 | 测活费用 ≤ 月度总请求费用 **2%**，且日封顶 = 月预算 ÷ 20 | `attempt_usage JOIN attempts JOIN requests` 后按 **`requests.probe_kind='probe'`** 过滤滚动累计（⚠️ `attempt_usage` **没有** `probe_kind` 列；attempt 层的对应字段是 `attempts.role='probe'`） |
 | 租户 | 单租户测活 ≤ 该租户月费用 **2%**；同租户同时 ≤ **1** 个测活请求 | 租户级预算计数器 + 并发闸 |
 | 会话 | 每会话最多被测活 **1** 次；会话第一轮、金级会话默认不测活 | `session_prefix_ledger` / 会话级标记 |
 | 错误预算 | 测活导致的失败 ≤ 该等级错误预算 **10%** | §5 错误预算扣减，超限停测活 |
@@ -194,7 +194,7 @@ RETURNING canary_used_in_window, canary_inflight;
 
 - **前置条件（FR-061，全满足才可测活）**：模型能力匹配 + 数据许可 + 价格有效（新鲜）+ 余额充足 + 容量充足（不占接管保留）+ 会话可承受（非金级首轮）+ 接管资源可用（失败能补偿）。任一不满足即不测活。
 - **机会分配（FR-064）**：试错机会按 ①样本陈旧程度 ②指标不确定性 ③潜在收益 ④失败历史 加权分配，**不得持续集中给同一用户或渠道**（分配器维护 per-user / per-binding 近期测活计数，超集中度阈值即降权）。
-- **记录（FR-067）**：每次测活记 测活原因、决策快照、预算变化、首字、完整结果、缓存、费用、接管结果 → 落 [02](./02-data-model.md) `requests.decision_snapshot` + `attempts`（`probe_kind='probe'`）。
+- **记录（FR-067）**：每次测活记 测活原因、决策快照、预算变化、首字、完整结果、缓存、费用、接管结果 → 落 [02](./02-data-model.md) `requests.decision_snapshot` + `requests.probe_kind='probe'` + `attempts.role='probe'`。
 - **达上限暂停（FR-068）**：探索预算达任一层上限即暂停新测活，**不影响正常稳定流量**（测活闸与主流量闸独立）。
 
 ## 3. steward：冷却、样本门槛与全资源不可用
@@ -297,7 +297,7 @@ RETURNING canary_used_in_window, canary_inflight;
 | 1 | 快照刷新频率 vs 决策新鲜度 | ✅ **已定**：价格 6h/余额 5~15min/健康准实时(每次 attempt 结束增量更新)/订阅 1h（参数10 默认，可配） |
 | 2 | 用满倍率的"周期额度用满"口径 | ✅ **已定**：按 `period_quota` 全部用满计边际成本；未用满风险由倾斜三道闸的启动条件兜（§4.1） |
 | 3 | 容量保留与订阅引流上限的叠加冲突 | ✅ **已定**：接管保留优先级最高，订阅倾斜不得侵占接管/金级保留（§4.2 显式排除） |
-| 4 | 测活成本归因窗口 | ✅ **已定**：按 `probe_kind='probe'` 的 `attempt_usage` 滚动 30 天，与月费用比（§2.1） |
+| 4 | 测活成本归因窗口 | ✅ **已定**：按 `requests.probe_kind='probe'` 关联到 `attempt_usage` 后滚动 30 天，与月费用比（§2.1） |
 
 > 上述均为**一期已定取舍**（可配置项默认值 + 判断题结论），非待议；标 ✅ 以便读者区分"已定"与"待拍板"。
 
