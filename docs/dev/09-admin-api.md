@@ -95,6 +95,69 @@ type ParamMeta struct {
 
 ---
 
+## 4bis. `config_params` 全量键清单（**权威来源**，第 31 轮自查）
+
+> 此前配置键散落在 01/02/03/05/06/14 十余处，**没有一份清单** —— 开发不知道迁移种子该初始化哪些、`/admin/config` 该校验哪些、漏掉一个只会在运行时以默认零值的形式静默出错。
+> **本表是唯一权威来源**：新增键必须先进本表。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
+
+| 键 | 默认 | 关键项 | 用途 / 定义处 |
+| --- | --- | --- | --- |
+| **调度与期限** ||||
+| `default_ttft_budget_ms` | 8000 | | 无承诺策略的 TTFT 预算（[05 §1.3](./05-scheduling-and-operations.md)） |
+| `prefix_target_ms` | 10000 | | 连续会话前缀平均目标 |
+| `ttft_safety_margin_ms` | 500 | | 逐跳分配的安全余量 |
+| `min_hop_ms` | 1500 | | 单跳最小期限，低于此不再排跳 |
+| `max_hops` | 3 | | RoutePlan 最大跳数 |
+| `price_stale_hours` | 48 | | 价格新鲜度阈值 |
+| `snapshot_refresh_ms` | 1000 | | 内存快照刷新周期 |
+| **缓存（FR-056）** ||||
+| `cache_switch_min_hit_rate` | 0.6 | | 切换抑制阈值（**内部参数，非对外承诺**，[02 §6quater](./02-data-model.md)） |
+| **canary（FR-121）** ||||
+| `canary_max_per_hour` | 20 | | per-binding 每小时上限 |
+| `canary_max_concurrent` | 1 | | per-binding 并发上限 |
+| `canary_failure_threshold` | 3 | | 连续失败退回 cooling |
+| **主动测活（FR-060~067）** ||||
+| `probe_idle_window_min` | 30 | | 多久无业务流量才发探测 |
+| `probe_batch_size` | 3 | | 每轮最多探几个 binding |
+| `probe_global_cost_cap_ratio` | 0.02 | ✅ | 全局测活费用 ≤ 月费用 2% |
+| `probe_binding_daily_cap` | 20 | | 单 binding 日探测次数 |
+| `probe_error_budget_ratio` | 0.10 | ✅ | 测活失败占错误预算上限 |
+| **容量保留（FR-029/032）** ||||
+| `capacity_ceiling_normal` | 0.65 | | 四类流量的并发天花板（[02 §6bis-2](./02-data-model.md)） |
+| `capacity_ceiling_committed` | 0.85 | | |
+| `capacity_ceiling_takeover` | 0.95 | | |
+| `capacity_ceiling_probe` | 0.70 | | |
+| **健康与冷却（参数 11）** ||||
+| `health_min_samples_1h` | 20 | | 样本门槛 |
+| `health_min_samples_24h` | 100 | | |
+| `cooldown_base_sec` / `cooldown_max_sec` | 300 / 14400 | | 退避起点与上限 |
+| `observing_min_minutes` / `observing_min_success` | 30 / 50 | | 观察期转可用 |
+| **配额与计费** ||||
+| `billing_variance_tolerance` | 0.05 | ✅ | 计费偏差容差（[05 §4.4](./05-scheduling-and-operations.md)） |
+| `billing_min_base_usd` | 0.01 | | 低于此改用绝对差额判定（除零保护） |
+| `billing_abs_tolerance_usd` | 0.05 | | |
+| `billing_recovery_streak` | 20 | | 连续一致次数后恢复 |
+| **告警** ||||
+| `alert_webhook_url` | 空 | ✅ | 为空则不外发（[06 §5bis](./06-deployment-and-operations.md)） |
+| `alert_recovery_checks` | 3 | | 连续几轮不成立才关闭 |
+| `key_invalid_streak` | 3 | | 连续 401/403 判 Key 失效 |
+| `all_unavail_checks` | 2 | | 连续几轮空候选判全不可用 |
+| `error_budget_burn_ratio` | 0.5 | | 快速消耗阈值 |
+| `stale_alert_hours` | 12 | | 数据过期告警 |
+| **采集** ||||
+| `collector_request_interval_ms` | 200 | | 站内请求间隔 |
+| `collector_price_interval_h` / `_balance_min` / `_keyquota_min` | 6 / 5 / 30 | | 三类采集周期 |
+| **开关** ||||
+| `data_policy_enabled` | `false` | ✅ | 数据许可硬过滤（[02 §2ter](./02-data-model.md)） |
+| `alias_passthrough` | `false` | ✅ | 未命中别名时按同名直连（**绕过别名策略**，仅迁移期用） |
+| `load_test_mode` | `false` | ✅ | 输出 `x-sla-*` 内部时延头（**生产不得开**，[14 §2ter](./14-acceptance-matrix.md)） |
+| `ledger.batch_commit.enabled` | `false` | | 组提交（[14 §2ter](./14-acceptance-matrix.md)） |
+| `ledger.batch_commit.max_size` / `.linger_ms` | 16 / 2 | | linger **不得超 2ms** |
+
+**CI 断言**：迁移种子必须为上表**每一个键**插入一行 `config_params`；`/admin/config` 拒绝写入表外的键（防拼写错误静默生效）。
+
+---
+
 ## 5. 其余管理端点（M1~M4 逐步）
 
 | 端点 | 作用 | 里程碑 |
