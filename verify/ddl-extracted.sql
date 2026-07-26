@@ -427,6 +427,10 @@ CREATE TABLE attempts (
   --    若恢复扫描按"committed ⇒ 见过首字"判定，会把"空响应已提交、关单前崩溃"
   --    误写成 interrupted + 人工核对，而它的真实终态是 completed/failed。
   response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真、**且已落库**的时刻
+  commit_trigger    TEXT CHECK (commit_trigger IN ('actionable','buffer_limit')),
+                                              -- 'actionable' = 真见到可执行输出；
+                                              -- 'buffer_limit' = T2 缓冲上限强制提交（非真首字，
+                                              --   has_ttft_output=false、ttft 为 NULL、不计入 TTFT 统计）
   -- ── 上游事件到达时刻（**同步写之前**）：与下游交付时刻配对，度量我们自己的开销 ──
   upstream_first_actionable_at TIMESTAMPTZ,   -- 上游首个 ShouldCommit 事件**到达**时刻（早于 response_committed_at）
   upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 finalize_upstream 提交）

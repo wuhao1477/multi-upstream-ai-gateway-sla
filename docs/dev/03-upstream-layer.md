@@ -60,23 +60,65 @@ type Response struct {
     Stream  Stream        // 流式：字节流 + 旁路观察
 }
 
-// Stream 是字节级透传的流。Read 出来的字节原样写给下游；
-// Observe 返回旁路观察通道，供 executor 做接管判定（ShouldCommit）、TTFT 打点（HasTTFTOutput）与 usage 提取。
+// ⚠️ Stream 不能是「io.ReadCloser + 旁路 channel」（开发视角审查第 28 轮 [P0]）：
+//    两者之间没有任何同步点，无法表达「首字/终帧先落库再放行字节」——
+//    Read() 一返回字节就已经在去下游的路上了，旁路 channel 拦不住它。
+//
+// 故改为**帧驱动**：扫描器切出帧并附带原始字节，由 executor 决定何时放行。
+// 字节内容仍一字节不改（透传硬约束），只是**放行时机**由 executor 掌握。
 type Stream interface {
-    io.ReadCloser              // 字节级透传；Close 即向上游传播取消（AC-32）
-    Observe() <-chan Observation
+    // NextFrame 阻塞返回下一帧（含原始字节 + 旁路判定）。io.EOF 表示上游流结束。
+    NextFrame(ctx context.Context) (Frame, error)
+    // Close 向上游传播取消（AC-32）
+    Close() error
 }
+
+// Frame = 一个 SSE 事件的原始字节 + 对它的旁路判定。二者同时到达，executor 才能原子决策。
+type Frame struct {
+    Raw   []byte      // 该事件的**原始字节**（含 event:/data: 行与结尾空行），原样转发
+    Obs   Observation // 对该帧的判定
+}
+
+// executor 的放行循环（伪码，说明同步边界）：
+//   for {
+//       f, err := stream.NextFrame(ctx)
+//       switch {
+//       case f.Obs.IsFirstCommit:   // 首次 ShouldCommit
+//           if err := ledger.CommitFirstActionable(...); err != nil { abortDownstream(); return }
+//           flushBufferedAndWrite(f.Raw)      // ← 落库成功后才放行（含此前缓冲的帧）
+//       case f.Obs.IsTerminal:
+//           if err := ledger.FinalizeUpstream(...); err != nil { abortDownstream(); return }
+//           write(f.Raw); closeDownstream()   // ← 落库成功后才放行终帧
+//           go ledger.EnqueueDeliveryEvent(...)  // socket write 返回后，异步经 outbox
+//       default:
+//           if committed { write(f.Raw) } else { buffer(f.Raw) }  // 未提交前只缓冲（T2 上限见 §6）
+//       }
+//   }
 
 // Observation 是旁路观察事件——只含元数据，不含正文（FR-112、12 L1 层）
 type Observation struct {
     Seq            int           // 事件序号
     OffsetMs       int           // 相对请求发出的到达偏移
     EventType      string        // SSE event 名，如 response.output_text.delta
-    ShouldCommit    bool     // 已产出确定结果（文本/工具调用/拒答/推理摘要/终态）→ 提交并停止接管（AC-32，§3.2）
-    HasTTFTOutput   bool     // 产出了实际内容 → 打 content_aware_ttft_ms（AC-31，§3.2）
-                             // ⚠️ 两者独立，空终态 ShouldCommit=true 而 HasTTFTOutput=false
+    ShouldCommit   bool          // 已产出确定结果 → 提交并停止接管（AC-32，§3.2）
+    HasTTFTOutput  bool          // 产出了实际内容 → 打 content_aware_ttft_ms（AC-31，§3.2）
+                                 // ⚠️ 两者独立：空终态 ShouldCommit=true 而 HasTTFTOutput=false
+    IsFirstCommit  bool          // 本帧是**首次** ShouldCommit（扫描器维护，executor 不自己判重）
+    IsTerminal     bool          // 本帧是终帧
+    TerminalKind   string        // 'completed'|'empty_completed'|'error'|'incomplete'；非终帧为空
     Bytes          int           // 该事件字节数
-    Usage          *UsageSnapshot // 仅终帧携带
+    Usage          *UsageSnapshot // 仅终帧或 usage chunk 携带（见 §3.3 到达顺序）
+}
+
+// UsageSnapshot：上游用量的归一化形态（第 28 轮 [P0]：此前被接口引用但从未定义）
+type UsageSnapshot struct {
+    PromptTokens          int
+    CompletionTokens      int
+    TotalTokens           int
+    PromptCachedTokens    int  // 命中缓存的输入 token
+    CacheablePromptTokens int  // **可缓存**的输入 token（FR-056 命中率的分母，见 §3.4）
+    ReasoningTokens       int  // Responses 的推理 token；Chat 无此概念时为 0
+    Source                string // 'upstream'（上游回传）| 'estimated'（上游未回，按价格版本估算）
 }
 
 type ProtocolSupport struct {
@@ -92,13 +134,16 @@ type ProtocolSupport struct {
 ## 3. 流式处理：字节透传 + 旁路观察
 
 ```
-上游 SSE 字节 ──┬──> 原样写给下游客户端（零改动）
-                └──> tee 到 SSE 扫描器 ──> Observation 通道
-                                            ├─ ShouldCommit  → executor 提交/停止接管（AC-32）
-                                            ├─ HasTTFTOutput → 账本打 TTFT（AC-31）
-                                            ├─ 事件轨迹 → 12 的 L1 环形缓冲
-                                            └─ 终帧 usage → 账本（02 attempt_usage）
+上游 SSE 字节 ──> 扫描器切帧 ──> Frame{Raw, Obs} ──> executor 放行循环
+                                                      ├─ 未提交：缓冲（T2 上限 §6）
+                                                      ├─ 首帧 ShouldCommit：先落库 → 再放行缓冲+本帧
+                                                      ├─ 中间 delta：直接放行（无同步写）
+                                                      └─ 终帧：先 finalize_upstream → 再放行 → 关流
+                                          旁路副产物 ├─ 事件轨迹 → 12 的 L1 环形缓冲
+                                                      └─ usage → 账本（02 attempt_usage）
 ```
+
+> ⚠️ **不是「一路直通 + tee 旁路」**（第 28 轮 [P0]）：那种结构下字节一经 `Read()` 就已在去下游的路上，旁路拦不住它，"先落库再放行"无从实现。字节内容仍**一字节不改**，改的只是**放行时机由 executor 掌握**。
 
 ### 3.0 提交顺序（**首字与终帧都必须先落库再放行字节**）
 
@@ -171,11 +216,29 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 
 ### 3.1 SSE 扫描器（只读不改）
 
-解析要点（借鉴 [zhfeng1](./08-ref-eval-zhfeng1-ai-gateway.md) 的实现思路，非代码）：
+**逐协议的解析优先级与终帧判定**（第 28 轮 [P1]：此前只有双判定表，没说"怎么认出这是哪种事件"，开发只能猜）：
+
+| 项 | Responses | Chat Completions |
+| --- | --- | --- |
+| **事件类型以谁为准** | **JSON body 的 `type` 字段为准**，`event:` 行仅作校验。理由：实测部分中转站省略 `event:` 行但 body 始终带 `type`；两者不一致时以 body 为准并记一条 L1 告警 | 无 `event:` 行，只看 body |
+| **终帧判定** | `type ∈ {response.completed, response.failed, response.incomplete}` | **`data: [DONE]` 为准**；`finish_reason` 非空只代表该 choice 结束，**不等于流结束**（usage chunk 常在其后） |
+| **usage 到达顺序** | 随 `response.completed` 的 `response.usage` 一起到 | **可能在 `finish_reason` 之后单独一个 chunk**（`choices: []` + `usage: {...}`）。故**不可**见到 `finish_reason` 就关账 |
+| **错误事件形态** | `type='response.failed'`，错误在 `response.error` | 非 SSE 的 JSON 错误体（见 §6bis），或流中 `{"error": {...}}` chunk |
+
+**解析失败的分类**（必须显式定义，否则开发只能吞掉）：
+
+| 情形 | 处置 |
+| --- | --- |
+| `data:` 行 JSON 解析失败 | 该帧 `Obs` 全 false，**字节照常透传**（不因我们看不懂就截断用户的流）；记 L1 告警 `frame_parse_failed` |
+| 连续 ≥3 帧解析失败 | 判为**渠道格式故障** → `quality_events(event_type='format_broken')` + 该 binding 进冷却；当前请求**不中断**（已提交的照常透传到底） |
+| 流结束但从未见终帧 | `terminal_event` 留 NULL → 走 [02 §4.2bis](./02-data-model.md) ③b 分支（`interrupted`） |
+
+**基础解析要点**（借鉴 [zhfeng1](./08-ref-eval-zhfeng1-ai-gateway.md) 实现思路，非代码）：
 
 - **换行归一化**：真实上游 `\r\n` 与 `\n` 混用，须先归一再按 `\n\n` 分块，否则切错事件
 - **多行 `data:` 拼接**：SSE 规范允许一个事件多行 `data:`，须 `\n` 拼接后再解析
-- **`[DONE]` 与注释行**：`data: [DONE]` 与 `:` 开头的心跳注释**不计入可见内容**
+- **`[DONE]` 与注释行**：`data: [DONE]` 与 `:` 开头的心跳注释**不计入可见内容**（但 `[DONE]` 是 Chat 的终帧标记）
+- **`Frame.Raw` 必须是原始字节**：包含 `event:`/`data:` 行与结尾空行，**不得**由解析结果重新拼装 —— 重拼就等于解析-重组，正是 [13 §5](./13-research-reassessment.md) 三个项目翻车的地方
 
 ### 3.2 两个独立判定：`ShouldCommit` 与 `HasTTFTOutput`（AC-31）
 
@@ -210,6 +273,34 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 **蕴含关系**：`HasTTFTOutput ⇒ ShouldCommit`（反之不成立）。实现上 `Observation` 暴露两个独立字段，**不得由一个推另一个**。
 
 > 实现参考：AxonHub 的 `llm/pipeline/empty_response.go:hasResponseContent` 思路可借鉴（[13 §2.1](./13-research-reassessment.md)），但**须扩展到工具调用与拒答**——其原实现同样只覆盖文本。
+
+---
+
+### 3.5 两类异常出口（第 28 轮 [P1]）
+
+**A. T2 缓冲上限强制提交**（[15 T2](./15-scope-and-preflight.md)：缓冲达 256KB 或 5s 仍无 `ShouldCommit`）：
+
+```
+达上限 → commit_first_actionable(has_ttft=false, trigger='buffer_limit')
+       → 放行已缓冲字节 → 此后纯透传、**不再接管**
+```
+
+- `has_ttft_output=false`、`content_aware_ttft_ms` 留 NULL、**不计入 TTFT 统计**——它不是真的首字，只是我们不能再缓冲了。
+- 后续终帧照常走 `finalize_upstream`（attempt 已是 `committed`，链路不变）。
+- 记 `quality_events(event_type='empty_response')` 供渠道健康归因。
+
+**B. 非 2xx / 非 SSE 响应**（连流都没建立起来）：
+
+| 情形 | attempt 终态 | 是否试下一跳 | 健康处置 |
+| --- | --- | --- | --- |
+| HTTP 4xx（除 429） | `failed`，`cancel_reason='upstream_error'` | **不试**——请求本身有问题，换渠道也会失败 | 不计入该 binding 失败率 |
+| HTTP 429 / 5xx | `failed`，`cancel_reason='upstream_error'` | **试下一跳**（RoutePlan 还有候选时） | 计入失败率 + 冷却退避 |
+| 2xx 但 `Content-Type` 非 `text/event-stream`（流式请求下） | `failed` | **试下一跳** | `quality_events(event_type='format_broken')` + 冷却 |
+| 连接超时 / TCP 失败 | `failed`，`cancel_reason='upstream_disconnect'` | **试下一跳** | 计入失败率 + 冷却 |
+
+- **每种情形都先 `closeout_attempt`** 收尾本跳（写终态与费用行——4xx/连接失败时费用为 0，`external_call_started_at` 决定是否计费），**再** `dispatch_next`（若要试下一跳）。
+- **RoutePlan 耗尽仍失败** → `finalize_abort(request_terminal='failed')`；若一跳都没发出过 → `unavailable`（[02 §2bis](./02-data-model.md) 映射表）。
+- **健康更新由 `steward` 异步消费 attempt 结果**，不在请求路径上同步写 `resource_health`——否则每个失败请求都要多一次同步写。
 
 ---
 

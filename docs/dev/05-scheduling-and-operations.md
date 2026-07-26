@@ -64,7 +64,31 @@
 
 ### 1.3 RoutePlan：候选序列 + 每跳期限
 
-`selector` 输出 `RoutePlan = [{binding, deadline_ms}...]` 交 `executor`：
+`selector` 输出 `RoutePlan` 交 `executor`。**结构必须冻结**（第 28 轮 [P0]：原文只写 `{binding, deadline_ms}`，而 dispatch 事务需要价格版本、倍率版本、role、预留额、claim 意图——开发只能自己发明这些字段从哪来）：
+
+```go
+type RoutePlan struct {
+    Entries       []RoutePlanEntry
+    EstimatedUSD  float64   // Σ 各跳上界（[02 §2bis](./02-data-model.md) 预估算法）；dispatch 的 :est
+    DataClassCtx  Attrs     // 四维数据许可属性，取自 gateway_clients（§1.1 序 3）
+}
+
+type RoutePlanEntry struct {
+    BindingID           int64
+    PriceVersionID      string    // 决策时的基础价版本 → attempts.price_version_id
+    MultiplierVersionID string    // 决策时的倍率版本   → attempts.multiplier_version_id
+    Role                string    // 'primary' | 'takeover' | 'retry' | 'canary' | 'probe'
+    DeadlineMs          int       // 本跳期限
+    SingleHopUSD        float64   // 本跳上界（供 closeout/recovery 估算该跳费用）
+    ClaimIntent         string    // ''（无）| 'canary' | 'probe' —— 决定 dispatch 走哪个变体
+    CachePredicted      float64   // FR-056 预测命中率，入 decision_snapshot
+    CacheTarget         float64   // 对应目标值，入 decision_snapshot
+}
+```
+
+**各字段的生成者**：`selector` 填全部——价格/倍率版本取自决策时的内存快照（这正是 FR-013「每请求关联决策时价格版本」的落点）；`executor` **只读不改**；`ledger` 从中取 dispatch 事务的参数。
+
+要点：
 
 - **每跳期限按 SLA 等级 TTFT 预算分配**：金级首跳期限 = min(该 binding 近期 P95, 等级 TTFT 预算)，为接管留余量（前缀平均 ≤10s → 金级单跳 P95≤5s，§11）。
 - 期限到达且未见**内容感知有效首字** → executor `Close()` 传播取消、切下一跳（[03 §4.3](./03-upstream-layer.md)、AC-32）。

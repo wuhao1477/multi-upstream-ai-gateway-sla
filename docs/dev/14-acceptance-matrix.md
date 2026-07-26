@@ -137,6 +137,42 @@
 | AC-23 | 增加订阅流量将触发超额或突破成本上限 | FIXTURE | 停止增加该渠道流量；保留真实成本记录；不以提高消耗率为由继续 |
 | AC-24 | 用满 0.034 订阅 vs 倍率 0.035 普通 | FIXTURE | **调度选订阅渠道**（用满倍率排序）；**账务报表按实际倍率 0.045 记账**——两个口径同时正确 |
 
+## 1bis. M1 验证夹具规范（第 28 轮 [P1]）
+
+> 原文只说"35 字段 diff"和"MOCK 场景集"，但**没说 diff 怎么做、mock 要有哪些场景** —— 开发只能自己发明，而发明出来的判据决定 AC-01/31/32 是否真的守住了字节透传。
+
+**AC-01 的 Responses 保真 diff 规范**：
+
+| 项 | 冻结做法 |
+| --- | --- |
+| 比什么 | **两路的 SSE 事件序列**：`(event_type, JSON body)` 逐帧对齐比对。**不比原始字节**——上游两次响应的空白/分块边界本就可能不同，比字节会产生假阳性 |
+| 怎么对齐 | 按事件出现顺序一一对应；**事件数量不同即判失败**（漏事件正是 LiteLLM 翻车点） |
+| 忽略哪些字段 | 仅忽略**天然易变**的三类：`response.id`、`created_at`/时间戳、`system_fingerprint`。其余 **35 字段全部参与比对，reasoning item 必须逐字段相同** |
+| 判失败的条件 | 任一字段缺失、类型改变、值不同（除忽略项）；或事件序列长度/顺序不同 |
+| artifact | 两路的完整事件序列 JSONL + diff 报告存 CI 产物，**失败时必须能看到具体是哪个字段** |
+| 跑几个站 | **两个基线站都跑**（[15 §1bis](./15-scope-and-preflight.md)），两站都通过才算过 |
+
+**mock 场景集**（`verify/mock_upstream.py` 须覆盖，当前只有 Chat 场景）：
+
+| 场景 | 协议 | 断言 |
+| --- | --- | --- |
+| `mock-normal` | 两协议各一份 | ttft≈500ms，commit 于首 delta |
+| `mock-heartbeat` | 两协议 | 心跳不触发 commit，ttft≈600ms+ |
+| `mock-empty-sse` | 两协议 | commit=true 但 ttft=NULL |
+| `mock-tool-only` | 两协议 | commit 于首个 tool_call，**不得被接管取消** |
+| `mock-refusal-only` | 两协议 | 同上 |
+| `mock-reasoning-summary-only` | Responses | 同上 |
+| `mock-error-terminal` | 两协议 | commit=true、按失败关单、ttft=NULL |
+| `mock-slow-first-token` | 两协议 | 期限到即接管（AC-32） |
+| `mock-abort` | 两协议 | 首字后断流 → `stream_broken=true` |
+| `mock-buffer-flood` | 两协议 | 持续发无内容元事件至 256KB → T2 强制提交（`commit_trigger='buffer_limit'`） |
+| `mock-usage-after-finish` | Chat | `finish_reason` 后单独 usage chunk → **不得**提前关账 |
+| `mock-no-event-line` | Responses | 省略 `event:` 行、只有 body `type` → 仍能正确判定 |
+
+**AC-32 的取消可观测性**：mock 须**记录并暴露上游连接被关闭的时刻**（如写一个 `/„mock/last-abort` 端点或日志行），否则"取消是否传播到上游"无法断言——只看我们这边的 `cancel_propagated` 字段等于自证。
+
+---
+
 ## 2bis. AC-18 负载模型（**已冻结，开工前定**）
 
 > **核心原则（2026-07-25 负责人确认）**：**压的是程序本身，不是上游。**

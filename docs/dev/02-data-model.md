@@ -626,6 +626,50 @@ COMMIT;
 - **不追加预留**：预留在首跳已按 RoutePlan **全部跳**求和（见上方上界算法），接管跳不再动聚合。
 - **`attempt_no` 由 `UNIQUE (request_id, request_created_at, attempt_no)` 保证不重复**——并发重复插入会撞唯一约束而失败，正是期望行为。
 
+**首字提交事务 `commit_first_actionable`**（第 28 轮 [P0]：[01 §5.1](./01-architecture.md) 与 [03 §3.0](./03-upstream-layer.md) 都要求"首字先落库再放行字节"，**但从来没有这个事务的 SQL** —— 开发照文档写到这一步就没东西可调）：
+
+```sql
+BEGIN;
+UPDATE attempts a
+   SET attempt_status        = 'committed',
+       response_committed_at = now(),
+       has_ttft_output       = :has_ttft,              -- 空终态首帧时为 false
+       content_aware_ttft_ms = CASE WHEN :has_ttft THEN :ttft_ms ELSE NULL END,
+       upstream_first_actionable_at = :arrived_at,      -- 事件**到达**时刻，早于本次提交
+       commit_trigger        = :trigger                 -- 'actionable' | 'buffer_limit'（T2 强制提交）
+ WHERE a.id = :attempt_id
+   AND a.request_id = :rid AND a.request_created_at = :rcat   -- 归属校验
+   AND a.attempt_status = 'pending'                            -- 幂等闸门：只提交一次
+RETURNING a.id;
+COMMIT;
+```
+
+| 返回行数 | 含义 | 处置 |
+| --- | --- | --- |
+| 1 | 首次提交成功 | 放行响应头 + 已缓冲字节 |
+| 0 且该 attempt 已是 `committed` | 重复调用（扫描器应保证不发生，防御性） | **视为成功**，照常放行 |
+| 0 且 attempt 已终态或不存在 | 参数错配 / 已被恢复扫描收走 | **中断下游流** + P2 告警 |
+| 报错 | 库不可用 | **中断下游流**（同 [03 §3.0](./03-upstream-layer.md) 终帧写库失败的语义：无法持久化就不能声称成功） |
+
+- **空终态与首字同帧时**（上游一个 `response.completed` 就结束、中间无 delta）：**先 `commit_first_actionable(has_ttft=false)` 再 `finalize_upstream`**，两个事务顺序执行、不合并。理由：`attempt_status` 的跃迁链 `pending → committed → 终态` 必须完整，否则 [§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 的分流判据（靠 `response_committed_at` 区分 ② 与 ③）会失效。
+- **`commit_trigger` 列**：区分"真见到可执行输出"与"[T2](./15-scope-and-preflight.md) 缓冲上限强制提交"。后者 `has_ttft_output=false`、`content_aware_ttft_ms` 为 NULL，且**不计入 TTFT 统计**——它不是真的首字，只是我们不能再缓冲了。
+
+**事务参数来源表**（第 28 轮 [P0]：`:usage_id`、`:claim_id`、`:event_key` 这些占位符**从来没说过谁生成、怎么生成** —— 而幂等性完全依赖它们。若重试时算出不同的 key，幂等就是假的）：
+
+| 参数 | 生成者 | 规则 | 幂等含义 |
+| --- | --- | --- | --- |
+| `request_id` | `protocol` 层，C′ 阶段 | **UUIDv7**（时间有序） | 请求的天然主键 |
+| `attempt_id` | `selector`/`executor`，每跳 dispatch 前 | **UUIDv7** | 每跳唯一；重试**必须**用新的（一次外部调用=一次上游调用，FR-119） |
+| `usage_id` | `ledger`，写 usage 时 | **UUIDv7** | 不承担幂等——幂等由 `UNIQUE (attempt_id, request_created_at, upstream_seq)` 保证 |
+| `claim_id` | `selector`，claim 时 | **UUIDv7** | 释放时按它一次性跃迁 |
+| **`settle_event_key`** | `ledger` | **稳定组合键**：`<attempt_id>:<terminal_kind>`（如 `018f…:completed`）。**绝不能用随机值** | 同一次结算重试算出**同一个 key** → `UNIQUE` 挡住二次结算 |
+| `reservation_adjustments.event_key` | **调用方（运维/管理 API）** 提供 | 建议 `adj:<request_id>:<账单批次号>` | 同一次人工修正重复提交只生效一次 |
+| `ledger_outbox.idempotency_key` | `ledger` | `<attempt_id>:<event_type>` | 同一 attempt 的同一事件只投递一次 |
+
+> ⚠️ **`settle_event_key` 是全套幂等的支点**：[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增) 的三态判定（`applied` / `already_applied_same_event` / `conflict`）靠它区分"幂等重试"与"真冲突"。用随机 UUID 会让每次重试都被判成新结算 → 重复扣费。
+
+**首字提交事务 `commit_first_actionable`** 与下方 `closeout_attempt` 的调用者与线程模型见 [§2quater](#2quater-事务的调用者与线程模型)。
+
 **每跳收尾事务 `closeout_attempt`（`sla_takeover` 专用）**（第 24 轮 [high]）：
 
 > ⚠️ `sla_takeover` 是唯一"结束本跳但不终结 request"的原因，此前**没有任何事务承载它**——hop1 被接管后，它的终态、费用事实、canary claim 释放全都无人负责：
@@ -995,12 +1039,40 @@ SELECT (SELECT count(*) FROM claimed)        AS quota_ok,
 > **验收**：AC-08⑩ 与 AC-33 须断言五者（预留/claim/inflight/attempt/stage）同事务成败。
 
 
-- `quota_daily_usd IS NULL`（不设日配额）时**跳过 D 的限额判断**，仍插入 reservation 行（记账与崩溃恢复需要它），`reserved_usd` 照常累加。
+- **`quota_daily_usd IS NULL`（不限额）的分支**（第 28 轮 [P1]：原文只说"跳过限额判断"，但上面的 SQL 硬依赖 `<= :quota` 条件，`:quota` 传 NULL 会让整个条件恒为 UNKNOWN → `claimed` 永远 0 行 → **不限额的凭证一个请求都发不出去**）。
+  实现上是**同一条 SQL 的两个变体**，由应用层按 `rpm_limit IS NULL` 同样的方式二选一：
+  ```text
+  不限额变体：claimed 的 WHERE 只保留
+       d.gateway_client_id = :cid AND d.spend_date = :date
+  删掉  AND d.reserved_usd + d.settled_usd + :est <= :quota  这一行，其余完全相同。
+  ```
+  仍插入 reservation 行、仍累加 `reserved_usd`（记账与崩溃恢复需要它们），只是不做上限判定。
 - **D 必须在发起上游调用前完成**，与 [§5.1 意图先行](./01-architecture.md) 的 attempt 落库同属"发请求前的同步写"。
 
 **签发与轮换**（[09](./09-admin-api.md) 管理 API）：签发时生成随机明文 → 存哈希 → **明文只返回一次**；吊销即置 `status='revoked'` 并记 `revoked_at/revoke_reason`；轮换 = 新签发 + 旧的宽限期后吊销。
 
 **服务 FR/AC**：FR-094（不展示完整凭证）、FR-113（**上游 Key 明文 ≠ 入站凭证明文**，入站强制哈希）；新增 AC 见 [14](./14-acceptance-matrix.md)。
+
+---
+
+## 2quater. 事务的调用者与线程模型
+
+> 第 28 轮 [P0]：文档定义了八个事务，但**没说谁在什么线程上调用、失败了怎么办** —— 开发无法判断哪些在请求路径上（影响 P99）、哪些能异步。
+
+| 事务 | 调用者 | 线程 | 失败处置 |
+| --- | --- | --- | --- |
+| C′ 落 `requests` | `protocol` | **请求 goroutine（同步）** | 返回 500，不进调度 |
+| B 阶段 RPM 闸 | `protocol` | 同上 | 0 行 → 429 |
+| `dispatch`（首跳） | `executor` | 同上，**发上游调用前** | 三值分支：配额 0 → 429；canary 0 → 回落非 canary 重试；异常 → 500 |
+| `commit_first_actionable` | `executor` | 同上，**放行首字节前** | 中断下游流（[03 §3.0](./03-upstream-layer.md)） |
+| `finalize_upstream` | `executor` | 同上，**放行终帧前** | 中断下游流，按 ③b2 结算 |
+| `closeout_attempt` | `executor` | 同上，接管时 | 记 P2 告警；**不阻塞**下一跳（恢复扫描会兜底） |
+| `dispatch_next` | `executor` | 同上 | 0 行 → 放弃该跳，按全候选不可用处置 |
+| `finalize_delivery` | **outbox 投递器** | **后台 goroutine** | 重试；`ledger_outbox` 保留未投递行 |
+| `finalize_recovery` | **恢复扫描任务** | **后台 goroutine**（周期 + 启动时） | 记日志重试；`SKIP LOCKED` 保证多实例安全 |
+| `adjust` | 管理 API | **HTTP handler goroutine** | 三态判定（[§2bis](#2bis-网关调用方凭证域入站鉴权对抗性审查新增)） |
+
+**在请求路径上的同步写共 4 次**（C′、dispatch、首字、终帧）——这是 [AC-34/36](./14-acceptance-matrix.md) 压测要盯的对象，也是允许**组提交**优化的地方。
 
 ---
 
@@ -1226,6 +1298,10 @@ CREATE TABLE attempts (
   --    若恢复扫描按"committed ⇒ 见过首字"判定，会把"空响应已提交、关单前崩溃"
   --    误写成 interrupted + 人工核对，而它的真实终态是 completed/failed。
   response_committed_at TIMESTAMPTZ,          -- ShouldCommit 首次为真、**且已落库**的时刻
+  commit_trigger    TEXT CHECK (commit_trigger IN ('actionable','buffer_limit')),
+                                              -- 'actionable' = 真见到可执行输出；
+                                              -- 'buffer_limit' = T2 缓冲上限强制提交（非真首字，
+                                              --   has_ttft_output=false、ttft 为 NULL、不计入 TTFT 统计）
   -- ── 上游事件到达时刻（**同步写之前**）：与下游交付时刻配对，度量我们自己的开销 ──
   upstream_first_actionable_at TIMESTAMPTZ,   -- 上游首个 ShouldCommit 事件**到达**时刻（早于 response_committed_at）
   upstream_terminal_at         TIMESTAMPTZ,   -- 上游终帧**到达**时刻（早于 finalize_upstream 提交）

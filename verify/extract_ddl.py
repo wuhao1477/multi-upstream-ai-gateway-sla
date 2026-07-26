@@ -30,5 +30,14 @@ ddl = [
     if re.match(r"^\s*(CREATE|ALTER)\s", s, re.I) and not re.search(r"^\s*:", s, re.M)
 ]
 
+# 守卫：```sql 块里若残留未闭合内容（没有以分号收尾的片段），它会静默吞掉
+# 后续语句 —— 第 28 轮就这么丢过一整张 data_policies 建表。宁可报错也不静默。
+if buf:
+    raise SystemExit(
+        "❌ ```sql 块内有未闭合语句（缺分号或括号不平衡），它会吞掉后面的 DDL：\n"
+        + "\n".join(buf[:6])
+        + "\n\n若这是说明性片段而非完整语句，请改用 ```text 围栏。"
+    )
+
 open(OUT, "w").write("\n\n".join(ddl) + "\n")
 print(f"抽出 {len(ddl)} 条 DDL → {OUT}")
