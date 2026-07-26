@@ -71,6 +71,36 @@ multi-upstream-ai-gateway-sla/
 
 ---
 
+## 2bis. sqlc 查询契约（M0/M1 开工清单）
+
+> ⚠️ **开发视角审查第 27 轮 [P1]**：[02](./02-data-model.md) 里全是**事务骨架**（带 `:参数` 的多语句 CTE），它们不是 sqlc 能直接生成的形态。开发拿到手第一步就卡在"`queries.sql` 该怎么写"。本节给出最小清单与切分原则，**不重复 02 的 SQL 正文**（那里是唯一真相源）。
+
+**切分原则**：
+
+| 形态 | 放哪 | 理由 |
+| --- | --- | --- |
+| 单语句查询/写入 | `queries.sql`，由 sqlc 生成 | 类型安全、零反射 |
+| **多语句事务**（dispatch / finalize / recovery / adjust / closeout） | **手写 `pgx` 事务函数**，内部逐条调 sqlc 生成的语句或直接 `tx.Exec` | sqlc 不表达事务边界与"按行数分支"；而这套设计的正确性**恰恰依赖行数判定**（[02 §2bis](./02-data-model.md) 三态判定） |
+| 应用层断言 | Go 代码 | `settled=1 / already_applied / conflict` 这类分支 sqlc 无法生成 |
+
+**M0 必需（对应 AC-27 / AC-33-M0）**：
+
+| `-- name:` | 类型 | 说明 |
+| --- | --- | --- |
+| `CreateGatewayClient` | `:one` | 签发凭证，返回 id 与 `secret_prefix`（**明文只在应用层返回一次，不入库**） |
+| `GetClientBySecretPrefix` | `:many` | 按前缀取候选行，哈希校验在 Go 侧做（避免把明文送进 SQL） |
+| `ListGatewayClients` | `:many` | **不得** SELECT `secret_hash`（FR-094 不回显） |
+| `RevokeGatewayClient` | `:exec` | 置 `status='revoked'` + `revoked_at`/`revoke_reason` |
+| `IncrementRPMWindow` | `:one` | [02 §2bis](./02-data-model.md) B 阶段原子语句，返回 `request_count`；**0 行 = 429** |
+| `RecordAuthRejection` | `:exec` | `ON CONFLICT ... DO UPDATE` 分钟聚合；**必须能写匿名 401（两列 NULL）** |
+| `UpsertConfigParam` / `ListConfigParams` | `:exec` / `:many` | `/admin/config` 读写 + 二次确认标记 |
+
+**M1 追加（账本与配额）**：`CreateModel`（强校验两个 token 上界非空）、`InsertRequestAuthenticated`（C′ 阶段）、`SetRequestStage`、`DispatchFirstAttempt`（**事务函数**）、`DispatchNextAttempt`（**事务函数**）、`CloseoutAttempt`（**事务函数**）、`FinalizeUpstream` / `FinalizeAbort` / `FinalizeRecovery` / `FinalizeDelivery`（**均为事务函数**）、`AdjustReservation`（**事务函数**）、`ScanStaleRequests`（`:many`，含 outbox 反连接）。
+
+> **命名与 02 的对应关系必须写在 `queries.sql` 注释里**（如 `-- 对应 02 §2bis D 阶段`），否则改了 02 没人知道该同步哪条查询。
+
+---
+
 ## 3. 构建与 CI
 
 | 目标 | 内容 |

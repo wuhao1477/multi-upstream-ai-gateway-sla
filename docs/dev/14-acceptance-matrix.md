@@ -26,8 +26,8 @@
 
 | 里程碑 | 验收 AC | 条数 |
 | --- | --- | --- |
-| **M0 骨架** | AC-27、**AC-33**（入站鉴权） | 2 |
-| **M1 上游直连 + 账本** | AC-01、AC-16、AC-26、AC-30、AC-31、AC-32、**AC-35**（崩溃恢复） | 7 |
+| **M0 骨架** | AC-27、**AC-33-M0**（入站鉴权基础子集，见下方拆分说明） | 2 |
+| **M1 上游直连 + 账本** | AC-01、AC-16、AC-26、AC-30、AC-31、AC-32、**AC-35**（崩溃恢复）、**AC-33-M1**（配额与结算子集） | 7（AC-33 与 M0 共享编号，不重复计数） |
 | **M2 流式 SLA 核心** | AC-06、AC-12、AC-15、AC-25、**AC-07**（缓存切换损失预测） | 5 |
 | **M3 元数据采集** | AC-02、AC-03、AC-04、AC-05、AC-17、AC-19、AC-28、AC-29 | 8 |
 | **M4 经营与验收** | AC-08、AC-11、AC-13、AC-14、AC-18、**AC-09**、**AC-10**（主动测活）、**AC-34**（1000 并发抗压）、**AC-36**（1000 QPS 吞吐） | 9 |
@@ -46,6 +46,15 @@
 | --- | --- | --- | --- |
 | AC-27 | 自研核心某一实例宕机 | FIXTURE | `docker stop sla-core-a` → 持续打 30 个请求，**全部成功、无一失败**；Caddy 日志显示已摘除该实例；恢复后自动重新纳入 |
 | **AC-33**（新增） | 入站鉴权：无凭证 / 已吊销 / 越权别名 / 超配额 | FIXTURE | ① 不带 `Authorization` → **401**；② 用已 `revoked` 凭证 → **401**；③ 用 `allowed_aliases` 外的别名 → **403**；④ 超 `rpm_limit` → **429**；⑤ 合法凭证正常 200；**㉔ 401/403 不得产生 `requests` 行**（它们从未进入调度；逐请求落账会让未鉴权流量变成写库放大），但 `auth_rejections` 的对应 `(窗口, 前缀, 原因)` 计数必须递增；㉕ 同一分钟内重复触发只增计数**不新增行**；㉖ `revoked`/`bad_secret` 超阈值触发 **P2** 告警。**跨实例并发**：⑥ 双 core 同时打，日费用累计到 `quota_daily_usd` 时**必然被拒**（不得因预留晚于检查而超限）；⑦ RPM 窗口跨实例共享（在 A 打满后 B 也拒）；⑧ core 重启后配额计数不清零。
+
+> **AC-33 分期拆分**（开发视角审查第 27 轮 [P0]）：本条整体被列在 M0，但 ⑨~㉗ 依赖 selector、`/admin/models`、日费用预留、`finalize`、`adjust`——这些属 M1。故拆为：
+>
+> | 子集 | 条目 | 里程碑 |
+> | --- | --- | --- |
+> | **AC-33-M0** | ①~⑤（401/403/429 基础）、⑦（RPM 跨实例）、⑧（重启不清零）、㉒（`rpm_limit IS NULL` 不限速）、凭证脱敏与不回显、`auth_rejections` 落库（含匿名 401） | **M0** |
+> | **AC-33-M1** | ⑥⑨~㉑㉓~㉗（日费用预留、上界算法、并发配额、`finalize`/`adjust` 幂等、跨午夜、负值拒绝、计费单位缩放） | **M1**（随账本） |
+>
+> M0 只需 `gateway_clients`、`client_rate_window`、`auth_rejections` 三张表与 `/admin/clients`；`client_daily_spend`/`client_reservations`/`reservation_adjustments` 随 M1 账本一起交付。
 **预留正确性**（[02 §2bis](./02-data-model.md) 上界算法）：⑨ 预留额 = RoutePlan 全部跳的上界之和（发生接管时不超预留）；⑩ **实际用量高于初始估算**时结算按实际写入，且溢出后**下一个请求必被 429**；⑪ `models.max_input_tokens`/`max_output_tokens` 为 NULL 的模型，其全部 binding **不得进入候选**（无上界即不可预留）；且 `POST /admin/models` 缺这两个字段必须返回 **400**，建成后 selector 能正确读到两列；⑫ **事务幂等重试**（结算已不经 outbox，[02 §2bis 写入路径分工](./02-data-model.md)）：同一 `settle_event_key` 重放 `finalize_upstream`、同一 `reservation_adjustments.event_key` 重放 `adjust`，`settled_usd` **不翻倍**、`reserved_usd` **不为负**；连接中断后重试同样只生效一次；⑬ 高并发（100 并发同凭证）下 `reserved_usd + settled_usd` **恒不超** `quota_daily_usd` + 单请求上界；㉗ **计费单位缩放**：给定 `billing_unit='per_1m_token'`、单价 3.0、1000 token，成本必须是 `0.003` 而非 `3000`（漏缩放会把每笔成本放大 100 万倍，预留/配额/错误预算/告警阈值全部失真）；⑯ **多模态/续接请求**（含 `image_url`、`previous_response_id` 等标记）按 `models.max_input_tokens` 预留，且 `max_input_tokens`/`max_output_tokens` 为 NULL 的模型 binding 不进候选；⑰ RPM 与日配额的**原子语句各自返回 0 行时必须 429**，不得先放行再补记；㉒ **`rpm_limit IS NULL` 的凭证连发 100 请求全部通过**（不限速语义，须整段跳过 RPM 闸，不得因 `count < NULL` 恒 UNKNOWN 而从第二个请求起误 429）；㉓ 溢出后的拒绝**由 `reserved_usd + settled_usd >= quota_daily_usd` 派生**，库中**不存在** `over_quota` 列，断言不得引用它。
 **人工修正**（[02 §2bis](./02-data-model.md) `adjust` 事务）：⑭ 恢复扫描产生的 `needs_manual_review` 记录能被 `adjust` 修正为真实值且标志清除；⑮ 同一 `event_key` 重复提交、或事务提交后客户端未收到响应而重试，`settled_usd` **不得二次变动**；⑱ **两个不同 `event_key` 并发修正同一 reservation**，收敛后 `client_daily_spend.settled_usd` 与 `client_reservations.actual_usd` **必须一致**（不得出现 10→12/13 并发后聚合变 15 的失真）；⑲ `adjust` 只能改动该 reservation 自身的 client 与日期（参数不可指定）；⑳ **负值拒绝**：`new_actual_usd < 0` 返回 400、事务回滚、`settled_usd` 不变，且修正后 `settled_usd` 恒 ≥ 0；㉑ **`finalize` 同样不接受 client/日期/预留额传参**——跨午夜长流（预留在 D 日、结算在 D+1 日）的费用必须记在 **D 日**，且 `reserved_usd` 在 D 日归零。
 另断言：`GET /admin/clients` **不回显完整凭证**、库中 `secret_hash` 非明文、日志中不出现凭证明文 |

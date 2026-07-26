@@ -35,7 +35,13 @@
 
 | 里程碑 | 交付 | 覆盖重点 | 退出标准 |
 | --- | --- | --- | --- |
-| **M0 骨架** | Go 单仓工程骨架、compose（Caddy LB + 2×core + PG + collector）、配置与别名→策略模型、CI | FR-115/117 | ① `docker compose up` 后 `/healthz` 全绿；② 停任一 core 实例，30 个连续请求**全部成功**（AC-27）；③ 加载 ≥3 个别名+策略并经 `GET /admin/config` 回显一致；④ CI 全绿（含 FR-112 不可存列断言 + **DDL 真跑**）；⑤ **AC-27 与 AC-33 全通过**（入站鉴权、跨实例配额与 RPM、凭证不回显；[14](./14-acceptance-matrix.md) M0 集） |
+| **M0 骨架** | Go 单仓工程骨架、compose（Caddy LB + 2×core + PG + collector）、配置与别名→策略模型、CI | FR-115/117 | ① `docker compose up` 后 `/healthz` 全绿；② 停任一 core 实例，30 个连续请求**全部成功**（AC-27）；③ 加载**固定种子**（见下）并经 `GET /admin/config` 回显一致；④ CI 全绿（含 FR-112 不可存列断言 + **DDL 真跑**）；⑤ **AC-27 全通过 + AC-33 的 M0 子集**（见 [14](./14-acceptance-matrix.md) AC-33 分期说明）
+
+> ⚠️ **M0 边界（开发视角审查第 27 轮 [P0] 澄清）**：M0 **只做骨架与入站侧**——工程结构、compose、`/healthz`、`/admin/config` 与 `/admin/clients`、迁移与 CI、最小入站鉴权。
+> **不属于 M0**：上游透传、Responses 35 字段 diff、Codex 实机、mock 场景集、日费用预留/结算/人工修正——这些依赖上游对接层与账本，**全部属 M1**（[03 §10](./03-upstream-layer.md)）。
+> [06 §7 部署清单](./06-deployment-and-operations.md) 中列出的上游相关项同属 M1，勿按 M0 验收。
+>
+> **M0 固定种子**（避免开发自行发明）：1 个 canonical model（`gpt-5.5`，须填 `max_input_tokens`/`max_output_tokens`）；3 个别名 → `gpt-5.5`（`probe_allowed=true`）、`gpt-5.5-sla-1`（`probe_allowed=false`）、`gpt-5.5-cheap`（`probe_allowed=true`）；各自映射一条 `routing_policies`（一期单级 SLA，`conflict_order` 分别为 SLA>缓存>成本 / SLA>成本>缓存 / 成本>缓存>SLA）；一行 `sla_targets` 默认值。 |
 | **M1 上游直连 + 账本 v1** | 自研上游透传层（字节透传 + 旁路观察）；OpenAI CC/Responses；Attempt 账本落 PG（单一真相源） | FR-111/119、AC-26/31/32 | ① REAL：Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**；② 账本 usage 来自旁路终帧且与上游一致；③ **AC-01/16/26/30/31/32 + AC-35 全通过**（[14 验收矩阵](./14-acceptance-matrix.md) M1 集，共 7 条）；④ **AC-35 崩溃恢复不可跳过**——账本首版必须同时交付 request 级恢复扫描与两阶段关单，否则 K1~K4 全部不可验 |
 | **M2 流式 SLA 核心** | 内容感知 TTFT、动态期限、首字前接管、mid-stream 取消传播、取消口径归并 | 硬约束 4/5/7，AC-30～32 | ① MOCK 场景全绿（role-only/心跳/空 SSE/慢首字/中断/abort）；② **AC-06/07/12/15/25 全通过**（[14](./14-acceptance-matrix.md) M2 集，共 5 条；**AC-07 缓存切换损失预测已于 2026-07-26 拉入一期**）；③ 内容感知 TTFT 在三类元事件场景下**均不出现 ≈0ms** |
 | **M3 元数据采集** | 三家族采集器、价格版本、余额信号识别（**订阅台账/双倍率/倾斜三道闸移入二期**，[15](./15-scope-and-preflight.md)） | FR-010/011/020～027、AC-28/29 | ① 4 家实测站点采集跑通且 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；② **AC-02/03/04/05/17/19/28/29 全通过**（订阅相关 AC-20~24 移入二期） |

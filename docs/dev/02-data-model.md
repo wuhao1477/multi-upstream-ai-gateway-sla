@@ -1579,7 +1579,11 @@ CREATE TABLE attempt_usage (
   prompt_tokens     INTEGER,                  -- beta5 usageLogs.promptTokens
   completion_tokens INTEGER,                  -- completionTokens
   total_tokens      INTEGER,                  -- totalTokens
-  prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存部分，FR-054）
+  prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存命中部分，FR-054）
+  -- FR-056 预测需要**分母**：命中率 = prompt_cached_tokens / cacheable_prompt_tokens。
+  -- 只有 prompt_tokens 不够——系统提示、工具定义等固定前缀才可缓存，用户新增的那一轮不可缓存，
+  -- 拿 prompt_tokens 当分母会系统性低估命中率（开发视角审查第 27 轮 [P1]）。
+  cacheable_prompt_tokens INTEGER,            -- 本次请求中**理论可缓存**的输入 token 数
   total_cost        nonneg_usd,               -- beta5 usageLogs.totalCost
   cost_items        JSONB,                    -- beta5 usageLogs.costItems（明细，元数据）
   cost_source       TEXT NOT NULL DEFAULT 'upstream' CHECK (cost_source IN ('upstream','estimated')),
@@ -1885,6 +1889,107 @@ CREATE INDEX idx_hwin_binding    ON health_metric_windows(binding_id, window_kin
 ```
 
 **服务 FR/AC**：FR-007、FR-040~047、FR-060/065/066；AC-08/10。
+
+---
+
+### 6quater. 缓存命中率滚动统计（FR-056，一期）
+
+> ⚠️ **FR-056 此前只有需求文字没有算法**（开发视角审查第 27 轮 [P1]）：设计要求"预测切换后缓存命中率，低于目标则限制切换"，但**用什么数据算、公式是什么、目标值从哪来**三样都没定义 —— 开发只能自己发明，而发明出来的东西直接决定长会话省不省钱。
+
+```sql
+-- 会话 × 缓存作用域 的滚动命中率（供 selector 预测切换代价）
+CREATE TABLE cache_hit_windows (
+  session_id      TEXT NOT NULL,
+  cache_scope_id  BIGINT NOT NULL REFERENCES cache_scopes(id),
+  window_start    TIMESTAMPTZ NOT NULL,        -- 小时窗口
+  cached_tokens   BIGINT NOT NULL DEFAULT 0,   -- Σ prompt_cached_tokens
+  cacheable_tokens BIGINT NOT NULL DEFAULT 0,  -- Σ cacheable_prompt_tokens（分母）
+  turn_count      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, cache_scope_id, window_start)
+);
+```
+
+**预测公式**（`selector` 排序前，纯内存快照，不查库）：
+
+```text
+PredictCacheHitRate(session, candidate_binding):
+  cur_scope  = 该 session 上一轮命中的 cache_scope_id
+  cand_scope = candidate_binding 的 cache_scope_id
+
+  ① cand_scope == cur_scope（作用域可延续）
+       → 预测 = 该 (session, scope) 的近窗口实测命中率
+                = cached_tokens / NULLIF(cacheable_tokens, 0)
+       → 无历史（首轮）时取该 scope 的全局中位数
+  ② cand_scope != cur_scope（换作用域，前缀作废）
+       → 预测 = 0（本轮必然全量重算）
+         ——**下一轮**起才会重新积累，故切换代价 ≈ 本轮 cacheable_tokens × 输入单价
+
+  目标值 target = sla_targets WHERE metric='cache_hit_rate' AND sla_level=该请求等级
+  抑制条件：预测 < target AND 不存在"更高等级 SLA 要求接管"的理由
+```
+
+- **切换代价入决策快照**：`decision_snapshot.excluded[]` 记 `{binding, reason:'cache_switch_loss', predicted, target, est_extra_cost_usd}` —— [AC-07](./14-acceptance-matrix.md) 要断言这三个数**真的被算出来了**，而不是只有一个布尔。
+- **`sla_targets` 须有一行 `metric='cache_hit_rate'`**：一期单级 SLA，默认目标由 `config_params` 给（建议 0.6，长会话场景实测后调整）。**这是配置项不是硬编码**。
+- **为何分母是 `cacheable_prompt_tokens` 而非 `prompt_tokens`**：可缓存的只有固定前缀（系统提示、工具定义、历史轮次），用户本轮新增内容不可缓存。用 `prompt_tokens` 作分母会随会话变长而系统性低估命中率，越是长会话越失真 —— 而长会话正是本项目的主场景。
+- **上游不回 `prompt_cached_tokens` 时**：该窗口不计入统计（`cacheable_tokens` 不累加），预测退回全局中位数；**不可**把缺失当成 0 命中，否则会误判所有该类渠道。
+
+**服务 FR/AC**：FR-054/055/056；AC-07。
+
+---
+
+### 6ter. 主动测活的请求模板与预算（FR-060~067，一期第二轨）
+
+> ⚠️ **一条必须正面处理的冲突**（开发视角审查第 27 轮 [P0]）：设计要求测活用「**合格真实业务请求**」而非固定 `hello`/`ping`，但 [FR-112](../PRD.md) 明令**不存请求正文** —— 于是**根本没有正文可以复用**。canary 轨没问题（用的是内存里正在处理的真实请求），但主动测活要在**无业务流量时段**发请求，此刻手上一条正文都没有。
+>
+> **结论**：主动测活**只能用运维预先配置的探测模板**，不能、也无法复用用户历史正文。这不违反「不用 hello/ping」的本意——本意是"别用一个空洞的短请求去代表真实负载"，模板同样可以贴近真实工作负载（多轮上下文、工具定义、典型长度）。
+>
+> **代价（明示）**：模板探测的保真度**低于**真实业务请求——它测不出"这个渠道对我实际 prompt 分布的表现"。故**优先级永远是 canary 优先**（[05 §2](./05-scheduling-and-operations.md)），主动测活只在无流量时兜底。
+
+```sql
+-- 探测模板：运维维护，按模型 × 协议配置
+CREATE TABLE probe_templates (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  model_id      BIGINT NOT NULL REFERENCES models(id),
+  protocol      TEXT NOT NULL CHECK (protocol IN ('chat_completions','responses')),
+  name          TEXT NOT NULL,                 -- 如 "typical-coding-turn"
+  body          JSONB NOT NULL,                -- 探测请求体（**运维编写，非用户正文**，不受 FR-112 约束）
+  expect_tools  BOOLEAN NOT NULL DEFAULT false,-- 是否期望触发 tool_calls（覆盖工具链路）
+  expect_min_output_tokens INTEGER,            -- 低于此值视为异常响应
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model_id, protocol, name)
+);
+
+-- 五维预算窗口（FR-063：全局/租户/用户/会话/资源，逐维独立计数）
+CREATE TABLE probe_budget_windows (
+  scope_kind    TEXT NOT NULL CHECK (scope_kind IN ('global','tenant','user','session','binding')),
+  scope_id      TEXT NOT NULL DEFAULT '*',     -- 哨兵，避免可空列进主键
+  window_start  TIMESTAMPTZ NOT NULL,          -- 日窗口，date_trunc('day')
+  probe_count   INTEGER NOT NULL DEFAULT 0,
+  probe_cost    nonneg_usd NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,    -- 供「测活失败 ≤ 错误预算 10%」判定
+  PRIMARY KEY (scope_kind, scope_id, window_start)
+);
+
+-- 每次测活的占用（与 canary_claims 同构：原子 claim + 一次性释放，防并发突破）
+CREATE TABLE probe_claims (
+  claim_id      UUID PRIMARY KEY,
+  binding_id    BIGINT NOT NULL REFERENCES bindings(id),
+  template_id   BIGINT NOT NULL REFERENCES probe_templates(id),
+  request_id    UUID NOT NULL,
+  attempt_id    UUID NOT NULL,
+  lease_owner   TEXT NOT NULL,
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at   TIMESTAMPTZ
+);
+CREATE INDEX idx_probe_active ON probe_claims(binding_id) WHERE state = 'active';
+```
+
+**占用与释放**：与 canary 完全同构（[§6bis](#6bis-canary-占用fr-121跨实例硬上限的执行载体)）——五维窗口的条件 UPDATE + `INSERT probe_claims` + `INSERT attempts` **单事务**；释放在 `finalize`/`closeout_attempt` 内按 `claim_id` 一次性跃迁。**并发上限同样必须落库执行**，内存快照只做预筛。
+
+**服务 FR/AC**：FR-060~067、FR-070~075；AC-09、AC-10。
 
 ---
 

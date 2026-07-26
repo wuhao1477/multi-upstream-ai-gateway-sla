@@ -500,7 +500,11 @@ CREATE TABLE attempt_usage (
   prompt_tokens     INTEGER,                  -- beta5 usageLogs.promptTokens
   completion_tokens INTEGER,                  -- completionTokens
   total_tokens      INTEGER,                  -- totalTokens
-  prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存部分，FR-054）
+  prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存命中部分，FR-054）
+  -- FR-056 预测需要**分母**：命中率 = prompt_cached_tokens / cacheable_prompt_tokens。
+  -- 只有 prompt_tokens 不够——系统提示、工具定义等固定前缀才可缓存，用户新增的那一轮不可缓存，
+  -- 拿 prompt_tokens 当分母会系统性低估命中率（开发视角审查第 27 轮 [P1]）。
+  cacheable_prompt_tokens INTEGER,            -- 本次请求中**理论可缓存**的输入 token 数
   total_cost        nonneg_usd,               -- beta5 usageLogs.totalCost
   cost_items        JSONB,                    -- beta5 usageLogs.costItems（明细，元数据）
   cost_source       TEXT NOT NULL DEFAULT 'upstream' CHECK (cost_source IN ('upstream','estimated')),
@@ -714,6 +718,54 @@ CREATE INDEX idx_health_state    ON resource_health(health_state);
 CREATE INDEX idx_health_cooldown ON resource_health(cooldown_until) WHERE health_state='cooling';
 
 CREATE INDEX idx_hwin_binding    ON health_metric_windows(binding_id, window_kind, window_start DESC);
+
+CREATE TABLE cache_hit_windows (
+  session_id      TEXT NOT NULL,
+  cache_scope_id  BIGINT NOT NULL REFERENCES cache_scopes(id),
+  window_start    TIMESTAMPTZ NOT NULL,        -- 小时窗口
+  cached_tokens   BIGINT NOT NULL DEFAULT 0,   -- Σ prompt_cached_tokens
+  cacheable_tokens BIGINT NOT NULL DEFAULT 0,  -- Σ cacheable_prompt_tokens（分母）
+  turn_count      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, cache_scope_id, window_start)
+);
+
+CREATE TABLE probe_templates (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  model_id      BIGINT NOT NULL REFERENCES models(id),
+  protocol      TEXT NOT NULL CHECK (protocol IN ('chat_completions','responses')),
+  name          TEXT NOT NULL,                 -- 如 "typical-coding-turn"
+  body          JSONB NOT NULL,                -- 探测请求体（**运维编写，非用户正文**，不受 FR-112 约束）
+  expect_tools  BOOLEAN NOT NULL DEFAULT false,-- 是否期望触发 tool_calls（覆盖工具链路）
+  expect_min_output_tokens INTEGER,            -- 低于此值视为异常响应
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model_id, protocol, name)
+);
+
+CREATE TABLE probe_budget_windows (
+  scope_kind    TEXT NOT NULL CHECK (scope_kind IN ('global','tenant','user','session','binding')),
+  scope_id      TEXT NOT NULL DEFAULT '*',     -- 哨兵，避免可空列进主键
+  window_start  TIMESTAMPTZ NOT NULL,          -- 日窗口，date_trunc('day')
+  probe_count   INTEGER NOT NULL DEFAULT 0,
+  probe_cost    nonneg_usd NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,    -- 供「测活失败 ≤ 错误预算 10%」判定
+  PRIMARY KEY (scope_kind, scope_id, window_start)
+);
+
+CREATE TABLE probe_claims (
+  claim_id      UUID PRIMARY KEY,
+  binding_id    BIGINT NOT NULL REFERENCES bindings(id),
+  template_id   BIGINT NOT NULL REFERENCES probe_templates(id),
+  request_id    UUID NOT NULL,
+  attempt_id    UUID NOT NULL,
+  lease_owner   TEXT NOT NULL,
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at   TIMESTAMPTZ
+);
+
+CREATE INDEX idx_probe_active ON probe_claims(binding_id) WHERE state = 'active';
 
 CREATE TABLE canary_claims (
   claim_id      UUID PRIMARY KEY,
