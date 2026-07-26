@@ -765,11 +765,29 @@ WITH claimed AS (
    WHERE gateway_client_id = :cid AND spend_date = :date
      AND reserved_usd + settled_usd + :est <= :quota      -- ⚠️ 判断与递增在**同一条** UPDATE 里
   RETURNING gateway_client_id
+),
+resv AS (
+  INSERT INTO client_reservations(request_id, gateway_client_id, spend_date, estimated_usd, state)
+  SELECT :rid, :cid, :date, :est, 'reserved' FROM claimed  -- claimed 为空则不插入
+  RETURNING request_id
+),
+-- ⚠️ 首个 attempt 与 stage 必须与预留**同事务**（第 20 轮 [high]）：
+--    分开写会出现「有 reservation、无 attempt、stage 仍 planned」的泄漏路径 ——
+--    恢复扫描按零 attempt 走 ⓪d 判 failed，却不会扣回那笔已经产生的预留。
+att AS (
+  INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
+                       price_version_id, multiplier_version_id, role,
+                       attempt_status, lease_owner, lease_heartbeat_at)
+  SELECT :attempt_id, :rid, :rcat, 1, :binding_id,
+         :price_version_id, :multiplier_version_id, :role,
+         'pending', :owner, now() FROM resv
+  RETURNING request_id
 )
-INSERT INTO client_reservations(request_id, gateway_client_id, spend_date, estimated_usd, state)
-SELECT :rid, :cid, :date, :est, 'reserved' FROM claimed;  -- claimed 为空则不插入
+UPDATE requests SET stage = 'dispatched'
+ WHERE id = :rid AND created_at = :rcat AND EXISTS (SELECT 1 FROM att);
 COMMIT;
--- 插入 0 行 → 整体回滚语义（reserved_usd 也未加）→ 429
+-- 三者同生同死：claimed 为空 → resv/att 均不插入、stage 不推进 → 429
+-- 预留失败（429）后**另起一个事务**写 `stage='reservation_rejected'`（本事务已回滚，不能在其中写）
 ```
 
 - `quota_daily_usd IS NULL`（不设日配额）时**跳过 D 的限额判断**，仍插入 reservation 行（记账与崩溃恢复需要它），`reserved_usd` 照常累加。

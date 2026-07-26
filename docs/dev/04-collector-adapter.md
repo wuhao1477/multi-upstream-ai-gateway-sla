@@ -235,8 +235,8 @@ type SubscriptionQuota struct {
 
 | 源码表 | 字段 | → `SubscriptionQuota` / FR |
 | --- | --- | --- |
-| `subscription_plans`（可售套餐） | `name`、`price`、`original_price`、`currency`、`validity_days`、`validity_unit`、`features`、`for_sale`、`group_id` | `FixedFeeUSD=price`、`DurationDays=validity_days×unit`、`PlanRef`；支持模型/倍率经 `group_id` 关联（FR-033） |
-| `user_subscriptions`（已购实例） | `user_id`、`group_id`、`starts_at`、`expires_at`、`status`(active/expired/suspended)、`daily/weekly/monthly_window_start`、`daily/weekly/monthly_usage_usd`、`assigned_by`、`notes` | `StartsAt/ExpiresAt/Status/UsedUSD/ResetAt`（FR-034） |
+| `subscription_plans`（可售套餐） | `name`、`price`、`original_price`、`currency`、`validity_days`、`validity_unit`、`features`、`for_sale`、`group_id` | `FixedFeeUSD=price`、`DurationDays=validity_days×unit`、`PlanRef`；支持模型/倍率经 `group_id` 关联（FR-033） | ⏭ **二期** |
+| `user_subscriptions`（已购实例） | `user_id`、`group_id`、`starts_at`、`expires_at`、`status`(active/expired/suspended)、`daily/weekly/monthly_window_start`、`daily/weekly/monthly_usage_usd`、`assigned_by`、`notes` | `StartsAt/ExpiresAt/Status/UsedUSD/ResetAt`（FR-034） | ⏭ **二期** |
 | `group`（额度与倍率载体） | `rate_multiplier`、`peak_*`、`subscription_type`、`daily/weekly/monthly_limit_usd`、`rpm_limit`、`platform`、`is_exclusive` | `LimitUSD`（周期上限）、`RateMultiplier`、高峰倍率、`WindowMode=fixed`（FR-033/036） |
 | `user_platform_quota`（平台额度视图） | `platform`、`daily/weekly/monthly_limit_usd` + `_usage_usd` + `_window_start` | 平台级周期额度 + 已用 + 重置（FR-034） |
 
@@ -284,9 +284,9 @@ type SubscriptionQuota struct {
 
 | Capability | NewAPI | Sub2API | ASXS |
 | --- | --- | --- | --- |
-| `account` | supported | **unsupported（一期）** | supported |
-| `keys` | supported | **unsupported（一期）** | unsupported |
-| `groups` | supported | **unsupported（一期）** | unsupported |
+| `account` | supported | supported | supported |
+| `keys` | supported | supported | unsupported |
+| `groups` | supported | supported | unsupported |
 | `subscription_quotas` | **unsupported** | **unsupported（一期）** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
 | `pricing` | supported（公开） | degraded | degraded |
 | 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 | JWT 7d，无 refresh，账密重登 |
@@ -306,8 +306,8 @@ type SubscriptionQuota struct {
 | `price_versions` | `FetchPricing` | 币种、计费单位、来源、查询/生效时间；**不可覆盖版本** | FR-012/013 |
 | `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`balance_state`、`conservative_floor`、`quota_status` | FR-020/024/026 |
 | `upstream_keys` + `collector_snapshots` | `FetchKeys` | key 级 `remain_quota/expired_time/model_limits` + 限流快照（payload） | FR-021/028/031 |
-| `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 |
-| `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 |
+| `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 | ⏭ **二期** |
+| `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 | ⏭ **二期** |
 | `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
 | `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
 

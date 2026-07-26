@@ -82,7 +82,8 @@
 > 提前插入后，这两条路径都有 `pending` 行，再由 `finalize_abort` 推到 `unavailable`／`failed` 终态。
 | **首次 ShouldCommit → 放行响应头与缓冲字节之前** | `attempt_status='committed'`、`response_committed_at`、`has_ttft_output`、`content_aware_ttft_ms` | **同步提交（先落库再放行字节）** |
 | **识别终帧 → 放行终帧字节之前** | 见下方 `finalize_upstream` 行（**同步直写表，非 outbox**） | **同步提交（先落库再放行字节）**，[03 §3.0](./03-upstream-layer.md) |
-| 每跳取消 / 中途状态 | cancel_reason、cancel_propagated | 异步，但经 **outbox** |
+| **每跳取消 / 每跳结束** | `attempt_status`(终态) + `cancel_reason` + `canceled_by_sla` | **同步直写 `attempts`** |
+| 每跳取消后的纯观测字段 | `cancel_propagated` | 异步，经 **outbox** |
 | **`finalize_upstream`**（终帧到达时） | **直写表**：`attempts.terminal_event` + `attempt_usage` + reservation 结算 + `attempt_status` 终态。**`requests.final_status` 保持 `pending`** | **同步**（不经 outbox），在放行终帧字节之前 |
 | **`finalize_delivery`**（socket write 返回后） | `downstream_write_completed_at`，再据它推 `requests.final_status` | 异步，经 **outbox**（不涉及计费） |
 | **`finalize_abort`**（取消／断流／内部超时／全候选不可用） | attempt 终态 + `cancel_reason` + **`requests.final_status`** + reservation 结算 + canary 释放 | **同步** |
