@@ -526,22 +526,27 @@ usage_ins AS (
   ON CONFLICT (attempt_id, request_created_at, upstream_seq) DO NOTHING
   RETURNING id
 ),
-rel AS (
-  -- ④ 释放本跳 canary 占用（按 attempt_id；计数用 GROUP BY，不可直接 -1）
-  UPDATE canary_claims c SET state='released', released_at=now()
-    FROM settled
-   WHERE c.attempt_id = :attempt_id AND c.state='active'
-  RETURNING c.binding_id
-),
-rel_agg AS (
-  SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id
-),
+-- ④ 释放本跳的**三套**占用（第 31 轮统一：此前只放 canary，capacity/probe 永不释放必然泄漏）
+rel_cap AS (
+  UPDATE capacity_claims c SET state='released', released_at=now()
+    FROM settled WHERE c.attempt_id = :attempt_id AND c.state='active' RETURNING c.binding_id),
+rel_can AS (
+  UPDATE canary_claims  c SET state='released', released_at=now()
+    FROM settled WHERE c.attempt_id = :attempt_id AND c.state='active' RETURNING c.binding_id),
+rel_prb AS (
+  UPDATE probe_claims   c SET state='released', released_at=now()
+    FROM settled WHERE c.attempt_id = :attempt_id AND c.state='active' RETURNING c.binding_id),
+cap_agg AS (SELECT binding_id, count(*) AS n FROM rel_cap GROUP BY binding_id),
+can_agg AS (SELECT binding_id, count(*) AS n FROM rel_can GROUP BY binding_id),
 dec AS (
   UPDATE resource_health h
-     SET canary_inflight = GREATEST(h.canary_inflight - g.n, 0)
-    FROM rel_agg g WHERE h.binding_id = g.binding_id
-  RETURNING 1
-)
+     SET concurrency_inflight = GREATEST(h.concurrency_inflight - COALESCE(c.n,0), 0),
+         canary_inflight      = GREATEST(h.canary_inflight      - COALESCE(k.n,0), 0)
+    FROM (SELECT binding_id FROM cap_agg UNION SELECT binding_id FROM can_agg) b
+    LEFT JOIN cap_agg c ON c.binding_id = b.binding_id
+    LEFT JOIN can_agg k ON k.binding_id = b.binding_id
+   WHERE h.binding_id = b.binding_id
+  RETURNING 1)
 -- ⑤ request 终态：**仅 finalize_abort / finalize_recovery 传非空 :request_terminal**；
 --    finalize_upstream 传 NULL，本句自然影响 0 行（那时交付结果未知，写了会让 K4 不可达）
 UPDATE requests r SET final_status = :request_terminal
@@ -782,16 +787,27 @@ usage_ins AS (                      -- 该跳的费用事实：有真实 usage �
   ON CONFLICT (attempt_id, request_created_at, upstream_seq) DO NOTHING
   RETURNING id
 ),
-rel AS (                            -- 立即释放**本跳**的 canary claim，不等租约过期
-  UPDATE canary_claims c SET state='released', released_at=now()
-    FROM att WHERE c.attempt_id = att.id AND c.state='active'
-  RETURNING c.binding_id
-),
-rel_agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id),
+-- ④ 释放本跳的**三套**占用（第 31 轮统一：此前只放 canary，capacity/probe 永不释放必然泄漏）——立即释放，不等租约过期
+rel_cap AS (
+  UPDATE capacity_claims c SET state='released', released_at=now()
+    FROM att WHERE c.attempt_id = att.id AND c.state='active' RETURNING c.binding_id),
+rel_can AS (
+  UPDATE canary_claims  c SET state='released', released_at=now()
+    FROM att WHERE c.attempt_id = att.id AND c.state='active' RETURNING c.binding_id),
+rel_prb AS (
+  UPDATE probe_claims   c SET state='released', released_at=now()
+    FROM att WHERE c.attempt_id = att.id AND c.state='active' RETURNING c.binding_id),
+cap_agg AS (SELECT binding_id, count(*) AS n FROM rel_cap GROUP BY binding_id),
+can_agg AS (SELECT binding_id, count(*) AS n FROM rel_can GROUP BY binding_id),
 dec AS (
-  UPDATE resource_health h SET canary_inflight = GREATEST(h.canary_inflight - g.n, 0)
-    FROM rel_agg g WHERE h.binding_id = g.binding_id RETURNING 1
-)
+  UPDATE resource_health h
+     SET concurrency_inflight = GREATEST(h.concurrency_inflight - COALESCE(c.n,0), 0),
+         canary_inflight      = GREATEST(h.canary_inflight      - COALESCE(k.n,0), 0)
+    FROM (SELECT binding_id FROM cap_agg UNION SELECT binding_id FROM can_agg) b
+    LEFT JOIN cap_agg c ON c.binding_id = b.binding_id
+    LEFT JOIN can_agg k ON k.binding_id = b.binding_id
+   WHERE h.binding_id = b.binding_id
+  RETURNING 1)
 SELECT count(*) AS closed FROM att;   -- 应用层断言 = 1，否则 ROLLBACK
 COMMIT;
 ```
@@ -1075,13 +1091,27 @@ resv AS (
   SELECT :rid, :cid, :date, :est, 'reserved' FROM claimed
   RETURNING request_id
 ),
+-- ⚠️ capacity 占用：**每个请求都要**（第 31 轮统一编排）。
+--    仅当该 binding 已登记容量时执行；未登记则应用层跳过本 CTE 并把 capacity_ok 填 1。
+cap AS (
+  INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
+                              lease_owner, lease_expires_at)
+  SELECT :cap_claim_id, :binding_id, :rid, :attempt_id, :cap_kind, :owner,
+         now() + interval '60 seconds'
+    FROM resv
+   WHERE EXISTS (SELECT 1 FROM resource_health h JOIN bindings bd ON bd.id = h.binding_id
+                  WHERE h.binding_id = :binding_id
+                    AND (bd.concurrency_limit IS NULL
+                         OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling)))
+  RETURNING request_id
+),
 att AS (
   INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
                        price_version_id, multiplier_version_id, role,
                        attempt_status, lease_owner, lease_heartbeat_at)
   SELECT :attempt_id, :rid, :rcat, 1, :binding_id,
          :price_version_id, :multiplier_version_id, :role,
-         'pending', :owner, now() FROM resv
+         'pending', :owner, now() FROM cap        -- ⚠️ 依赖 cap，容量拿不到就不落 attempt
   RETURNING request_id
 ),
 adv AS (
@@ -1094,7 +1124,8 @@ adv AS (
 --    （[05 §2.0](./05-scheduling-and-operations.md)：抢不到是常态，应回落到正常排序），
 --    与"配额不足"混为一谈会在 canary 并发竞争时**拒绝本可服务的请求**。
 SELECT (SELECT count(*) FROM claimed) AS quota_ok,
-       (SELECT count(*) FROM adv)     AS advanced;
+       (SELECT count(*) FROM cap)     AS capacity_ok,
+       (SELECT count(*) FROM adv)     AS advanced;   -- 普通路径 exp_ok 恒填 1
 -- ⚠️ **块内不写 COMMIT**（第 23 轮 [high]）：分支表要求 `canary_ok=0` 时 ROLLBACK，
 --    若 SQL 先 COMMIT，已递增的 `reserved_usd` 就被提交下去了。
 --    提交与否**一律由应用层依三值分支决定**。
@@ -1651,16 +1682,27 @@ agg AS (
   RETURNING 1
 ),
 -- ⓓ 释放该 request 名下**全部**残留 claim（按 binding 计数扣减）
-rel AS (
-  UPDATE canary_claims c SET state='released', released_at=now()
-    FROM req WHERE c.request_id = req.id AND c.state='active'
-  RETURNING c.binding_id
-),
-rel_agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id),
+-- ④ 释放本跳的**三套**占用（第 31 轮统一：此前只放 canary，capacity/probe 永不释放必然泄漏）——恢复时按 request 批量
+rel_cap AS (
+  UPDATE capacity_claims c SET state='released', released_at=now()
+    FROM req WHERE c.request_id = req.id AND c.state='active' RETURNING c.binding_id),
+rel_can AS (
+  UPDATE canary_claims  c SET state='released', released_at=now()
+    FROM req WHERE c.request_id = req.id AND c.state='active' RETURNING c.binding_id),
+rel_prb AS (
+  UPDATE probe_claims   c SET state='released', released_at=now()
+    FROM req WHERE c.request_id = req.id AND c.state='active' RETURNING c.binding_id),
+cap_agg AS (SELECT binding_id, count(*) AS n FROM rel_cap GROUP BY binding_id),
+can_agg AS (SELECT binding_id, count(*) AS n FROM rel_can GROUP BY binding_id),
 dec AS (
-  UPDATE resource_health h SET canary_inflight = GREATEST(h.canary_inflight - g.n, 0)
-    FROM rel_agg g WHERE h.binding_id = g.binding_id RETURNING 1
-),
+  UPDATE resource_health h
+     SET concurrency_inflight = GREATEST(h.concurrency_inflight - COALESCE(c.n,0), 0),
+         canary_inflight      = GREATEST(h.canary_inflight      - COALESCE(k.n,0), 0)
+    FROM (SELECT binding_id FROM cap_agg UNION SELECT binding_id FROM can_agg) b
+    LEFT JOIN cap_agg c ON c.binding_id = b.binding_id
+    LEFT JOIN can_agg k ON k.binding_id = b.binding_id
+   WHERE h.binding_id = b.binding_id
+  RETURNING 1),
 -- ⓔ 关单（本事务的目的）
 fin AS (
   UPDATE requests r SET final_status = :request_terminal

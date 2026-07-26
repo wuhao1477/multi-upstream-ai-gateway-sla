@@ -18,7 +18,12 @@
 | --- | --- | --- | --- |
 | 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用 `upstream_keys.secret`**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
 | 健康 | `/healthz` | 无 | LB 探针（[06](./06-deployment-and-operations.md)） |
-| **管理平面** | **`/admin/*`** | **独立管理令牌**（非业务 Key） | 本篇；配置读写、策略、审计查询 |
+| **管理平面** | **`/admin/*`**、`/metrics` | **两层都要**：① 网络边界（Caddy 不代理，仅容器网络/本机可达）② **独立管理令牌** `ADMIN_TOKEN`（env 注入，非业务 Key，与 `gateway_clients` 无关） | 本篇；配置读写、策略、审计查询 |
+
+> ⚠️ **鉴权口径冻结（第 31 轮：09 说"独立管理令牌"、06 说"网络边界是唯一边界"，两处打架，直接决定 handler 要不要验权、失败返回什么、env 要不要加）**：
+> **两层都要,不是二选一**。理由：网络边界防的是外部;管理令牌防的是**同一台机器上的其它进程或容器**（本项目 compose 里还跑着 collector 与 mock，它们不该能改配置）。
+> 一期不做的是**多用户/RBAC**（[15](./15-scope-and-preflight.md) 已确认仅本人使用），不是不做鉴权 —— 一把静态令牌成本几乎为零。
+> 缺失或错误的令牌一律 **401**；令牌**不得**出现在日志与 `/metrics`（[12 §6](./12-debuggability.md) 脱敏同标准）。
 
 - 管理平面挂在 sla-core 上，是**我方核心对运维暴露的面**；与上游站点自身的管理接口（采集器访问，[04](./04-collector-adapter.md)）互不相干。
 - 一期鉴权：单个**管理令牌**（环境变量注入，明文一期可接受，随 FR-113 一起在对外前升级）；管理平面**只在内网/本机可达**，不经公网。
@@ -147,12 +152,21 @@ type ParamMeta struct {
 | **采集** ||||
 | `collector_request_interval_ms` | 200 | | 站内请求间隔 |
 | `collector_price_interval_h` / `_balance_min` / `_keyquota_min` | 6 / 5 / 30 | | 三类采集周期 |
+| **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
+| `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
+| `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
+| `cancel_cost_safety_usd` | 0.05 | | 取消后仍可能被上游计费的保守预估（[02 §4](./02-data-model.md)） |
+| `tenant_probe_concurrency` | 1 | | 同租户在飞探测数上限（[05 §2.1bis](./05-scheduling-and-operations.md) 第六维闸） |
+| `debug.capture.enabled` | `false` | ✅ | L2 抓包总开关（[12 §3](./12-debuggability.md)）——**含正文，生产默认关** |
+| `debug.capture.max_requests` | 20 | | 抓包环形上限 |
+| `debug.capture.ttl_minutes` | 30 | | 抓包自动过期，防长期驻留正文 |
 | **开关** ||||
 | `data_policy_enabled` | `false` | ✅ | 数据许可硬过滤（[02 §2ter](./02-data-model.md)） |
 | `alias_passthrough` | `false` | ✅ | 未命中别名时按同名直连（**绕过别名策略**，仅迁移期用） |
 | `load_test_mode` | `false` | ✅ | 输出 `x-sla-*` 内部时延头（**生产不得开**，[14 §2ter](./14-acceptance-matrix.md)） |
 | `ledger.batch_commit.enabled` | `false` | | 组提交（[14 §2ter](./14-acceptance-matrix.md)） |
 | `ledger.batch_commit.max_size` / `.linger_ms` | 16 / 2 | | linger **不得超 2ms** |
+| `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`**（避免自己改自己）；此处仅登记其存在 |
 
 **CI 断言**：迁移种子必须为上表**每一个键**插入一行 `config_params`；`/admin/config` 拒绝写入表外的键（防拼写错误静默生效）。
 

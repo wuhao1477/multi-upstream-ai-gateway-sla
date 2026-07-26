@@ -252,35 +252,56 @@ RETURNING canary_used_in_window, canary_inflight;
 **五维预算的原子扣减**（与 canary claim 同构，缺一维都可能被并发突破）：
 
 ```sql
--- 五个 scope 各一行，**全部** UPDATE 成功才算拿到额度；任一为 0 行即整事务回滚
-WITH g AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
-            WHERE scope_kind='global'  AND scope_id='*'      AND window_start=:day
-              AND probe_cost + :est <= :global_cap    RETURNING 1),
-     t AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
-            WHERE scope_kind='tenant'  AND scope_id=:tenant  AND window_start=:day
-              AND probe_cost + :est <= :tenant_cap    RETURNING 1),
-     u AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
-            WHERE scope_kind='user'    AND scope_id=:client  AND window_start=:day
-              AND probe_cost + :est <= :user_cap      RETURNING 1),
-     b AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
-            WHERE scope_kind='binding' AND scope_id=:bid     AND window_start=:day
-              AND probe_count + 1 <= :binding_cap     RETURNING 1),
-     e AS (SELECT 1 WHERE (SELECT failure_count FROM probe_budget_windows
-                            WHERE scope_kind='global' AND scope_id='*' AND window_start=:day)
-                          < :error_budget_cap)          -- 第五维：错误预算
-SELECT (SELECT count(*) FROM g) AS g_ok, (SELECT count(*) FROM t) AS t_ok,
-       (SELECT count(*) FROM u) AS u_ok, (SELECT count(*) FROM b) AS b_ok,
-       (SELECT count(*) FROM e) AS e_ok;
--- ⚠️ **并发闸单列一条**（第 31 轮修正：五维预算只扣费用与次数，
---    「同租户同时 ≤1 个测活」这条并发限制此前没有任何执行载体）：
---    并发数取自 probe_claims 的 active 行，与 canary/capacity 同源。
-     c AS (SELECT 1 WHERE (SELECT count(*) FROM probe_claims
-                            WHERE state='active' AND lease_expires_at > now()
-                              AND request_id IN (SELECT id FROM requests
-                                                  WHERE tenant_id = :tenant
-                                                    AND created_at > now() - INTERVAL '1 hour'))
-                          < :tenant_probe_concurrency)   -- 默认 1
--- 应用层：**六值**全为 1 才 COMMIT 并发起探测；任一为 0 → ROLLBACK，本轮跳过该 binding
+-- probe dispatch：预算 + 并发闸 + claim + attempt，**单事务**
+-- ⚠️ 第 31 轮修正：上一版把并发闸的 CTE 写在了 SELECT **之后**，SQL 根本不可执行；
+--    且 probe_claims / attempts 的插入没有并进这个事务。整段重写如下。
+BEGIN;
+WITH
+  -- ① 五维预算：各自条件 UPDATE，任一为 0 行即整链失败
+  g AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+         WHERE scope_kind='global'  AND scope_id='*'     AND window_start=:day
+           AND probe_cost + :est <= :global_cap                      RETURNING 1),
+  t AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+         WHERE scope_kind='tenant'  AND scope_id=:tenant AND window_start=:day
+           AND probe_cost + :est <= :tenant_cap                      RETURNING 1),
+  u AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+         WHERE scope_kind='user'    AND scope_id=:client AND window_start=:day
+           AND probe_cost + :est <= :user_cap                        RETURNING 1),
+  b AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+         WHERE scope_kind='binding' AND scope_id=:bid    AND window_start=:day
+           AND probe_count + 1 <= :binding_cap                       RETURNING 1),
+  e AS (SELECT 1 WHERE (SELECT failure_count FROM probe_budget_windows
+                         WHERE scope_kind='global' AND scope_id='*' AND window_start=:day)
+                       < :error_budget_cap),
+  -- ② 并发闸（第六维）：同租户在飞的 probe 数，取自 probe_claims 的 active 行
+  c AS (SELECT 1 WHERE (SELECT count(*) FROM probe_claims pc
+                          JOIN requests r ON r.id = pc.request_id
+                         WHERE pc.state='active' AND pc.lease_expires_at > now()
+                           AND r.tenant_id = :tenant)
+                       < :tenant_probe_concurrency),
+  -- ③ 六者全过才插 claim
+  claim AS (
+    INSERT INTO probe_claims(claim_id, binding_id, template_id, request_id, attempt_id,
+                             lease_owner, lease_expires_at)
+    SELECT :claim_id, :bid, :template_id, :rid, :attempt_id, :owner, now() + interval '60 seconds'
+      FROM g, t, u, b, e, c                      -- 任一 CTE 为空 → 笛卡尔积为空 → 不插
+    RETURNING request_id),
+  -- ④ attempt 与 claim 同事务（意图先行）
+  att AS (
+    INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
+                         price_version_id, multiplier_version_id, role,
+                         attempt_status, lease_owner, lease_heartbeat_at)
+    SELECT :attempt_id, :rid, :rcat, 1, :bid, :pv, :mv, 'probe', 'pending', :owner, now()
+      FROM claim
+    RETURNING id)
+SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
+       (SELECT count(*) FROM u)   AS u_ok,  (SELECT count(*) FROM b) AS b_ok,
+       (SELECT count(*) FROM e)   AS e_ok,  (SELECT count(*) FROM c) AS c_ok,
+       (SELECT count(*) FROM att) AS dispatched;
+COMMIT;
+-- 应用层：`dispatched=1` 才提交并发起探测；**任何一值为 0 一律 ROLLBACK**
+--   （否则预算已扣、claim 却没插 —— 额度白白漏掉）
+--   g/t/u/b=0 → 该维预算耗尽；e=0 → 错误预算超限，暂停全部测活；c=0 → 该租户已有在飞探测
 ```
 
 > ⚠️ 各行**不存在**时视为未初始化 → 由本 worker 先 `INSERT ... ON CONFLICT DO NOTHING` 建当日行，再执行上面的 UPDATE。

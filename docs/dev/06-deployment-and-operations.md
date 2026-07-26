@@ -23,7 +23,7 @@
 
 | 服务 | 镜像/构建 | 端口 | 依赖 | 备注 |
 | --- | --- | --- | --- | --- |
-| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做管理面鉴权体系（[决议](#) 确认仅本人使用），**网络边界就是唯一的边界**，代理出去等于裸奔 |
+| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做的是**多用户/RBAC**（仅本人使用），但**仍有一把静态 `ADMIN_TOKEN`**（[09 §1](./09-admin-api.md) 冻结：网络边界 + 管理令牌**两层都要**）。**两层缺一不可**：网络边界防外部，令牌防同机其它进程（compose 里还跑着 collector 与 mock） |
 | `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres | 无本地状态；`/healthz` 就绪探针；**内含自研上游透传层**（[03](./03-upstream-layer.md)）。**必须 ≥2 实例**（FR-110） |
 | `postgres` | postgres:16 | 5432 | — | 单库；账本/台账/价格/健康（单一真相源） |
 | `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
