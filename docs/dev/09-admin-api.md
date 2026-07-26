@@ -126,6 +126,9 @@ type ParamMeta struct {
 | `probe_batch_size` | 3 | | 每轮最多探几个 binding |
 | `probe_global_cost_cap_ratio` | 0.02 | ✅ | 全局测活费用 ≤ 月费用 2% |
 | `probe_binding_daily_cap` | 20 | | 单 binding 日探测次数 |
+| `probe_tenant_cost_cap_ratio` | 0.02 | ✅ | 单租户测活 ≤ 该租户月费用 2%（`:tenant_cap` = 该租户月费用 × 本值） |
+| `probe_user_cost_cap_ratio` | 0.02 | ✅ | 单调用方同上（一期 user≡client，`:user_cap` 同源） |
+| `probe_session_cap` | 1 | | 每会话最多被测活次数（`:session_cap`） |
 | `probe_error_budget_ratio` | 0.10 | ✅ | 测活失败占错误预算上限 |
 | **容量保留（FR-029/032）** ||||
 | `capacity_ceiling_normal` | 0.65 | | 四类流量的并发天花板（[02 §6bis-2](./02-data-model.md)） |

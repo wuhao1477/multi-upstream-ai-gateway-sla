@@ -257,6 +257,13 @@ RETURNING canary_used_in_window, canary_inflight;
 -- ⚠️ 第 31 轮修正：上一版把并发闸的 CTE 写在了 SELECT **之后**，SQL 根本不可执行；
 --    且 probe_claims / attempts 的插入没有并进这个事务。整段重写如下。
 BEGIN;
+-- ⚠️ 先确保当日窗口行存在（第 38 轮：此前只有 UPDATE，行不存在时**恒 0 行**，
+--    等于每天第一次探测必然失败，且看不出原因）。五个 scope 一次建齐。
+INSERT INTO probe_budget_windows(scope_kind, scope_id, window_start)
+VALUES ('global','*',:day), ('tenant',:tenant,:day), ('user',:client,:day),
+       ('session',:session,:day), ('binding',:bid,:day)
+ON CONFLICT DO NOTHING;
+
 WITH
   -- ① 五维预算：各自条件 UPDATE，任一为 0 行即整链失败
   g AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
@@ -271,6 +278,12 @@ WITH
   b AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
          WHERE scope_kind='binding' AND scope_id=:bid    AND window_start=:day
            AND probe_count + 1 <= :binding_cap                       RETURNING 1),
+  -- session 维（FR-063 第五维：每会话最多被测活 1 次）。第 38 轮补：
+  -- §2.1 写了这条限制，但此前 SQL 里没有任何 session 维扣减。
+  -- 模板探测不属于用户会话时 :session 传固定哨兵 '*'，该维恒放行。
+  ss AS (UPDATE probe_budget_windows SET probe_count=probe_count+1
+          WHERE scope_kind='session' AND scope_id=:session AND window_start=:day
+            AND probe_count + 1 <= :session_cap                        RETURNING 1),
   e AS (SELECT 1 WHERE (SELECT failure_count FROM probe_budget_windows
                          WHERE scope_kind='global' AND scope_id='*' AND window_start=:day)
                        < :error_budget_cap),
@@ -290,7 +303,7 @@ WITH
                             OR h.rpm_window_start < date_trunc('minute', now())
                            THEN 1 ELSE h.rpm_used + 1 END,
            concurrency_inflight = h.concurrency_inflight + 1
-      FROM g, t, u, b, e, c, bindings bd
+      FROM g, t, u, ss, b, e, c, bindings bd
      WHERE h.binding_id = :bid AND bd.id = h.binding_id
        AND (bd.concurrency_limit IS NULL
             OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling_probe))
@@ -314,23 +327,25 @@ WITH
   -- ⑤ attempt 与 claim 同事务（意图先行）
   att AS (
     INSERT INTO attempts(id, request_id, request_created_at, attempt_no, binding_id,
-                         price_version_id, multiplier_version_id, role,
+                         single_hop_est_usd, price_version_id, multiplier_version_id, role,
                          attempt_status, lease_owner, lease_heartbeat_at)
-    SELECT :attempt_id, :rid, :rcat, 1, :bid, :pv, :mv, 'probe', 'pending', :owner, now()
+    SELECT :attempt_id, :rid, :rcat, 1, :bid, :est, :pv, :mv, 'probe', 'pending', :owner, now()
       FROM claim
     RETURNING id)
 SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
        (SELECT count(*) FROM u)   AS u_ok,  (SELECT count(*) FROM b) AS b_ok,
-       (SELECT count(*) FROM e)   AS e_ok,  (SELECT count(*) FROM c) AS c_ok,
+       (SELECT count(*) FROM ss)  AS ss_ok, (SELECT count(*) FROM e) AS e_ok,
+       (SELECT count(*) FROM c)   AS c_ok,
        (SELECT count(*) FROM cap) AS capacity_ok,
        (SELECT count(*) FROM att) AS dispatched;
 -- ⚠️ **块内不写 COMMIT**（第 33 轮修正：原版紧跟 COMMIT，而下一行又要求
 --    任一值为 0 时 ROLLBACK —— 先提交就回滚不了，预算已扣、claim 没插）。
 --    提交与否**一律由应用层依返回值决定**，与 dispatch 同纪律。
 -- 应用层：`dispatched=1` 才 COMMIT 并发起探测；**任何一值为 0 一律 ROLLBACK**
+--   ss_ok=0 → 该会话已被测活过（每会话上限 1 次）
 --   capacity_ok=0 → 该 binding 上游容量已满，本轮跳过它（不是错误）
 --   （否则预算已扣、claim 却没插 —— 额度白白漏掉）
---   g/t/u/b=0 → 该维预算耗尽；e=0 → 错误预算超限，暂停全部测活；c=0 → 该租户已有在飞探测
+--   g/t/u/ss/b=0 → 该维预算耗尽；e=0 → 错误预算超限，暂停全部测活；c=0 → 该租户已有在飞探测
 ```
 
 > ⚠️ 各行**不存在**时视为未初始化 → 由本 worker 先 `INSERT ... ON CONFLICT DO NOTHING` 建当日行，再执行上面的 UPDATE。
@@ -496,7 +511,7 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 BEGIN;
 -- ⚠️ `id` 无 DEFAULT（UUIDv7 由应用层生成），必须显式给；`severity` 是 TEXT，
 --    直接 GREATEST 会按字典序比较（'P1' < 'P2' < 'P3'），**恰好与严重度相反** ——
---    P1 最严重却会被 P3 覆盖。改用显式 rank 函数。
+--    P1 最严重却会被 P3 覆盖。改用内联 CASE（不引入自定义函数——全库没有 CREATE FUNCTION）。
 INSERT INTO alert_events (id, dedup_key, category, severity, state,
                           started_at, last_seen_at, occurrence_count, payload)
 VALUES (:alert_id /* UUIDv7 */, :key, :cat, :sev, 'open', now(), now(), 1, :payload)

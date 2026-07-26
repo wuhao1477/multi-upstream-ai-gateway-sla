@@ -977,7 +977,9 @@ WITH locked AS (
 --     原版把 gating 只写在注释（"仅当影响行数=1 才执行"），SQL 本体没表达 →
 --     同一 event_key 携带**不同** new_actual_usd 重试时，INSERT 被 DO NOTHING 吃掉，
 --     后面两个 UPDATE 却照跑，聚合与 reservation 被二次改写。
-WITH inserted AS (
+-- ⚠️ 第 38 轮：此处原是第二个 `WITH`（第 37 轮加 locked 时留下的），一条语句里
+--    两个 WITH 不可执行。已并入上面同一条 CTE 链。
+inserted AS (
   INSERT INTO reservation_adjustments(event_key, request_id, old_actual_usd, new_actual_usd, operator, reason)
   SELECT :event_key, :rid, l.actual_usd, :new_actual, :operator, :reason FROM locked l
   ON CONFLICT (event_key) DO NOTHING

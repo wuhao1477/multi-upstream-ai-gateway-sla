@@ -297,6 +297,23 @@ for f, body in ALLDEV.items():
         code_only = "\n".join(re.sub(r"--.*$", "", l) for l in blk.split("\n"))
         if re.search(r"SELECT[^;]*?\bINTO\s+:", code_only, re.S):
             col_bad.append(f"{os.path.basename(f)}:{ln0} 用了 PL/pgSQL 专有的 `SELECT … INTO :var`，普通连接跑不了")
+# 同类：一条语句里出现两个 WITH（第 38 轮：adjust 改造时留下的，SQL 直接不可执行）
+for f, body in ALLDEV.items():
+    for m in re.finditer(r"```sql\n(.*?)```", body, re.S):
+        blk, ln0 = m.group(1), body[:m.start()].count("\n") + 1
+        code = "\n".join(re.sub(r"--.*$", "", l) for l in blk.split("\n"))
+        for stmt in re.split(r";\s*\n", code):
+            if len(re.findall(r"^\s*WITH\b", stmt, re.M)) > 1:
+                col_bad.append(f"{os.path.basename(f)}:{ln0} 同一条语句里出现两个 WITH —— 不可执行")
+
+# 同类：INSERT INTO attempts 必须带 single_hop_est_usd（恢复结算依赖它，
+# 漏了不会报错，只会在崩溃恢复时把该跳费用算成 0）
+for f, body in ALLDEV.items():
+    for m in re.finditer(r"INSERT INTO attempts\s*\(([^)]*)\)", body, re.S):
+        if "single_hop_est_usd" not in m.group(1):
+            ln0 = body[:m.start()].count("\n") + 1
+            col_bad.append(f"{os.path.basename(f)}:{ln0} INSERT attempts 漏 single_hop_est_usd")
+
 report("事务 SQL 引用的列/函数存在于 DDL", sorted(set(col_bad)))
 
 
