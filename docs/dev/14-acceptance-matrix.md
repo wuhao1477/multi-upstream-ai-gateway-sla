@@ -87,7 +87,7 @@
 | AC-17 | 两渠道不同币种/计费单位 | FIXTURE | 统一美元口径比较（一期 1:1）；不同计费单位归一后可比 |
 | AC-19 | 余额耗尽 / Key 失效 / 错误预算快速消耗 | FIXTURE | 三场景各产生 P1 或 P2 `alert_events`；**P1 无延迟**（触发到落库 < 5s）；同因合并为一个持续事件 |
 | AC-28 | 三家族站点（NewAPI/Sub2API/闭源）接入采集 | **REAL** | 4 个实测站点：`Detect()` 正确归族；各自 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；不支持字段返回 `unsupported` 而非留空 |
-| AC-29 | 非标准方式返回"余额不足" | **REAL** | 构造/捕获该信号 → `balance_signals.balance_state = 'exhausted'`，停止向其发新付费请求 |
+| AC-29 | 非标准方式返回"余额不足" | **REAL** | 构造/捕获该信号 → `balance_signals.balance_state = 'exhausted'`，停止向其发新付费请求。<br>**FR-026 保守下限**（[05 §1.1bis](./05-scheduling-and-operations.md)）：①`last_confirmed_balance` 有值但 `known_consumption_since` 为空 → 该 binding **被排除**，`decision_snapshot.excluded[]` 原因为 `balance_floor_unavailable`；②`conservative_floor` 为负 → 按 `balance_floor_exhausted` 排除；③floor 可形成且 >0 → 通过，且后续判定**用 floor 而非标称余额** |
 
 ### M4 经营与验收
 

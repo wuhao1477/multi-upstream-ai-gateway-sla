@@ -24,11 +24,29 @@
 | 2 | 模型能力**与协议** | 按**请求协议**查 `channel_models(channel_id, model_id, protocol)`：只留 `enabled AND support='supported'` 且满足流式/工具需求的 binding。⚠️ 实测存在**非对称支持**（同模型 Responses 通、CC 返 503），不可假设两协议都可用 | FR-005/006、[02 §1.1](./02-data-model.md) |
 | 3 | 数据许可 | 按 [02 §2ter `data_policies`](./02-data-model.md) 四维求值（deny 一票否决 → 顺序无关）。**开关 `data_policy_enabled` 默认 `false` → 一期放行全部**；排除原因入 `decision_snapshot` | FR-093（P1，默认关）、AC-14 |
 | 4 | 健康/样本 | 排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底）；**`canary` 态仅在 §2.0 五条准入全满足时才作为本次主渠道**（这是它获得样本的唯一途径） | FR-043/046、参数11 |
-| 5 | 余额/配额 | 排除 `balance_state∈{exhausted,critical}`；**配额 `unknown` 默认保守排除**（FR-118，由自研 selector 实现） | FR-020~027、**FR-118** |
+| 5 | 余额/配额 | 见下方 §1.1bis 的四条判据（**以保守下限而非标称余额判定**） | FR-020~027、**FR-026**、**FR-118** |
 | 6 | 价格新鲜度 | 价格 `queried_at` 超 48h 的 binding 退出"低价优选"，仅作保底（参数10 方向：越旧越保守） | FR-014/015、参数10 |
 | 7 | 容量保留 | 扣除接管保留容量与金级保留容量后仍有余量（§4.3） | 参数12 |
 
 过滤后若候选为空 → 按 §3 全资源不可用处置。
+
+### 1.1bis 余额/配额过滤的四条判据（FR-026 落地）
+
+> ⚠️ **此前只写了"排除 exhausted/critical + 配额 unknown"**，而 [FR-026](../PRD.md) 还要求：*"使用最近可信余额扣除已知消耗形成保守下限；**无法形成安全下限时停止新付费请求**"*。`balance_signals.conservative_floor` 这一列早就建好了，**但 selector 从头到尾没有用过它**——FR-026 的后半句在整套设计里没有任何决策规则承载（本轮路径走查发现）。
+
+| # | 判据 | 处置 |
+| --- | --- | --- |
+| 1 | `balance_state ∈ {exhausted, critical}` | 排除 |
+| 2 | 配额 `unknown` | 排除（FR-118，保守默认） |
+| 3 | **`conservative_floor` 可形成且 > 0** | 通过；**用 floor 而非 `last_confirmed_balance` 参与后续判定**（标称余额可能早已被消耗掉） |
+| 4 | **`conservative_floor` 无法形成，或 ≤ 0** | **视同 `exhausted` 排除，停止向该资源发新付费请求**（FR-026 后半句） |
+
+**"无法形成"的判定**（`balance_signals`，[02 §7](./02-data-model.md)）：`last_confirmed_balance IS NULL`，**或** `known_consumption_since IS NULL`（消耗不可知则下限无从算起），**或**该快照 `collector_snapshots_v.is_stale = true` 且期间发生过计费（陈旧确认点 + 未知消耗 = 下限不可信）。
+
+- **`conservative_floor ≤ 0` 为何直接排除**：该列**可为负**（[02](./02-data-model.md)），负值意味着"按已知消耗推算，余额可能已经用尽"——继续发付费请求就是在赌，与 FR-026 的字面要求相反。
+- **排除原因入快照**：`decision_snapshot.excluded[]` 记 `balance_floor_unavailable` / `balance_floor_exhausted`，与 `data_policy_denied` 同格式，供排障区分"真的没钱"与"算不出有没有钱"。
+- **不影响免费/订阅资源**：FR-026 限定"新**付费**请求"；无计费的 binding 不适用判据 4。⏭ 订阅资源一期不在候选（[15 §1.2](./15-scope-and-preflight.md)）。
+- **验收**：[AC-29](./14-acceptance-matrix.md) 须补——构造 `last_confirmed_balance` 存在但 `known_consumption_since` 为空的 binding，断言它**被排除**且排除原因为 `balance_floor_unavailable`；再构造 floor 为负的 binding，断言按 `balance_floor_exhausted` 排除。
 
 ### 1.2 排序键（冲突优先序可配置）
 
