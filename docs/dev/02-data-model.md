@@ -565,7 +565,7 @@ COMMIT;
 | `cancel_reason` | request 终态 | 计入 SLA 失败？ |
 | --- | --- | --- |
 | `client_disconnect` | **`canceled`**（attempt 记 **`canceled_by_client`**） | **否**——用户主动取消，PRD 术语明确不计入 |
-| `sla_takeover` | 不终结（本跳取消，请求继续走下一跳） | — |
+| `sla_takeover` | 不终结（本跳取消，请求继续走下一跳）→ 走下方 **`closeout_attempt`** | — |
 | `upstream_disconnect` | `failed`（`stream_broken=true` 时计流中断） | 是 |
 | `internal_timeout` | `failed` | 是 |
 | `upstream_error` | `failed` | 是 |
@@ -625,6 +625,62 @@ COMMIT;
 - **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（[stage 推进协议](#stage-的推进协议)）。
 - **不追加预留**：预留在首跳已按 RoutePlan **全部跳**求和（见上方上界算法），接管跳不再动聚合。
 - **`attempt_no` 由 `UNIQUE (request_id, request_created_at, attempt_no)` 保证不重复**——并发重复插入会撞唯一约束而失败，正是期望行为。
+
+**每跳收尾事务 `closeout_attempt`（`sla_takeover` 专用）**（第 24 轮 [high]）：
+
+> ⚠️ `sla_takeover` 是唯一"结束本跳但不终结 request"的原因，此前**没有任何事务承载它**——hop1 被接管后，它的终态、费用事实、canary claim 释放全都无人负责：
+> - hop1 的费用（上游已发出、可能已计费）在 hop2 关单时被漏掉 → `settled_usd` 系统性偏低、日配额可持续被突破；
+> - hop1 若是 canary，其 claim 只能等 60s 租约过期回收，而不是随该跳结束立即释放 → 并发额度被白占。
+
+```sql
+-- closeout_attempt：只收尾本跳，**不碰 reservation、不写 requests.final_status**
+BEGIN;
+WITH att AS (
+  UPDATE attempts a
+     SET attempt_status = 'canceled_by_sla', cancel_reason = 'sla_takeover',
+         canceled_by_sla = true, cancel_propagated = :propagated, ended_at = now()
+   WHERE a.id = :attempt_id AND a.request_id = :rid
+     AND a.request_created_at = :rcat
+     AND a.attempt_status IN ('pending','committed')
+  RETURNING a.id, a.request_created_at
+),
+usage_ins AS (                      -- 该跳的费用事实：有真实 usage 用真实，否则按取消口径估算
+  INSERT INTO attempt_usage (id, attempt_id, request_created_at, upstream_seq,
+                             prompt_tokens, completion_tokens, total_tokens,
+                             prompt_cached_tokens, total_cost, estimated_cost,
+                             cost_variance, cost_source)
+  SELECT :usage_id, att.id, att.request_created_at, 1,
+         :prompt, :completion, :total, :cached, :cost, :est, :cost - :est, :cost_source
+    FROM att
+  ON CONFLICT (attempt_id, request_created_at, upstream_seq) DO NOTHING
+  RETURNING id
+),
+rel AS (                            -- 立即释放**本跳**的 canary claim，不等租约过期
+  UPDATE canary_claims c SET state='released', released_at=now()
+    FROM att WHERE c.attempt_id = att.id AND c.state='active'
+  RETURNING c.binding_id
+),
+rel_agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id),
+dec AS (
+  UPDATE resource_health h SET canary_inflight = GREATEST(h.canary_inflight - g.n, 0)
+    FROM rel_agg g WHERE h.binding_id = g.binding_id RETURNING 1
+)
+SELECT count(*) AS closed FROM att;   -- 应用层断言 = 1，否则 ROLLBACK
+COMMIT;
+```
+
+**`actual_usd(request) = Σ 该 request 全部 attempt` 是所有结算入口的统一规则**（不只恢复路径）：
+
+| 入口 | 结算金额 |
+| --- | --- |
+| `finalize_upstream`（末跳终帧） | **Σ 全部 attempt**——含此前被 `closeout_attempt` 收尾的接管跳 |
+| `finalize_abort` | 同上 |
+| `finalize_recovery` | 同上（见 §4.2bis 汇总规则） |
+| `closeout_attempt` | **不结算 reservation**，只写本跳费用行 |
+
+> ⚠️ 此前"Σ 全部 attempt"只写在恢复段，正常路径写的是 `actual=真实 usage`。代入 [AC-06](./14-acceptance-matrix.md)：hop1 已发出后被接管取消、hop2 成功 —— hop2 的 `finalize_upstream` 会释放**整笔 RoutePlan 预留**，`actual_usd` 却只取 hop2 的 usage，**hop1 的钱凭空消失**。
+>
+> **验收**：[AC-06](./14-acceptance-matrix.md)/[AC-08](./14-acceptance-matrix.md) 须断言——正常接管成功后，`actual_usd` 包含 hop1 实际成本、hop1 的 canary claim 已 `released` 且 `canary_inflight` 已扣减（**不依赖租约过期**）。
 
 **关单必须两阶段：`finalize_upstream` → `finalize_delivery`**（第 12 轮 [critical]）：
 

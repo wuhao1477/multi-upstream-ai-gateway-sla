@@ -165,7 +165,7 @@ RETURNING canary_used_in_window, canary_inflight;
    └─ 连续失败 ≥ canary_failure_threshold(默认 3) → cooling（退避照 §3.1 翻倍），冷却期满重回 canary
 ```
 
-- canary attempt 落 `attempts.role='canary'`，**正常计费、正常计入成本**；其失败**计入该 binding 健康统计**，但因别名限定为铜级，**不消耗金/银错误预算**。
+- canary attempt 落 `attempts.role='canary'`，**正常计费、正常计入成本**；若该跳被 SLA 接管取消，其 claim 由 [`closeout_attempt`](./02-data-model.md) **在该跳结束时立即释放**，不等租约过期；其失败**计入该 binding 健康统计**，但因别名限定为铜级，**不消耗金/银错误预算**。
 - 运维可 `POST /admin/bindings/{id}/canary` 手工把某 binding 置回 canary 并重置窗口计数（[09](./09-admin-api.md)）。
 
 > **仍存在的代价（明示）**：长期零业务流量时（例如夜间无请求），canary 也拿不到样本——因为它不额外造流量。此时渠道停在 `canary` 且 `low_confidence=true`，**不会**被选作主渠道，行为是安全的（保守），只是验证被推迟。若需要"无业务流量时也保持验证"，那正是二期主动测活要解决的问题。
