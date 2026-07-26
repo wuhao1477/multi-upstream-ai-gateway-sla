@@ -5,7 +5,7 @@
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
 | 日期 | 2026-07-23 |
 | 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
-| 输入 | [PRD v1.3](../PRD.md)（FR-001~119、AC-01~32、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设 + beta5 schema 适配表）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
+| 输入 | [PRD v1.4](../PRD.md)（FR-001~119、AC-01~32、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设 + beta5 schema 适配表）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
 | 覆盖范围 | 本篇定义**自研 SLA 核心的 PG 库**结构。转向自研后（[11](./11-decision-full-selfbuilt.md)），本库是**账本唯一真相源**，无外部网关账本需对账 |
 
 ---
@@ -1098,8 +1098,9 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 -- ⚠️ **块内不写 COMMIT**（第 23 轮 [high]）：分支表要求 `canary_ok=0` 时 ROLLBACK，
 --    若 SQL 先 COMMIT，已递增的 `reserved_usd` 就被提交下去了。
 --    提交与否**一律由应用层依三值分支决定**。
--- ⚠️ 上式**是普通路径**：普通请求根本没有 `canary_claimed` 这个 CTE，
---    无条件读取它会直接语法错。canary 路径见下方单独一段。
+-- ⚠️ 上式是**普通路径**：普通请求没有 canary/probe 的 CTE，无条件读取会语法错。
+--    ⚠️ 但本式**尚未包含 capacity 占用** —— 完整顺序见上方「三套 claim 的统一编排」，
+--    实现时以那一节为准：req→quota→resv→**cap**→exp→att→adv。
 ```
 
 **应用层据三值分支**：
@@ -1111,7 +1112,7 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 | 1 | 1 | 1 | 提交，发起上游调用 |
 | 其他组合 | — | — | 视为异常 → ROLLBACK + P2 告警（不应出现） |
 
-**canary 路径的 dispatch（单独一段可执行 SQL，与上面互斥选用）**：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
+**canary 路径的 dispatch**（⚠️ 第 31 轮澄清：本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回三值：
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
@@ -2035,7 +2036,7 @@ CREATE TABLE resource_health (
   observing_success_count INTEGER NOT NULL DEFAULT 0,
 
   -- 容量占用（FR-029/032，[05 §4.3](./05-scheduling-and-operations.md)）：
-  -- 仅对**已登记容量**的 binding 维护；未登记者这三列恒为 0 且不参与判定。
+  -- 仅对**已登记容量**的 binding 维护；未登记者**整段跳过占用事务**，这三列恒为 0（见 §6bis-2）。
   rpm_window_start    TIMESTAMPTZ,              -- 分钟窗口起点
   rpm_used            INTEGER NOT NULL DEFAULT 0,
   concurrency_inflight INTEGER NOT NULL DEFAULT 0,
@@ -2226,7 +2227,9 @@ RETURNING claim_id;
 - **返回 0 行 = 该 binding 容量已满** → 该候选**排除出本次 RoutePlan**，selector 取下一个；全部候选都满 → 按 [§3.2](./05-scheduling-and-operations.md) 全资源不可用处置（按承诺与否决定排队时长）。**不是 429** —— 429 是调用方配额，这里是上游容量。
 - **释放**：在 `finalize`/`closeout_attempt` 内按 `claim_id` 一次性跃迁，成功才 `concurrency_inflight -= 1`（`rpm_used` **不回退**，它是窗口计数）。
 - **租约续期与回收**：与 canary claim 同规则 —— 随 attempt 心跳续租；后台只回收 `state='active' AND lease_expires_at < now()` 的。
-- **未登记容量的 binding**：`concurrency_limit`/`rpm_limit` 皆为 NULL 时上面的条件恒真，等价于放行；**但仍插 claim 行**，以便运维在 `/admin/health` 看到真实并发（[05 §4.3](./05-scheduling-and-operations.md) 要求界面提示"保留未生效"）。
+- **未登记容量的 binding：整段跳过本事务**（第 31 轮修正——此前本条写"条件恒真、但仍插 claim 行"，与 [05 §4.3](./05-scheduling-and-operations.md) 的"未登记即不走 DB 原子路径"直接矛盾；而后者才是对的：**为了保住 P99≤50ms，未登记渠道不该在请求路径上多一次同步写**）。
+  由应用层判 `concurrency_limit IS NULL AND rpm_limit IS NULL` 则**不执行本 SQL**，`capacity_ok` 直接填 1。
+  代价：`/admin/health` 看不到这类渠道的实时并发 —— 这正是 [05 §4.3](./05-scheduling-and-operations.md) 要求界面显式提示"**未登记容量 → 保留未生效**"的原因。
 
 **服务 FR/AC**：FR-029/032；AC-18。
 

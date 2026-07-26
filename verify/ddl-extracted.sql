@@ -713,7 +713,7 @@ CREATE TABLE resource_health (
   observing_success_count INTEGER NOT NULL DEFAULT 0,
 
   -- 容量占用（FR-029/032，[05 §4.3](./05-scheduling-and-operations.md)）：
-  -- 仅对**已登记容量**的 binding 维护；未登记者这三列恒为 0 且不参与判定。
+  -- 仅对**已登记容量**的 binding 维护；未登记者**整段跳过占用事务**，这三列恒为 0（见 §6bis-2）。
   rpm_window_start    TIMESTAMPTZ,              -- 分钟窗口起点
   rpm_used            INTEGER NOT NULL DEFAULT 0,
   concurrency_inflight INTEGER NOT NULL DEFAULT 0,

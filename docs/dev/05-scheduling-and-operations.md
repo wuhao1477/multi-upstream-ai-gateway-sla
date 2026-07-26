@@ -5,7 +5,7 @@
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 定位 | 把 `selector`（候选选择与排序）与 `steward`（测活/冷却/订阅倾斜/告警/错误预算）落成可实现规则。数值全部来自 [DECISIONS](../DECISIONS.md) 参数确认，**作默认值 + 可配置**（存 [02 §2 `config_params`](./02-data-model.md)，关键项二次确认，FR-115） |
-| 输入 | [PRD v1.3](../PRD.md)、[DECISIONS](../DECISIONS.md)（16 参数）、[02 数据模型](./02-data-model.md)、[03 上游对接层](./03-upstream-layer.md)、[01 架构](./01-architecture.md)（selector/steward 模块） |
+| 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)（16 参数）、[02 数据模型](./02-data-model.md)、[03 上游对接层](./03-upstream-layer.md)、[01 架构](./01-architecture.md)（selector/steward 模块） |
 | 不含 | 流式执行/首字判定/取消传播（属 `executor`，见 03/01）；采集（见 04） |
 
 > 一条总原则贯穿全篇：**决策只读内存快照、P99≤50ms（FR-110）**。所有排序键、预算、门槛均来自后台刷新的快照（价格/健康/余额/订阅），同步路径不查库、不发网络请求。
@@ -225,7 +225,7 @@ RETURNING canary_used_in_window, canary_inflight;
 | 层 | 上限 | 落地 |
 | --- | --- | --- |
 | 全局 | 测活费用 ≤ 月度总请求费用 **2%**，且日封顶 = 月预算 ÷ 20 | `attempt_usage JOIN attempts JOIN requests` 后按 **`requests.probe_kind='probe'`** 过滤滚动累计（⚠️ `attempt_usage` **没有** `probe_kind` 列；attempt 层的对应字段是 `attempts.role='probe'`） |
-| 租户 | 单租户测活 ≤ 该租户月费用 **2%**；同租户同时 ≤ **1** 个测活请求 | 租户级预算计数器 + 并发闸 |
+| 租户 | 单租户测活 ≤ 该租户月费用 **2%**；同租户同时 ≤ **1** 个测活请求 | 费用走 `probe_budget_windows`；**并发闸走 `probe_claims` 的 active 计数**（见 §2.1bis 补充语句）—— 第 31 轮修正：此前只说"并发闸"而预算 SQL 只扣费用/次数，没有任何并发判定载体 |
 | 会话 | 每会话最多被测活 **1** 次；会话第一轮、金级会话默认不测活 | `session_prefix_ledger` / 会话级标记 |
 | 错误预算 | 测活导致的失败 ≤ 该等级错误预算 **10%** | §5 错误预算扣减，超限停测活。⚠️ **仅 canary 轨扣用户错误预算**（它用的是真实用户请求）；主动测活轨的失败**不进用户 SLA 分母**，只扣 `probe_budget_windows.failure_count`（[PRD AC-09](../PRD.md)） |
 
@@ -271,7 +271,16 @@ WITH g AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost
 SELECT (SELECT count(*) FROM g) AS g_ok, (SELECT count(*) FROM t) AS t_ok,
        (SELECT count(*) FROM u) AS u_ok, (SELECT count(*) FROM b) AS b_ok,
        (SELECT count(*) FROM e) AS e_ok;
--- 应用层：五值全为 1 才 COMMIT 并发起探测；任一为 0 → ROLLBACK，本轮跳过该 binding
+-- ⚠️ **并发闸单列一条**（第 31 轮修正：五维预算只扣费用与次数，
+--    「同租户同时 ≤1 个测活」这条并发限制此前没有任何执行载体）：
+--    并发数取自 probe_claims 的 active 行，与 canary/capacity 同源。
+     c AS (SELECT 1 WHERE (SELECT count(*) FROM probe_claims
+                            WHERE state='active' AND lease_expires_at > now()
+                              AND request_id IN (SELECT id FROM requests
+                                                  WHERE tenant_id = :tenant
+                                                    AND created_at > now() - INTERVAL '1 hour'))
+                          < :tenant_probe_concurrency)   -- 默认 1
+-- 应用层：**六值**全为 1 才 COMMIT 并发起探测；任一为 0 → ROLLBACK，本轮跳过该 binding
 ```
 
 > ⚠️ 各行**不存在**时视为未初始化 → 由本 worker 先 `INSERT ... ON CONFLICT DO NOTHING` 建当日行，再执行上面的 UPDATE。
