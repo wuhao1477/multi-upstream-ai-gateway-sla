@@ -41,7 +41,9 @@ type Client interface {
     // 实测发现：同一站点部分模型仅支持 Responses，CC 返回 503（13 §3）。
     Probe(ctx context.Context, b Binding, model string) (ProtocolSupport, error)
 
-    // Models 透传上游模型目录（Codex 靠 GET /v1/models 刷新，13 §1.3）。
+    // Models 读取上游真实模型目录。⚠️ **不对外暴露**（第 31 轮：/v1/models 已改为
+    // 由网关按别名表合成，见 §4 第 4 条）——本方法降级为两个内部用途：
+    //   ① 协议能力探测的输入；② 管理面比对"上游真实目录 vs 我方登记"是否漂移。
     Models(ctx context.Context, b Binding) ([]byte, http.Header, error)
 }
 

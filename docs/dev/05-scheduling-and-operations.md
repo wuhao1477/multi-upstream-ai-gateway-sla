@@ -508,7 +508,7 @@ COMMIT;
 | 4 | **余额下限重算** | 每 5min | advisory lock #2 | 跳过；`conservative_floor` 保持旧值并因陈旧而更保守 | §5bis.2 |
 | 5 | **主动测活调度** | 每 60s | advisory lock #3 | 跳过 | §2.1bis |
 | 6 | **采集器** | 价格 6h／余额 5min／Key 额度 30min | advisory lock #4~6（按类分） | 该站进退避，其它站不受影响 | [04](./04-collector-adapter.md) |
-| 7 | **canary/probe claim 回收** | 每 60s | advisory lock #7 | 跳过 | [02 §6bis](./02-data-model.md) |
+| 7 | **capacity/canary/probe claim 回收**（**三张表同一任务**） | 每 60s | advisory lock #7 | 跳过 | [02 §6bis](./02-data-model.md)、[§6bis-2](./02-data-model.md) |
 | 8 | **分区维护**（建下月分区、清过期） | 每天 03:00 | advisory lock #8 | P2 告警 | [02 §9.1](./02-data-model.md) |
 
 > **快照刷新不在此表**：selector 读的内存快照由各任务写库后**主动推送**给本实例（或按 `config_params` 的 `snapshot_refresh_ms` 拉取），属实例内行为，不需要跨实例协调。
@@ -573,7 +573,8 @@ UPDATE resource_health h
 conservative_floor(account_group) =
       last_confirmed_balance                       -- 采集器最近一次确认值
     − known_consumption_since                      -- 见下
-    − safety_reserve                               -- config_params，默认 max(余额×2%, $1)
+    − safety_reserve                               -- = max(余额 × `balance_safety_reserve_ratio`(0.02),
+                                                   --        `balance_safety_reserve_min_usd`($1)) —— 两键见 [09 §4bis](./09-admin-api.md)
 
 known_consumption_since = Σ attempt_usage.total_cost
                           WHERE attempt.binding 属该账号组

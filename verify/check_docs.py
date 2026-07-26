@@ -160,6 +160,29 @@ else:
     print("✅ FR/AC 分期标注互斥")
 
 
+# ── 5bis config_params 键清单规范 ───────────────────────
+# 迁移种子与 /admin/config 白名单都按 09 §4bis 逐行生成，
+# 合并行（`a / b`）或缩写键（`.x`）会直接漏键 → 运行时静默用默认零值。
+cfg = open("docs/dev/09-admin-api.md").read()
+seg = cfg[cfg.index("## 4bis."): cfg.index("## 5.")]
+keybad = []
+for line in seg.split("\n"):
+    m = re.match(r"^\| `([^`]+)` \|", line)
+    if not m:
+        continue
+    k = m.group(1)
+    if "/" in k or " " in k:
+        keybad.append(f"合并行: {k}")
+    elif "." in k:
+        keybad.append(f"缩写键(含点): {k}")
+    elif not re.fullmatch(r"[a-z0-9_]+", k):
+        keybad.append(f"非法字符: {k}")
+report("config_params 键清单规范", keybad)
+KEYS = {re.match(r"^\| `([^`]+)` \|", l).group(1)
+        for l in seg.split("\n") if re.match(r"^\| `([^`]+)` \|", l)}
+print(f"   （清单共 {len(KEYS)} 个键）")
+
+
 # ── 6 AC 计数自洽 ───────────────────────────────────────
 m14 = open("docs/dev/14-acceptance-matrix.md").read()
 cnt = []

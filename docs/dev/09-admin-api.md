@@ -103,7 +103,7 @@ type ParamMeta struct {
 ## 4bis. `config_params` 全量键清单（**权威来源**，第 31 轮自查）
 
 > 此前配置键散落在 01/02/03/05/06/14 十余处，**没有一份清单** —— 开发不知道迁移种子该初始化哪些、`/admin/config` 该校验哪些、漏掉一个只会在运行时以默认零值的形式静默出错。
-> **本表是唯一权威来源**：新增键必须先进本表。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
+> **本表是唯一权威来源**：新增键必须先进本表。**一行一个完整 `param_key`，不得用 `a / b` 合并行或 `.x` 缩写**——迁移种子与 `/admin/config` 白名单都按本表逐行生成，合并行会漏键。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
 
 | 键 | 默认 | 关键项 | 用途 / 定义处 |
 | --- | --- | --- | --- |
@@ -132,11 +132,16 @@ type ParamMeta struct {
 | `capacity_ceiling_committed` | 0.85 | | |
 | `capacity_ceiling_takeover` | 0.95 | | |
 | `capacity_ceiling_probe` | 0.70 | | |
+| `balance_safety_reserve_ratio` | 0.02 | | 余额安全储备比例（[05 §5bis.2](./05-scheduling-and-operations.md) 的 safety_reserve） |
+| `balance_safety_reserve_min_usd` | 1.0 | | 安全储备下限，实际取 max(余额×比例, 本值) |
+| `retention_months` | 7 | ✅ | 账本分区保留窗口（≥180 天，FR-112） |
 | **健康与冷却（参数 11）** ||||
 | `health_min_samples_1h` | 20 | | 样本门槛 |
 | `health_min_samples_24h` | 100 | | |
-| `cooldown_base_sec` / `cooldown_max_sec` | 300 / 14400 | | 退避起点与上限 |
-| `observing_min_minutes` / `observing_min_success` | 30 / 50 | | 观察期转可用 |
+| `cooldown_base_sec` | 300 | | 冷却退避起点 |
+| `cooldown_max_sec` | 14400 | | 冷却退避上限 |
+| `observing_min_minutes` | 30 | | 观察期时长（先到为准） |
+| `observing_min_success` | 50 | | 观察期连续成功数 |
 | **配额与计费** ||||
 | `billing_variance_tolerance` | 0.05 | ✅ | 计费偏差容差（[05 §4.4](./05-scheduling-and-operations.md)） |
 | `billing_min_base_usd` | 0.01 | | 低于此改用绝对差额判定（除零保护） |
@@ -151,21 +156,24 @@ type ParamMeta struct {
 | `stale_alert_hours` | 12 | | 数据过期告警 |
 | **采集** ||||
 | `collector_request_interval_ms` | 200 | | 站内请求间隔 |
-| `collector_price_interval_h` / `_balance_min` / `_keyquota_min` | 6 / 5 / 30 | | 三类采集周期 |
+| `collector_price_interval_h` | 6 | | 价格采集周期（小时） |
+| `collector_balance_interval_min` | 5 | | 余额采集周期（分钟） |
+| `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
 | **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
 | `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
 | `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
 | `cancel_cost_safety_usd` | 0.05 | | 取消后仍可能被上游计费的保守预估（[02 §4](./02-data-model.md)） |
 | `tenant_probe_concurrency` | 1 | | 同租户在飞探测数上限（[05 §2.1bis](./05-scheduling-and-operations.md) 第六维闸） |
-| `debug.capture.enabled` | `false` | ✅ | L2 抓包总开关（[12 §3](./12-debuggability.md)）——**含正文，生产默认关** |
-| `debug.capture.max_requests` | 20 | | 抓包环形上限 |
-| `debug.capture.ttl_minutes` | 30 | | 抓包自动过期，防长期驻留正文 |
+| `debug_capture_enabled` | `false` | ✅ | L2 抓包总开关（[12 §3](./12-debuggability.md)）——**含正文，生产默认关** |
+| `debug_capture_max_requests` | 20 | | 抓包环形上限 |
+| `debug_capture_ttl_minutes` | 30 | | 抓包自动过期，防长期驻留正文 |
 | **开关** ||||
 | `data_policy_enabled` | `false` | ✅ | 数据许可硬过滤（[02 §2ter](./02-data-model.md)） |
 | `alias_passthrough` | `false` | ✅ | 未命中别名时按同名直连（**绕过别名策略**，仅迁移期用） |
 | `load_test_mode` | `false` | ✅ | 输出 `x-sla-*` 内部时延头（**生产不得开**，[14 §2ter](./14-acceptance-matrix.md)） |
-| `ledger.batch_commit.enabled` | `false` | | 组提交（[14 §2ter](./14-acceptance-matrix.md)） |
-| `ledger.batch_commit.max_size` / `.linger_ms` | 16 / 2 | | linger **不得超 2ms** |
+| `ledger_batch_commit_enabled` | `false` | | 组提交总开关（[14 §2ter](./14-acceptance-matrix.md)） |
+| `ledger_batch_commit_max_size` | 16 | | 单事务最多合并几个请求 |
+| `ledger_batch_commit_linger_ms` | 2 | | 攒批等待上限，**不得超 2ms** |
 | `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`**（避免自己改自己）；此处仅登记其存在 |
 
 **CI 断言**：迁移种子必须为上表**每一个键**插入一行 `config_params`；`/admin/config` 拒绝写入表外的键（防拼写错误静默生效）。
@@ -184,6 +192,7 @@ type ParamMeta struct {
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
+| `GET /admin/debug/trace/{request_id}` | **L1 事件轨迹查询**（[12 §3](./12-debuggability.md)）：返回该请求各 attempt 的 SSE 事件元数据序列（`seq`/`offset_ms`/`event_type`/`should_commit`/`has_ttft_output`/`bytes`），**不含正文**（FR-112） | M1 |
 | `GET /admin/ledger/reconciliation?scope=account\|key\|model&from=&to=` | **计费对账**（FR-019）：聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed` | M3 |
 | `GET /v1/models`、`GET /v1/models/{alias}` | **数据面**端点，非管理面。由网关**合成**（[03 §4](./03-upstream-layer.md)）：返回该凭证 `allowed_aliases` 内的启用别名；非别名 404、越权 403；`x-models-etag` 我方自生成并支持 `If-None-Match` → 304 | M1 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
