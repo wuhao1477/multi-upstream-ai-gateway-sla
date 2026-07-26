@@ -284,10 +284,10 @@ type SubscriptionQuota struct {
 
 | Capability | NewAPI | Sub2API | ASXS |
 | --- | --- | --- | --- |
-| `account` | supported | supported | supported |
-| `keys` | supported | supported | unsupported |
-| `groups` | supported | supported | unsupported |
-| `subscription_quotas` | **unsupported** | supported | **supported** |
+| `account` | supported | **unsupported（一期）** | supported |
+| `keys` | supported | **unsupported（一期）** | unsupported |
+| `groups` | supported | **unsupported（一期）** | unsupported |
+| `subscription_quotas` | **unsupported** | **unsupported（一期）** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
 | `pricing` | supported（公开） | degraded | degraded |
 | 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 | JWT 7d，无 refresh，账密重登 |
 | 额度单位 | `quota/quota_per_unit` | USD 浮点 | `micros/1e6` |

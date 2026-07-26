@@ -184,7 +184,10 @@ CREATE TABLE bindings (
   cache_scope_id BIGINT REFERENCES cache_scopes(id),
   effective_url TEXT NOT NULL,    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (channel_id, account_id, key_id, model_id, region, cache_scope_id)
+  -- ⚠️ 必须 NULLS NOT DISTINCT（第 19 轮 [high]）：PostgreSQL 普通 UNIQUE 允许多行 NULL，
+  --    region/cache_scope_id 可空 → 「无地区、无缓存作用域」的同一 binding 可被重复创建，
+  --    路由资源身份分裂、健康统计被拆成两份。
+  UNIQUE NULLS NOT DISTINCT (channel_id, account_id, key_id, model_id, region, cache_scope_id)
 );
 
 -- 资源×故障域（FR-044）多对多
@@ -276,6 +279,8 @@ CREATE TABLE config_params (
   CONSTRAINT config_scope_global_sentinel
     CHECK (scope_type <> 'global' OR scope_id = '*'),
   UNIQUE (scope_type, scope_id, param_key, version),
+  -- ✅ 同样刻意用普通 UNIQUE：`idempotency_key` 为 NULL 表示调用方未启用幂等，
+  --    此时允许同一 param_key 多次变更（幂等是 opt-in）。勿改 NULLS NOT DISTINCT。
   UNIQUE (param_key, idempotency_key)          -- 同一参数的同一幂等键只允许一行
 );
 
@@ -377,6 +382,9 @@ CREATE TABLE client_reservations (
   needs_manual_review BOOLEAN NOT NULL DEFAULT false, -- unknown_billing/interrupted 结算：金额为保守估算，待人工核对
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   settled_at    TIMESTAMPTZ,
+  -- ✅ 此处**刻意**用普通 UNIQUE（允许多行 NULL）：未结算的 reservation 该列恒为 NULL，
+  --    改成 NULLS NOT DISTINCT 会导致全局只允许存在一条未结算预留 —— 直接锁死系统。
+  --    与 bindings/health_metric_windows 的情形相反，勿一并"修正"（第 19 轮自查澄清）。
   UNIQUE (settle_event_key)
 );
 -- 运维视图：所有待人工核对的保守结算
@@ -469,11 +477,16 @@ UPDATE attempts
        content_aware_ttft_ms = COALESCE(content_aware_ttft_ms, :ttft_ms),
        ended_at = now()                           --    骨架原先只改 attempt_status，该事实无人写入
  WHERE id = :attempt_id AND attempt_status IN ('pending','committed');
--- ③bis usage 同事务落库（幂等：主键 (attempt_id, upstream_seq) 冲突即跳过）
-INSERT INTO attempt_usage (attempt_id, upstream_seq, prompt_tokens, completion_tokens,
-                           cached_tokens, total_cost, estimated_cost, cost_variance)
-VALUES (:attempt_id, 1, :prompt, :completion, :cached, :cost, :est, :cost - :est)
-ON CONFLICT (attempt_id, upstream_seq) DO NOTHING;
+-- ③bis usage 同事务落库
+-- ⚠️ 第 19 轮 [critical] 修正：上一版漏 id / request_created_at 两个 NOT NULL 列、
+--    把 prompt_cached_tokens 写成不存在的 cached_tokens、且冲突目标无对应唯一约束 →
+--    正常流式成功走到终帧就会卡在这个同步事务里（按 §3.0 写库失败即中断下游流）。
+INSERT INTO attempt_usage (id, attempt_id, request_created_at, upstream_seq,
+                           prompt_tokens, completion_tokens, total_tokens,
+                           prompt_cached_tokens, total_cost, estimated_cost, cost_variance)
+VALUES (:usage_id /* UUIDv7 */, :attempt_id, :request_created_at, 1,
+        :prompt, :completion, :total, :cached, :cost, :est, :cost - :est)
+ON CONFLICT (attempt_id, request_created_at, upstream_seq) DO NOTHING;
 -- ④ 释放**本跳**的 canary 占用；按 attempt_id，且用 **GROUP BY 计数**扣减。
 --    ⚠️ 不可写成 `UPDATE ... FROM rel WHERE h.binding_id = rel.binding_id` 直接 -1：
 --       rel 若有多行指向同一 binding，PostgreSQL 的 UPDATE…FROM 对同一目标行**只应用一次**
@@ -668,6 +681,22 @@ COMMIT;
 - **验收**：见 [AC-33](./14-acceptance-matrix.md) ⑭／⑮／⑱／⑲（成功修正 / 重复 event_key 与崩溃重放 / **两个不同 event_key 并发修正后聚合与 reservation 必须一致** / 参数不可指定 client 与日期）。
 
 > **验收**：[AC-33](./14-acceptance-matrix.md) 须含**事务幂等重试**测试——结算已不经 outbox（见上方写入路径分工），故场景改为：同一 `settle_event_key` 重复执行 `finalize_upstream`、或事务提交后连接中断导致调用方重试，`settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
+
+**`stage` 的推进协议**（第 19 轮 [critical]：上一版只定义了枚举与恢复判据，**没有任何 `SET stage` 的时机**，开发无从实现；且恢复分流漏了 `planned`——崩在 selector 之后、预留之前同样是零 attempt，却没有对应分支）：
+
+| 时机 | 写入 | 同事务对象 |
+| --- | --- | --- |
+| C′ 落 `requests` | `stage='authenticated'`（DEFAULT） | 单独事务 |
+| selector 输出**空**候选集 | `stage='no_candidates'` | 与写 `decision_snapshot`（含排除原因）同事务 |
+| selector 产出**非空** RoutePlan | `stage='planned'` | 与写 `decision_snapshot` 同事务 |
+| D 阶段原子预留返回 0 行 | `stage='reservation_rejected'` | 单独事务（预留事务已回滚） |
+| 首个 attempt 落库 | `stage='dispatched'` | **与 `client_reservations` 插入、`attempts` 插入同事务**（D 阶段那一个事务） |
+
+**单调推进**：`authenticated → {no_candidates | planned → {reservation_rejected | dispatched}}`，只进不退。多跳接管**不改变** `stage`（已是 `dispatched`）。
+
+> ⚠️ **`stage` 只用于零 attempt 请求的归因**，不参与任何调度决策。有 attempt 的请求一律走 §4.2bis 的 ①②③ 分支，不看 `stage`——避免同一事实两个来源。
+
+恢复分流的 ⓪ 分支据此补全为四种（见 §4.2bis）。
 
 **鉴权拒绝的审计载体**（本轮路径走查发现：FR-120 明写"支持…**使用审计**"，但唯一载体 `gateway_clients.last_used_at` 只记**成功使用**；被拒绝的请求既不落 `requests`（C′ 在鉴权**之后**），也没有别的地方记 → 一把已吊销的 Key 被反复打、或某调用方持续探测越权别名，**系统完全看不见**）：
 
@@ -1029,7 +1058,10 @@ CREATE TABLE attempts (
   lease_heartbeat_at TIMESTAMPTZ,             -- 持有实例的心跳；**插入 attempt 时即写入非 NULL**（防漏扫）
   lease_owner       TEXT,                     -- 持有该 attempt 的实例标识
 
-  PRIMARY KEY (id, request_created_at)
+  PRIMARY KEY (id, request_created_at),
+  -- ⚠️ 恢复扫描用 max(attempt_no) 判定「最后一跳」；无此约束时重复 attempt_no 会让最后一跳不唯一，
+  --    同一 request 可能被处理多次（第 18 轮 [high]；第 19 轮修正：此约束曾被误加到 session_prefix_ledger）
+  UNIQUE (request_id, request_created_at, attempt_no)
 ) PARTITION BY RANGE (request_created_at);
 ```
 
@@ -1116,6 +1148,7 @@ SELECT r.id, r.created_at, a.*
 | ⓪a | — | 无 attempt 且 `stage='no_candidates'` | — | `unavailable` | 无预留 → 跳过闸门 | **P1**（AC-15） |
 | ⓪b | — | 无 attempt 且 `stage='reservation_rejected'` | — | `failed` | 无预留 → 跳过闸门 | 无（429 已回给调用方） |
 | ⓪c | — | 无 attempt 且 `stage='authenticated'`（**C′ 之后、selector 之前崩溃**） | — | `failed` | 无预留 → 跳过闸门 | P3（内部中断，非用户可见错误） |
+| ⓪d | — | 无 attempt 且 `stage='planned'`（**selector 之后、预留之前崩溃**） | — | `failed` | 无预留 → 跳过闸门 | P3 |
 | ① | — | `external_call_started_at IS NULL` | `failed` | `failed` | `abandoned`（**释放预留**） | 无（确定未计费） |
 | ② | **K1** | `external_call_started_at NOT NULL` 且 `response_committed_at IS NULL` | `unknown_billing` | `failed` | `settled`，全跳汇总，`needs_manual_review=true` | **P2** |
 | ③b1 | **K2** | `response_committed_at NOT NULL`、`terminal_event IS NULL`、`downstream_first_byte_written_at IS NULL` | `interrupted` | **`failed`** | `settled`，全跳汇总，待核对 | **P3** |
@@ -1239,7 +1272,9 @@ CREATE TABLE attempt_usage (
   PRIMARY KEY (id, request_created_at),       -- 分区表：主键必须包含分区键
   -- 指向 attempts 的复合外键（分区表间引用须带分区键）
   FOREIGN KEY (attempt_id, request_created_at)
-      REFERENCES attempts (id, request_created_at)
+      REFERENCES attempts (id, request_created_at),
+  -- 支撑 finalize_upstream 的 ON CONFLICT 幂等目标（第 19 轮 [critical]）；须含分区键
+  UNIQUE (attempt_id, request_created_at, upstream_seq)
 ) PARTITION BY RANGE (request_created_at);
 ```
 
@@ -1259,10 +1294,7 @@ CREATE TABLE session_prefix_ledger (
   target_ms         INTEGER,                 -- 本轮目标（默认前缀均 ≤10s，§11）
   met_target        BOOLEAN,                 -- 每轮结束达标判定（FR-051）
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (session_id, turn_no),
-  -- ⚠️ 恢复扫描用 max(attempt_no) 判定「最后一跳」，无此约束时重复 attempt_no 会让最后一跳不唯一，
-  --    同一 request 可能被处理多次（第 18 轮 [high]）
-  UNIQUE (request_id, request_created_at, attempt_no)
+  PRIMARY KEY (session_id, turn_no)
 );
 ```
 
@@ -1512,7 +1544,9 @@ CREATE TABLE health_metric_windows (
   p99_ttft_ms     INTEGER,
   success_count   INTEGER,
   stream_break_count INTEGER,
-  UNIQUE (binding_id, model_id, request_type, context_bucket, window_kind, window_start)
+  -- ⚠️ 同上：model_id/request_type/context_bucket 可空，普通 UNIQUE 挡不住重复行 →
+  --    同一窗口的「总体统计」可写多份，selector 读到的健康度不确定（第 19 轮 [high]）
+  UNIQUE NULLS NOT DISTINCT (binding_id, model_id, request_type, context_bucket, window_kind, window_start)
 );
 
 -- 质量事件（FR-007）：空响应/格式破坏/能力不符/疑似模型替换（P1）
