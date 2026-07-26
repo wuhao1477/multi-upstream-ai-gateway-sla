@@ -365,7 +365,14 @@ CREATE TABLE price_change_log (
   detected_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC);
+ALTER TABLE price_versions ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT true;
+
+ALTER TABLE price_versions ADD COLUMN confirmed_by TEXT;
+
+ALTER TABLE price_versions ADD COLUMN confirmed_at TIMESTAMPTZ;
+
+CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC)
+  WHERE confirmed;
 
 CREATE INDEX idx_mult_cur  ON multiplier_versions(binding_id, effective_at DESC);
 
@@ -885,7 +892,12 @@ CREATE TABLE alert_events (
   id              UUID PRIMARY KEY,             -- UUIDv7
   dedup_key       TEXT NOT NULL,               -- 同因合并键（FR-102）
   severity        TEXT NOT NULL CHECK (severity IN ('P1','P2','P3')), -- 参数16：P1 15min/P2 1h/P3 当日
-  category        TEXT NOT NULL,               -- error_budget/sla_breach/balance/key_invalid/price_anomaly/sub_expiry/capacity/fault_domain/model_capability/data_stale
+  category        TEXT NOT NULL,               -- 取值与 dedup_key 规则见 [05 §5.2bis](./05-scheduling-and-operations.md)：
+                                              -- balance_exhausted/key_invalid/all_unavailable/billing_anomaly/
+                                              -- collector_failed/unknown_billing/error_budget_burn/
+                                              -- probe_template_missing/capacity_tight/data_stale
+  occurrence_count INTEGER NOT NULL DEFAULT 1, -- 同因重复发生次数（FR-102 合并而非刷屏）
+  payload         JSONB,                      -- 触发时的判据快照（元数据，**不含正文**，FR-112）
   scope           JSONB,                       -- 影响范围（渠道/资源/故障域）
   trigger_data    JSONB,                       -- 触发数据（元数据）
   suggested_action TEXT,                        -- 建议处置（FR-101）

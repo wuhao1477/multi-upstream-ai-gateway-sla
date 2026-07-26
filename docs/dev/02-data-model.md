@@ -1247,7 +1247,15 @@ CREATE TABLE price_change_log (
 **索引**
 
 ```sql
-CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC);
+-- ⚠️ 降价确认（FR-014/AC-03，第 29 轮 [P0]）：AC-03 要构造「降价版本 confirmed=false」，
+--    但本表原先**没有这一列** —— 开发不知道确认状态放哪、selector 该读哪张表。
+ALTER TABLE price_versions ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE price_versions ADD COLUMN confirmed_by TEXT;
+ALTER TABLE price_versions ADD COLUMN confirmed_at TIMESTAMPTZ;
+-- 采集到**降价**时插入 confirmed=false 的新版本；涨价与首次采集直接 confirmed=true。
+-- selector 的「当前价格」= 该 (channel, model) 下 confirmed=true 且 effective_at 最大的一行。
+CREATE INDEX idx_price_cur ON price_versions(channel_id, model_id, effective_at DESC)
+  WHERE confirmed;
 CREATE INDEX idx_mult_cur  ON multiplier_versions(binding_id, effective_at DESC);
 ```
 
@@ -2038,6 +2046,28 @@ CREATE TABLE cache_hit_windows (
 );
 ```
 
+**窗口谁写、何时写**（第 29 轮 [P0]：此前只有表和公式，没说写入点，开发无从落地）：
+
+| 项 | 冻结做法 |
+| --- | --- |
+| 写入点 | **`finalize_upstream` 事务内**（与 `attempt_usage` 同一条链）—— 那时 usage 刚拿到，`prompt_cached_tokens` 与 `cacheable_prompt_tokens` 都已知 |
+| 纳入哪些 attempt | 仅 `attempt_status='completed'` 且 `cost_source='upstream'`（真实 usage）。**取消跳、失败跳、估算用量一律不计** —— 它们的缓存数据要么不存在要么不可信 |
+| `cacheable_prompt_tokens` 怎么算 | `UsageSnapshot` 由上游回传时直接取；**上游不回传时**按 `prompt_tokens − 本轮新增 token 数`估算，本轮新增按请求体增量字节 / 2 取上界；仍无法估算则**该次不写窗口**（宁可少一个样本，不可写入错误分母） |
+| 窗口粒度 | `(session_id, cache_scope_id, date_trunc('hour', now()))`，`ON CONFLICT DO UPDATE` 累加 |
+| 无 `session_id` 的请求 | **不写**（单轮请求没有前缀可延续，纳入会稀释长会话的统计） |
+
+```sql
+-- 在 finalize_upstream 链尾追加（仅当 attempt 完成且 usage 为真实值）
+INSERT INTO cache_hit_windows (session_id, cache_scope_id, window_start,
+                               cached_tokens, cacheable_tokens, turn_count)
+SELECT :session_id, :cache_scope_id, date_trunc('hour', now()), :cached, :cacheable, 1
+ WHERE :session_id IS NOT NULL AND :cost_source = 'upstream' AND :cacheable > 0
+ON CONFLICT (session_id, cache_scope_id, window_start) DO UPDATE
+   SET cached_tokens    = cache_hit_windows.cached_tokens    + EXCLUDED.cached_tokens,
+       cacheable_tokens = cache_hit_windows.cacheable_tokens + EXCLUDED.cacheable_tokens,
+       turn_count       = cache_hit_windows.turn_count       + 1;
+```
+
 **预测公式**（`selector` 排序前，纯内存快照，不查库）：
 
 ```text
@@ -2253,7 +2283,12 @@ CREATE TABLE alert_events (
   id              UUID PRIMARY KEY,             -- UUIDv7
   dedup_key       TEXT NOT NULL,               -- 同因合并键（FR-102）
   severity        TEXT NOT NULL CHECK (severity IN ('P1','P2','P3')), -- 参数16：P1 15min/P2 1h/P3 当日
-  category        TEXT NOT NULL,               -- error_budget/sla_breach/balance/key_invalid/price_anomaly/sub_expiry/capacity/fault_domain/model_capability/data_stale
+  category        TEXT NOT NULL,               -- 取值与 dedup_key 规则见 [05 §5.2bis](./05-scheduling-and-operations.md)：
+                                              -- balance_exhausted/key_invalid/all_unavailable/billing_anomaly/
+                                              -- collector_failed/unknown_billing/error_budget_burn/
+                                              -- probe_template_missing/capacity_tight/data_stale
+  occurrence_count INTEGER NOT NULL DEFAULT 1, -- 同因重复发生次数（FR-102 合并而非刷屏）
+  payload         JSONB,                      -- 触发时的判据快照（元数据，**不含正文**，FR-112）
   scope           JSONB,                       -- 影响范围（渠道/资源/故障域）
   trigger_data    JSONB,                       -- 触发数据（元数据）
   suggested_action TEXT,                        -- 建议处置（FR-101）

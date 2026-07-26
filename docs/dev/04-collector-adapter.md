@@ -100,7 +100,73 @@ type CollectorAdapter interface {
 
 // 不支持的 fetch 统一返回该哨兵错误；调用方据此登记 Unsupported，不留空
 var ErrUnsupported = errors.New("collector: capability unsupported by this family")
+
+// ── 接口引用但此前未定义的类型（第 29 轮 [P0] 补齐）──
+// 开发按原文档写到 Authenticate() 就卡住：Credential/Session 只有名字没有结构。
+
+// Credential：运维登记的采集凭证，落 collector_credentials（[02 §7](./02-data-model.md)，一期明文）
+type Credential struct {
+    ChannelID  int64
+    BaseURL    string
+    Kind       string // 'password' | 'access_token' | 'api_key'
+    Username   string // Kind='password' 时用
+    Password   string
+    Token      string // Kind='access_token'/'api_key' 时用
+    ExtraHeaders map[string]string // 如 NewAPI 二开的 New-API-User
+}
+
+// Session：Authenticate 的产出，含续期所需的一切。**内存态，不落库**（含明文令牌）
+type Session struct {
+    Family      Family
+    BaseURL     string
+    AccessToken string
+    RefreshToken string    // 仅 Sub2API 有；ASXS 无 refresh，到期须账密重登（§5）
+    UserID      string     // NewAPI 的数字用户 ID，用于 New-API-User 头
+    ExpiresAt   time.Time  // 令牌到期；提前 ExpiryGrace 续期
+    Headers     map[string]string // 每次请求都要带的固定头
+}
+
+// Pricing：模型价格表。**入库不做单位归一**（保留上游口径便于对账），
+// 缩放只发生在算成本那一处（[02 §3](./02-data-model.md) 成本公式）
+type Pricing struct {
+    SourceMeta
+    Items []PriceItem
+}
+type PriceItem struct {
+    ModelName   string
+    InputPrice  float64
+    OutputPrice float64
+    CachePrice  float64
+    BillingUnit string // 'per_1m_token' | 'per_1k_token' | 'per_token'，**必须回填，不得猜**
+    GroupRatio  float64 // 分组倍率；无分组概念时为 1
+}
+
+// RateLimit：Key 级限流，回填 bindings.rpm_limit / concurrency_limit
+// （[05 §4.3](./05-scheduling-and-operations.md)：未登记容量 = 不启用保留）
+type RateLimit struct {
+    RPM         *int // nil = 该站不暴露，**不可当成 0 或无限**
+    Concurrency *int
+}
+
+// ManualReserve：无法采集时运维手填的保守余额下限（§7 降级路径）
+type ManualReserve struct {
+    AmountUSD  float64
+    SetBy      string
+    SetAt      time.Time
+    Note       string
+}
 ```
+
+**分页、限流与重试（三家族统一约定）**：
+
+| 项 | 约定 |
+| --- | --- |
+| 分页 | 统一 `page`(从 1)/`page_size`(默认 100)；适配器内部循环取完再返回，**不把分页暴露给调用方** |
+| 单站并发 | 1（顺序采集）—— 采集是后台任务，没有并发必要，反而容易触发上游风控 |
+| 站内请求间隔 | `collector_request_interval_ms`，默认 200ms |
+| 失败重试 | 指数退避 1s/2s/4s，最多 3 次；仍失败 → 该站本轮放弃，`collector_credentials.status='error'` + P2 告警，**不影响其它站** |
+| 429/403 | 立即停止本轮该站采集并退避到下一周期（不重试），避免把凭证打死 |
+| 超时 | 单请求 10s，整站一轮 120s |
 
 **返回结构（均内嵌 `SourceMeta`，金额统一归一为数值美元 —— FR-018 一期 1:1，AC-17）**：
 

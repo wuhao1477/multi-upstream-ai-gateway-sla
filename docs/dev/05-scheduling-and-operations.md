@@ -90,7 +90,26 @@ type RoutePlanEntry struct {
 
 要点：
 
-- **每跳期限按 SLA 等级 TTFT 预算分配**：金级首跳期限 = min(该 binding 近期 P95, 等级 TTFT 预算)，为接管留余量（前缀平均 ≤10s → 金级单跳 P95≤5s，§11）。
+- **每跳期限的确定性算法**（第 29 轮 [P0]：原文只给了首跳一句 `min(P95, 目标)`，没说多跳怎么分、会话余量怎么参与、最多几跳 —— 开发只能自己发明，而这直接决定 AC-06/AC-32）：
+
+  ```text
+  输入：target      = sla_targets.ttft_p95_ms（承诺策略 5000；无承诺策略取 config 的 default_ttft_budget_ms，默认 8000）
+        session_used = 该会话已累计的有效首字（session_prefix_ledger.cumulative_first_token_ms）
+        session_target = prefix_target_ms × turn_no    （前缀平均目标，默认 10000/轮）
+        margin      = ttft_safety_margin_ms（config，默认 500）
+
+  ① 本轮可用预算 budget = min(target, max(session_target − session_used, min_hop_ms))
+       —— 会话已超支时收紧本轮，但不低于 min_hop_ms（默认 1500，太短会导致无谓接管）
+  ② 跳数上限 maxHops = min(候选数, max_hops)     （max_hops 默认 3）
+  ③ 逐跳分配：hop_i 期限 = min( binding_i 近期 p95_ttft_ms × 1.2 , 剩余预算 − Σ 后续跳的 min_hop_ms − margin )
+       —— 「×1.2」给该渠道自身的正常波动留余量；减去后续跳的最小时间，保证接管链跑得完
+  ④ 若 hop_i 期限 < min_hop_ms → **不再排入更多跳**（RoutePlan 到此为止）
+  ⑤ 最后一跳不设接管期限（无处可切），只受整体超时约束
+  ```
+
+  - **无 `p95_ttft_ms` 的 binding**（新渠道/样本不足）：用该 model 全局 p95 的中位数代入，仍无则取 `budget`。
+  - **候选耗尽**时按 §3.2 全资源不可用处置（按承诺与否决定排队时长）。
+  - **验收**：[AC-06](./14-acceptance-matrix.md) 须断言长会话第 N 轮的本轮预算随 `session_used` 收紧；[AC-32](./14-acceptance-matrix.md) 断言期限到达即 `Close()`。
 - 期限到达且未见**内容感知有效首字** → executor `Close()` 传播取消、切下一跳（[03 §4.3](./03-upstream-layer.md)、AC-32）。
 - 决策快照(候选/排除原因/选择)写 `requests.decision_snapshot`（元数据 JSON，不含正文，FR-097/112）。
 
@@ -211,6 +230,65 @@ RETURNING canary_used_in_window, canary_inflight;
 | 错误预算 | 测活导致的失败 ≤ 该等级错误预算 **10%** | §5 错误预算扣减，超限停测活 |
 
 > **五维限制（FR-063）**：上表列全局/租户/会话/错误预算；此外**用户级**与**资源级**同样分别设测活费用/次数/并发/错误预算上限（`config_params` 按 scope 分别配置）。
+
+### 2.1bis 主动测活的触发、抢占与模板选择（第 29 轮 [P0]）
+
+> 此前只有预算**上限表**，没有"谁定时触发、谁抢执行权、预算怎么原子扣、模板怎么选" —— 开发无从下手。
+> **里程碑归属冻结：M4**（与 canary 闭环 AC-08、冷却/样本门槛同批交付，都属 steward 经营闭环）。M2 只做流式 SLA 核心，不含任何测活。
+
+**触发条件**（每 60s 一轮，advisory lock #3 抢占，见 [§5bis](#5bis-后台任务总表)）：
+
+```text
+候选 binding = health_state = 'canary'
+             AND 该 binding 近 probe_idle_window（默认 30min）内**无任何真实业务 attempt**
+             AND low_confidence = true            -- 还没攒够样本
+             AND 存在健康接管候选（失败能补偿）
+排序 = 样本陈旧度 desc, 失败历史 asc   （FR-064 的机会分配：不得持续集中同一 binding）
+每轮最多取 probe_batch_size（默认 3）个
+```
+
+- **canary 优先原则的落地就在这里**：只有"近 30min 无业务流量"才进候选 —— 有流量时 canary 会自然拿到样本，不必额外花钱。
+
+**五维预算的原子扣减**（与 canary claim 同构，缺一维都可能被并发突破）：
+
+```sql
+-- 五个 scope 各一行，**全部** UPDATE 成功才算拿到额度；任一为 0 行即整事务回滚
+WITH g AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+            WHERE scope_kind='global'  AND scope_id='*'      AND window_start=:day
+              AND probe_cost + :est <= :global_cap    RETURNING 1),
+     t AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+            WHERE scope_kind='tenant'  AND scope_id=:tenant  AND window_start=:day
+              AND probe_cost + :est <= :tenant_cap    RETURNING 1),
+     u AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+            WHERE scope_kind='user'    AND scope_id=:client  AND window_start=:day
+              AND probe_cost + :est <= :user_cap      RETURNING 1),
+     b AS (UPDATE probe_budget_windows SET probe_count=probe_count+1, probe_cost=probe_cost+:est
+            WHERE scope_kind='binding' AND scope_id=:bid     AND window_start=:day
+              AND probe_count + 1 <= :binding_cap     RETURNING 1),
+     e AS (SELECT 1 WHERE (SELECT failure_count FROM probe_budget_windows
+                            WHERE scope_kind='global' AND scope_id='*' AND window_start=:day)
+                          < :error_budget_cap)          -- 第五维：错误预算
+SELECT (SELECT count(*) FROM g) AS g_ok, (SELECT count(*) FROM t) AS t_ok,
+       (SELECT count(*) FROM u) AS u_ok, (SELECT count(*) FROM b) AS b_ok,
+       (SELECT count(*) FROM e) AS e_ok;
+-- 应用层：五值全为 1 才 COMMIT 并发起探测；任一为 0 → ROLLBACK，本轮跳过该 binding
+```
+
+> ⚠️ 各行**不存在**时视为未初始化 → 由本 worker 先 `INSERT ... ON CONFLICT DO NOTHING` 建当日行，再执行上面的 UPDATE。
+> ⚠️ **`session` 维度一期不参与**：探测不属于任何用户会话（[FR-063](../PRD.md) 已注明一期实际只有 global/binding/client 三个独立维度，此处的 tenant/user 在个人场景同为 client id）。
+
+**模板选择算法**（`probe_templates`，[02 §6ter](./02-data-model.md)）：
+
+```text
+1. 按 (binding.model_id, 请求协议) 过滤 enabled=true 的模板
+2. 优先选**该 binding 最久未用过**的模板（`probe_claims` 里该 binding+template 的最近 created_at）
+   —— 轮换模板，避免只测一种负载形态
+3. 若该模型无任何模板 → **跳过该 binding 并记 P3 告警**（`category='probe_template_missing'`）
+   ⚠️ 不得回退到 hello/ping：FR-060 明令禁止，宁可不测也不要测出一个虚假的"健康"
+4. 选中后按 canary 同构方式 claim（probe_claims），claim + attempt 同事务
+```
+
+**探测请求的记账主体**：内置凭证 `system-probe`（[02 §2bis](./02-data-model.md)）；`requests.probe_kind='probe'`、`attempts.role='probe'`。
 
 ### 2.2 测活资格（别名承载，参数6）
 
@@ -337,9 +415,128 @@ RETURNING canary_used_in_window, canary_inflight;
 
 同因合并为一个持续事件（`dedup_key`，FR-102），不刷屏。
 
+### 5.2bis 告警写入路径（第 29 轮 [P0]：此前只有分级示例，没有 `dedup_key` 规则与事务）
+
+**`dedup_key` 生成规则**（同因合并的唯一依据，FR-102）：
+
+| category | `dedup_key` | 说明 |
+| --- | --- | --- |
+| `balance_exhausted` | `balance:<balance_group_key>` | 同一余额组只报一次，不按 binding 刷屏 |
+| `key_invalid` | `key:<key_id>` | |
+| `all_unavailable` | `unavail:<model_id>` | 按模型聚合——一个模型全挂是一件事 |
+| `billing_anomaly` | `billing:<binding_id>` | |
+| `collector_failed` | `collector:<channel_id>:<capability>` | 区分是价格挂了还是余额挂了 |
+| `unknown_billing` | `unkbill:<request_id>` | **每单一条**，因为需要逐单人工核对 |
+| `error_budget_burn` | `budget:<policy_id>:<window_start>` | 同窗口只报一次 |
+| `probe_template_missing` | `tmpl:<model_id>:<protocol>` | |
+| `capacity_tight` | `capacity:<binding_id>` | |
+
+**写入事务**（`open` 与 `recovering` 的并发转换必须在行锁下做，否则会产生第二条活动行）：
+
+```sql
+BEGIN;
+INSERT INTO alert_events (dedup_key, category, severity, state, started_at, last_seen_at, payload)
+VALUES (:key, :cat, :sev, 'open', now(), now(), :payload)
+ON CONFLICT (dedup_key) WHERE state <> 'closed'      -- 部分唯一索引 uq_alert_active
+DO UPDATE SET last_seen_at = now(),
+              occurrence_count = alert_events.occurrence_count + 1,
+              severity = GREATEST(alert_events.severity, EXCLUDED.severity)  -- 升级不降级
+RETURNING id, state;
+COMMIT;
+```
+
+**状态迁移**（`open → acknowledged → recovering → closed`）一律 `SELECT … FOR UPDATE` 后再改。**关闭条件**：该 `dedup_key` 的触发条件连续 `alert_recovery_checks`（默认 3）轮不再成立；`unknown_billing` 类**只能人工关闭**。
+
+**P1/P2/P3 的判据**（[AC-19](./14-acceptance-matrix.md) 三场景的精确触发）：
+
+| 场景 | 判据 | 级别 |
+| --- | --- | --- |
+| 余额耗尽 | `conservative_floor <= 0` **或** `balance_state='exhausted'` | **P1** |
+| Key 失效 | 该 key 连续 `key_invalid_streak`（默认 3）次收到 401/403 | **P1** |
+| 全渠道不可用 | 某 model 的候选集连续 `all_unavail_checks`（默认 2）轮为空 | **P1** |
+| 错误预算快速消耗 | 窗口内已消耗 > `error_budget_burn_ratio`（默认 0.5）且窗口过半未到 | **P2** |
+| 计费异常 | §4.4 判据 | **P2** |
+| 数据过期 | `collector_snapshots_v.is_stale` 持续 > `stale_alert_hours`（默认 12h） | **P3** |
+
+---
+
 ### 5.3 余额不足信号自适应识别（参数5/FR-027）
 
 余额**非实时**、后台校对；置"耗尽"靠多判据组合（[02 `balance_signals`](./02-data-model.md)）：错误码 / 错误文案正则("余额"类关键词) / 真实请求失败信号 / 余量归零（AC-29）。保守储备与三档处置（<24h 告警 / <6h 停测活与高成本 / <1h 临界减普通流量，参数5）。
+
+---
+
+## 5bis. 后台任务总表（第 29 轮 [P0]：此前八个 worker 散落各处，**没有一处说清周期、多实例协调与失败重试** —— 开发无法判断谁定时跑、谁抢占执行权）
+
+**统一的多实例协调机制**：所有周期任务用 **PG advisory lock**（`pg_try_advisory_lock(<任务号>)`）抢执行权，抢不到就跳过本轮 —— 与 [06 §2.2](./06-deployment-and-operations.md) 的 bootstrap 选主同一套机制，不引入额外组件。**逐行扫描类**（恢复扫描、outbox 投递）改用 `FOR UPDATE SKIP LOCKED`，天然多实例安全，不需要 advisory lock。
+
+| # | 任务 | 周期 | 多实例协调 | 失败处置 | 定义位置 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **outbox 投递** | 200ms | `SKIP LOCKED` | 指数退避重试，行保留；积压进 `/metrics` | [02 §9.2bis](./02-data-model.md) |
+| 2 | **恢复扫描** | 启动时 + 每 30s | `SKIP LOCKED` | 记日志重试；**必须在 outbox drain 之后**跑 | [02 §4.2bis](./02-data-model.md) |
+| 3 | **健康聚合** | 每 60s | advisory lock #1 | 跳过本轮，下轮补 | §5bis.1 |
+| 4 | **余额下限重算** | 每 5min | advisory lock #2 | 跳过；`conservative_floor` 保持旧值并因陈旧而更保守 | §5bis.2 |
+| 5 | **主动测活调度** | 每 60s | advisory lock #3 | 跳过 | §2.1bis |
+| 6 | **采集器** | 价格 6h／余额 5min／Key 额度 30min | advisory lock #4~6（按类分） | 该站进退避，其它站不受影响 | [04](./04-collector-adapter.md) |
+| 7 | **canary/probe claim 回收** | 每 60s | advisory lock #7 | 跳过 | [02 §6bis](./02-data-model.md) |
+| 8 | **分区维护**（建下月分区、清过期） | 每天 03:00 | advisory lock #8 | P2 告警 | [02 §9.1](./02-data-model.md) |
+
+> **快照刷新不在此表**：selector 读的内存快照由各任务写库后**主动推送**给本实例（或按 `config_params` 的 `snapshot_refresh_ms` 拉取），属实例内行为，不需要跨实例协调。
+
+### 5bis.1 健康聚合 worker（每 60s）
+
+```sql
+-- 从 attempts 聚合到 resource_health。⚠️ 归因口径见 §4.2bis 不变式 3：
+--    unknown_billing / interrupted 是**我们**崩溃，不计入渠道成功率。
+WITH w AS (
+  SELECT a.binding_id,
+         count(*) FILTER (WHERE a.started_at > now() - INTERVAL '1 hour')  AS n1h,
+         count(*) FILTER (WHERE a.started_at > now() - INTERVAL '24 hours') AS n24h,
+         percentile_disc(0.95) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+           FILTER (WHERE a.has_ttft_output)                                 AS p95,
+         avg((a.attempt_status = 'completed')::int)                         AS ok_rate
+    FROM attempts a
+   WHERE a.request_created_at > now() - INTERVAL '24 hours'
+     AND a.attempt_status NOT IN ('unknown_billing','interrupted')   -- 崩溃不算渠道的账
+     AND a.role <> 'probe'                                            -- 测活失败单独归因（§2.1）
+  GROUP BY a.binding_id)
+UPDATE resource_health h
+   SET sample_count_1h = w.n1h, sample_count_24h = w.n24h,
+       p95_ttft_ms = w.p95, success_rate = w.ok_rate,
+       low_confidence = NOT (w.n1h >= :min_1h OR w.n24h >= :min_24h),
+       last_sample_at = now(), updated_at = now()
+  FROM w WHERE h.binding_id = w.binding_id;
+```
+
+**状态迁移（同一事务内，紧接上面）**，判据全部来自刚更新的行：
+
+| 从 | 到 | 条件 |
+| --- | --- | --- |
+| `canary` | `observing` | `NOT low_confidence`（达 §3.1 样本门槛）且 `canary_failures < 阈值` |
+| `canary` | `cooling` | `canary_failures >= canary_failure_threshold`（默认 3） |
+| `observing` | `available` | `observing_since < now()-30min` **或** `observing_success_count >= 50` |
+| `available` | `degraded` | `success_rate < 目标` 或 `p95_ttft_ms > 目标`，连续 2 轮 |
+| `available`/`degraded` | `cooling` | `consecutive_failures` 触发退避（§3.1） |
+| `cooling` | `canary` | `cooldown_until < now()` —— **回 canary 而非直接 available**，重新积累样本 |
+
+### 5bis.2 余额下限重算 worker（每 5min）
+
+```text
+conservative_floor(account_group) =
+      last_confirmed_balance                       -- 采集器最近一次确认值
+    − known_consumption_since                      -- 见下
+    − safety_reserve                               -- config_params，默认 max(余额×2%, $1)
+
+known_consumption_since = Σ attempt_usage.total_cost
+                          WHERE attempt.binding 属该账号组
+                            AND attempt.started_at > last_confirmed_at
+                            AND attempt_status IN ('completed','failed','interrupted','unknown_billing')
+                          （**含**已计费但结果不明的两类——保守）
+```
+
+- **账号组聚合**：按 `upstream_accounts.balance_group_key` 归并（FR-022/AC-04）——同一 key 的多账号/多 Key **只算一份余额**，消耗则**全部累加**。`balance_group_key` 为空时按 account_id 独立成组。
+- **无法形成下限**的三种情形与处置见 [§1.1bis](#11bis-余额配额过滤的四条判据fr-026-落地)，本 worker 只负责在这些情形下**把 `conservative_floor` 置 NULL**（而非算出一个假值）。
+- **落 `balance_signals`**：每轮写一行快照（`last_confirmed_balance`/`known_consumption_since`/`conservative_floor`/`computed_at`），供排障回溯"当时为什么排除了这个渠道"。
 
 ---
 
