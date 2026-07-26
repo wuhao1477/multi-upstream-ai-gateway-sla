@@ -167,6 +167,23 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 - [ ] CI：Go 构建 + **DDL 在临时 PG 真跑通过**（`verify/ddl-check.sh`）+ 别名策略加载 + 不可存列断言 + 凭证脱敏断言。
 - [ ] `pg_dump`/restore 演练脚本就位。
 
+**⚠️ 客户端接入前置（实测确认，不是可选项）**：
+
+Codex 发送的模型名来自**它自己的 `~/.codex/config.toml`**，与我方 `/v1/models` 返回什么无关（[03 §4 实测](./03-upstream-layer.md)）。故接入时必须：
+
+```toml
+# ~/.codex/config.toml
+model = "gpt-5.5"                     # ← 必须是我方**别名**，不是上游真实模型名
+
+[model_providers.sla_gateway]
+name = "SLA Gateway"
+base_url = "http://<网关地址>/v1"
+wire_api = "responses"
+```
+
+- **不改这一行 → 每个请求都 404**（别名表里没有 `gpt-5.6-sol` 这类上游真名）。
+- 迁移期可临时开 `alias_passthrough`（`config_params`，默认关）让老配置先跑通，但**它会绕过别名策略**（SLA 等级、测活资格、数据许可全失效），改完配置应立即关掉。
+
 **M0 期间并行、但不作门禁**：
 
 - [ ] **Codex 实机 spike**（[15 T1](./15-scope-and-preflight.md)）：临时最小透传脚本 + 真实 Codex CLI + 真实上游抓包。timebox 2~3 天；**必答**「Codex 请求的模型名从哪来」（决定 `/v1/models` 合成会不会 404 打不通）与「35 字段是否零丢失」。跑不通则记录阻塞，**不拖 M0**。
