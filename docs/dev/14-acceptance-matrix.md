@@ -122,7 +122,7 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-09 | 测活渠道首字超时 | MOCK | 测活请求分配到慢渠道 → 期限到即接管；**用户侧 TTFT 仍达标**；该次测活失败计入探索预算而非用户错误预算 |
+| AC-09 | 测活渠道首字超时 | MOCK | **两轨分别断言**（口径见 [PRD AC-09](../PRD.md)）：**A 主动测活**（`system-probe` + `probe_kind=probe`）→ 分配到慢渠道、期限到即接管；该次失败**不出现在用户 SLA 分母**（断言 `requests` 里 `probe_kind=probe` 的行被 SLA 聚合排除）、费用计入 `probe_budget_windows` 与实际成本。**B canary**（真实用户请求）→ **必须**计入用户 SLA：接管成功则用户侧不计失败但延迟计入；接管失败则用户侧失败成立、两边都计。<br>⚠️ 此前 PRD 写「延迟计入 SLA」而本矩阵写「计入探索预算而非用户错误预算」，两轨拆开后不再冲突。 |
 | AC-10 | 测活失败或费用超标 | FIXTURE | 达任一预算上限即**暂停新测活**；正常流量**不受影响**（对比暂停前后主流量成功率差 < 1%） |
 
 ### ⏭ 二期（订阅制适配，[15 §1.2](./15-scope-and-preflight.md)）
@@ -207,6 +207,65 @@
 | 4 | 持续加压至**首次不达标** | **记录拐点值**：这就是当前实现的容量天花板 |
 
 → 拐点值写入 M4 验收证据；后续优化以"抬高拐点"为目标。
+
+### 2ter. 压测 harness（冻结，第 30 轮 [P0]：此前只有负载模型，没有工具、命令与产物格式 → AC-34/36 不可复现）
+
+| 项 | 冻结选择 | 理由 |
+| --- | --- | --- |
+| 压测工具 | **k6**（`grafana/k6` 容器） | 脚本化、原生支持 SSE 消费与自定义指标、可输出 JSON summary 供归档 |
+| 负载脚本 | `verify/load/sla_load.js` | 与 mock 上游一起进仓库，压测可一键复跑 |
+| Mock 上游 | `verify/mock_upstream.py --load-mode` | **须扩展**：可控 TTFT、可控产出速率、可控流式比例（见下） |
+| 产物 | `verify/load/out/<ts>/{summary.json,metrics.txt,pg_stats.txt}` | `summary.json` 出 k6 指标；`metrics.txt` 抓压测末尾的 `/metrics`；`pg_stats.txt` 出 `pg_stat_statements` Top20 |
+
+**mock 上游的 LOAD 模式参数**（现有 mock 只有固定场景，须补）：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--ttft-ms` | 800 | 首字延迟；压测要的是**稳定可控**而非真实抖动 |
+| `--output-tokens` | 300 | 每响应产出 token 数 |
+| `--token-interval-ms` | 5 | 产出间隔 → 决定单响应总时长 ≈ 800 + 300×5 = 2.3s |
+| `--stream-ratio` | 0.9 | 流式请求占比（[§2bis](#2bis-冻结的负载模型) 冻结的 90%） |
+| `--protocol-mix` | `responses:0.8,chat:0.2` | 两协议混合 |
+
+**命令**（M4 验收照此执行并留档）：
+
+```bash
+# 阶段 1：1000 并发用户稳态 30 分钟（AC-34）
+docker run --rm -v "$PWD/verify/load:/l" grafana/k6 run /l/sla_load.js \
+  -e MODE=concurrency -e VUS=1000 -e DURATION=30m \
+  --summary-export=/l/out/$(date +%s)/summary.json
+
+# 阶段 2：峰值吞吐爬坡至 1000 QPS（AC-36）
+docker run --rm -v "$PWD/verify/load:/l" grafana/k6 run /l/sla_load.js \
+  -e MODE=throughput -e TARGET_RPS=1000 -e DURATION=10m \
+  --summary-export=/l/out/$(date +%s)/summary.json
+
+# 阶段 3：拐点探测——持续加压直到首次不达标，记录拐点值
+docker run --rm -v "$PWD/verify/load:/l" grafana/k6 run /l/sla_load.js \
+  -e MODE=ramp -e START_RPS=1000 -e STEP_RPS=500 -e STEP_DURATION=3m
+```
+
+**k6 侧必须自定义的三个指标**（`Trend`），因为它们才是门禁对象：
+
+| 指标 | 取自 | 门禁 |
+| --- | --- | --- |
+| `downstream_ttft_delay_ms` | 响应头回传（我方在压测模式下把它写进 `x-sla-ttft-delay`） | P99 由本轮实测冻结 |
+| `downstream_finish_delay_ms` | 同上（`x-sla-finish-delay`） | 同上 |
+| `gateway_overhead_ms` | 同上（`x-sla-overhead`） | **P99 ≤ 50ms**（FR-110） |
+
+> ⚠️ **这三个头只在 `load_test_mode=true` 时输出**（`config_params`），生产环境不得暴露内部时延。
+
+**组提交的开关与可测性**（第 30 轮 [P0]：此前只说"允许组提交"，没有配置键就无法做开/关对比）：
+
+| 配置键 | 默认 | 说明 |
+| --- | --- | --- |
+| `ledger.batch_commit.enabled` | `false` | 默认关；压测不达标时才开 |
+| `ledger.batch_commit.max_size` | 16 | 单事务最多合并几个请求的同步写 |
+| `ledger.batch_commit.linger_ms` | 2 | 攒批等待上限；**不得超过 2ms**，否则直接体现为 TTFT 变差 |
+
+`/metrics` 须同时暴露 `ledger_batch_size`（histogram）、`ledger_batch_flush_ms`（histogram）、`ledger_commit_total`（counter），否则开了也不知道有没有生效。**AC-34/36 须跑开/关两组并对比**，把结论写回 [01 §5.1](./01-architecture.md)。
+
+---
 
 ### 判定口径（**关键**）
 

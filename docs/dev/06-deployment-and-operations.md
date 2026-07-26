@@ -133,6 +133,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 | `outbox_undelivered`、`outbox_oldest_age_s` | gauge | `finalize_delivery` 落后 → request 终态迟迟不落定 |
 | `canary_inflight`、`probe_budget_used` | gauge | 两轨验证的实时占用 |
 | **`alert_webhook_failed_total`** | counter | 见 §6bis：webhook 静默失败时唯一的可见信号 |
+| `ledger_batch_size` / `ledger_batch_flush_ms` / `ledger_commit_total` | histogram/counter | 组提交是否生效、攒批是否拖慢首字（[14 §2ter](./14-acceptance-matrix.md) 要求开/关对比） |
 | `requests_by_final_status` | counter | SLA 聚合与错误预算 |
 
 > 🔒 `/metrics` **不得**包含任何凭证、URL 中的 key、请求正文片段（与 [12 §6](./12-debuggability.md) 脱敏同标准）。

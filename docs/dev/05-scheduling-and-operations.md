@@ -227,7 +227,7 @@ RETURNING canary_used_in_window, canary_inflight;
 | 全局 | 测活费用 ≤ 月度总请求费用 **2%**，且日封顶 = 月预算 ÷ 20 | `attempt_usage JOIN attempts JOIN requests` 后按 **`requests.probe_kind='probe'`** 过滤滚动累计（⚠️ `attempt_usage` **没有** `probe_kind` 列；attempt 层的对应字段是 `attempts.role='probe'`） |
 | 租户 | 单租户测活 ≤ 该租户月费用 **2%**；同租户同时 ≤ **1** 个测活请求 | 租户级预算计数器 + 并发闸 |
 | 会话 | 每会话最多被测活 **1** 次；会话第一轮、金级会话默认不测活 | `session_prefix_ledger` / 会话级标记 |
-| 错误预算 | 测活导致的失败 ≤ 该等级错误预算 **10%** | §5 错误预算扣减，超限停测活 |
+| 错误预算 | 测活导致的失败 ≤ 该等级错误预算 **10%** | §5 错误预算扣减，超限停测活。⚠️ **仅 canary 轨扣用户错误预算**（它用的是真实用户请求）；主动测活轨的失败**不进用户 SLA 分母**，只扣 `probe_budget_windows.failure_count`（[PRD AC-09](../PRD.md)） |
 
 > **五维限制（FR-063）**：上表列全局/租户/会话/错误预算；此外**用户级**与**资源级**同样分别设测活费用/次数/并发/错误预算上限（`config_params` 按 scope 分别配置）。
 

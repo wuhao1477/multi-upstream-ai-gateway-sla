@@ -1976,6 +1976,12 @@ CREATE TABLE resource_health (
   observing_since  TIMESTAMPTZ,
   observing_success_count INTEGER NOT NULL DEFAULT 0,
 
+  -- 容量占用（FR-029/032，[05 §4.3](./05-scheduling-and-operations.md)）：
+  -- 仅对**已登记容量**的 binding 维护；未登记者这三列恒为 0 且不参与判定。
+  rpm_window_start    TIMESTAMPTZ,              -- 分钟窗口起点
+  rpm_used            INTEGER NOT NULL DEFAULT 0,
+  concurrency_inflight INTEGER NOT NULL DEFAULT 0,
+
   -- 一期受控验证（canary，[05 §2.0](./05-scheduling-and-operations.md)）
   canary_since        TIMESTAMPTZ,               -- 进入 canary 的时刻
   canary_window_start TIMESTAMPTZ,               -- 当前小时窗口起点（配额按小时重置）
@@ -2096,6 +2102,75 @@ PredictCacheHitRate(session, candidate_binding):
 - **上游不回 `prompt_cached_tokens` 时**：该窗口不计入统计（`cacheable_tokens` 不累加），预测退回全局中位数；**不可**把缺失当成 0 命中，否则会误判所有该类渠道。
 
 **服务 FR/AC**：FR-054/055/056；AC-07。
+
+---
+
+### 6bis-2. 容量占用（FR-029/032，AC-18 的执行载体）
+
+> ⚠️ 第 30 轮 [P0]：[05 §4.3](./05-scheduling-and-operations.md) 只写了"用与 canary 同构的 DB 原子计数"，**没有表、没有 SQL、没有释放与恢复规则** —— AC-18 无从实现。
+
+```sql
+-- 每次占用一行，与 canary_claims / probe_claims 同构
+CREATE TABLE capacity_claims (
+  claim_id      UUID PRIMARY KEY,
+  binding_id    BIGINT NOT NULL REFERENCES bindings(id),
+  request_id    UUID NOT NULL,
+  attempt_id    UUID NOT NULL,
+  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','probe')),
+  lease_owner   TEXT NOT NULL,
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at   TIMESTAMPTZ
+);
+CREATE INDEX idx_capacity_active ON capacity_claims(binding_id) WHERE state = 'active';
+```
+
+**各类流量的并发天花板**（比例来自 [05 §4.2](./05-scheduling-and-operations.md)，均可配）：
+
+| `kind` | 可用上限 | 依据 |
+| --- | --- | --- |
+| `normal` | `limit × (1 − 承诺20% − 接管10% − 测活5%) = 65%` | 日常流量不得挤占三类保留 |
+| `committed` | `limit × 85%`（65% + 承诺 20%） | 承诺流量可用自己的保留 |
+| `takeover` | `limit × 95%`（+ 接管 10%） | 接管是 SLA 最后防线，天花板最高 |
+| `probe` | `limit × 70%`（65% + 测活 5%） | 探索不得伤主流量 |
+
+**原子占用**（与 dispatch 同事务，`kind` 由 `RoutePlanEntry.Role` 推出）：
+
+```sql
+WITH lim AS (
+  SELECT b.id, b.concurrency_limit, b.rpm_limit FROM bindings b WHERE b.id = :bid
+),
+claimed AS (
+  UPDATE resource_health h
+     SET rpm_window_start = CASE WHEN h.rpm_window_start IS NULL
+                                  OR h.rpm_window_start < date_trunc('minute', now())
+                                 THEN date_trunc('minute', now()) ELSE h.rpm_window_start END,
+         rpm_used = CASE WHEN h.rpm_window_start IS NULL
+                          OR h.rpm_window_start < date_trunc('minute', now())
+                         THEN 1 ELSE h.rpm_used + 1 END,
+         concurrency_inflight = h.concurrency_inflight + 1
+    FROM lim
+   WHERE h.binding_id = lim.id
+     AND (lim.concurrency_limit IS NULL                      -- 未登记 → 不设闸
+          OR h.concurrency_inflight < floor(lim.concurrency_limit * :ceiling))
+     AND (lim.rpm_limit IS NULL
+          OR h.rpm_window_start < date_trunc('minute', now())
+          OR h.rpm_used < floor(lim.rpm_limit * :ceiling))
+  RETURNING h.binding_id)
+INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
+                            lease_owner, lease_expires_at)
+SELECT :claim_id, binding_id, :rid, :attempt_id, :kind, :owner, now() + interval '60 seconds'
+  FROM claimed
+RETURNING claim_id;
+```
+
+- **返回 0 行 = 该 binding 容量已满** → 该候选**排除出本次 RoutePlan**，selector 取下一个；全部候选都满 → 按 [§3.2](./05-scheduling-and-operations.md) 全资源不可用处置（按承诺与否决定排队时长）。**不是 429** —— 429 是调用方配额，这里是上游容量。
+- **释放**：在 `finalize`/`closeout_attempt` 内按 `claim_id` 一次性跃迁，成功才 `concurrency_inflight -= 1`（`rpm_used` **不回退**，它是窗口计数）。
+- **租约续期与回收**：与 canary claim 同规则 —— 随 attempt 心跳续租；后台只回收 `state='active' AND lease_expires_at < now()` 的。
+- **未登记容量的 binding**：`concurrency_limit`/`rpm_limit` 皆为 NULL 时上面的条件恒真，等价于放行；**但仍插 claim 行**，以便运维在 `/admin/health` 看到真实并发（[05 §4.3](./05-scheduling-and-operations.md) 要求界面提示"保留未生效"）。
+
+**服务 FR/AC**：FR-029/032；AC-18。
 
 ---
 

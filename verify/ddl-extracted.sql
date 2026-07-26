@@ -712,6 +712,12 @@ CREATE TABLE resource_health (
   observing_since  TIMESTAMPTZ,
   observing_success_count INTEGER NOT NULL DEFAULT 0,
 
+  -- 容量占用（FR-029/032，[05 §4.3](./05-scheduling-and-operations.md)）：
+  -- 仅对**已登记容量**的 binding 维护；未登记者这三列恒为 0 且不参与判定。
+  rpm_window_start    TIMESTAMPTZ,              -- 分钟窗口起点
+  rpm_used            INTEGER NOT NULL DEFAULT 0,
+  concurrency_inflight INTEGER NOT NULL DEFAULT 0,
+
   -- 一期受控验证（canary，[05 §2.0](./05-scheduling-and-operations.md)）
   canary_since        TIMESTAMPTZ,               -- 进入 canary 的时刻
   canary_window_start TIMESTAMPTZ,               -- 当前小时窗口起点（配额按小时重置）
@@ -764,6 +770,21 @@ CREATE TABLE cache_hit_windows (
   turn_count      INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, cache_scope_id, window_start)
 );
+
+CREATE TABLE capacity_claims (
+  claim_id      UUID PRIMARY KEY,
+  binding_id    BIGINT NOT NULL REFERENCES bindings(id),
+  request_id    UUID NOT NULL,
+  attempt_id    UUID NOT NULL,
+  kind          TEXT NOT NULL CHECK (kind IN ('normal','committed','takeover','probe')),
+  lease_owner   TEXT NOT NULL,
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','released')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at   TIMESTAMPTZ
+);
+
+CREATE INDEX idx_capacity_active ON capacity_claims(binding_id) WHERE state = 'active';
 
 CREATE TABLE probe_templates (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
