@@ -183,6 +183,31 @@ KEYS = {re.match(r"^\| `([^`]+)` \|", l).group(1)
 print(f"   （清单共 {len(KEYS)} 个键）")
 
 
+# ── 5ter 跨文档引用：配置键 / 管理端点 ──────────────────
+# 第 33 轮：12 引用 debug.capture.*、02 引用 retention.months、
+# 14 引用 /admin/ledger/requests/{id} —— 三者都不在权威清单里。
+# 这类"引用了不存在的东西"人工审查反复漏，做成检查。
+ALLDEV = {f: open(f).read() for f in DEV}
+
+ref_bad = []
+for f, body in ALLDEV.items():
+    # 07 记录的是 AxonHub 自身的管理端点（历史实测），不是我方 API
+    if f.endswith("09-admin-api.md") or f.endswith("07-axonhub-runtime-probes.md"):
+        continue
+    # 只认明确的键引用形式：config_params['k'] / param_key='k'
+    for m in re.finditer(r"config_params\['([a-z][a-z0-9_.]+)'\]|param_key='([a-z][a-z0-9_.]+)'", body):
+        k = m.group(1) or m.group(2)
+        if k not in KEYS:
+            ref_bad.append(f"{os.path.basename(f)}: config_params 键 `{k}` 不在 09 §4bis 清单")
+    for m in re.finditer(r"`(/admin/[a-z0-9/{}_-]+)`", body):
+        ep = re.sub(r"\{[^}]+\}", "{}", m.group(1)).rstrip("/")
+        known = {re.sub(r"\{[^}]+\}", "{}", e).rstrip("/")
+                 for e in re.findall(r"`?(/admin/[a-z0-9/{}_-]+)", ALLDEV["docs/dev/09-admin-api.md"])}
+        if ep not in known:
+            ref_bad.append(f"{os.path.basename(f)}: 端点 {ep} 未登记在 09")
+report("跨文档引用（配置键/端点）", sorted(set(ref_bad)))
+
+
 # ── 6 AC 计数自洽 ───────────────────────────────────────
 m14 = open("docs/dev/14-acceptance-matrix.md").read()
 cnt = []

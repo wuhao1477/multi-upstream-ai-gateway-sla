@@ -607,7 +607,7 @@ COMMIT;
 actual_usd(被取消的 attempt) =
     已知输入 token 上界 × 输入单价                     -- 与预留同源，len(RawBody) 或 max_input_tokens
   + ceil(旁路已观测到的输出字节数 / 2) × 输出单价       -- 每 token ≥1 字节 → 除 2 是**下界**，
-                                                        -- 故乘安全系数 cancel_cost_safety（默认 1.3）
+                                                        -- 故乘安全系数 `cancel_cost_safety_ratio`（默认 1.3，[09 §4bis](./09-admin-api.md)）
   ) × 倍率版本
 ```
 
@@ -618,7 +618,7 @@ actual_usd(被取消的 attempt) =
 | **旁路字节数是可得的** | `Observation.Bytes` 已在逐事件统计（[03 §2](./03-upstream-layer.md)），无需额外机制 |
 
 > ⚠️ **这是近似值，且是本设计已知的成本误差敞口**（明示，不假装精确）：它既可能高估（安全系数）也可能低估（上游按其自己的分词计费）。因转向自研后**无对账环节**（账本即唯一真相源），该误差**无法被自动纠正**。
-> **缓解**：[06 §6](./06-deployment-and-operations.md) 增监控项——`取消请求占比` 与 `取消请求估算成本占总成本比`；后者超阈值（默认 15%）→ **P3**，提示人工抽样核对上游账单并调整 `cancel_cost_safety`。
+> **缓解**：[06 §6](./06-deployment-and-operations.md) 增监控项——`取消请求占比` 与 `取消请求估算成本占总成本比`；后者超阈值（默认 15%）→ **P3**，提示人工抽样核对上游账单并调整 `cancel_cost_safety_ratio`。
 
 > ⚠️ `sla_takeover` 是**唯一不终结 request** 的取消原因：它只结束当前 attempt，请求继续。其余取消原因都意味着"本请求到此为止"，必须走 `finalize_abort`。
 > **验收**：[AC-30/AC-32](./14-acceptance-matrix.md) 须断言——客户端断开后 `requests.final_status='canceled'`、`client_reservations.state≠'reserved'`、`client_daily_spend.reserved_usd` 已扣回、canary claim 已释放，且该请求**不计入 SLA 失败**。
@@ -1091,18 +1091,36 @@ resv AS (
   SELECT :rid, :cid, :date, :est, 'reserved' FROM claimed
   RETURNING request_id
 ),
--- ⚠️ capacity 占用：**每个请求都要**（第 31 轮统一编排）。
---    仅当该 binding 已登记容量时执行；未登记则应用层跳过本 CTE 并把 capacity_ok 填 1。
+-- ⚠️ capacity 占用：**每个请求都要**（统一编排）。第 33 轮修正两处：
+--    ① 原版只 INSERT claim、**没有原子递增计数** → EXISTS 是读判定，并发下容量闸无效；
+--       必须用条件 UPDATE ... RETURNING 递增，才具备原子性。
+--    ② 原版说"未登记容量则跳过本 CTE"，但下面的 att 固定 FROM cap → 跳过就断链。
+--       改为**两个变体**，由应用层按是否登记容量二选一（结构同形，att 无需改）。
+cap_res AS (          -- 【变体 A：已登记容量】条件 UPDATE 原子递增
+  UPDATE resource_health h
+     SET rpm_window_start = CASE WHEN h.rpm_window_start IS NULL
+                                  OR h.rpm_window_start < date_trunc('minute', now())
+                                 THEN date_trunc('minute', now()) ELSE h.rpm_window_start END,
+         rpm_used = CASE WHEN h.rpm_window_start IS NULL
+                          OR h.rpm_window_start < date_trunc('minute', now())
+                         THEN 1 ELSE h.rpm_used + 1 END,
+         concurrency_inflight = h.concurrency_inflight + 1
+    FROM resv, bindings bd
+   WHERE h.binding_id = :binding_id AND bd.id = h.binding_id
+     AND h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling)
+     AND (h.rpm_window_start < date_trunc('minute', now())
+          OR h.rpm_used < floor(bd.rpm_limit * :ceiling))
+  RETURNING h.binding_id
+),
+-- 【变体 B：未登记容量】把上面一段整体换成直通：
+--   cap_res AS (SELECT :binding_id AS binding_id FROM resv)
+--   —— 不碰 resource_health，请求路径不多一次同步写（保 P99≤50ms）
 cap AS (
   INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
                               lease_owner, lease_expires_at)
-  SELECT :cap_claim_id, :binding_id, :rid, :attempt_id, :cap_kind, :owner,
+  SELECT :cap_claim_id, binding_id, :rid, :attempt_id, :cap_kind, :owner,
          now() + interval '60 seconds'
-    FROM resv
-   WHERE EXISTS (SELECT 1 FROM resource_health h JOIN bindings bd ON bd.id = h.binding_id
-                  WHERE h.binding_id = :binding_id
-                    AND (bd.concurrency_limit IS NULL
-                         OR h.concurrency_inflight < floor(bd.concurrency_limit * :ceiling)))
+    FROM cap_res
   RETURNING request_id
 ),
 att AS (
@@ -1731,14 +1749,9 @@ UPDATE attempts SET attempt_status = 'canceled_by_sla',
 -- ⓑ 最后一跳 → 按 §4.2bis 分流表（①/②/③b1/③b2/③c）定终态
 UPDATE attempts SET attempt_status = :attempt_terminal, ended_at = now()
  WHERE id = :last_attempt_id AND attempt_status IN ('pending','committed');
--- ⓒ 释放该 request 名下**全部**残留 canary claim（按 binding 计数扣减，不可 -1）
-WITH rel AS (
-  UPDATE canary_claims SET state='released', released_at=now()
-   WHERE request_id = :rid AND state='active' RETURNING binding_id),
-     agg AS (SELECT binding_id, count(*) AS n FROM rel GROUP BY binding_id)
-UPDATE resource_health h
-   SET canary_inflight = GREATEST(h.canary_inflight - agg.n, 0)
-  FROM agg WHERE h.binding_id = agg.binding_id;
+-- ⓒ 释放该 request 名下**全部**残留 claim —— **三张表**（第 33 轮修正：此段是
+--    finalize_recovery 的重复示例，仍只放 canary，与上方统一释放段冲突）。
+--    实现直接复用 finalize_recovery 主体的 rel_cap/rel_can/rel_prb 三段，本处不重复给。
 ```
 
 - ⓐ 的归因是**保守且可辩护**的：能产生下一跳，说明本跳当时确实被判定为需要接管。
@@ -2559,7 +2572,7 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 
 ### 9.2 保留策略配置化
 
-- 保留窗口（默认 7 个月 ≥180 天）走 `config_params(param_key='retention.months', is_critical=true)`；缩短保留是关键操作，需二次确认（FR-115）。
+- 保留窗口（默认 7 个月 ≥180 天）走 `config_params(param_key='retention_months', is_critical=true)`；缩短保留是关键操作，需二次确认（FR-115）。
 - **不可存列的守卫**：CI 中加 schema 断言，禁止任何账本表出现 `body/messages/prompt/completion_text/headers` 命名列（FR-112 硬约束 3）。
 
 ### 9.2bis 账本 outbox（防崩溃丢账，[01 §5.1](./01-architecture.md)）

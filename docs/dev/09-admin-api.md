@@ -162,10 +162,11 @@ type ParamMeta struct {
 | **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
 | `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
 | `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
-| `cancel_cost_safety_usd` | 0.05 | | 取消后仍可能被上游计费的保守预估（[02 §4](./02-data-model.md)） |
+| `cancel_cost_safety_ratio` | 1.3 | | 取消成本的**安全系数**（[02 §4](./02-data-model.md)：旁路观测字节 ÷2 得到的是 token **下界**，故乘该系数上浮）。⚠️ 第 33 轮修正：此前登记为 `cancel_cost_safety_usd=0.05`，把**系数**误记成**金额**，两者语义完全不同 |
 | `tenant_probe_concurrency` | 1 | | 同租户在飞探测数上限（[05 §2.1bis](./05-scheduling-and-operations.md) 第六维闸） |
 | `debug_capture_enabled` | `false` | ✅ | L2 抓包总开关（[12 §3](./12-debuggability.md)）——**含正文，生产默认关** |
 | `debug_capture_max_requests` | 20 | | 抓包环形上限 |
+| `debug_capture_max_bytes` | 1048576 | | 单请求抓包上限（1MB），超出截断 |
 | `debug_capture_ttl_minutes` | 30 | | 抓包自动过期，防长期驻留正文 |
 | **开关** ||||
 | `data_policy_enabled` | `false` | ✅ | 数据许可硬过滤（[02 §2ter](./02-data-model.md)） |
@@ -188,7 +189,8 @@ type ParamMeta struct {
 | `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
 | `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
-| `GET /admin/ledger/requests?…` | 账本查询（逐 Attempt、对账状态；FR-097/098） | M1 |
+| `GET /admin/ledger/requests?…` | 账本**列表**查询（按时间/client/别名/终态过滤；FR-097/098） | M1 |
+| `GET /admin/ledger/requests/{request_id}` | 账本**详情**：该请求的全部 attempt、逐跳 usage 与成本、`decision_snapshot`、reservation 状态与终态时间线（[AC-16](./14-acceptance-matrix.md) 的判定入口）。**不含正文**（FR-112） | M1 |
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
 | `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
 | `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |

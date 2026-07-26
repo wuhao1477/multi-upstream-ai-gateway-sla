@@ -298,8 +298,10 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
        (SELECT count(*) FROM u)   AS u_ok,  (SELECT count(*) FROM b) AS b_ok,
        (SELECT count(*) FROM e)   AS e_ok,  (SELECT count(*) FROM c) AS c_ok,
        (SELECT count(*) FROM att) AS dispatched;
-COMMIT;
--- 应用层：`dispatched=1` 才提交并发起探测；**任何一值为 0 一律 ROLLBACK**
+-- ⚠️ **块内不写 COMMIT**（第 33 轮修正：原版紧跟 COMMIT，而下一行又要求
+--    任一值为 0 时 ROLLBACK —— 先提交就回滚不了，预算已扣、claim 没插）。
+--    提交与否**一律由应用层依返回值决定**，与 dispatch 同纪律。
+-- 应用层：`dispatched=1` 才 COMMIT 并发起探测；**任何一值为 0 一律 ROLLBACK**
 --   （否则预算已扣、claim 却没插 —— 额度白白漏掉）
 --   g/t/u/b=0 → 该维预算耗尽；e=0 → 错误预算超限，暂停全部测活；c=0 → 该租户已有在飞探测
 ```
