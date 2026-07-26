@@ -96,3 +96,50 @@
 | [13 调研资产重审](./13-research-reassessment.md) | 转向后重审全部调研；Codex 三条硬约束；三项目在同一处翻车 → 字节透传 | ✅ 已重审 |
 | [14 验收矩阵](./14-acceptance-matrix.md) | **AC → 里程碑 → 可执行判定方法**；PM 与开发的验收契约（**一期 31 条 + 二期 5 条 = 36**，与本文里程碑表及 [PRD](../PRD.md) 一致） | 草案（M1 前定稿） |
 | [15 一期范围与开工前确认清单](./15-scope-and-preflight.md) | 一期/二期范围展开说明 + 16 项隐患确认结果（10 定论 + 6 验证点） | ✅ 已确认 |
+
+---
+
+## 5. 交付确认（2026-07-27）
+
+**判定**：开发视角对抗性审查第 39 轮 **ready-to-ship，无阻塞项**。
+
+**门禁现状**（`verify/gate.sh`，CI 与本地共用）：
+
+| 类别 | 状态 |
+| --- | --- |
+| 坏链 / SQL 块内 Markdown / DDL 顺序 / 引用不存在的列 | ✅ |
+| `config_params` 键清单规范（一行一键） | ✅ |
+| 跨文档引用（配置键 / 管理端点） | ✅ |
+| 事务骨架残留（块内 COMMIT / 旧三值 / 双 WITH / 漏必填列） | ✅ |
+| 事务 SQL 引用的列与函数存在于 DDL | ✅ |
+| AC 计数自洽（一期 31 + 二期 5 = 36） | ✅ |
+| FR/AC 分期标注 | ⚠️ 12 处疑似，**人工判读为合法拆分**（如 FR-103 一期最小 webhook、二期完整渠道），不阻断 |
+| **DDL 在 postgres:16 真跑** | ✅ 98 条语句 / 50 对象 + 匿名 401 回归断言 |
+
+### 5.1 实现期须自行确认的假设（非阻塞，但开工首日应对齐）
+
+1. `probe_budget_windows.scope_id` 是 `TEXT`：`binding_id` / `client_id` / `session_id` **入库前统一转字符串**；不适用的维度传哨兵 `'*'`。
+2. probe dispatch 的多返回值：**任一 `*_ok = 0` 或 `dispatched = 0` 一律 `ROLLBACK`**，不得部分提交。
+3. `probe_*` 的比例型配置由**应用层换算**成 SQL 参数（`:global_cap` 等），SQL 里不做比例运算。
+4. `requests.id` 按 UUIDv7 全局唯一使用，尽管分区主键是 `(id, created_at)`。
+5. 未登记容量的 binding **不更新 `resource_health`**，但预算、并发闸、claim、attempt 判定照常执行。
+
+### 5.2 最可能在实现期暴露问题的三处
+
+| # | 位置 | 为什么 |
+| --- | --- | --- |
+| 1 | probe dispatch 的多返回值事务 | 七个 CTE 串联、七个返回值，任一分支处理错都会导致「预算扣了但没探测」 |
+| 2 | `probe_budget_windows.scope_id` 的类型与哨兵 | 五个维度共用一列 TEXT，规范化不一致会静默漏扣 |
+| 3 | 容量「已登记 / 未登记」两条 SQL 变体 | 分支选错：未登记走原子路径会拖慢 P99；已登记走直通会让容量闸失效 |
+
+### 5.3 第一周任务顺序
+
+1. 落 DDL、M0 固定种子、`system-probe` 内置凭证
+2. 写事务集成测试：`adjust` / `dispatch` / `dispatch_next` / probe dispatch
+3. 实现 probe dispatch —— 优先覆盖首日窗口创建、session cap、预算失败回滚
+4. 接入 steward 定时触发与配置读取
+5. 恢复结算测试，确认 `single_hop_est_usd` 真正参与崩溃恢复成本汇总
+
+---
+
+_审查过程：39 轮对抗性审查（含 5 轮开发视角），累计修复 200+ 项阻塞问题；十类机器可判定检查固化在 `verify/gate.sh`，其中四类做过注入验证。_

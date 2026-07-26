@@ -294,7 +294,8 @@ WITH
                            AND r.tenant_id = :tenant)
                        < :tenant_probe_concurrency),
   -- ③ 容量占用（第 36 轮补：探测同样要占上游容量，kind='probe'、天花板 70%）
-  cap_res AS (   -- 未登记容量时换成 SELECT :bid AS binding_id FROM g 直通
+  cap_res AS (   -- 未登记容量时换成 `SELECT :bid AS binding_id FROM g, t, u, ss, b, e, c` 直通
+                 -- ⚠️ 必须依赖全部前置 CTE，否则预算/并发闸没过也会插 claim
     UPDATE resource_health h
        SET rpm_window_start = CASE WHEN h.rpm_window_start IS NULL
                                     OR h.rpm_window_start < date_trunc('minute', now())
