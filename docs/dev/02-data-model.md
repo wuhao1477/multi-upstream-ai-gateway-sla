@@ -640,6 +640,29 @@ COMMIT;
 
 > **验收**：[AC-33](./14-acceptance-matrix.md) 须含**事务幂等重试**测试——结算已不经 outbox（见上方写入路径分工），故场景改为：同一 `settle_event_key` 重复执行 `finalize_upstream`、或事务提交后连接中断导致调用方重试，`settled_usd` **不得翻倍**、`reserved_usd` **不得为负**。[AC-35](./14-acceptance-matrix.md) 须在**四个崩溃时点各断言** `client_reservations.state ≠ 'reserved'` 且 `client_daily_spend.reserved_usd` 已归零（无泄漏）。
 
+**鉴权拒绝的审计载体**（本轮路径走查发现：FR-120 明写"支持…**使用审计**"，但唯一载体 `gateway_clients.last_used_at` 只记**成功使用**；被拒绝的请求既不落 `requests`（C′ 在鉴权**之后**），也没有别的地方记 → 一把已吊销的 Key 被反复打、或某调用方持续探测越权别名，**系统完全看不见**）：
+
+```sql
+-- 鉴权拒绝的**聚合**审计：按分钟窗口计数，不逐请求落行
+CREATE TABLE auth_rejections (
+  window_start  TIMESTAMPTZ NOT NULL,          -- 分钟粒度对齐
+  gateway_client_id BIGINT REFERENCES gateway_clients(id),  -- 401(无凭证/无法定位) 时为 NULL
+  secret_prefix TEXT,                          -- 可定位但校验失败时记前缀（**永不记完整凭证**，FR-094）
+  reason        TEXT NOT NULL CHECK (reason IN
+                  ('no_credential','bad_secret','revoked','expired','alias_forbidden')),
+  count         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (window_start, gateway_client_id, secret_prefix, reason)
+);
+```
+
+> ⚠️ **为什么是计数而不是逐请求落 `requests` 行**：401 发生在鉴权**之前**，意味着**任何人**都能触发它。若逐请求写库，未鉴权流量直接变成**写库放大**——一个脚本就能把账本表打满、把 PG 拖垮，等于给了攻击者一条比业务请求更廉价的攻击路径。按分钟窗口聚合后，无论打多少次，每分钟每（凭证前缀 × 原因）最多一行。
+>
+> **明确结论：401/403 不进 `requests` 账本。** 这是刻意选择，不是遗漏——它们从未进入调度，没有候选、没有价格版本、没有 attempt，FR-097/098 要求记录的字段一个都不存在。它们的审计需求由本表满足。
+>
+> **告警**：单窗口 `revoked`/`bad_secret` 计数超阈值 → **P2**（疑似凭证泄露或被爆破）；`alias_forbidden` 持续出现 → P3（调用方配置错误）。阈值走 `config_params`。
+>
+> **服务 FR/AC**：FR-120（使用审计）、FR-094（不展示完整凭证）；[AC-33](./14-acceptance-matrix.md) 须断言 401/403 **不产生 `requests` 行**、但 `auth_rejections` 计数递增。
+
 **鉴权与预留的执行顺序**（第 9 轮 [critical] 修正）：
 
 > ⚠️ 上一版把"校验 `quota_daily_usd`"写在鉴权阶段（selector 之前），但 `estimated_usd` **必须等 selector 产出完整 RoutePlan 才算得出来**——顺序上不可能在那时校验。照原文实现必然写成 check-then-act：多实例同时通过基于旧余额的检查，再各自预留，配额直接被突破（违反 AC-33⑥⑬）。故拆成**快速拒绝**与**原子预留**两段。
@@ -1716,7 +1739,7 @@ CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created
 | --- | --- | --- |
 | §1 注册（channels/accounts/keys/models/bindings/fault_domains/cache_scopes） | FR-001~006、022、031、044/045、055、095、109、113 | AC-01/04/05/11 |
 | §2 别名与策略（model_aliases/routing_policies/sla_targets/config_params） | FR-062、090/091、104、115/116/117 | AC-25/26 |
-| §2bis 入站凭证与配额（gateway_clients/client_daily_spend/client_rate_window/client_reservations/**reservation_adjustments**） | FR-094、113、120 | AC-33 |
+| §2bis 入站凭证与配额（gateway_clients/client_daily_spend/client_rate_window/client_reservations/reservation_adjustments/**auth_rejections**） | FR-094、113、120 | AC-33 |
 | §2ter 数据许可（data_policies） | FR-093（P1，默认关） | AC-14 |
 | §3 价格版本（price_versions/price_change_log） | FR-010、012~018 | AC-02/03/17 |
 | §4 请求与 Attempt 账本（requests/attempts/attempt_usage/session_prefix_ledger） | FR-040、050/051、058、070~072、076/078/079/080、092、097~099、112、116、**119** | AC-06/07/09/12/13/16、**AC-30/31/32** |
