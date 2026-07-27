@@ -977,19 +977,22 @@ SELECT r.session_id,
        :prefix_target_ms,                                        -- config_params['prefix_target_ms']
        (COALESCE(prev.cumulative_first_token_ms, 0) + COALESCE(r.effective_ttft_ms, 0))
          / (COALESCE(prev.turn_no, 0) + 1) <= :prefix_target_ms
-  FROM requests r
+  FROM attempts a                                                -- ⚠️ 与 ② 同源：从 attempts 派生
+  JOIN requests r ON r.id = a.request_id AND r.created_at = a.request_created_at
   LEFT JOIN LATERAL (
        SELECT turn_no, cumulative_first_token_ms FROM session_prefix_ledger
         WHERE session_id = r.session_id ORDER BY turn_no DESC LIMIT 1) prev ON true
- WHERE r.id = :rid AND r.created_at = :rcat
+ WHERE a.id = :attempt_id
    AND r.session_id IS NOT NULL                                  -- 无会话键的请求不入账
    AND r.effective_ttft_ms IS NOT NULL                           -- 没首字不构成一轮
 ON CONFLICT (session_id, turn_no) DO NOTHING;                    -- 见下方并发说明
 COMMIT;
 ```
 
-- **`:rid`/`:rcat` 在本事务可用**：outbox payload 只有 `attempt_id`，故 ④ 与 ② 一样**从 attempts 派生**——
-  实现时在 ② 之后用 `RETURNING` 带出，或在 ④ 内直接 join `attempts`。**不得**新增一次未说明的查表。
+- **只用 `:attempt_id` 一个参数**：outbox payload 只有 `attempt_id`/`written_at`。
+  ④ 与 ② 一样**从 attempts 派生** `request_id`/`request_created_at`，
+  **不得**写成 `:rid`/`:rcat`——那会依赖一次本事务没有说明来源的额外查询（第 17 轮 [high] 定的规矩）。
+- **④ 读得到 ③ 刚写的 `effective_ttft_ms`**：同一事务内后一条语句可见前一条的效果。
 - **轮次并发**：同一 `session_id` 的两个请求并发关单会算出相同 `turn_no` → 撞主键。
   `ON CONFLICT DO NOTHING` 让后到者**丢弃本轮记账**而不是报错——连续会话本就是串行对话，
   并发同会话属异常输入；丢一轮记账的代价远小于让关单事务失败。

@@ -811,35 +811,64 @@ DO UPDATE SET sample_count = EXCLUDED.sample_count,
               success_count = EXCLUDED.success_count,
               stream_break_count = EXCLUDED.stream_break_count;
 
--- ── 段二：由窗口汇出 resource_health（不再碰 attempts）──────────
-WITH cur AS (      -- 当前小时的总体行（三个维度均为 NULL = 不分维度）
-  SELECT binding_id, sample_count, p50_ttft_ms, p95_ttft_ms, p99_ttft_ms, success_count
-    FROM health_metric_windows
-   WHERE window_kind = '1h' AND window_start = date_trunc('hour', now())
-     AND model_id IS NULL AND request_type IS NULL AND context_bucket IS NULL),
+-- ── 段二：汇出 resource_health ────────────────────────────────
+-- 1h 指标走**滑动窗口直扫**（只 1 小时的 attempts），24h 计数走窗口表累加。
+-- ⚠️ 1h **不能**读段一的整点行：`window_start = date_trunc('hour', now())` 在每个整点
+--    会让全部 binding 的 sample_count 同时跌到接近 0 → `low_confidence` 集体翻真
+--    → 所有渠道同一时刻退出主候选。**每小时一次的悬崖**，比原来的全表扫描更糟。
+--    滑动窗口没有这个问题，且 1h ≈ 24 分之一的数据量，原本"每 60s 扫 24h"的
+--    不可行性已经消除。段一的窗口行留给 24h 计数与分维度查询（FR-041）。
+WITH cur AS (
+  SELECT a.binding_id,
+         count(*) AS sample_count,
+         count(*) FILTER (WHERE a.attempt_status = 'completed') AS success_count,
+         percentile_disc(0.50) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+           FILTER (WHERE a.has_ttft_output) AS p50_ttft_ms,
+         percentile_disc(0.95) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+           FILTER (WHERE a.has_ttft_output) AS p95_ttft_ms,
+         percentile_disc(0.99) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+           FILTER (WHERE a.has_ttft_output) AS p99_ttft_ms
+    FROM attempts a
+   WHERE a.request_created_at > now() - INTERVAL '1 hour'      -- 滑动，非整点对齐
+     AND a.attempt_status NOT IN ('unknown_billing','interrupted')
+     AND a.role <> 'probe'
+   GROUP BY a.binding_id),
 d24 AS (           -- 24h 只汇**计数**：计数可加，分位数不可加（见下）
   SELECT binding_id, sum(sample_count) AS n24
     FROM health_metric_windows
    WHERE window_kind = '1h' AND window_start > now() - INTERVAL '24 hours'
      AND model_id IS NULL AND request_type IS NULL AND context_bucket IS NULL
    GROUP BY binding_id)
+-- ⚠️ 必须**全量扫 resource_health 并左连窗口**，不能只更新"有窗口行的 binding"：
+--    当前小时没流量的 binding 根本不会出现在 cur 里，只更新命中行会让它
+--    **永远保留上一小时的样本数与 p95** —— 一个已经挂掉、无人再路由到的渠道
+--    会一直显示健康，selector 反而更愿意选它。空窗必须显式归零。
 UPDATE resource_health h
-   SET sample_count_1h = cur.sample_count,
+   SET sample_count_1h  = COALESCE(cur.sample_count, 0),
        sample_count_24h = COALESCE(d24.n24, 0),
-       p50_ttft_ms = cur.p50_ttft_ms,
+       p50_ttft_ms = cur.p50_ttft_ms,          -- 无窗口行 → NULL（"不知道"，不是"很快"）
        p95_ttft_ms = cur.p95_ttft_ms,
        p99_ttft_ms = cur.p99_ttft_ms,
-       success_rate = CASE WHEN cur.sample_count > 0
+       success_rate = CASE WHEN COALESCE(cur.sample_count,0) > 0
                            THEN cur.success_count::numeric / cur.sample_count END,
-       low_confidence = NOT (cur.sample_count >= :min_1h OR COALESCE(d24.n24,0) >= :min_24h),
-       last_sample_at = now(), updated_at = now()
-  FROM cur LEFT JOIN d24 ON d24.binding_id = cur.binding_id
- WHERE h.binding_id = cur.binding_id;
+       low_confidence = NOT (COALESCE(cur.sample_count,0) >= :min_1h
+                             OR COALESCE(d24.n24,0) >= :min_24h),
+       last_sample_at = CASE WHEN COALESCE(cur.sample_count,0) > 0
+                             THEN now() ELSE h.last_sample_at END,   -- 无样本不刷新"最近有样本"
+       updated_at = now()
+  FROM (SELECT binding_id FROM resource_health) b
+  LEFT JOIN cur ON cur.binding_id = b.binding_id
+  LEFT JOIN d24 ON d24.binding_id = b.binding_id
+ WHERE h.binding_id = b.binding_id;
 ```
 
 - **段一要跑两遍**：一遍带 `model_id/request_type/context_bucket` 分组（供 FR-041 的分维度健康查询与
-  [09 `GET /admin/health`](./09-admin-api.md)），一遍三列全填 `NULL` 出**总体行**（段二读的就是它）。
+  [09 `GET /admin/health`](./09-admin-api.md)），一遍三列全填 `NULL` 出**总体行**（段二的 24h 计数读的就是它）。
   `UNIQUE NULLS NOT DISTINCT` 保证总体行不会被写成多份（[02 §6](./02-data-model.md) 第 19 轮加的约束正是为此）。
+- **两段的分工**：段一负责**留痕与分维度**（历史、按模型/协议/上下文区间拆分、24h 计数的可加来源），
+  段二负责**喂决策**（selector 读的 `resource_health`）。决策要的是**滑动**的近 1 小时，
+  留痕要的是**对齐**的整点桶——两者口径本就不同，硬用同一份数据才是错的。
+  段一的整点行在小时中途是**部分数据**，任何按整点行做实时判定的逻辑都会有悬崖，不止本处。
 - **`window_kind='24h'` 的行**由每 5min 的一个轻量任务从 1h 行汇总，**只填计数三列**
   （`sample_count`/`success_count`/`stream_break_count`），**分位数三列留 NULL**——
   ⚠️ **分位数不可由子窗口合成**：24 个小时各自的 p95 求平均/取最大都不等于这 24 小时整体的 p95。
