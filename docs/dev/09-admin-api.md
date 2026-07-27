@@ -235,6 +235,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
 | `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
+| `GET /admin/channel-models`、`POST /admin/channel-models` | **渠道×模型×协议能力矩阵的写入载体**（`channel_models`）。登记 `enabled`、探测结果（`support`/`supports_streaming`/`supports_tools`/`probed_at`），以及 ⚠️ **`upstream_model_name`——该渠道对这个模型的叫法**。中转站把 `gpt-5.5` 叫成 `openai/gpt-5.5` 或 `gpt-5.5-0930` 是常态，**不填就按 `models.canonical_name` 发出去，上游必然 404**（[05 §1.0 出站改写](./05-scheduling-and-operations.md)）。留空 = 与 `canonical_name` 相同 | **M1** |
 | `GET /admin/ledger/requests?…` | 账本**列表**查询（按时间/client/别名/终态过滤；FR-097/098） | M1 |
 | `GET /admin/ledger/requests/{request_id}` | 账本**详情**：该请求的全部 attempt、逐跳 usage 与成本、`decision_snapshot`、reservation 状态与终态时间线（[AC-16](./14-acceptance-matrix.md) 的判定入口）。**不含正文**（FR-112） | M1 |
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
@@ -244,7 +245,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/debug/trace/{request_id}` | **L1 事件轨迹查询**（[12 §3](./12-debuggability.md)）：返回该请求各 attempt 的 SSE 事件元数据序列（`seq`/`offset_ms`/`event_type`/`should_commit`/`has_ttft_output`/`bytes`），**不含正文**（FR-112） | M1 |
 | `GET /admin/ledger/reconciliation?scope=account\|key\|model&from=&to=` | **计费对账**（FR-019）：聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed` | M3 |
 | `GET /admin/prices/changes?model_id=&channel_id=&key_id=&from=&to=` | **价格变化记录与影响范围**（FR-017）：查 `price_change_log`，逐条给出前后两版单价（join `from_version_id`/`to_version_id`）、`direction`、是否已确认，以及**影响范围**——该 `(channel, model)` 下受影响的 binding 列表与变更后窗口内的实际用量金额。三个过滤参数对应 FR-017 的「按模型、渠道和 Key 查询」（`key_id` 经 binding 反查） | M3 |
-| `POST /admin/prices/changes/{id}/confirm` | 人工确认一条 `direction='decrease'` 的降价（置 `confirmed=true`），使其重新参与低价优选排序（[04 §价格变更留痕](./04-collector-adapter.md)、FR-014/AC-03） | M3 |
+| `POST /admin/prices/changes/{id}/confirm` | 人工确认一条 `direction='decrease'` 的降价。⚠️ **必须在同一事务里改两张表**：`price_change_log.confirmed=true` **以及**该行 `to_version_id` 指向的 `price_versions.confirmed=true`（+ `confirmed_by`/`confirmed_at`）。selector 的「当前价」判据读的是 **`price_versions.confirmed`**（[02 §3](./02-data-model.md) 的 `idx_price_cur` 部分索引），只改留痕表**等于没确认**，该降价永远不参与低价优选，AC-03「确认后逐步增加」无法成立（[04 §价格变更留痕](./04-collector-adapter.md)、FR-014/AC-03） | M3 |
 | `GET /v1/models`、`GET /v1/models/{alias}` | **数据面**端点，非管理面。由网关**合成**（[03 §4](./03-upstream-layer.md)）：返回该凭证 `allowed_aliases` 内的启用别名；非别名 404、越权 403；`x-models-etag` 我方自生成并支持 `If-None-Match` → 304 | M1 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
 | `GET /admin/fault-domains` | 列出故障域（`kind` + `label` 作显示名）及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |

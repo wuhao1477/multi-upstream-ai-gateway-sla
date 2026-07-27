@@ -2656,6 +2656,10 @@ CREATE TABLE alert_events (
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- 同因重复发生时刷新（[05 §5.2bis](./05-scheduling-and-operations.md) 合并事务）
   acknowledged_at TIMESTAMPTZ,
+  -- 进入 recovering 的时刻（第 41 轮补）：关闭判据是「recovering 持续超 alert_close_after_sec」，
+  -- 没有这一列就只能拿 started_at 或 last_seen_at 凑 —— 前者会让开了几小时的告警一恢复就立刻关，
+  -- 后者会让它永远关不掉。转出 recovering（判据再次成立）时必须置回 NULL。
+  recovering_since TIMESTAMPTZ,
   closed_at       TIMESTAMPTZ,
   -- ⚠️ 不可用 UNIQUE(dedup_key, state)（对抗性审查发现）：state 不同即视为不同行，
   --    同因可同时存在 open/acknowledged/recovering 三行；且历史上只允许一条 closed，

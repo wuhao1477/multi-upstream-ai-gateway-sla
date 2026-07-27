@@ -27,16 +27,29 @@
 | --- | --- | --- |
 | 1 | 取请求体 `model` 字段的字符串 `name`（**不做 JSON 全解析**，只按 §1.0bis 的字节级取值） | 缺字段 → **400** |
 | 2 | `model_aliases WHERE alias = name AND enabled` | 未命中或 `enabled=false` → **404**（与"模型不存在"同一响应，不泄漏别名表） |
-| 3 | 命中行给出两样东西：`policy_id` → SLA 等级与测活资格（序 1）；`target_model_id` → **本次请求的 `model_id`**（序 2 起全程使用） | 指向的策略 `is_active=false` → **500**（配置错误，不是调用方的问题） |
+| 3 | 命中行给出两样东西：`policy_id` → SLA 等级与测活资格（序 1）；`target_model_id` → **本次请求的 `model_id`**（序 2 起全程使用） | 指向的策略 `is_active=false` → **503**（该别名已被停用，配置问题不是请求问题） |
 | 4 | `requests.alias_id` 记命中的别名 id（调用方**意图**）；实际用了哪个模型由每条 attempt 的 `bindings.model_id` 钉住 | —— |
 
 - **为什么 `requests` 不另存 `model_id`**：别名→模型的映射是**可变配置**，而 attempt 的 binding 已经钉死了那一跳真正用的模型。
   再存一列快照会出现"requests 说 A、attempt 说 B"的双真相。零 attempt 的请求本来就没发生过模型选择。
 - **`enabled=false` 返 404 而非 403**：别名下线后调用方不该能通过响应码区分"从没有过"和"下线了"。
-- **策略的"生效版本"**：`routing_policies` 是**版本化**的（`version`/`effective_at`/`changed_by`，FR-104）。
-  生效行 = 该 `name` 下 `is_active = true` 且 `effective_at <= now()` 的最大 `version` 行。
-  改策略走**插新版本 + 旧版本置 `is_active=false`**，与 `config_params` 同一套不可覆盖原则——
-  历史请求的 `requests.policy_id` 因此永远指向它当时真正用的那一版。
+- **`routing_policies` 一期用「原地更新 + 版本号自增」，不做插入式版本化**（第 41 轮修正我自己上一轮引入的矛盾）：
+
+  > ⚠️ 上一版写的是"改策略走插新版本 + 旧版本置 `is_active=false`"，与 `config_params` 对齐。
+  > **但 `config_params` 没有任何外键指向它，`routing_policies` 有两个**：`model_aliases.policy_id`
+  > 和 `requests.policy_id`。一旦插新版本，别名的外键仍指着旧行 → 第一次改策略之后，
+  > **每个请求都会命中一个 `is_active=false` 的策略**。这条规则自己把自己锁死了。
+
+  | 项 | 一期做法 |
+  | --- | --- |
+  | 改策略 | **`UPDATE` 该行**，同时 `version = version + 1`、写 `changed_by`/`change_reason`/`effective_at` |
+  | `is_active` | **纯启停开关**，不承载版本语义。置 false = 该策略下线，指向它的别名返回 **503** |
+  | 生效行 | 就是 `model_aliases.policy_id` 指的那一行，**不需要再按 name 找版本** |
+  | 变更历史 | ⚠️ **一期不保留**：只留最后一次变更的 `changed_by`/`change_reason`/`version`。策略数量是个位数、只有本人操作，历史价值低于把外键搞复杂的代价 |
+  | 历史请求的可回溯 | 靠 `requests.sla_level`（决策时的冗余快照）+ `requests.decision_snapshot`，**不靠**回查策略表 |
+
+  ⏭ 二期若需要完整策略变更史，做法是加一张 `routing_policy_revisions` 影子表**只追加**，
+  主表保持单行身份不变——外键仍然安全。**不要**改成插入式版本化。
 
 **出站改写（executor 发上游前）**：
 
@@ -53,13 +66,27 @@
 - **接管换渠道时必须重新改写**：hop1 与 hop2 的 `upstream_model_name` 可能不同，
   不得复用 hop1 已改写的字节（[03 §5](./03-upstream-layer.md) 每跳重建请求体）。
 
-### 1.0bis 取 `model` 字段而不解析整个请求体
+### 1.0bis 一次字节扫描，三样产出
 
-字节级透传是硬约束，但**必须知道模型名才能路由**——这两件事的调和方式：只做一次**定位取值**，不做解析-重组。
+字节级透传是硬约束，但路由**必须知道模型名**、能力过滤**必须知道用了哪些字段**、费用预留
+**必须知道有没有多模态标记**。调和方式：**整个请求体只扫一遍**，一次产出三样东西，全程不构建 JSON 对象。
 
-- 用流式 JSON 扫描器定位顶层 `"model"` 键的字符串值（`encoding/json` 的 `Decoder.Token()` 逐 token 走即可），**读完即停**。
-- 改写时按定位到的**字节区间做替换**，请求体其余字节一字不动；`Content-Length` 按长度差重算。
+| 产出 | 用途 | 定义处 |
+| --- | --- | --- |
+| 顶层 `model` 的字符串值 **及其字节区间** | 别名解析（§1.0 步 1）+ 出站改写 | 本节 |
+| 能力标记位（`tools`/`stream`/`reasoning`/多模态/结构化输出） | 能力过滤 | [§1.1ter](#11ter-能力过滤请求需要什么--比对哪几列fr-006-落地第-40-轮补) |
+| 多模态/服务端上下文引用标记 | 费用预留走保守分支 | [02 §2bis](./02-data-model.md) |
+
+> ⚠️ **不得"取到 model 就停"**（第 41 轮修正：上一版写的是"读完即停"，与上面两张表**同一次扫描**
+> 的说法直接冲突）。请求体里 `model` 通常在最前面、`tools` 在很后面——提前退出会让能力标记
+> **恒为假**，于是带工具的请求被路由到不支持工具的渠道，且**没有任何报错**，只是回答里没有工具调用。
+> 扫描必须走完整个 body。
+
+- 用流式 JSON 扫描器逐 token 走完全文（`encoding/json` 的 `Decoder.Token()` 即可），
+  途中记录顶层 `model` 值的**起止字节偏移**与各标记位命中情况。
+- 改写时按记下的**字节区间做替换**，请求体其余字节一字不动；`Content-Length` 按长度差重算。
 - **不得** `json.Unmarshal` 到 map 再 `Marshal` 回去——那就是 [13 §5](./13-research-reassessment.md) 里三个项目翻车的解析-重组路线（键序、数字精度、未知字段全会变）。
+- **只扫一遍**：三类产出共用同一次遍历，不要为预留、能力、路由各扫一次。
 
 ### 1.1 候选过滤顺序（权限/资格先于负载均衡）
 
@@ -84,7 +111,7 @@
 > `supports_reasoning` / `supports_structured_output` 三列建好后**全库零引用**——
 > "请求需要什么能力"到"比对哪一列"之间没有任何映射，等于 P0 只做了一半。
 
-**需求探测**（与 [02 §2bis](./02-data-model.md) 预留分支同一次字节级扫描，**不额外解析 JSON**）：
+**需求探测**（走 [§1.0bis](#10bis-一次字节扫描三样产出) 那一次全量扫描的产出，**不额外解析 JSON、不提前退出**）：
 
 | 请求侧标记（出现任一即置位） | 需求 | 比对列 |
 | --- | --- | --- |
@@ -682,10 +709,13 @@ COMMIT;
 | --- | --- | --- |
 | → `open` | 上方写入事务 | `started_at`/`last_seen_at`/`occurrence_count` |
 | `open` → `acknowledged` | **人工**：`POST /admin/alerts/{id}/ack` | `state`、`acknowledged_at = now()` |
-| `open`/`acknowledged` → `recovering` | 告警 worker：判据连续 `:alert_recovery_checks`（默认 3）轮不再成立 | `state` |
-| `recovering` → `closed` | 同 worker：`recovering` 持续超 `:alert_close_after_sec`（默认 900） | `state`、`closed_at = now()` |
-| `recovering` → `open` | 同 worker：判据再次成立 | `state`（`closed_at` 保持 NULL） |
+| `open`/`acknowledged` → `recovering` | 告警 worker：判据连续 `:alert_recovery_checks`（默认 3）轮不再成立 | `state`、**`recovering_since = now()`** |
+| `recovering` → `closed` | 同 worker：`now() - recovering_since > :alert_close_after_sec`（默认 900） | `state`、`closed_at = now()` |
+| `recovering` → `open` | 同 worker：判据再次成立 | `state`、**`recovering_since = NULL`**（下次恢复重新计时） |
 
+- **必须用 `recovering_since` 而不是 `started_at` 或 `last_seen_at` 计时**：前者会让开了几小时的告警
+  一进 recovering 就立刻满足 900 秒而秒关（等于没有观察期），后者在判据不再成立后**不再刷新**，
+  同样会立刻满足。这一列是第 41 轮补的，此前表里根本没有它。
 - **`closed` 之后同键再次发生会开一条新行**：部分唯一索引 `uq_alert_active` 只约束 `state <> 'closed'`，
   历史事件因此完整保留（FR-102 要的是"不刷屏"，不是"只留一条"）。
 - **ack 不影响自动关闭**：人工确认只是表示"我看到了"，判据恢复照样走 `recovering → closed`。
@@ -800,8 +830,15 @@ SELECT a.binding_id, bd.model_id, r.request_type,
   LEFT JOIN attempt_usage au
          ON au.attempt_id = a.id AND au.request_created_at = a.request_created_at
  WHERE a.request_created_at > now() - INTERVAL '1 hour'
-   AND a.attempt_status NOT IN ('unknown_billing','interrupted')   -- 崩溃不算渠道的账
-   AND a.role <> 'probe'                                            -- 测活失败单独归因（§2.1）
+   -- 归因口径见 [02 §4.2bis 不变式 3](./02-data-model.md)：三类都不是渠道的账。
+   --   unknown_billing / interrupted = **我们**崩溃；canceled_by_client = **用户**主动取消。
+   --   ⚠️ canceled_by_client 第 41 轮补上：不变式明写了要排除，SQL 里一直漏着 ——
+   --      用户按 Ctrl-C 会被算成该渠道的一个非成功样本，把健康渠道误降级。
+   AND a.attempt_status NOT IN ('unknown_billing','interrupted','canceled_by_client')
+   -- ⚠️ **不排除 role='probe'**（第 41 轮修正）：主动测活的全部目的就是给空闲渠道**攒健康样本**。
+   --    排掉它，canary 渠道即使测活全过样本数仍为 0，永远晋级不了（§2.0 五条准入过不去）。
+   --    "测活失败单独归因"约束的是**用户 SLA 与错误预算**（§5.1 按 requests 聚合时排除
+   --    probe_kind='probe'），不是渠道健康。两套口径不同，见下方说明。
  GROUP BY a.binding_id, bd.model_id, r.request_type, 4
 ON CONFLICT (binding_id, model_id, request_type, context_bucket, window_kind, window_start)
 DO UPDATE SET sample_count = EXCLUDED.sample_count,
@@ -830,8 +867,8 @@ WITH cur AS (
            FILTER (WHERE a.has_ttft_output) AS p99_ttft_ms
     FROM attempts a
    WHERE a.request_created_at > now() - INTERVAL '1 hour'      -- 滑动，非整点对齐
-     AND a.attempt_status NOT IN ('unknown_billing','interrupted')
-     AND a.role <> 'probe'
+     AND a.attempt_status NOT IN ('unknown_billing','interrupted','canceled_by_client')
+     -- 同段一：测活样本**计入渠道健康**，只是不进用户 SLA 分母
    GROUP BY a.binding_id),
 d24 AS (           -- 24h 只汇**计数**：计数可加，分位数不可加（见下）
   SELECT binding_id, sum(sample_count) AS n24
@@ -865,6 +902,15 @@ UPDATE resource_health h
 - **段一要跑两遍**：一遍带 `model_id/request_type/context_bucket` 分组（供 FR-041 的分维度健康查询与
   [09 `GET /admin/health`](./09-admin-api.md)），一遍三列全填 `NULL` 出**总体行**（段二的 24h 计数读的就是它）。
   `UNIQUE NULLS NOT DISTINCT` 保证总体行不会被写成多份（[02 §6](./02-data-model.md) 第 19 轮加的约束正是为此）。
+- **测活样本进渠道健康、不进用户 SLA**（第 41 轮把两处对立的说法统一）：
+
+  | 口径 | 聚合对象 | 测活怎么算 | 客户端取消怎么算 |
+  | --- | --- | --- | --- |
+  | **渠道健康** `resource_health` | `attempts` | **计入**（这是空闲渠道唯一的样本来源，[§2.1bis 判据 5](#21bis-主动测活的触发抢占与模板选择第-29-轮-p0)） | **不计入**（不是渠道的问题） |
+  | **用户 SLA / 错误预算** §5.1 | `requests` | **不计入**（按 `probe_kind='probe'` 排除，AC-09 的分轨断言） | 不计入失败（PRD §术语） |
+
+  > 「测活失败单独归因」这句话此前被同时理解成"不进 SLA"和"不进健康"两件事。
+  > 若不进健康，主动测活就完全失去意义——它存在的**唯一理由**就是给没有业务流量的渠道产生样本。
 - **两段的分工**：段一负责**留痕与分维度**（历史、按模型/协议/上下文区间拆分、24h 计数的可加来源），
   段二负责**喂决策**（selector 读的 `resource_health`）。决策要的是**滑动**的近 1 小时，
   留痕要的是**对齐**的整点桶——两者口径本就不同，硬用同一份数据才是错的。
@@ -946,7 +992,7 @@ conservative_floor(account_group) =
 
 known_consumption_since = Σ attempt_usage.total_cost
                           WHERE attempt.binding 属该账号组
-                            AND attempt.started_at > last_confirmed_at
+                            AND attempt.started_at > confirmed_at   -- ⚠️ 列名是 confirmed_at，不是 last_confirmed_at
                             AND attempt_status IN ('completed','failed','interrupted','unknown_billing')
                           （**含**已计费但结果不明的两类——保守）
 
@@ -967,7 +1013,9 @@ inflight_reserved_since = Σ attempts.single_hop_est_usd
   这里管的是**上游账号**的余额，两者是不同主体的两笔账，同时存在不构成重复扣减。
 - **账号组聚合**：按 `upstream_accounts.balance_group_key` 归并（FR-022/AC-04）——同一 key 的多账号/多 Key **只算一份余额**，消耗则**全部累加**。`balance_group_key` 为空时按 account_id 独立成组。
 - **无法形成下限**的三种情形与处置见 [§1.1bis](#11bis-余额配额过滤的四条判据fr-026-落地)，本 worker 只负责在这些情形下**把 `conservative_floor` 置 NULL**（而非算出一个假值）。
-- **落 `balance_signals`**：每轮写一行快照（`last_confirmed_balance`/`known_consumption_since`/`conservative_floor`/`computed_at`），供排障回溯"当时为什么排除了这个渠道"。
+- **落 `balance_signals`**：每轮更新该账号组的行（`known_consumption_since`/`conservative_floor`/`updated_at`），供排障回溯"当时为什么排除了这个渠道"。
+  ⚠️ 列名以 [02 §7](./02-data-model.md) 为准：确认时刻是 **`confirmed_at`**（不是 `last_confirmed_at`）、
+  时间戳是 **`updated_at`**（表里**没有** `computed_at` 这一列）。第 41 轮：原文两处列名都是臆造的，照抄跑不通。
 
 ---
 

@@ -82,9 +82,18 @@ report("DDL 顺序", order_bad)
 # ── 4 引用不存在的列 ────────────────────────────────────
 alltext = "".join(open(f).read() for f in DEV)
 tables = set(re.findall(r"CREATE TABLE (\w+)", alltext))
+# ⚠️ 列不一定在 CREATE TABLE 里 —— 本文档有几处走 `ALTER TABLE t ADD COLUMN c`
+#    （如 price_versions.confirmed）。只看建表体会把真实存在的列误报成不存在，
+#    进而诱使人去"修"一份本来正确的文档（第 41 轮踩到）。
+altered = {}
+for m in re.finditer(r"ALTER TABLE (\w+) ADD COLUMN (?:IF NOT EXISTS )?(\w+)", alltext):
+    altered.setdefault(m.group(1), set()).add(m.group(2))
+
 miss = []
 for t, c in set(re.findall(r"`(\w+)\.(\w+)`", alltext)):
     if t in tables:
+        if c in altered.get(t, ()):
+            continue
         blk = re.search(r"CREATE TABLE " + t + r"\b.*?\n\)", alltext, re.S)
         if blk and not re.search(r"\b" + c + r"\b", blk.group(0)):
             miss.append(f"{t}.{c}")

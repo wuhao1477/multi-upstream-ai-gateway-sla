@@ -371,12 +371,28 @@ type SubscriptionQuota struct {
 | `channels`/`upstream_accounts`/`upstream_keys`/`models` | Detect + Fetch* | 资源身份登记，不以渠道名代身份；`site_family`、`external_user_id` | FR-002 |
 | `price_versions` | `FetchPricing` | 币种、计费单位、来源、查询/生效时间；**不可覆盖版本** | FR-012/013 |
 | `price_change_log` | `FetchPricing` **同一事务** | 见下方「价格变更留痕」 | FR-014/017 |
-| `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`balance_state`、`conservative_floor`、`quota_status` | FR-020/024/026 |
+| `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`confirmed_at`、`balance_state`、`quota_status`、`signal_kind`、`signal_evidence`。⚠️ **不写 `known_consumption_since` 与 `conservative_floor`**，见下方列归属 | FR-020/024/026 |
 | `upstream_keys` + `collector_snapshots` | `FetchKeys` | key 级 `remain_quota/expired_time/model_limits` + 限流快照（payload） | FR-021/028/031 |
 | `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 | ⏭ **二期** |
 | `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 | ⏭ **二期** |
 | `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
 | `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
+
+**`balance_signals` 的列级写入归属**（第 41 轮：采集器与余额下限 worker **都写 `conservative_floor`**，
+而 worker 会额外扣掉在途预留与安全储备 —— 采集器后写一次就把保守值抹回标称值。
+余额只剩 $2、在途 $5 时，selector 会看到一个正数下限并继续放行付费请求。
+与 [05 §5bis.0](./05-scheduling-and-operations.md) 给 `resource_health` 定的分工同一套办法）：
+
+| 列 | 唯一写入者 | 说明 |
+| --- | --- | --- |
+| `last_confirmed_balance`、`confirmed_at` | **采集器** `FetchAccount` | 上游报的余额与采到的时刻，事实值 |
+| `balance_state`、`quota_status` | **采集器** | 五态/配额态判定 |
+| `signal_kind`、`signal_evidence` | **采集器** | 识别到"余额不足"时的信号类型与证据（[05 §5.3](./05-scheduling-and-operations.md)） |
+| `known_consumption_since`、`conservative_floor` | **余额下限 worker**（每 5min，[05 §5bis.2](./05-scheduling-and-operations.md)） | **派生值**，由确认点 + 已终结消耗 + 在途预留 + 安全储备算出 |
+
+- **采集器的 `UPDATE` 语句必须逐列列出，不得整行覆盖**：写成 `INSERT ... ON CONFLICT DO UPDATE SET
+  (全部列) = ...` 就会把 worker 刚算好的下限一起冲掉。
+- **顺序无关**：两方各写各的列，谁先谁后都不影响结果——这正是按列切分而非加锁的目的。
 
 **价格变更留痕**（第 40 轮补：`price_change_log` 的 `from_version_id`/`to_version_id`/`direction`
 建好后**零引用**——没有任何写入方，FR-014「降价需再次确认」与 FR-017「价格变化记录和影响范围」
@@ -387,7 +403,7 @@ type SubscriptionQuota struct {
 | 情形 | `direction` | `confirmed` | 后续动作 |
 | --- | --- | --- | --- |
 | 新价 > 旧价 | `increase` | `true` | 直接生效（涨价照单全收，不需确认） |
-| 新价 < 旧价 | `decrease` | **`false`** | ⚠️ **不直接采信**（FR-014/AC-03）：降价可能是采集页面改版误读。生效但标记待验证，由一次真实扣费与预估一致后置 `true`（[05 §4.4](./05-scheduling-and-operations.md) 计费对账），或人工 `POST /admin/prices/changes/{id}/confirm` |
+| 新价 < 旧价 | `decrease` | **`false`** | ⚠️ **不直接采信**（FR-014/AC-03）：降价可能是采集页面改版误读。**`price_versions.confirmed` 也置 `false`**（两处必须一致），由一次真实扣费与预估一致后置 `true`（[05 §4.4](./05-scheduling-and-operations.md) 计费对账），或人工 `POST /admin/prices/changes/{id}/confirm`（该端点同事务改两张表） |
 | 价格未变但 `queried_at` 刷新 | `confirmed` | `true` | 仅刷新新鲜度，不改判 |
 | 采集失败/超期未采到 | `stale` | `false` | 不插 `price_versions`，只记一条 `stale` 留痕 + P3 告警（`category='data_stale'`） |
 
