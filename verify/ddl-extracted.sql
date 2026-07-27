@@ -69,6 +69,11 @@ CREATE TABLE channel_models (
   model_id    BIGINT NOT NULL REFERENCES models(id),
   protocol    TEXT NOT NULL CHECK (protocol IN ('chat_completions','responses')),
   enabled     BOOLEAN NOT NULL DEFAULT true,  -- 人工开关（FR-004）
+  -- ── 该渠道对这个模型的**上游称呼**（第 40 轮新增）──
+  -- 20 个中转站对同一模型叫法不同是常态（`gpt-5.5` / `gpt-5.5-0930` / `openai/gpt-5.5`…）。
+  -- 此前只有全局唯一的 models.canonical_name，**无处存放分渠道差异** → 发给上游必然模型名错。
+  -- NULL = 该渠道就用 models.canonical_name（多数情况）。
+  upstream_model_name TEXT,
   -- ── Probe() 探测结果（[03 §8](./03-upstream-layer.md)）──
   support     TEXT NOT NULL DEFAULT 'unknown'
                 CHECK (support IN ('supported','unsupported','unknown')),
@@ -109,13 +114,15 @@ CREATE TABLE bindings (
   model_id      BIGINT NOT NULL REFERENCES models(id),
   region        TEXT,
   cache_scope_id BIGINT REFERENCES cache_scopes(id),
+  -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）；executor 据此发请求，
+  -- 装配进 [03 §2](./03-upstream-layer.md) 的 `Binding.BaseURL`
   effective_url TEXT NOT NULL,
   -- 人工停用（selector 过滤序 4 前置判据）
   enabled       BOOLEAN NOT NULL DEFAULT true,
   -- 容量登记（B9）：保留策略的基数来源。**两列皆空 = 该渠道不启用任何容量保留**
   rpm_limit     INTEGER,                        -- 该 binding 的每分钟请求上限（登记或采集器回填）
   concurrency_limit INTEGER,                    -- 并发上限
-  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
+  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),   -- 容量数据来源
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- ⚠️ 必须 NULLS NOT DISTINCT（第 19 轮 [high]）：PostgreSQL 普通 UNIQUE 允许多行 NULL，
   --    region/cache_scope_id 可空 → 「无地区、无缓存作用域」的同一 binding 可被重复创建，
@@ -164,8 +171,11 @@ CREATE TABLE routing_policies (
 
 CREATE TABLE model_aliases (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名
-  target_model_id BIGINT REFERENCES models(id),
+  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名（= 调用方 body.model 里填的字符串）
+  -- ⚠️ 必须 NOT NULL（第 40 轮）：别名的**全部作用**就是 ①定策略 ②定模型。
+  --    可空意味着可以建出"指不到任何模型的别名"，selector 序 2 拿不到 model_id 无法过滤。
+  --    别名解析规则见 [05 §1.0](./05-scheduling-and-operations.md)。
+  target_model_id BIGINT NOT NULL REFERENCES models(id),
   policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
   enabled        BOOLEAN NOT NULL DEFAULT true,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()

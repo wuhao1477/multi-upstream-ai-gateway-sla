@@ -139,6 +139,11 @@ CREATE TABLE channel_models (
   model_id    BIGINT NOT NULL REFERENCES models(id),
   protocol    TEXT NOT NULL CHECK (protocol IN ('chat_completions','responses')),
   enabled     BOOLEAN NOT NULL DEFAULT true,  -- 人工开关（FR-004）
+  -- ── 该渠道对这个模型的**上游称呼**（第 40 轮新增）──
+  -- 20 个中转站对同一模型叫法不同是常态（`gpt-5.5` / `gpt-5.5-0930` / `openai/gpt-5.5`…）。
+  -- 此前只有全局唯一的 models.canonical_name，**无处存放分渠道差异** → 发给上游必然模型名错。
+  -- NULL = 该渠道就用 models.canonical_name（多数情况）。
+  upstream_model_name TEXT,
   -- ── Probe() 探测结果（[03 §8](./03-upstream-layer.md)）──
   support     TEXT NOT NULL DEFAULT 'unknown'
                 CHECK (support IN ('supported','unsupported','unknown')),
@@ -189,13 +194,15 @@ CREATE TABLE bindings (
   model_id      BIGINT NOT NULL REFERENCES models(id),
   region        TEXT,
   cache_scope_id BIGINT REFERENCES cache_scopes(id),
+  -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）；executor 据此发请求，
+  -- 装配进 [03 §2](./03-upstream-layer.md) 的 `Binding.BaseURL`
   effective_url TEXT NOT NULL,
   -- 人工停用（selector 过滤序 4 前置判据）
   enabled       BOOLEAN NOT NULL DEFAULT true,
   -- 容量登记（B9）：保留策略的基数来源。**两列皆空 = 该渠道不启用任何容量保留**
   rpm_limit     INTEGER,                        -- 该 binding 的每分钟请求上限（登记或采集器回填）
   concurrency_limit INTEGER,                    -- 并发上限
-  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),    -- 实际上游 URL（attempt 的 binding 三要素之一：渠道+key+url）
+  capacity_source TEXT CHECK (capacity_source IN ('manual','collector')),   -- 容量数据来源
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- ⚠️ 必须 NULLS NOT DISTINCT（第 19 轮 [high]）：PostgreSQL 普通 UNIQUE 允许多行 NULL，
   --    region/cache_scope_id 可空 → 「无地区、无缓存作用域」的同一 binding 可被重复创建，
@@ -261,8 +268,11 @@ CREATE TABLE routing_policies (
 -- 对外模型别名（FR-062/117、AC-25）：如 gpt-5.5（可测活） vs gpt-5.5-sla-1（禁测活）
 CREATE TABLE model_aliases (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名
-  target_model_id BIGINT REFERENCES models(id),
+  alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名（= 调用方 body.model 里填的字符串）
+  -- ⚠️ 必须 NOT NULL（第 40 轮）：别名的**全部作用**就是 ①定策略 ②定模型。
+  --    可空意味着可以建出"指不到任何模型的别名"，selector 序 2 拿不到 model_id 无法过滤。
+  --    别名解析规则见 [05 §1.0](./05-scheduling-and-operations.md)。
+  target_model_id BIGINT NOT NULL REFERENCES models(id),
   policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
   enabled        BOOLEAN NOT NULL DEFAULT true,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -424,8 +434,10 @@ CREATE INDEX idx_resv_open ON client_reservations(gateway_client_id, spend_date)
 > ⚠️ **`len(RawBody)` 不是通用上界**（第 9 轮）：设计承诺多模态原样透传——一个几十字节的图片 URL 可对应上千视觉计费 token；Responses 的 `previous_response_id`/`conversation` 还会引入**请求体里根本不存在**的服务端上下文。这两类请求下按字节数预留会严重低估，日配额照样被突破。
 
 ```
-单跳上界(binding) = ( 输入 token 上界 × 该 binding 输入单价
-                    + models.max_output_tokens × 该 binding 输出单价 ) × 倍率版本
+单跳上界(binding) = ( 输入 token 上界 × pv.input_price
+                    + models.max_output_tokens × pv.output_price ) / u × m
+      -- pv / u / m 与 §3 成本公式同源同定义（当前生效价版本、billing_unit 缩放、两个倍率之积）
+      -- ⚠️ 预留**不用** cache_price：预留是上界，必须假设最坏情况（零缓存命中）
 
 输入 token 上界 =
   ├─ 纯文本且无服务端上下文引用 → min( len(RawBody), models.max_input_tokens )
@@ -621,10 +633,11 @@ SELECT (SELECT count(*) FROM settled) AS settled_n,
 
 ```
 actual_usd(被取消的 attempt) =
-    已知输入 token 上界 × 输入单价                     -- 与预留同源，len(RawBody) 或 max_input_tokens
-  + ceil(旁路已观测到的输出字节数 / 2) × 输出单价       -- 每 token ≥1 字节 → 除 2 是**下界**，
+  ( 已知输入 token 上界 × pv.input_price               -- 与预留同源，len(RawBody) 或 max_input_tokens
+  + ceil(旁路已观测到的输出字节数 / 2) × pv.output_price -- 每 token ≥1 字节 → 除 2 是**下界**，
                                                         -- 故乘安全系数 `cancel_cost_safety_ratio`（默认 1.3，[09 §4bis](./09-admin-api.md)）
-  ) × 倍率版本
+  ) / u × m × cancel_cost_safety_ratio
+      -- pv / u / m 同 §3 成本公式；取消时拿不到 usage，故无缓存分段，全按 input_price 计
 ```
 
 | 决策 | 理由 |
@@ -747,7 +760,18 @@ att AS (
          'pending', :owner, now()
     FROM req, cap                       -- ⚠️ 依赖 cap：容量拿不到就不落 attempt
   RETURNING id
-)
+),
+-- 首字前接管的**唯一写入点**（第 40 轮：`requests.had_takeover` 建好后全库零赋值，
+-- FR-076/092 与 AC-06 都要按它统计接管率，却没有任何路径把它置 true）。
+-- ⚠️ 必须 `FROM att`：数据修改型 CTE 无论是否被引用都会执行（本文档反复踩过），
+--    不挂在 att 上就会出现"容量没拿到、attempt 没插、却标了接管"。
+mark AS (
+  UPDATE requests r SET had_takeover = true
+    FROM att
+   WHERE r.id = :rid AND r.created_at = :rcat
+     AND :role = 'takeover'            -- 仅接管跳；retry/canary/probe 不置位
+     AND NOT r.had_takeover            -- 幂等：已是 true 就不再写
+  RETURNING r.id)
 SELECT (SELECT count(*) FROM cap) AS capacity_ok,
        (SELECT count(*) FROM att) AS inserted;
 --   capacity_ok=0 → **换 RoutePlan 下一个候选**（不是错误、不是 429）          -- 应用层断言 = 1，否则 ROLLBACK 并放弃该跳
@@ -912,14 +936,53 @@ UPDATE requests r
               AND a.attempt_status = 'completed'                THEN 'completed'
          WHEN a.attempt_status IN ('failed','unknown_billing')  THEN 'failed'
          ELSE 'interrupted'                                      -- 写出未确认 → 保守
-       END
+       END,
+       -- ③ 对外有效首字（第 40 轮补：该列建好后全库零赋值，而 AC-06「最终 TTFT < 等级目标」
+       --    与 AC-31 的对外口径全靠它 —— 没有计算路径，验收无处可断言）。
+       --    取**被提交那一跳**的自算 TTFT：被 SLA 取消的前几跳不算数（用户没看到它们的字）。
+       --    `has_ttft_output=false`（空终态）时保持 NULL —— 没有首字就没有首字延迟。
+       effective_ttft_ms = CASE WHEN a.has_ttft_output THEN a.content_aware_ttft_ms
+                                ELSE r.effective_ttft_ms END
   FROM attempts a
  WHERE a.id = :attempt_id
    AND r.id = a.request_id
    AND r.created_at = a.request_created_at                       -- 分区键对齐
    AND r.final_status IN ('pending','interrupted');              -- 允许纠正保守终态
+
+-- ④ 连续会话前缀账目（FR-050/051；AC-06/07）
+-- ⚠️ 第 40 轮：`session_prefix_ledger` **全库没有任何写入语句**，而 §1.3 动态期限算法
+--    读它的 `cumulative_first_token_ms` —— 悬空读，期限会恒等于默认值，FR-051 无从判定。
+INSERT INTO session_prefix_ledger(
+         session_id, turn_no, request_id,
+         turn_first_token_ms, cumulative_first_token_ms, prefix_avg_ms, target_ms, met_target)
+SELECT r.session_id,
+       COALESCE(prev.turn_no, 0) + 1,                            -- 轮次由本表自增，调用方不传
+       r.id,
+       r.effective_ttft_ms,
+       COALESCE(prev.cumulative_first_token_ms, 0) + COALESCE(r.effective_ttft_ms, 0),
+       (COALESCE(prev.cumulative_first_token_ms, 0) + COALESCE(r.effective_ttft_ms, 0))
+         / (COALESCE(prev.turn_no, 0) + 1),                      -- 前缀平均
+       :prefix_target_ms,                                        -- config_params['prefix_target_ms']
+       (COALESCE(prev.cumulative_first_token_ms, 0) + COALESCE(r.effective_ttft_ms, 0))
+         / (COALESCE(prev.turn_no, 0) + 1) <= :prefix_target_ms
+  FROM requests r
+  LEFT JOIN LATERAL (
+       SELECT turn_no, cumulative_first_token_ms FROM session_prefix_ledger
+        WHERE session_id = r.session_id ORDER BY turn_no DESC LIMIT 1) prev ON true
+ WHERE r.id = :rid AND r.created_at = :rcat
+   AND r.session_id IS NOT NULL                                  -- 无会话键的请求不入账
+   AND r.effective_ttft_ms IS NOT NULL                           -- 没首字不构成一轮
+ON CONFLICT (session_id, turn_no) DO NOTHING;                    -- 见下方并发说明
 COMMIT;
 ```
+
+- **`:rid`/`:rcat` 在本事务可用**：outbox payload 只有 `attempt_id`，故 ④ 与 ② 一样**从 attempts 派生**——
+  实现时在 ② 之后用 `RETURNING` 带出，或在 ④ 内直接 join `attempts`。**不得**新增一次未说明的查表。
+- **轮次并发**：同一 `session_id` 的两个请求并发关单会算出相同 `turn_no` → 撞主键。
+  `ON CONFLICT DO NOTHING` 让后到者**丢弃本轮记账**而不是报错——连续会话本就是串行对话，
+  并发同会话属异常输入；丢一轮记账的代价远小于让关单事务失败。
+  ⚠️ 但**不要**改成 `DO UPDATE`：那会把两轮的首字混算进同一行，前缀平均直接失真。
+- **`met_target` 是每轮结论，不回溯**：某轮不达标不会改写既往行（FR-051 要的是逐轮判定，不是终局判定）。
 
 **首字节的写出事实同理**：`downstream_first_byte` 事件写 `attempts.downstream_first_byte_written_at`（同样 `WHERE ... IS NULL` 幂等），它不推 request 终态，只用于恢复扫描区分 ③b1／③b2 与统计 `stream_break_rate`。
 
@@ -1395,13 +1458,36 @@ CREATE TABLE price_change_log (
 ```
 
 - **不可覆盖**：两表均仅 INSERT。「当前生效价」= 该 `(channel,model)` 下 `effective_at<=now()` 的最新 `price_versions` 行；「当前生效倍率」= 该 `binding_id` 下最新 `multiplier_versions` 行。
-- **成本计算**（第 18 轮 [high] 修正）：
+- **成本计算**（第 18 轮 [high] 修正；第 40 轮把散文词绑到列）：
+
+  > ⚠️ 此前写的是"基础价 × 倍率"这类**散文词**，`input_price` / `output_price` / `cache_price` /
+  > `group_multiplier` / `key_multiplier` 五列建好后**全库零引用**——开发无从知道哪个词对应哪一列，
+  > 尤其 `cache_price` 完全没进过公式，而 `attempt_usage.prompt_cached_tokens` 是采集得到的
+  > → 缓存命中部分会被按输入价计费（第 40 轮悬空列检查发现）。
+
   ```
-  成本 = token 数 / unit_tokens(billing_unit) × 基础价 × 倍率
-         其中 unit_tokens: per_1m_token → 1_000_000
-                           per_1k_token → 1_000
-                           per_token    → 1
+  设 pv = 当前生效 price_versions 行（该 channel+model，effective_at<=now() 的最新行）
+     mv = 当前生效 multiplier_versions 行（该 binding 的最新行）
+     u  = unit_tokens(pv.billing_unit)：per_1m_token→1_000_000 / per_1k_token→1_000 / per_token→1
+     m  = COALESCE(mv.group_multiplier, 1) × COALESCE(mv.key_multiplier, 1)
+
+  cached   = COALESCE(au.prompt_cached_tokens, 0)              -- 缓存命中的输入 token
+  fresh_in = GREATEST(COALESCE(au.prompt_tokens,0) - cached, 0) -- 未命中的输入 token
+  p_cache  = COALESCE(pv.cache_price, pv.input_price)           -- 无缓存价的渠道退回输入价
+
+  成本 = ( fresh_in                        × pv.input_price
+         + cached                          × p_cache
+         + COALESCE(au.completion_tokens,0)× pv.output_price ) / u × m
   ```
+
+  - **`prompt_tokens` 含缓存部分**：上游回传的 `promptTokens` 是**总输入**，缓存命中数另给一列。
+    直接拿 `prompt_tokens × input_price` 会把缓存部分按全价算——长会话下这是主要成本来源，
+    误差不是小数点问题。故必须先扣减再分段计价。
+  - **`cache_price IS NULL` 退回 `input_price`**（而非 0）：不知道折扣就按不打折算，方向保守。
+  - **两个倍率相乘**：`group_multiplier` 是用户组倍率（FR-010）、`key_multiplier` 是 Key 倍率（FR-003），
+    二者独立叠加；任一为 NULL 视作 1（未登记 ≠ 免费）。
+  - **`upstream_keys.key_multiplier` 是登记态，`multiplier_versions.key_multiplier` 是版本快照**——
+    算成本一律用后者（前者会被采集器覆盖，历史复算会失真）。
   > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而 `billing_unit` 默认就是 `per_1m_token`——照原式实现会把每一笔成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
   > **实现要求**：入库时**不做**归一（保留上游原始口径便于对账与排障），缩放只发生在算成本的这一处，且 `unit_tokens` 必须由 `billing_unit` 查表得出，**不得硬编码**。
   > **CI 断言**：给定 `per_1m_token` 单价 3.0、1000 token → 成本必须是 `0.003` 而非 `3000`。

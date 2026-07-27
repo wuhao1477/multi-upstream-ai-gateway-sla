@@ -14,6 +14,49 @@
 
 ## 1. selector：候选选择与排序
 
+### 1.0 别名解析：从 `body.model` 到 `model_id` 与上游模型名（第 40 轮补）
+
+> ⚠️ **这是每个请求的第一步，此前全套文档从未写下**。`model_aliases.target_model_id` 建好后**全库零引用**，
+> 而 §1.1 序 2 直接用 `channel_models(channel_id, model_id, protocol)` 过滤——**`model_id` 从哪来没有任何交代**。
+> 同一问题的下半截更隐蔽：03 §4 实测确认 Codex **原样发送用户配置里的模型名**，
+> 但"发给上游时这个字段填什么"03/05 全文不出现 `canonical_name`，等于没写。
+
+**入站解析（同步路径，只读内存快照）**：
+
+| 步 | 规则 | 失败处置 |
+| --- | --- | --- |
+| 1 | 取请求体 `model` 字段的字符串 `name`（**不做 JSON 全解析**，只按 §1.0bis 的字节级取值） | 缺字段 → **400** |
+| 2 | `model_aliases WHERE alias = name AND enabled` | 未命中或 `enabled=false` → **404**（与"模型不存在"同一响应，不泄漏别名表） |
+| 3 | 命中行给出两样东西：`policy_id` → SLA 等级与测活资格（序 1）；`target_model_id` → **本次请求的 `model_id`**（序 2 起全程使用） | —— |
+| 4 | `requests.alias_id` 记命中的别名 id（调用方**意图**）；实际用了哪个模型由每条 attempt 的 `bindings.model_id` 钉住 | —— |
+
+- **为什么 `requests` 不另存 `model_id`**：别名→模型的映射是**可变配置**，而 attempt 的 binding 已经钉死了那一跳真正用的模型。
+  再存一列快照会出现"requests 说 A、attempt 说 B"的双真相。零 attempt 的请求本来就没发生过模型选择。
+- **`enabled=false` 返 404 而非 403**：别名下线后调用方不该能通过响应码区分"从没有过"和"下线了"。
+
+**出站改写（executor 发上游前）**：
+
+```
+上游请求体的 model 字段 = COALESCE(channel_models.upstream_model_name,   -- 该渠道的叫法
+                                   models.canonical_name)                 -- 缺省用全局真名
+                          （按本跳 binding 的 channel_id + model_id + 请求协议查）
+```
+
+- **这是请求体上唯一允许的改写**，其余字节原样透传。硬约束见 [03 §1](./03-upstream-layer.md)。
+- **别名名 ≠ 上游真名，二者必须都不出现在对方一侧**：下游只认别名（`gpt-5.5`），上游只认真名
+  （可能是 `gpt-5.5-0930`）。漏改写 → 上游 404；漏还原 → 无影响（响应体里的 `model` 字段**照常透传上游值**，
+  Codex 实测不校验它，见 [03 §4](./03-upstream-layer.md)）。
+- **接管换渠道时必须重新改写**：hop1 与 hop2 的 `upstream_model_name` 可能不同，
+  不得复用 hop1 已改写的字节（[03 §5](./03-upstream-layer.md) 每跳重建请求体）。
+
+### 1.0bis 取 `model` 字段而不解析整个请求体
+
+字节级透传是硬约束，但**必须知道模型名才能路由**——这两件事的调和方式：只做一次**定位取值**，不做解析-重组。
+
+- 用流式 JSON 扫描器定位顶层 `"model"` 键的字符串值（`encoding/json` 的 `Decoder.Token()` 逐 token 走即可），**读完即停**。
+- 改写时按定位到的**字节区间做替换**，请求体其余字节一字不动；`Content-Length` 按长度差重算。
+- **不得** `json.Unmarshal` 到 map 再 `Marshal` 回去——那就是 [13 §5](./13-research-reassessment.md) 里三个项目翻车的解析-重组路线（键序、数字精度、未知字段全会变）。
+
 ### 1.1 候选过滤顺序（权限/资格先于负载均衡）
 
 对应 ISSUE-001 假设 5 的源码级顺序（过滤先于 LB），逐层裁剪候选集，**顺序不可交换**：

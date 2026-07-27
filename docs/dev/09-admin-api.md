@@ -105,6 +105,42 @@ type ParamMeta struct {
 > 此前配置键散落在 01/02/03/05/06/14 十余处，**没有一份清单** —— 开发不知道迁移种子该初始化哪些、`/admin/config` 该校验哪些、漏掉一个只会在运行时以默认零值的形式静默出错。
 > **本表是唯一权威来源**：新增键必须先进本表。**一行一个完整 `param_key`，不得用 `a / b` 合并行或 `.x` 缩写**——迁移种子与 `/admin/config` 白名单都按本表逐行生成，合并行会漏键。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
 
+### 4bis.0 取值路径（第 40 轮补：清单有了，**怎么读出一个值**从没写过）
+
+> ⚠️ `config_params.param_value` / `prev_value` 建表后全库零引用。清单列了 61 个键、
+> §4 定义了静态元数据，但"给定一个 key，运行时拿到哪一行、什么类型"没有任何交代 ——
+> 而全套设计里几乎每条规则都以"（`config_params` 可配）"收尾。
+
+**生效行的选取**（后台刷快照时执行，同步路径只读内存，FR-110）：
+
+```sql
+-- 某 scope 下某键的当前生效值
+SELECT param_value FROM config_params
+ WHERE scope_type = :scope_type AND scope_id = :scope_id AND param_key = :key
+   AND effective_at <= now()
+   AND (NOT is_critical OR confirmed_twice)   -- 关键项未二次确认 → 视同未生效
+ ORDER BY version DESC LIMIT 1;               -- 只 INSERT 不 UPDATE，版本号最大者生效
+```
+
+**作用域回退顺序**（先具体后宽泛，命中即止）：
+
+```
+model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<tenant_id> → global:'*' → ParamMeta.Default
+```
+
+- **`global` 的 `scope_id` 恒为 `'*'`**（[02](./02-data-model.md) 的 CHECK 约束），查询时**不得**传 NULL。
+- **兜底是代码里的 `ParamMeta.Default`，不是零值**：库里查不到该键属正常（迁移种子只初始化非默认项），
+  但**绝不能因此得到 0** —— 一个默认 0 的预算比例会让整套测活静默停摆。
+- **未二次确认的关键项按"没改过"处理**：回退到上一版本或默认值，而不是拒绝服务。
+
+**类型**：`param_value` 是 `JSONB`，**按 [§4 `ParamMeta`](#4-策略元数据fr-115明示含义用法影响) 定型**——
+比例存 JSON number（`0.02`，不是 `"2%"`）、时长存整数毫秒/秒并以 `_ms`/`_sec` 后缀自明、开关存 JSON boolean。
+**转换只发生在应用层**（[00 §5.1](./00-overview-and-milestones.md) 已列为实现期须确认的假设之一），SQL 里不做 `::numeric` 强转——
+类型不符应在 `/admin/config/apply` 时按 `ParamMeta` 校验并 400，而不是留到运行时炸。
+
+**`prev_value` 的写入点**：`apply` 插入新版本行时，把**当时生效行**的 `param_value` 抄进新行的 `prev_value`
+（FR-099 要的是"前后值"可查）；首次设置该键时为 NULL。它是审计字段，**不参与取值**。
+
 | 键 | 默认 | 关键项 | 用途 / 定义处 |
 | --- | --- | --- | --- |
 | **调度与期限** ||||

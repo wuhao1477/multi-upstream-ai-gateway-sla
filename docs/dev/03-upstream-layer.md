@@ -16,6 +16,7 @@
 | # | 原则 | 依据 |
 | --- | --- | --- |
 | 1 | **字节级透传优先**：Responses/CC 的响应体原样回送，不解析进领域模型再重发 | [13 §5](./13-research-reassessment.md) 三例翻车 |
+| 1bis | **请求体只允许一处改写：顶层 `model` 字段**（别名 → 该渠道的上游模型名）。其余字节一字不动，按字节区间替换、`Content-Length` 重算，**不得 Unmarshal→Marshal**。规则与理由见 [05 §1.0](./05-scheduling-and-operations.md) | 第 40 轮：原则 1 只约束了**响应**侧，请求侧要不要改写从未表态，而不改写必然 404 |
 | 2 | **旁路观察而非接管**：内容感知 TTFT（AC-31）、usage 提取都在**旁路**做，不改变字节流 | AC-31 |
 | 3 | **一次外部调用 = 一次上游调用**：不做隐藏重试；重试由 `executor` 按 RoutePlan 显式发起并各落一条 attempt | FR-119、[02 §4](./02-data-model.md) |
 | 4 | **响应头白名单透传**：上游响应头默认透传，仅剔除 hop-by-hop 与我方要覆盖的 | [13 §1.3](./13-research-reassessment.md) |
@@ -47,10 +48,25 @@ type Client interface {
     Models(ctx context.Context, b Binding) ([]byte, http.Header, error)
 }
 
+// Binding 是执行一跳所需的全部**已解析**信息（第 40 轮补：此前 Client 四个方法都收它，
+// 却从没定义过这个类型 —— 开发得自己发明字段，尤其"请求发到哪个 URL"无处可取）。
+// 由 selector 从 02 bindings 行 + 关联表装配，executor 不再查库。
+type Binding struct {
+    ID           int64  // bindings.id → attempts.binding_id
+    BaseURL      string // bindings.effective_url —— **实际发往的上游地址**，一 binding 一个
+    APIKey       string // upstream_keys.secret（一期明文，FR-113）；覆盖 Authorization 头（§7）
+    UpstreamModel string // = COALESCE(channel_models.upstream_model_name, models.canonical_name)
+    Protocol     Protocol // 该 binding 在本协议下 support='supported'（05 §1.1 序 2 已保证）
+}
+
 type Request struct {
     Protocol   Protocol // ProtocolChatCompletions | ProtocolResponses
+    // ⚠️ 已改写为**上游模型名**（COALESCE(channel_models.upstream_model_name, models.canonical_name)），
+    //    不是调用方发来的别名。改写规则见 05 §1.0；每跳按该跳 binding 重算，不得复用上一跳的值。
     Model      string
-    RawBody    []byte      // 原样透传（不解构工具/多模态字段，FR-111）
+    // 原样透传（不解构工具/多模态字段，FR-111）。**唯一例外**：顶层 model 字段已按上行
+    //    做过字节区间替换（原则 1bis）。除此之外与调用方发来的字节完全一致。
+    RawBody    []byte
     Headers    http.Header // 调用方请求头（经白名单过滤后转发）
     Stream     bool
 }
