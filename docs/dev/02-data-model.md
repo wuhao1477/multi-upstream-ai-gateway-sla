@@ -2780,7 +2780,51 @@ CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created
   WHERE delivered_at IS NULL;
 ```
 
-**恢复流程**：实例启动时扫描 `delivered_at IS NULL` 的行并重放（`FOR UPDATE SKIP LOCKED`，多实例安全）。因幂等键存在，重放不会产生重复账目。
+**写入点**（第 42 轮补：整张表此前**只有建表、索引与读取**——恢复扫描 `SELECT 1 FROM ledger_outbox`、
+投递器 drain、`finalize_delivery` 由它驱动，**却没有任何一条 INSERT**。
+防崩溃丢账的整套机制没有入口，开发照文档实现会得到一张永远空的表，
+于是 `finalize_delivery` 永不触发、所有请求停在 `pending`）：
+
+| 事件 | 谁写 | 何时 | `payload` |
+| --- | --- | --- | --- |
+| `downstream_first_byte` | `executor` | 向下游 socket 写出**首字节**的 `Write()` 返回后 | `{"attempt_id":…,"written_at":…}` |
+| `downstream_write_completed` | `executor` | 写出**终帧**的 `Write()` 返回后 | 同上 |
+| `cancel` | `executor` | 每跳取消时记原因与传播结果 | `{"attempt_id":…,"cancel_reason":…,"propagated":bool}` |
+
+```sql
+-- 三类事件共用同一条语句（event_type / payload 不同）。**不在业务事务里**：
+-- 这三件事都发生在「字节已经写出去之后」，此时业务事务早已提交。
+INSERT INTO ledger_outbox(attempt_id, request_created_at, event_type, payload, idempotency_key)
+VALUES (:attempt_id, :rcat, :event_type, :payload, :attempt_id || ':' || :event_type)
+ON CONFLICT (idempotency_key) DO NOTHING;      -- 重放/重试只投一次
+```
+
+> ⚠️ **`idempotency_key` 必须是 `<attempt_id>:<event_type>`**（[§2ter](#2ter-幂等键一览) 已登记）。
+> 用随机 UUID 会让每次重试都被当成新事件 —— 首字节时间戳被反复覆盖、`finalize_delivery` 反复触发。
+
+**投递（drain）**：后台 goroutine 每秒一轮，**取出 → 执行对应事务 → 标记已投递**。
+
+```sql
+-- ⚠️ 标记与执行必须同事务，否则崩在中间会重复投递（幂等键只挡重复插入，不挡重复执行）
+WITH claimed AS (
+  SELECT id, attempt_id, request_created_at, event_type, payload
+    FROM ledger_outbox
+   WHERE delivered_at IS NULL
+   ORDER BY created_at
+   FOR UPDATE SKIP LOCKED                       -- 多实例安全
+   LIMIT :batch)
+UPDATE ledger_outbox o SET delivered_at = now()
+  FROM claimed WHERE o.id = claimed.id
+RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
+-- 应用层按 event_type 分派：downstream_write_completed → finalize_delivery（§2bis）
+```
+
+- **投递失败不清 `delivered_at`**：本轮事务整体回滚，行仍是 `NULL`，下一轮自然重取。
+- **`delivered_at` 的唯一写入者是本 drain**，不要在别处标记。
+
+**恢复流程**：实例启动时先 drain 一遍 `delivered_at IS NULL` 的行（同上语句），再进 §4.2bis 的悬挂扫描——
+顺序不可颠倒（[§4.2bis](#42bis-崩溃恢复扫描) 已定：已写完的请求靠 drain 收口，根本不该进恢复扫描）。
+因幂等键存在，重放不会产生重复账目。
 
 ### 9.3 多实例并发写（FR-110）
 

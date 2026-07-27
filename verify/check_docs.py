@@ -395,6 +395,33 @@ for col, tbls in sorted(tbl_cols.items()):
 report("DDL 列均有规则承载（无悬空列）", dead)
 
 
+# ── 8 悬空读：SQL 里被读、却没有任何 SQL 写的表 ──────────────
+# 第 40/42 轮各栽一次：§1.3 读 session_prefix_ledger 而全库无写入；
+# 段二读 health_metric_windows 的「总体行」而段一的 GROUP BY 决定它永不产生。
+# 这类缺陷不报错，只是永远读到空——比语法错难发现得多。
+ALL_TABLES = set(re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", ddl_sql))
+sql_blocks = "\n".join(
+    m.group(1) for f in DEV for m in re.finditer(r"```sql\n(.*?)```", open(f).read(), re.S))
+# 建表/建索引本身不算「写」
+body = re.sub(r"CREATE TABLE (?:IF NOT EXISTS )?\w+\s*\(.*?\n\)[^;]*;", "", sql_blocks, flags=re.S)
+
+written = set(re.findall(r"(?:INSERT INTO|UPDATE)\s+(\w+)", body))
+read = set(re.findall(r"(?:FROM|JOIN)\s+(\w+)", body))
+# 不是所有写入都以 SQL 骨架形式出现，另有两条**已登记**的写入路径：
+#   ① 采集器：04 的「写入映射」表逐行列出它写哪张表
+#   ② 管理端点：09 的端点表里点名"落 `xxx`"的表
+# 这两条也算有写入者；除此之外的只读表就是悬空读。
+collector_written = set(re.findall(r"^\| `?(\w+)", open("docs/dev/04-collector-adapter.md").read(), re.M))
+admin_written = set(re.findall(r"`(\w+)`", open("docs/dev/09-admin-api.md").read()))
+
+dangle = []
+for t in sorted(read & ALL_TABLES):
+    if t in written or t in collector_written or t in admin_written or t in PHASE2_TABLES:
+        continue
+    dangle.append(f"{t} —— 被 SQL 读取，但全库没有任何 INSERT/UPDATE 写它")
+report("无悬空读（读到的表都有人写）", dangle)
+
+
 print()
 if FAIL:
     print(f"共 {FAIL} 处问题")

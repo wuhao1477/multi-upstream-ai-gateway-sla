@@ -632,6 +632,20 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 
 - 等级数量/各指标数值/统计窗口**全部用户自定义**（参数1：圈的渠道不同，SLA 就不同）；金/银/铜三级仅默认模板（[02 `sla_targets`](./02-data-model.md)、§11）。
 - 统计口径：`有效可用性 = 完整成功数 ÷ 应计入 SLA 的有效请求数`；用户参数错误、用户主动取消不计入失败（PRD §术语）。
+- **分母必须排除测活请求**（第 42 轮自查补：§5bis.1 的口径对照表引用了"§5.1 按 `probe_kind='probe'` 排除"，
+  而本节从来没写过这条规则——悬空引用）：
+
+  ```
+  应计入 SLA 的有效请求 ⟺ requests.probe_kind = 'normal'
+                        AND final_status <> 'canceled'        -- 用户主动取消
+                        AND gateway_client_id <> system-probe -- 双保险，见下
+  ```
+
+  - **为什么两个条件都要**：`probe_kind` 是业务标记，`system-probe` 是记账主体。
+    任一漏判都会让**我们自己发的探测请求**进用户 SLA 分母——测活越积极，SLA 数字越难看，
+    而这些请求根本没有用户在等。
+  - ⚠️ 这与 [§5bis.1](#5bis1-健康聚合-worker每-60s) 的渠道健康口径**方向相反**：
+    测活样本**要**进渠道健康（那是空闲渠道唯一的样本来源），**不能**进用户 SLA。两处不可混用同一个过滤条件。
 - **崩溃恢复产生的终态照常计入用户 SLA**：`final_status='failed'`（`unknown_billing` 场景）与 `'interrupted'`（首字后崩溃）都**计入失败**，后者是否计入 `stream_break_rate` 由**唯一判据**决定——`stream_broken=true OR (final_status='interrupted' AND downstream_first_byte_written_at IS NOT NULL)`，分母为同窗口全部流式请求（[02 §4.2bis](./02-data-model.md)）——FR-071 要求用户真实经历的失败与流中断始终计入，AC-12 要求首字后中断记为完整失败。**但这些 attempt 不计入渠道健康统计**（崩溃是我们的故障，不是渠道的），两套口径的完整对照见 [02 §4.2bis 不变式 3](./02-data-model.md)。
 - 错误预算 = 窗口内允许失败上限（如 99.9% → 月 ~43min）；测活失败扣该等级预算 ≤10%（§2.1）。
 
@@ -848,6 +862,44 @@ DO UPDATE SET sample_count = EXCLUDED.sample_count,
               success_count = EXCLUDED.success_count,
               stream_break_count = EXCLUDED.stream_break_count;
 
+-- ── 段一之二：**总体行**（三个维度列全写 NULL）───────────────
+-- ⚠️ 第 42 轮自查：段二的 d24 读的是「三列全 NULL 的总体行」，而上面那条语句
+--    GROUP BY 里带了 bd.model_id（binding 必有 model_id，永远不为 NULL）——
+--    **总体行从来不会被产生**，d24 恒为空 → sample_count_24h 恒为 0
+--    → low_confidence 恒为真 → 所有渠道永远进不了主候选。又一处悬空读。
+--    原文只在正文里写了"段一要跑两遍"，没给第二条语句。规则写在散文里而不在 SQL 里，
+--    是本项目反复出事的同一种形态。
+INSERT INTO health_metric_windows(
+       binding_id, model_id, request_type, context_bucket,
+       window_start, window_kind,
+       sample_count, p50_ttft_ms, p95_ttft_ms, p99_ttft_ms,
+       success_count, stream_break_count)
+SELECT a.binding_id, NULL, NULL, NULL,          -- ← 总体行的标志：三个维度列全空
+       date_trunc('hour', now()), '1h',
+       count(*),
+       percentile_disc(0.50) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       percentile_disc(0.95) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       percentile_disc(0.99) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       count(*) FILTER (WHERE a.attempt_status = 'completed'),
+       count(*) FILTER (WHERE a.stream_broken)
+  FROM attempts a
+ WHERE a.request_created_at > now() - INTERVAL '1 hour'
+   AND a.attempt_status NOT IN ('unknown_billing','interrupted','canceled_by_client')
+ GROUP BY a.binding_id
+ON CONFLICT (binding_id, model_id, request_type, context_bucket, window_kind, window_start)
+DO UPDATE SET sample_count = EXCLUDED.sample_count,
+              p50_ttft_ms = EXCLUDED.p50_ttft_ms,
+              p95_ttft_ms = EXCLUDED.p95_ttft_ms,
+              p99_ttft_ms = EXCLUDED.p99_ttft_ms,
+              success_count = EXCLUDED.success_count,
+              stream_break_count = EXCLUDED.stream_break_count;
+-- ⚠️ 这条 ON CONFLICT 依赖 `UNIQUE NULLS NOT DISTINCT`（[02 §6](./02-data-model.md) 第 19 轮加的）：
+--    普通 UNIQUE 下三个 NULL 列互不相等，每轮都会插一条新总体行而不是更新，
+--    d24 求和会把同一小时累加 60 次。这不是可选优化，是本语句成立的前提。
+
 -- ── 段二：汇出 resource_health ────────────────────────────────
 -- 1h 指标走**滑动窗口直扫**（只 1 小时的 attempts），24h 计数走窗口表累加。
 -- ⚠️ 1h **不能**读段一的整点行：`window_start = date_trunc('hour', now())` 在每个整点
@@ -899,9 +951,9 @@ UPDATE resource_health h
  WHERE h.binding_id = b.binding_id;
 ```
 
-- **段一要跑两遍**：一遍带 `model_id/request_type/context_bucket` 分组（供 FR-041 的分维度健康查询与
-  [09 `GET /admin/health`](./09-admin-api.md)），一遍三列全填 `NULL` 出**总体行**（段二的 24h 计数读的就是它）。
-  `UNIQUE NULLS NOT DISTINCT` 保证总体行不会被写成多份（[02 §6](./02-data-model.md) 第 19 轮加的约束正是为此）。
+- **段一是两条语句,都在上面给全了**：分维度行供 FR-041 的健康查询与
+  [09 `GET /admin/health`](./09-admin-api.md)；总体行（三列全 `NULL`）供段二的 24h 计数。
+  ⚠️ 两条都要跑——只跑第一条时总体行永远不存在，段二的 `d24` 恒为空。
 - **测活样本进渠道健康、不进用户 SLA**（第 41 轮把两处对立的说法统一）：
 
   | 口径 | 聚合对象 | 测活怎么算 | 客户端取消怎么算 |

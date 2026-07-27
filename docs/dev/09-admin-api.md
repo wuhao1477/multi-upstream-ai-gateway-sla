@@ -231,7 +231,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 | 端点 | 作用 | 里程碑 |
 | --- | --- | --- |
-| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`/`bindings`，含 `rpm_limit`/`concurrency_limit` 容量登记与 `enabled` 停用开关）。⚠️ **列表与详情须显式标注「未登记容量 → 保留未生效」**（[05 §4.3](./05-scheduling-and-operations.md)），供上游对接层读取，[03](./03-upstream-layer.md)）。**只引用已登记的 `model_id`，不在此隐式创建模型**——模型走 `/admin/models` | M1 |
+| `GET /admin/bindings`、`POST /admin/bindings` | 渠道/绑定登记（落 `channels`/`upstream_keys`/`bindings`，含 `rpm_limit`/`concurrency_limit` 容量登记与 `enabled` 停用开关）。⚠️ **列表与详情须显式标注「未登记容量 → 保留未生效」**（[05 §4.3](./05-scheduling-and-operations.md)），供上游对接层读取，[03](./03-upstream-layer.md)）。**只引用已登记的 `model_id`，不在此隐式创建模型**——模型走 `/admin/models`。⚠️ **同事务写 `binding_fault_domains`**：按该渠道的 `channels.upstream_provider_id` 挂一条 `kind='provider'` 的边（域不存在则先建 `fault_domains`），另按 `region` 挂 `kind='region'` 边。**不自动挂就永远是空表**，[05 §1.2bis](./05-scheduling-and-operations.md) 的接管故障域去重与 [§5bis.1bis](./05-scheduling-and-operations.md) 的集中失败检测双双失效（两者都 JOIN 这张表） | M1 |
 | `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
 | `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
