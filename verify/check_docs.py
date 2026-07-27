@@ -8,8 +8,14 @@
   4 引用不存在的列
   5 **FR/AC 的一期二期标注互斥**  ← 传播遗漏的高发区
   6 一期/二期 AC 计数与里程碑表自洽
+  7 **DDL 定义了但没有任何规则读写的列**  ← 与第 4 类方向相反
 
 第 5 类是本项目最高频的缺陷模式：改了主表、漏了引用它的其它文档。
+
+第 7 类是前 39 轮全部漏掉的盲区：一直只查「SQL 引用的列必须存在」，
+从没查过反方向「建了的列必须有人用」。DDL 跑在规则前面 —— 列建好了、
+索引建好了、保留策略也写了，但没有任何事务、worker 或端点碰它。
+悬空读（读一张没人写的表）比列不存在更危险：它不报错，只是永远读到空。
 """
 import glob
 import os
@@ -338,6 +344,45 @@ if p1set & p2:
 if len(p1set) + len(p2) != 36:
     cnt.append(f"一期 {len(p1set)} + 二期 {len(p2)} ≠ 36")
 report("AC 计数自洽", cnt)
+
+
+# ── 7 DDL 建了但没有任何规则读写的列 ──────────────────
+# 与第 5 类方向相反：那类查「引用的列存在吗」，这类查「存在的列被引用吗」。
+# 悬空列 = 规则没写完；悬空读（读一张没人写的表）= 永远读到空且不报错。
+m02 = open("docs/dev/02-data-model.md").read()
+ddl_sql = "\n".join(re.findall(r"```sql\n(.*?)```", m02, re.S))
+
+# 二期整表推迟（[PRD §2.1](../PRD.md)），其列未被引用属预期
+PHASE2_TABLES = {"subscription_plans", "user_subscriptions", "subscription_waste_forecast"}
+# 列名与 SQL 关键字/通用词同形，逐一核对成本高于收益，单独豁免并在此写明理由
+NOISY = {"currency", "region", "enabled", "created_at", "updated_at", "id"}
+
+tbl_cols, defining_blocks = {}, []
+for m in re.finditer(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)\s*\((.*?)\n\)", ddl_sql, re.S):
+    tbl, body = m.group(1), m.group(2)
+    defining_blocks.append(body)
+    for line in body.split("\n"):
+        line = re.sub(r"--.*$", "", line).strip()
+        c = re.match(r"^([a-z_][a-z0-9_]*)\s+[A-Za-z]", line)
+        if c and c.group(1).upper() not in (
+            "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT", "EXCLUDE", "PARTITION"
+        ):
+            tbl_cols.setdefault(c.group(1), set()).add(tbl)
+
+alldocs = "".join(open(f).read() for f in glob.glob("docs/**/*.md", recursive=True))
+defined_only = "\n".join(defining_blocks)
+
+dead = []
+for col, tbls in sorted(tbl_cols.items()):
+    if col in NOISY or tbls <= PHASE2_TABLES:
+        continue
+    # 出现总数 - 建表体内出现数 = 规则/事务/端点里的真实引用数
+    total = len(re.findall(r"\b" + re.escape(col) + r"\b", alldocs))
+    in_def = len(re.findall(r"\b" + re.escape(col) + r"\b", defined_only))
+    if total - in_def <= 0:
+        dead.append(f"{'/'.join(sorted(tbls))}.{col} —— 建表外零引用，无规则读写")
+
+report("DDL 列均有规则承载（无悬空列）", dead)
 
 
 print()
