@@ -181,6 +181,10 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `cooldown_max_sec` | 14400 | | 冷却退避上限 |
 | `observing_min_minutes` | 30 | | 观察期时长（先到为准） |
 | `observing_min_success` | 50 | | 观察期连续成功数 |
+| **故障域（FR-045，[05 §5bis.1bis](./05-scheduling-and-operations.md)）** ||||
+| `domain_min_bindings` | 3 | | 少于此数的故障域不做集中失败判定（避免单渠道误封整域） |
+| `domain_fail_ratio` | 0.6 | | 域内 cooling/degraded 占比超此值即封禁整域 |
+| `domain_disable_sec` | 600 | | 自动封禁时长；到期自动解封，靠下一轮重新判定续期 |
 | **配额与计费** ||||
 | `billing_variance_tolerance` | 0.05 | ✅ | 计费偏差容差（[05 §4.4](./05-scheduling-and-operations.md)） |
 | `billing_min_base_usd` | 0.01 | | 低于此改用绝对差额判定（除零保护） |
@@ -237,6 +241,9 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/ledger/reconciliation?scope=account\|key\|model&from=&to=` | **计费对账**（FR-019）：聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed` | M3 |
 | `GET /v1/models`、`GET /v1/models/{alias}` | **数据面**端点，非管理面。由网关**合成**（[03 §4](./03-upstream-layer.md)）：返回该凭证 `allowed_aliases` 内的启用别名；非别名 404、越权 403；`x-models-etag` 我方自生成并支持 `If-None-Match` → 304 | M1 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
+| `GET /admin/fault-domains` | 列出故障域及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |
+| `POST /admin/fault-domains/{id}/disable` | **人工隔离整个故障域**：置 `disabled_until`（入参 `duration_sec`，**省略 = NULL = 无限期，须人工恢复**）+ `disabled_reason`。用于已知供应商维护窗口等自动判据覆盖不到的场景（[05 §5bis.1bis](./05-scheduling-and-operations.md)） | M3 |
+| `POST /admin/fault-domains/{id}/enable` | 解除封禁（置 `disabled_until=NULL`）。⚠️ 若集中失败仍在持续，下一轮健康聚合会**再次自动封禁**——这是预期行为，不是解封失败 | M3 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
 | `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`（NULL=不限额）/`rpm_limit`（**NULL=不限速**，此时跳过 RPM 闸）/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |

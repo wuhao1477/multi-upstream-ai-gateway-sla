@@ -64,7 +64,7 @@
 | 序 | 过滤层 | 规则 | 依据 |
 | --- | --- | --- | --- |
 | 1 | 别名 → 策略 | 由 `model_aliases.policy_id` 定 SLA 等级与测活资格；别名即策略载体 | FR-062/117、AC-25 |
-| 2 | 模型能力**与协议** | 按**请求协议**查 `channel_models(channel_id, model_id, protocol)`：只留 `enabled AND support='supported'` 且满足流式/工具需求的 binding。⚠️ 实测存在**非对称支持**（同模型 Responses 通、CC 返 503），不可假设两协议都可用 | FR-005/006、[02 §1.1](./02-data-model.md) |
+| 2 | 模型能力**与协议** | 两层都要过（见下方 §1.1ter）：**模型层**比对 `models.supports_*` 与本次请求实际用到的能力；**渠道×协议层**按请求协议查 `channel_models(channel_id, model_id, protocol)`，只留 `enabled AND support='supported'`。⚠️ 实测存在**非对称支持**（同模型 Responses 通、CC 返 503），不可假设两协议都可用 | FR-005/006、[02 §1.1](./02-data-model.md) |
 | 3 | 数据许可 | 按 [02 §2ter `data_policies`](./02-data-model.md) 四维求值（deny 一票否决 → 顺序无关）。**开关 `data_policy_enabled` 默认 `false` → 一期放行全部**；排除原因入 `decision_snapshot` | FR-093（P1，默认关）、AC-14 |
 | 4 | 人工停用 → 健康/样本 | **先排除人工停用**：`bindings.enabled=false`、其账号 `status='disabled'`、其故障域 `disabled_until > now()`（三处任一命中即排除，[02](./02-data-model.md)）；再排除 `health_state∈{cooling,disabled}`；`low_confidence` 不作主渠道候选（可作保底）；**`canary` 态仅在 §2.0 五条准入全满足时才作为本次主渠道**（这是它获得样本的唯一途径） | FR-043/046、参数11 |
 | 5 | 余额/配额 | 见下方 §1.1bis 的四条判据（**以保守下限而非标称余额判定**） | FR-020~027、**FR-026**、**FR-118** |
@@ -72,6 +72,37 @@
 | 7 | 容量保留 | 扣除接管保留与**承诺保留**（`is_committed` 策略专用）后仍有余量；**未登记容量的渠道不设保留、本层直接放行**（§4.3） | 参数12 |
 
 过滤后若候选为空 → 按 §3 全资源不可用处置。
+
+### 1.1ter 能力过滤：请求需要什么 → 比对哪几列（FR-006 落地，第 40 轮补）
+
+> ⚠️ FR-006 是 P0：*"请求所需能力不完整时直接排除该资源；**未经授权不得自动替换模型或降低能力**"*。
+> 但序 2 此前**只查 `channel_models.support`**，而 `models.supports_multimodal` /
+> `supports_reasoning` / `supports_structured_output` 三列建好后**全库零引用**——
+> "请求需要什么能力"到"比对哪一列"之间没有任何映射，等于 P0 只做了一半。
+
+**需求探测**（与 [02 §2bis](./02-data-model.md) 预留分支同一次字节级扫描，**不额外解析 JSON**）：
+
+| 请求侧标记（出现任一即置位） | 需求 | 比对列 |
+| --- | --- | --- |
+| `"image_url"`、`"input_image"`、`"input_audio"`、`"input_file"`、`"file_id"` | 多模态 | `models.supports_multimodal` |
+| `"tools"`、`"tool_choice"`、`"functions"` | 工具调用 | `models.supports_tools` **且** `channel_models.supports_tools` |
+| `"response_format"`、`"json_schema"`、`"strict":true` | 结构化输出 | `models.supports_structured_output` |
+| `"reasoning"`、`"reasoning_effort"` | 推理 | `models.supports_reasoning` |
+| `"stream":true` | 流式 | `models.supports_streaming` **且** `channel_models.supports_streaming` |
+
+**判定规则**：
+
+- **只在需求置位时比对**：请求没用工具就不看 `supports_tools`——否则会把大量可用渠道白排除。
+- **`NULL` 视为不支持**（保守）：能力位为空说明**没探测过**，不是"支持"。
+  这与 FR-118「配额 unknown 即排除」同向：不确定时不赌。
+- **两层都要过**：`models.supports_*` 是**模型固有能力**，`channel_models.supports_*` 是
+  **该渠道在该协议下的实测结果**。中转站限流/裁剪导致"模型支持但这个渠道不通"是实测到过的情形
+  （[07 §3bis](./07-axonhub-runtime-probes.md)），只查其一必然漏。
+- **排除原因入快照**：`decision_snapshot.excluded[]` 记 `{binding, reason:'capability_missing', missing:['multimodal']}`。
+- **全部候选都不满足 → 走 §3 全资源不可用，返回明确错误**。
+  ⚠️ **不得降级**：不换成能力更弱的模型、不静默丢弃 `tools` 字段重发——
+  这正是 FR-006 后半句禁止的"未经授权替换模型或降低能力"，也是 [AC-15](./14-acceptance-matrix.md)「未旁路未降级模型」的断言对象。
+  能力不匹配时**宁可失败也不悄悄换**：用户拿到一个没调用工具的回答，比拿到报错更难发现出了问题。
 
 ### 1.1bis 余额/配额过滤的四条判据（FR-026 落地）
 
@@ -104,6 +135,36 @@
 - **一期成本排序**：按 `price_versions` 的价格版本 × 分组/Key 倍率算预计实际成功成本。⏭ 订阅渠道的**用满倍率**比价（参数14/AC-24）**移入二期**（[15 §1.2](./15-scope-and-preflight.md)）。
 - **缓存作用域**：连续会话优先复用 `cache_scopes` 可延续的 binding，切换有损时计入切换成本（FR-055）。
 - **SLA 达标度**：用 `resource_health` 的 P95/P99 与目标 `sla_targets.target_value` 比，不用标称值/总体平均（FR-042）。
+
+### 1.2bis 故障域去重：接管跳必须换故障域（FR-045 后半句，第 40 轮补）
+
+> ⚠️ FR-045 是 P0，但此前全套设计里**只剩一条 P2 告警**（§5.2「同故障域集中失败」）。
+> `channels.upstream_provider_id`（故障域根）**无人读**、`binding_fault_domains` 整张表零引用、
+> `fault_domains.disabled_until` 被 §1.1 序 4 读却**无人写**。
+> 接管的全部意义是换一个**不会同时坏**的资源——排序完就按分数取前 N 跳，
+> 很容易选出同一供应商下的三个渠道，供应商一挂，三跳一起失败，接管等于没做。
+
+**RoutePlan 组装时的去重规则**（排序之后、截断成 N 跳之前）：
+
+```
+dom(b) = { fd.id | (b, fd) ∈ binding_fault_domains }          -- 一个 binding 可属多个域
+critical_kinds = ('provider','proxy','account')                -- 关键故障域；region/network 不参与去重
+
+逐跳自上而下取候选 b：
+  若 ∃ 已入选跳 e 使 dom(b) ∩ dom(e) ∩ critical_kinds ≠ ∅  → **跳过 b**，看下一个候选
+  否则                                                      → b 入选
+若扫完候选集仍凑不满 N 跳 → **放宽**：允许复用故障域，按原分数补齐
+```
+
+- **`critical_kinds` 只含三类**：`region`/`network` 粒度太粗（同区域的两个供应商并不同生共死），
+  拿它们去重会在小候选集上把 RoutePlan 削成一跳。
+- **放宽而不是失败**：只有两个渠道时强行要求异域会导致无跳可接管——
+  有个同域备选也**远好于**没有备选。放宽时在 `decision_snapshot` 记
+  `{fallback:'fault_domain_relaxed', hop:n}`，供排障区分"设计如此"与"去重没生效"。
+- **首跳不受本规则约束**：它没有"前一跳"可比。
+- **`upstream_provider_id` 的用法**：渠道登记时按 `channels.upstream_provider_id`
+  自动挂一条 `kind='provider'` 的 `binding_fault_domains` 边（[09 §5](./09-admin-api.md) `POST /admin/bindings` 内完成），
+  不需要人工维护——否则这张表永远是空的，去重规则形同虚设。
 
 ### 1.3 RoutePlan：候选序列 + 每跳期限
 
@@ -548,6 +609,7 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 | `error_budget_burn` | `budget:<policy_id>:<window_start>` | 同窗口只报一次 |
 | `probe_template_missing` | `tmpl:<model_id>:<protocol>` | |
 | `capacity_tight` | `capacity:<binding_id>` | |
+| `domain_concentrated_failure` | `domain:<fault_domain_id>` | 整域封禁只报一次，不按域下每个 binding 刷屏（§5bis.1bis） |
 
 **写入事务**（`open` 与 `recovering` 的并发转换必须在行锁下做，否则会产生第二条活动行）：
 
@@ -666,12 +728,57 @@ UPDATE resource_health h
 | `available`/`degraded` | `cooling` | `consecutive_failures` 触发退避（§3.1） |
 | `cooling` | `canary` | `cooldown_until < now()` —— **回 canary 而非直接 available**，重新积累样本 |
 
+### 5bis.1bis 故障域集中失败检测（FR-045 前半句，健康聚合 worker 同一轮次内，第 40 轮补）
+
+> ⚠️ `fault_domains.disabled_until` 被 §1.1 序 4 当作**排除判据读取**，但全库**没有任何写入方**——
+> 没有 worker、没有管理端点。这是悬空读的典型：它不报错，只是那条过滤规则永远不生效。
+> FR-045 要求的"发现故障域集中异常时，同时限制相关资源"因此完全没有落地。
+
+**判据**（在 §5bis.1 聚合出各 binding 健康之后，同一 worker 轮次继续做）：
+
+```sql
+-- 某故障域下「近 10min 有样本的 binding」中，处于 cooling/degraded 的占比超阈值
+WITH d AS (
+  SELECT fd.id AS fault_domain_id,
+         count(*)                                                       AS n_total,
+         count(*) FILTER (WHERE h.health_state IN ('cooling','degraded')) AS n_bad
+    FROM fault_domains fd
+    JOIN binding_fault_domains bfd ON bfd.fault_domain_id = fd.id
+    JOIN resource_health h         ON h.binding_id = bfd.binding_id
+   WHERE fd.kind IN ('provider','proxy','account')      -- 与 §1.2bis 的 critical_kinds 一致
+     AND h.last_sample_at > now() - INTERVAL '10 minutes'
+   GROUP BY fd.id
+  HAVING count(*) >= :domain_min_bindings               -- 默认 3：少于 3 个 binding 的域不判定
+     AND count(*) FILTER (WHERE h.health_state IN ('cooling','degraded'))::numeric
+         / count(*) >= :domain_fail_ratio)              -- 默认 0.6
+UPDATE fault_domains f
+   SET disabled_until  = now() + make_interval(secs => :domain_disable_sec),  -- 默认 600
+       disabled_reason = 'concentrated_failure'
+  FROM d
+ WHERE f.id = d.fault_domain_id
+   AND (f.disabled_until IS NULL OR f.disabled_until < now() + INTERVAL '60 seconds')
+RETURNING f.id;                                          -- → 每条开一次 P2 告警
+```
+
+- **`n_total >= 3` 的门槛不能省**：只有 1~2 个 binding 的域里，一个渠道进冷却就是 50~100%，
+  必然误封整域。域太小时**单渠道级的冷却已经足够**，不需要域级动作。
+- **只看有近期样本的 binding**：长期没流量的 binding 健康态是陈旧的，
+  拿它凑分母会让比例失真（一个真坏 + 两个没数据 = 33%，压不到阈值）。
+- **续期而非叠加**：`disabled_until < now()+60s` 才写，避免每轮都往后推 10min 造成**永不解封**。
+  故障域封禁是**自动过期**的，靠下一轮重新判定决定要不要续——这样上游恢复后无需人工介入。
+- **不写 `bindings.enabled`**：那是人工停用位（§1.1 序 4 的第一判据），
+  自动逻辑碰它会让运维分不清"我关的"还是"系统关的"，且没有自动恢复语义。
+- **告警**：每条 `RETURNING` 开一次 P2，`dedup_key = domain:<fault_domain_id>`（见 §5.2bis 表）。
+- **人工兜底**：`POST /admin/fault-domains/{id}/disable`（[09 §5](./09-admin-api.md)）——
+  自动判据只覆盖"已经开始集中失败"，运维提前得知供应商要维护时需要能手动隔离整域。
+
 ### 5bis.2 余额下限重算 worker（每 5min）
 
 ```text
 conservative_floor(account_group) =
       last_confirmed_balance                       -- 采集器最近一次确认值
-    − known_consumption_since                      -- 见下
+    − known_consumption_since                      -- 已终结的实际消耗，见下
+    − inflight_reserved_since                      -- **在途消耗**，见下（第 40 轮补）
     − safety_reserve                               -- = max(余额 × `balance_safety_reserve_ratio`(0.02),
                                                    --        `balance_safety_reserve_min_usd`($1)) —— 两键见 [09 §4bis](./09-admin-api.md)
 
@@ -680,8 +787,22 @@ known_consumption_since = Σ attempt_usage.total_cost
                             AND attempt.started_at > last_confirmed_at
                             AND attempt_status IN ('completed','failed','interrupted','unknown_billing')
                           （**含**已计费但结果不明的两类——保守）
+
+inflight_reserved_since = Σ attempts.single_hop_est_usd
+                          WHERE attempt.binding 属该账号组
+                            AND attempt_status IN ('pending','committed')   -- 尚未终结
 ```
 
+- **为什么必须减在途**（第 40 轮：FR-023「为已发出但尚未结算的请求预留预计费用」在上游侧一直没有载体）：
+  `known_consumption_since` 只累计**已终结**的 attempt，而在途 attempt **连 `attempt_usage` 行都还没有**
+  （usage 随终帧才写）。本 worker 每 5min 跑一次、长流式请求可以跑更久——
+  于是"正在烧的钱"对下限**完全不可见**：余额只剩 $2 时仍可能有十几个请求在途，
+  每个都以为自己还有 $2 可用。这正是 FR-024「可路由余额 = 确认余额 − 未结算预留 − 安全储备」的三项之一。
+- **用 `single_hop_est_usd` 而非按比例估**：该列在 `dispatch`/`dispatch_next` 落 attempt 时就已写入
+  （[02 §2bis](./02-data-model.md) 上界算法），是**已有的、按跳的**预留额，无需新增机制。
+  它是上界 → 减多了只会更保守，方向正确。
+- **与下游配额预留不重复**：`client_reservations` 管的是**调用方**的日配额，
+  这里管的是**上游账号**的余额，两者是不同主体的两笔账，同时存在不构成重复扣减。
 - **账号组聚合**：按 `upstream_accounts.balance_group_key` 归并（FR-022/AC-04）——同一 key 的多账号/多 Key **只算一份余额**，消耗则**全部累加**。`balance_group_key` 为空时按 account_id 独立成组。
 - **无法形成下限**的三种情形与处置见 [§1.1bis](#11bis-余额配额过滤的四条判据fr-026-落地)，本 worker 只负责在这些情形下**把 `conservative_floor` 置 NULL**（而非算出一个假值）。
 - **落 `balance_signals`**：每轮写一行快照（`last_confirmed_balance`/`known_consumption_since`/`conservative_floor`/`computed_at`），供排障回溯"当时为什么排除了这个渠道"。
