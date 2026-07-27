@@ -267,6 +267,30 @@ CREATE TABLE routing_policies (
   is_active      BOOLEAN NOT NULL DEFAULT true
 );
 
+-- 策略变更影子表（FR-104 的"可恢复到上一个已确认版本"，第 42 轮补）
+-- ⚠️ 为什么不做成「主表插新版本」：routing_policies 有两个外键指向它
+--    （model_aliases.policy_id、requests.policy_id）。插新版本会让别名永远
+--    指着旧行，第一次改策略之后每个请求都命中一个已下线的策略。
+--    影子表让主表保持**单行身份**（外键安全）而历史**只追加**（可回滚）。
+CREATE TABLE routing_policy_revisions (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
+  version        INTEGER NOT NULL,            -- 快照对应的主表 version（改**前**的值）
+  -- 改前的全部可变字段快照；回滚 = 把这些抄回主行
+  sla_level      TEXT NOT NULL,
+  is_committed   BOOLEAN NOT NULL,
+  canary_eligible BOOLEAN NOT NULL,
+  probe_allowed  BOOLEAN NOT NULL,
+  conflict_order JSONB NOT NULL,
+  no_resource_wait_ms INTEGER NOT NULL,
+  is_active      BOOLEAN NOT NULL,
+  changed_by     TEXT,                        -- 是谁把它改走的（FR-099/104）
+  change_reason  TEXT,
+  superseded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (policy_id, version)                 -- 同一版本只留一条快照
+);
+CREATE INDEX idx_polrev_latest ON routing_policy_revisions(policy_id, version DESC);
+
 -- 对外模型别名（FR-062/117、AC-25）：如 gpt-5.5（可测活） vs gpt-5.5-sla-1（禁测活）
 CREATE TABLE model_aliases (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1246,9 +1270,19 @@ cap_res AS (          -- 【变体 A：已登记容量】条件 UPDATE 原子递
           OR h.rpm_used < floor(bd.rpm_limit * :ceiling))
   RETURNING h.binding_id
 ),
--- 【变体 B：未登记容量】把上面一段整体换成直通：
---   cap_res AS (SELECT :binding_id AS binding_id FROM resv)
+-- 【变体 B：未登记容量（bd.rpm_limit 与 bd.concurrency_limit 皆空）】
+--   把上面 cap_res 那一段整体换成直通：
+--     cap_res AS (SELECT :binding_id AS binding_id FROM resv)
 --   —— 不碰 resource_health，请求路径不多一次同步写（保 P99≤50ms）
+-- ⚠️ **变体 B 仍然写 capacity_claims，下面的 cap 段不变**（第 42 轮明确：
+--    05 §1.1 序 7 写的"未登记容量的渠道不设保留、本层直接放行"读起来像"跳过整段"，
+--    与这里的结构冲突，开发只能靠猜）。理由：claim 不只是计数器，
+--    它还是**租约与悬挂回收的载体**（[§6bis](#6bis-claim-回收) 的回收任务、
+--    [§4.2bis](#42bis-崩溃恢复扫描) 的悬挂检测都按 claim 找孤儿 attempt）。
+--    不写 claim = 未登记容量的 binding 上的请求崩溃后无人回收。
+--    "不设保留"指的是**不做闸门判定**（没有上限可判），不是"不留痕迹"。
+-- ⚠️ 释放侧对称：`rel_cap` 照常把 claim 置 released；`dec` 递减 resource_health 时
+--    对未登记 binding 而言计数本来就是 0，`GREATEST(...,0)` 使其保持 0，不会变负。
 cap AS (
   INSERT INTO capacity_claims(claim_id, binding_id, request_id, attempt_id, kind,
                               lease_owner, lease_expires_at)
@@ -1472,7 +1506,13 @@ CREATE TABLE price_change_log (
 );
 ```
 
-- **不可覆盖**：两表均仅 INSERT。「当前生效价」= 该 `(channel,model)` 下 `effective_at<=now()` 的最新 `price_versions` 行；「当前生效倍率」= 该 `binding_id` 下最新 `multiplier_versions` 行。
+- **不可覆盖**：两表均仅 INSERT。
+  「当前生效价」= 该 `(channel,model)` 下 **`confirmed = true`** 且 `effective_at <= now()` 的最新 `price_versions` 行；
+  「当前生效倍率」= 该 `binding_id` 下最新 `multiplier_versions` 行。
+  > ⚠️ **`confirmed` 这个条件不能漏**（第 42 轮：本行与下方成本公式此前都只写了 `effective_at` 最新）：
+  > 采集到的**降价**版本插入时 `confirmed=false`（[04 §价格变更留痕](./04-collector-adapter.md)）。
+  > 漏掉该条件，一个可能是误读的低价会**立刻**进入低价优选，AC-03 的"确认后才逐步增加"完全绕过。
+  > 索引 `idx_price_cur` 就是按 `WHERE confirmed` 建的部分索引——漏条件还会走不上索引。
 - **成本计算**（第 18 轮 [high] 修正；第 40 轮把散文词绑到列）：
 
   > ⚠️ 此前写的是"基础价 × 倍率"这类**散文词**，`input_price` / `output_price` / `cache_price` /
@@ -1481,7 +1521,7 @@ CREATE TABLE price_change_log (
   > → 缓存命中部分会被按输入价计费（第 40 轮悬空列检查发现）。
 
   ```
-  设 pv = 当前生效 price_versions 行（该 channel+model，effective_at<=now() 的最新行）
+  设 pv = 当前生效 price_versions 行（该 channel+model，**confirmed=true** 且 effective_at<=now() 的最新行）
      mv = 当前生效 multiplier_versions 行（该 binding 的最新行）
      u  = unit_tokens(pv.billing_unit)：per_1m_token→1_000_000 / per_1k_token→1_000 / per_token→1
      m  = COALESCE(mv.group_multiplier, 1) × COALESCE(mv.key_multiplier, 1)

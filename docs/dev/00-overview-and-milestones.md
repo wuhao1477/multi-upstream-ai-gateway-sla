@@ -6,7 +6,7 @@
 | 日期 | 2026-07-23 |
 | 输入 | [PRD v1.4](../PRD.md)（**§2.1 为分期真相源**）、[11 转向决策](./11-decision-full-selfbuilt.md)、[13 调研重审](./13-research-reassessment.md)、[15 范围与隐患](./15-scope-and-preflight.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md) |
 | 技术栈决策（2026-07-23 确认） | 自研核心 **Go**（存储层 **pgx + sqlc**）；状态存储 **PostgreSQL 单库**（一期不引 Redis）；部署 **单机 Docker Compose**（LB + **≥2 核心实例** + PG + collector，**无外部网关**）；文档按 docs/dev/ 分篇 |
-| 交付分期 | **以 [PRD §2.1](../PRD.md) 为唯一真相源**：一期 = SLA 自研网关；二期 = 订阅制/主动测活/缓存进阶/多 SLA 等级/外部告警。本篇里程碑与 [14 验收矩阵](./14-acceptance-matrix.md) 均由其派生 |
+| 交付分期 | **以 [PRD §2.1](../PRD.md) 为唯一真相源**：一期 = SLA 自研网关；二期 = **订阅制/多 SLA 等级/外部告警完整渠道**。⚠️ **主动测活（FR-060~067/070~075、AC-09/10）与缓存切换损失预测（FR-056、AC-07）已于 2026-07-26 由二期拉入一期**（PRD v1.4 裁决），本行第 42 轮更正——原文仍把两者列在二期，与 M2/M4 的验收要求直接打架。本篇里程碑与 [14 验收矩阵](./14-acceptance-matrix.md) 均由其派生 |
 | 主力客户端（2026-07-23 确认） | **Codex CLI**（走 **OpenAI Responses** 协议，自带 `session_id`/`conversation_id` 头与 `prompt_cache_key`）。据此：一期入站协议维持 CC + Responses 不扩（[02 §4.5](./02-data-model.md)）；上游对接走**字节级透传**保真 reasoning 与事件生命周期（[03](./03-upstream-layer.md)、[13 §1](./13-research-reassessment.md)）；自研层不做隐藏重试，一次外部调用严格对应一次上游调用（FR-119） |
 
 ## 1. 要建什么（一句话）

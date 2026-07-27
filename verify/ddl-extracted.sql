@@ -171,6 +171,26 @@ CREATE TABLE routing_policies (
   is_active      BOOLEAN NOT NULL DEFAULT true
 );
 
+CREATE TABLE routing_policy_revisions (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  policy_id      BIGINT NOT NULL REFERENCES routing_policies(id),
+  version        INTEGER NOT NULL,            -- 快照对应的主表 version（改**前**的值）
+  -- 改前的全部可变字段快照；回滚 = 把这些抄回主行
+  sla_level      TEXT NOT NULL,
+  is_committed   BOOLEAN NOT NULL,
+  canary_eligible BOOLEAN NOT NULL,
+  probe_allowed  BOOLEAN NOT NULL,
+  conflict_order JSONB NOT NULL,
+  no_resource_wait_ms INTEGER NOT NULL,
+  is_active      BOOLEAN NOT NULL,
+  changed_by     TEXT,                        -- 是谁把它改走的（FR-099/104）
+  change_reason  TEXT,
+  superseded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (policy_id, version)                 -- 同一版本只留一条快照
+);
+
+CREATE INDEX idx_polrev_latest ON routing_policy_revisions(policy_id, version DESC);
+
 CREATE TABLE model_aliases (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   alias          TEXT NOT NULL UNIQUE,        -- 对外暴露名（= 调用方 body.model 里填的字符串）

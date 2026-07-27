@@ -235,6 +235,9 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/models`、`POST /admin/models` | **模型登记（唯一写入载体）**：`canonical_name` + **必填** `max_input_tokens`/`max_output_tokens`（[02 §1.1](./02-data-model.md)）+ 能力位。⚠️ 两个上界是**费用预留上界算法的硬前置**（[02 §2bis](./02-data-model.md)），缺任一即该模型的所有 binding **不进候选** → 接口层强制校验 `NOT NULL AND > 0`，缺失直接 **400**，不允许留空建模型 | **M1** |
 | `PATCH /admin/models/{id}` | 更新上界与能力位（上界变更影响预留额，走 §3 二次确认） | M1 |
 | `GET /admin/aliases` | 模型别名 ↔ 策略映射（[02 §2](./02-data-model.md)、FR-062） | M1 |
+| `GET /admin/policies`、`PATCH /admin/policies/{id}` | 策略读写。⚠️ **原地更新主行**（`version+1`）**并同事务向 `routing_policy_revisions` 追加改前快照**——主表单行身份不可变，两个外键（`model_aliases.policy_id`/`requests.policy_id`）依赖它（[05 §1.0](./05-scheduling-and-operations.md)） | M1 |
+| `GET /admin/policies/{id}/revisions` | 该策略的变更史（FR-104：版本/生效时间/变更原因/责任人）。按 `routing_policy_revisions.superseded_at` 倒序返回——该列是"这一版被改走的时刻"，与主行的 `effective_at`（当前版本何时生效）配对读，才能还原每一版的**生效区间** | M1 |
+| `POST /admin/policies/{id}/rollback` | **恢复到上一个已确认版本**（FR-104 明文要求）。入参 `to_version`；把该 revision 的字段抄回主行、`version+1`，并把**回滚前的当前值**也存一条 revision——回滚本身也是一次变更，必须可再回滚 | M1 |
 | `GET /admin/channel-models`、`POST /admin/channel-models` | **渠道×模型×协议能力矩阵的写入载体**（`channel_models`）。登记 `enabled`、探测结果（`support`/`supports_streaming`/`supports_tools`/`probed_at`），以及 ⚠️ **`upstream_model_name`——该渠道对这个模型的叫法**。中转站把 `gpt-5.5` 叫成 `openai/gpt-5.5` 或 `gpt-5.5-0930` 是常态，**不填就按 `models.canonical_name` 发出去，上游必然 404**（[05 §1.0 出站改写](./05-scheduling-and-operations.md)）。留空 = 与 `canonical_name` 相同 | **M1** |
 | `GET /admin/ledger/requests?…` | 账本**列表**查询（按时间/client/别名/终态过滤；FR-097/098） | M1 |
 | `GET /admin/ledger/requests/{request_id}` | 账本**详情**：该请求的全部 attempt、逐跳 usage 与成本、`decision_snapshot`、reservation 状态与终态时间线（[AC-16](./14-acceptance-matrix.md) 的判定入口）。**不含正文**（FR-112） | M1 |
