@@ -49,7 +49,9 @@ CREATE TABLE upstream_keys (
 CREATE TABLE models (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   canonical_name TEXT NOT NULL,   -- 真实上游模型名（区别于对外别名）
-  max_context   INTEGER,
+  -- ⚠️ 曾有一列 `max_context`，第 40 轮**删除**：它与下面的 `max_input_tokens` 语义重叠
+  --    （注释里 max_input_tokens 就写着「通常=上下文窗口」），却没有任何规则读它。
+  --    两个含义相近的上限列并存必然导致"预留用 A、能力判定用 B"的分裂。留一个。
   -- ── 费用预留上界所需（§2bis 预估算法）。**两列缺一，该模型的 binding 不得进候选** ──
   -- 曾把输出上限写成 channel_models.max_output_tokens —— 那一列**根本不存在**（第 9 轮 critical）。
   max_input_tokens  INTEGER,      -- 协议级最大可计费输入（通常=上下文窗口）；上游物理上不可能计费超过它
@@ -519,6 +521,9 @@ CREATE TABLE attempts (
   upstream_call_count SMALLINT NOT NULL DEFAULT 1, -- 实际上游调用数（补算后）
   hidden_retry_detected BOOLEAN NOT NULL DEFAULT false,
   hidden_retry_kind  TEXT,                    -- 如 'codex_400_strip_thinking'（假设6补验）
+  -- ⚠️ 上面三列（upstream_call_count / hidden_retry_detected / hidden_retry_kind）**一期恒为默认值**：
+  --    §11 开放点 5 已裁定一期不做隐藏重试推断（我们自己不发，上游中转站内部若有也不可观测）。
+  --    保留建表只为二期接入会隐藏重试的通道时零改表。**不是漏实现**（第 40 轮明示）。
 
   -- ── 上游关联键（自研直连，旁路观察提取）──
   upstream_response_id    TEXT,               -- 上游响应 id（如 resp_.../chatcmpl-...），用于排障关联

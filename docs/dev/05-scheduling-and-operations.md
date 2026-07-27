@@ -27,12 +27,16 @@
 | --- | --- | --- |
 | 1 | 取请求体 `model` 字段的字符串 `name`（**不做 JSON 全解析**，只按 §1.0bis 的字节级取值） | 缺字段 → **400** |
 | 2 | `model_aliases WHERE alias = name AND enabled` | 未命中或 `enabled=false` → **404**（与"模型不存在"同一响应，不泄漏别名表） |
-| 3 | 命中行给出两样东西：`policy_id` → SLA 等级与测活资格（序 1）；`target_model_id` → **本次请求的 `model_id`**（序 2 起全程使用） | —— |
+| 3 | 命中行给出两样东西：`policy_id` → SLA 等级与测活资格（序 1）；`target_model_id` → **本次请求的 `model_id`**（序 2 起全程使用） | 指向的策略 `is_active=false` → **500**（配置错误，不是调用方的问题） |
 | 4 | `requests.alias_id` 记命中的别名 id（调用方**意图**）；实际用了哪个模型由每条 attempt 的 `bindings.model_id` 钉住 | —— |
 
 - **为什么 `requests` 不另存 `model_id`**：别名→模型的映射是**可变配置**，而 attempt 的 binding 已经钉死了那一跳真正用的模型。
   再存一列快照会出现"requests 说 A、attempt 说 B"的双真相。零 attempt 的请求本来就没发生过模型选择。
 - **`enabled=false` 返 404 而非 403**：别名下线后调用方不该能通过响应码区分"从没有过"和"下线了"。
+- **策略的"生效版本"**：`routing_policies` 是**版本化**的（`version`/`effective_at`/`changed_by`，FR-104）。
+  生效行 = 该 `name` 下 `is_active = true` 且 `effective_at <= now()` 的最大 `version` 行。
+  改策略走**插新版本 + 旧版本置 `is_active=false`**，与 `config_params` 同一套不可覆盖原则——
+  历史请求的 `requests.policy_id` 因此永远指向它当时真正用的那一版。
 
 **出站改写（executor 发上游前）**：
 
@@ -469,6 +473,26 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 
 **探测请求的记账主体**：内置凭证 `system-probe`（[02 §2bis](./02-data-model.md)）；`requests.probe_kind='probe'`、`attempts.role='probe'`。
 
+**测活结果的通过判据**（第 40 轮补：`probe_templates.expect_tools` / `expect_min_output_tokens`
+两列建好后**零引用**——模板选出来了、请求发出去了，但"什么算测通了"没有任何规则，
+默认只能退化成"HTTP 200 即通过"，而 FR-060 的全部意义就是**不要虚假健康**）：
+
+| # | 判据 | 不满足的归因 |
+| --- | --- | --- |
+| 1 | 上游终帧 `terminal_event ∈ {completed, empty_completed}` 之外 → 失败 | `probe_failed`（渠道问题） |
+| 2 | `has_ttft_output = false`（空响应） | `probe_failed` —— 200 但没内容正是要抓的形态 |
+| 3 | `expect_min_output_tokens` 非空且 `attempt_usage.completion_tokens < 该值` | `probe_failed`：输出被截断/敷衍 |
+| 4 | `expect_tools = true` 但旁路未观测到 `tool_calls` 事件 | `probe_failed`：工具链路不通 |
+| 5 | 全部满足 | `probe_ok`，正常计入该 binding 健康 |
+
+- **判据 3/4 是"该模板期望什么"，不是"模型能不能"**：同一模型的两个模板可以一个期望工具、
+  一个不期望；`expect_min_output_tokens` 为 NULL 表示该模板不检查输出量。
+- **失败归因只落测活轨**：`probe_failed` 扣 `probe_budget_windows.failure_count`，
+  **不进用户 SLA 分母**（§2.1 已定，AC-09 的分轨断言对象）。
+- **判据 4 的观测来源**：旁路事件流已逐事件统计（[03 §2](./03-upstream-layer.md)），
+  看有无 `response.output_item.added` 且 `item.type='function_call'`（Responses）/
+  `tool_calls` delta（CC）即可，**不需要解析正文**（FR-112）。
+
 ### 2.2 测活资格（别名承载，参数6）
 
 - **测活权限编进对外别名**：`gpt-5.5`（可测活）vs `gpt-5.5-sla-1`（禁测活）→ `routing_policies.probe_allowed`（AC-25）。
@@ -636,7 +660,38 @@ RETURNING id, state;
 COMMIT;
 ```
 
-**状态迁移**（`open → acknowledged → recovering → closed`）一律 `SELECT … FOR UPDATE` 后再改。**关闭条件**：该 `dedup_key` 的触发条件连续 `alert_recovery_checks`（默认 3）轮不再成立；`unknown_billing` 类**只能人工关闭**。
+**`trigger_data` 与 `suggested_action` 的写入**（第 40 轮：两列建好后零引用，
+而 FR-101 要求"告警须给出建议处置"——没有它，告警只是"出事了"，运维不知道下一步做什么）：
+
+| category | `trigger_data`（判据快照，元数据） | `suggested_action`（FR-101） |
+| --- | --- | --- |
+| `balance_exhausted` | `{last_confirmed_balance, known_consumption_since, conservative_floor}` | 「充值或停用该余额组下全部渠道」 |
+| `key_invalid` | `{key_id, status, upstream_error}` | 「到上游站点确认 Key 状态，或在 /admin/bindings 停用」 |
+| `all_unavailable` | `{model_id, excluded:[{binding,reason}]}` | 「按 excluded 原因逐项排查；余额类先充值，健康类等冷却」 |
+| `billing_anomaly` | `{binding_id, estimated, actual, variance_ratio}` | 「核对上游价格页，必要时 POST /admin/prices 手工修正」 |
+| `unknown_billing` | `{request_id, attempt_id}` | 「查上游账单后走 POST /admin/reservations/{id}/adjust 修正」 |
+| `domain_concentrated_failure` | `{fault_domain_id, n_total, n_bad, ratio}` | 「确认供应商是否故障；误判则 POST /admin/fault-domains/{id}/enable」 |
+
+- **`suggested_action` 是模板文案，随二进制发布**，不入配置——它要跟着代码里的端点名一起改。
+- **`trigger_data` 与 `payload` 的分工**：`payload` 记**首次**触发时的快照，`trigger_data` 记**最近一次**
+  （`ON CONFLICT` 分支同时刷新 `last_seen_at` 与 `trigger_data`）。排障时前者答"怎么开始的"，后者答"现在什么样"。
+
+**生命周期**（`state` 四态的迁移方，第 40 轮：`acknowledged_at`/`closed_at` 此前无人写）：
+
+| 迁移 | 触发方 | 写什么 |
+| --- | --- | --- |
+| → `open` | 上方写入事务 | `started_at`/`last_seen_at`/`occurrence_count` |
+| `open` → `acknowledged` | **人工**：`POST /admin/alerts/{id}/ack` | `state`、`acknowledged_at = now()` |
+| `open`/`acknowledged` → `recovering` | 告警 worker：判据连续 `:alert_recovery_checks`（默认 3）轮不再成立 | `state` |
+| `recovering` → `closed` | 同 worker：`recovering` 持续超 `:alert_close_after_sec`（默认 900） | `state`、`closed_at = now()` |
+| `recovering` → `open` | 同 worker：判据再次成立 | `state`（`closed_at` 保持 NULL） |
+
+- **`closed` 之后同键再次发生会开一条新行**：部分唯一索引 `uq_alert_active` 只约束 `state <> 'closed'`，
+  历史事件因此完整保留（FR-102 要的是"不刷屏"，不是"只留一条"）。
+- **ack 不影响自动关闭**：人工确认只是表示"我看到了"，判据恢复照样走 `recovering → closed`。
+  ⚠️ **不要**让 ack 阻断自动流转——那会让已恢复的告警永远挂着。
+
+**状态迁移**（`open → acknowledged → recovering → closed`）一律 `SELECT … FOR UPDATE` 后再改。**关闭条件**见上方生命周期表（`recovering` 持续超 `alert_close_after_sec` 自动 `closed`）；`unknown_billing` 类**只能人工关闭**。
 
 **P1/P2/P3 的判据**（[AC-19](./14-acceptance-matrix.md) 三场景的精确触发）：
 
@@ -653,7 +708,22 @@ COMMIT;
 
 ### 5.3 余额不足信号自适应识别（参数5/FR-027）
 
-余额**非实时**、后台校对；置"耗尽"靠多判据组合（[02 `balance_signals`](./02-data-model.md)）：错误码 / 错误文案正则("余额"类关键词) / 真实请求失败信号 / 余量归零（AC-29）。保守储备与三档处置（<24h 告警 / <6h 停测活与高成本 / <1h 临界减普通流量，参数5）。
+余额**非实时**、后台校对；置"耗尽"靠多判据组合（[02 `balance_signals`](./02-data-model.md)）：错误码 / 错误文案正则("余额"类关键词) / 真实请求失败信号 / 余量归零（AC-29）。
+
+**四类信号的落库**（第 40 轮补：`signal_kind`/`signal_evidence` 两列建好后零引用，
+而 [AC-29](./14-acceptance-matrix.md) 要断言的正是"**非标准**方式返回余额不足也能识别"——
+不记下是哪一类信号、原文是什么，事后既无法判断识别对不对，也无法调正则）：
+
+| `signal_kind` | 触发 | `signal_evidence` 记什么 |
+| --- | --- | --- |
+| `error_code` | 上游返回约定错误码（如 402、`insufficient_quota`） | 状态码 + 错误 `code` 字段值 |
+| `error_text_regex` | 错误文案命中"余额/额度/欠费/insufficient/quota"类正则 | **命中的那个关键词**，不是整段文案 |
+| `real_request_fail` | 真实业务请求连续失败且伴随上述特征 | 触发的 attempt_id 与连续次数 |
+| `quota_zeroed` | 采集器读到余量/额度归零 | 采集到的字段名与值 |
+
+- ⚠️ **`signal_evidence` 只存关键词与字段名，不存上游返回的完整报文**——错误体可能回显请求片段，
+  存整段会把正文带进库，违反 FR-112。
+- **正则可配置**（`balance_text_patterns`），因为各家中转站文案不同；调正则的依据就是历史 `signal_evidence`。保守储备与三档处置（<24h 告警 / <6h 停测活与高成本 / <1h 临界减普通流量，参数5）。
 
 ---
 
@@ -697,25 +767,88 @@ COMMIT;
 ```sql
 -- 从 attempts 聚合到 resource_health。⚠️ 归因口径见 §4.2bis 不变式 3：
 --    unknown_billing / interrupted 是**我们**崩溃，不计入渠道成功率。
-WITH w AS (
-  SELECT a.binding_id,
-         count(*) FILTER (WHERE a.started_at > now() - INTERVAL '1 hour')  AS n1h,
-         count(*) FILTER (WHERE a.started_at > now() - INTERVAL '24 hours') AS n24h,
-         percentile_disc(0.95) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
-           FILTER (WHERE a.has_ttft_output)                                 AS p95,
-         avg((a.attempt_status = 'completed')::int)                         AS ok_rate
-    FROM attempts a
-   WHERE a.request_created_at > now() - INTERVAL '24 hours'
-     AND a.attempt_status NOT IN ('unknown_billing','interrupted')   -- 崩溃不算渠道的账
-     AND a.role <> 'probe'                                            -- 测活失败单独归因（§2.1）
-  GROUP BY a.binding_id)
+-- ⚠️ 第 40 轮改成**两段**：此前一条 SQL 直接扫 24h 的 attempts 算分位数，
+--    而 `health_metric_windows` 整张表**没有任何读写方**（建了索引、写了 30 天保留策略，
+--    却是孤儿表）。两个问题其实是同一个：AC-36 要求 1000 QPS，24h ≈ 8600 万行，
+--    每 60s 对它跑一次 percentile_disc 不可行 —— 窗口表本来就是为此存在的。
+
+-- ── 段一：滚动 1h 窗口（每 60s，只扫最近 1 小时）──────────────
+INSERT INTO health_metric_windows(
+       binding_id, model_id, request_type, context_bucket,
+       window_start, window_kind,
+       sample_count, p50_ttft_ms, p95_ttft_ms, p99_ttft_ms,
+       success_count, stream_break_count)
+SELECT a.binding_id, bd.model_id, r.request_type,
+       CASE WHEN au.prompt_tokens IS NULL      THEN NULL          -- FR-041 上下文区间
+            WHEN au.prompt_tokens <   8000     THEN 'lt8k'
+            WHEN au.prompt_tokens <  32000     THEN '8k-32k'
+            WHEN au.prompt_tokens < 128000     THEN '32k-128k'
+            ELSE 'ge128k' END,
+       date_trunc('hour', now()), '1h',
+       count(*),
+       percentile_disc(0.50) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       percentile_disc(0.95) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       percentile_disc(0.99) WITHIN GROUP (ORDER BY a.content_aware_ttft_ms)
+         FILTER (WHERE a.has_ttft_output),
+       count(*) FILTER (WHERE a.attempt_status = 'completed'),
+       count(*) FILTER (WHERE a.stream_broken)
+  FROM attempts a
+  JOIN bindings bd ON bd.id = a.binding_id
+  JOIN requests r  ON r.id = a.request_id AND r.created_at = a.request_created_at
+  LEFT JOIN attempt_usage au
+         ON au.attempt_id = a.id AND au.request_created_at = a.request_created_at
+ WHERE a.request_created_at > now() - INTERVAL '1 hour'
+   AND a.attempt_status NOT IN ('unknown_billing','interrupted')   -- 崩溃不算渠道的账
+   AND a.role <> 'probe'                                            -- 测活失败单独归因（§2.1）
+ GROUP BY a.binding_id, bd.model_id, r.request_type, 4
+ON CONFLICT (binding_id, model_id, request_type, context_bucket, window_kind, window_start)
+DO UPDATE SET sample_count = EXCLUDED.sample_count,
+              p50_ttft_ms = EXCLUDED.p50_ttft_ms,
+              p95_ttft_ms = EXCLUDED.p95_ttft_ms,
+              p99_ttft_ms = EXCLUDED.p99_ttft_ms,
+              success_count = EXCLUDED.success_count,
+              stream_break_count = EXCLUDED.stream_break_count;
+
+-- ── 段二：由窗口汇出 resource_health（不再碰 attempts）──────────
+WITH cur AS (      -- 当前小时的总体行（三个维度均为 NULL = 不分维度）
+  SELECT binding_id, sample_count, p50_ttft_ms, p95_ttft_ms, p99_ttft_ms, success_count
+    FROM health_metric_windows
+   WHERE window_kind = '1h' AND window_start = date_trunc('hour', now())
+     AND model_id IS NULL AND request_type IS NULL AND context_bucket IS NULL),
+d24 AS (           -- 24h 只汇**计数**：计数可加，分位数不可加（见下）
+  SELECT binding_id, sum(sample_count) AS n24
+    FROM health_metric_windows
+   WHERE window_kind = '1h' AND window_start > now() - INTERVAL '24 hours'
+     AND model_id IS NULL AND request_type IS NULL AND context_bucket IS NULL
+   GROUP BY binding_id)
 UPDATE resource_health h
-   SET sample_count_1h = w.n1h, sample_count_24h = w.n24h,
-       p95_ttft_ms = w.p95, success_rate = w.ok_rate,
-       low_confidence = NOT (w.n1h >= :min_1h OR w.n24h >= :min_24h),
+   SET sample_count_1h = cur.sample_count,
+       sample_count_24h = COALESCE(d24.n24, 0),
+       p50_ttft_ms = cur.p50_ttft_ms,
+       p95_ttft_ms = cur.p95_ttft_ms,
+       p99_ttft_ms = cur.p99_ttft_ms,
+       success_rate = CASE WHEN cur.sample_count > 0
+                           THEN cur.success_count::numeric / cur.sample_count END,
+       low_confidence = NOT (cur.sample_count >= :min_1h OR COALESCE(d24.n24,0) >= :min_24h),
        last_sample_at = now(), updated_at = now()
-  FROM w WHERE h.binding_id = w.binding_id;
+  FROM cur LEFT JOIN d24 ON d24.binding_id = cur.binding_id
+ WHERE h.binding_id = cur.binding_id;
 ```
+
+- **段一要跑两遍**：一遍带 `model_id/request_type/context_bucket` 分组（供 FR-041 的分维度健康查询与
+  [09 `GET /admin/health`](./09-admin-api.md)），一遍三列全填 `NULL` 出**总体行**（段二读的就是它）。
+  `UNIQUE NULLS NOT DISTINCT` 保证总体行不会被写成多份（[02 §6](./02-data-model.md) 第 19 轮加的约束正是为此）。
+- **`window_kind='24h'` 的行**由每 5min 的一个轻量任务从 1h 行汇总，**只填计数三列**
+  （`sample_count`/`success_count`/`stream_break_count`），**分位数三列留 NULL**——
+  ⚠️ **分位数不可由子窗口合成**：24 个小时各自的 p95 求平均/取最大都不等于这 24 小时整体的 p95。
+  宁可留空，也不要写一个看起来像 p95 的假数。需要真 24h 分位数时按需直接查 `attempts`（离线分析，不在同步路径）。
+- **`success_rate` 用计数相除而非 `avg()`**：`avg((status='completed')::int)` 在窗口表里无从复现，
+  而 `success_count / sample_count` 由两个可加的计数得出，跨窗口口径一致。
+- **`sample_count_24h` 由 24 个 1h 行求和**：计数可加，不需要回扫 24h 原始行。
+  这也是把 24h 窗口从"重扫"变成"累加"的关键——`low_confidence` 判定因此不再依赖大扫描。
+- **窗口写入落后最多 60s**：selector 读的是内存快照，本来就有秒级延迟，不引入新的时效问题。
 
 **状态迁移（同一事务内，紧接上面）**，判据全部来自刚更新的行：
 

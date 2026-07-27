@@ -107,7 +107,7 @@ type ParamMeta struct {
 
 ### 4bis.0 取值路径（第 40 轮补：清单有了，**怎么读出一个值**从没写过）
 
-> ⚠️ `config_params.param_value` / `prev_value` 建表后全库零引用。清单列了 61 个键、
+> ⚠️ `config_params.param_value` / `prev_value` 建表后全库零引用。下方清单列全了键、
 > §4 定义了静态元数据，但"给定一个 key，运行时拿到哪一行、什么类型"没有任何交代 ——
 > 而全套设计里几乎每条规则都以"（`config_params` 可配）"收尾。
 
@@ -172,6 +172,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `capacity_ceiling_takeover` | 0.95 | | |
 | `capacity_ceiling_probe` | 0.70 | | |
 | `balance_safety_reserve_ratio` | 0.02 | | 余额安全储备比例（[05 §5bis.2](./05-scheduling-and-operations.md) 的 safety_reserve） |
+| `balance_text_patterns` | `["余额","额度","欠费","insufficient","quota"]` | | 余额不足文案正则关键词表（[05 §5.3](./05-scheduling-and-operations.md)）；各中转站文案不同，按历史 `signal_evidence` 调 |
 | `balance_safety_reserve_min_usd` | 1.0 | | 安全储备下限，实际取 max(余额×比例, 本值) |
 | `retention_months` | 7 | ✅ | 账本分区保留窗口（≥180 天，FR-112） |
 | **健康与冷却（参数 11）** ||||
@@ -185,6 +186,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `domain_min_bindings` | 3 | | 少于此数的故障域不做集中失败判定（避免单渠道误封整域） |
 | `domain_fail_ratio` | 0.6 | | 域内 cooling/degraded 占比超此值即封禁整域 |
 | `domain_disable_sec` | 600 | | 自动封禁时长；到期自动解封，靠下一轮重新判定续期 |
+| **告警生命周期（[05 §5.2bis](./05-scheduling-and-operations.md)）** ||||
+| `alert_close_after_sec` | 900 | | `recovering` 持续多久自动 `closed` |
 | **配额与计费** ||||
 | `billing_variance_tolerance` | 0.05 | ✅ | 计费偏差容差（[05 §4.4](./05-scheduling-and-operations.md)） |
 | `billing_min_base_usd` | 0.01 | | 低于此改用绝对差额判定（除零保护） |
@@ -192,7 +195,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `billing_recovery_streak` | 20 | | 连续一致次数后恢复 |
 | **告警** ||||
 | `alert_webhook_url` | 空 | ✅ | 为空则不外发（[06 §5bis](./06-deployment-and-operations.md)） |
-| `alert_recovery_checks` | 3 | | 连续几轮不成立才关闭 |
+| `alert_recovery_checks` | 3 | | 判据连续几轮不成立才转 `recovering`（[05 §5.2bis](./05-scheduling-and-operations.md) 生命周期表） |
 | `key_invalid_streak` | 3 | | 连续 401/403 判 Key 失效 |
 | `all_unavail_checks` | 2 | | 连续几轮空候选判全不可用 |
 | `error_budget_burn_ratio` | 0.5 | | 快速消耗阈值 |
@@ -235,13 +238,16 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/ledger/requests?…` | 账本**列表**查询（按时间/client/别名/终态过滤；FR-097/098） | M1 |
 | `GET /admin/ledger/requests/{request_id}` | 账本**详情**：该请求的全部 attempt、逐跳 usage 与成本、`decision_snapshot`、reservation 状态与终态时间线（[AC-16](./14-acceptance-matrix.md) 的判定入口）。**不含正文**（FR-112） | M1 |
 | ~~`GET /admin/subscriptions`~~ | ⏭ **二期**：订阅台账/双倍率/到期浪费预测随订阅制整体推迟（[PRD §2.1](../PRD.md)）。**一期不提供该端点**；若为兼容预留，只允许返回稳定的 `{"error":"not_supported_in_phase_1"}`，**不得实现任何订阅查询、预测或双倍率逻辑** | ⏭ 二期 |
-| `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16） | M3 |
-| `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)） | M2 |
+| `GET /admin/alerts` | 告警事件流（[02 §8](./02-data-model.md)、参数16）；默认只返回 `state <> 'closed'`，`?include_closed=true` 查历史 | M3 |
+| `POST /admin/alerts/{id}/ack` | 人工确认（置 `state='acknowledged'` + `acknowledged_at`）。⚠️ **不阻断自动关闭**——判据恢复后照样走 `recovering → closed`（[05 §5.2bis](./05-scheduling-and-operations.md)） | M3 |
+| `GET /admin/health` | 各 binding 健康/冷却/样本（[02 §6](./02-data-model.md)）；`?by=model\|request_type\|context_bucket` 走 `health_metric_windows` 的分维度行（FR-041），缓存作用域以 `cache_scopes.scope_label` 显示 | M2 |
 | `GET /admin/debug/trace/{request_id}` | **L1 事件轨迹查询**（[12 §3](./12-debuggability.md)）：返回该请求各 attempt 的 SSE 事件元数据序列（`seq`/`offset_ms`/`event_type`/`should_commit`/`has_ttft_output`/`bytes`），**不含正文**（FR-112） | M1 |
 | `GET /admin/ledger/reconciliation?scope=account\|key\|model&from=&to=` | **计费对账**（FR-019）：聚合预估 vs 实扣 vs 余额变化，不可归因差额单列 `unattributed` | M3 |
+| `GET /admin/prices/changes?model_id=&channel_id=&key_id=&from=&to=` | **价格变化记录与影响范围**（FR-017）：查 `price_change_log`，逐条给出前后两版单价（join `from_version_id`/`to_version_id`）、`direction`、是否已确认，以及**影响范围**——该 `(channel, model)` 下受影响的 binding 列表与变更后窗口内的实际用量金额。三个过滤参数对应 FR-017 的「按模型、渠道和 Key 查询」（`key_id` 经 binding 反查） | M3 |
+| `POST /admin/prices/changes/{id}/confirm` | 人工确认一条 `direction='decrease'` 的降价（置 `confirmed=true`），使其重新参与低价优选排序（[04 §价格变更留痕](./04-collector-adapter.md)、FR-014/AC-03） | M3 |
 | `GET /v1/models`、`GET /v1/models/{alias}` | **数据面**端点，非管理面。由网关**合成**（[03 §4](./03-upstream-layer.md)）：返回该凭证 `allowed_aliases` 内的启用别名；非别名 404、越权 403；`x-models-etag` 我方自生成并支持 `If-None-Match` → 304 | M1 |
 | `POST /admin/bindings/{id}/canary` | 把 binding 置回 `canary` 态并重置窗口计数，用于新渠道受控验证（[05 §2.0](./05-scheduling-and-operations.md)） | M2 |
-| `GET /admin/fault-domains` | 列出故障域及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |
+| `GET /admin/fault-domains` | 列出故障域（`kind` + `label` 作显示名）及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |
 | `POST /admin/fault-domains/{id}/disable` | **人工隔离整个故障域**：置 `disabled_until`（入参 `duration_sec`，**省略 = NULL = 无限期，须人工恢复**）+ `disabled_reason`。用于已知供应商维护窗口等自动判据覆盖不到的场景（[05 §5bis.1bis](./05-scheduling-and-operations.md)） | M3 |
 | `POST /admin/fault-domains/{id}/enable` | 解除封禁（置 `disabled_until=NULL`）。⚠️ 若集中失败仍在持续，下一轮健康聚合会**再次自动封禁**——这是预期行为，不是解封失败 | M3 |
 | `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |

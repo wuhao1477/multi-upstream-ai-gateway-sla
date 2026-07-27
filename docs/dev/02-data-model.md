@@ -115,7 +115,9 @@ CREATE TABLE upstream_keys (
 CREATE TABLE models (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   canonical_name TEXT NOT NULL,   -- 真实上游模型名（区别于对外别名）
-  max_context   INTEGER,
+  -- ⚠️ 曾有一列 `max_context`，第 40 轮**删除**：它与下面的 `max_input_tokens` 语义重叠
+  --    （注释里 max_input_tokens 就写着「通常=上下文窗口」），却没有任何规则读它。
+  --    两个含义相近的上限列并存必然导致"预留用 A、能力判定用 B"的分裂。留一个。
   -- ── 费用预留上界所需（§2bis 预估算法）。**两列缺一，该模型的 binding 不得进候选** ──
   -- 曾把输出上限写成 channel_models.max_output_tokens —— 那一列**根本不存在**（第 9 轮 critical）。
   max_input_tokens  INTEGER,      -- 协议级最大可计费输入（通常=上下文窗口）；上游物理上不可能计费超过它
@@ -838,7 +840,17 @@ BEGIN;
 WITH att AS (
   UPDATE attempts a
      SET attempt_status = 'canceled_by_sla', cancel_reason = 'sla_takeover',
-         canceled_by_sla = true, cancel_propagated = :propagated, ended_at = now()
+         canceled_by_sla = true, cancel_propagated = :propagated, ended_at = now(),
+         -- 第 40 轮补：两列建好后全库零赋值，FR-080/FR-058 因此没有任何数据可依。
+         -- `continue_billing`：我们关连接时上游**已经在生成**（已提交首字）——
+         --   上游不会因为我们断开就立刻停止计费，故这笔钱**还会继续涨**，
+         --   而我们再也观测不到（[§取消时的费用口径](#取消时的费用口径) 的误差敞口就在这里）。
+         --   未提交首字就取消的跳不置位：还没开始产出，继续计费的风险可忽略。
+         continue_billing  = (a.attempt_status = 'committed'),
+         -- `is_duplicate_cost`：本跳的钱照付，但它的输出**没有交付给用户**（被接管取代）。
+         --   这正是 FR-058 要度量的"重复请求费用"——接管越多，这个占比越高。
+         --   sla_takeover 的每一跳按定义都满足，故恒 true。
+         is_duplicate_cost = true
    WHERE a.id = :attempt_id AND a.request_id = :rid
      AND a.request_created_at = :rcat
      AND a.attempt_status IN ('pending','committed')
@@ -1659,6 +1671,9 @@ CREATE TABLE attempts (
   upstream_call_count SMALLINT NOT NULL DEFAULT 1, -- 实际上游调用数（补算后）
   hidden_retry_detected BOOLEAN NOT NULL DEFAULT false,
   hidden_retry_kind  TEXT,                    -- 如 'codex_400_strip_thinking'（假设6补验）
+  -- ⚠️ 上面三列（upstream_call_count / hidden_retry_detected / hidden_retry_kind）**一期恒为默认值**：
+  --    §11 开放点 5 已裁定一期不做隐藏重试推断（我们自己不发，上游中转站内部若有也不可观测）。
+  --    保留建表只为二期接入会隐藏重试的通道时零改表。**不是漏实现**（第 40 轮明示）。
 
   -- ── 上游关联键（自研直连，旁路观察提取）──
   upstream_response_id    TEXT,               -- 上游响应 id（如 resp_.../chatcmpl-...），用于排障关联
@@ -2820,7 +2835,7 @@ CREATE INDEX idx_outbox_undelivered ON ledger_outbox(attempt_id, request_created
 | 2 | `session_id` 来源（不存正文如何标识会话） | ✅ **已收口**（见 §4.5）：**多源提取、不要求调用方配合**——主流客户端本就自带（Claude Code `X-Claude-Code-Session-Id`、Codex `session_id`/`conversation_id`、Responses `conversation`/`prompt_cache_key`）；按优先级捞，全未命中则按单轮处理、不派生不编造 |
 | 3 | ~~AxonHub 换 PG 共库 vs 独立 SQLite~~ | ⛔ **已废止（2026-07-25，[11 转向决策](./11-decision-full-selfbuilt.md)）**：数据面已无 AxonHub，**不存在共库分 schema，也不存在对账 JOIN**。当前结论：**单库单 schema，账本为唯一真相源**。原实测记录见 [07 §1](./07-axonhub-runtime-probes.md)，仅作历史，**不得作为实施指令** |
 | 4 | `decision_snapshot` JSONB 体积（每请求一份候选/排除快照） | ✅ **已定**：元数据裁剪 + 仅存 binding_id 与原因码，不存完整对象；必要时挪冷分区压缩 |
-| 5 | 隐藏重试补算的触发点 | ⛔ **已废止（2026-07-25）**：原方案依赖外部网关审计比对，转向后**无网关、无对账阶段**。当前结论：**一期不做隐藏重试推断**——我们自己不发隐藏重试（FR-119），`attempt_usage.upstream_seq` 恒为 1；上游中转站内部若有隐藏重试，我们**不可观测也不补算**，其成本已体现在上游回传的 usage 里 |
+| 5 | 隐藏重试补算的触发点 | ⛔ **已废止（2026-07-25）**：原方案依赖外部网关审计比对，转向后**无网关、无对账阶段**。当前结论：**一期不做隐藏重试推断**——我们自己不发隐藏重试（FR-119），`attempt_usage.upstream_seq` 恒为 1；上游中转站内部若有隐藏重试，我们**不可观测也不补算**，其成本已体现在上游回传的 usage 里。**因此 `attempts.upstream_call_count` 恒为 1、`hidden_retry_detected` 恒 false、`hidden_retry_kind` 恒 NULL**——三列保留建表只为二期零改表，**一期无写入方是设计如此，不是漏实现**（第 40 轮明示） |
 | 6 | 一期入站协议范围（FR-111 现为 CC + Responses） | ✅ **已定（2026-07-23）：维持 CC + Responses，不扩** —— **主力客户端为 Codex CLI，说的正是 OpenAI Responses，已在一期范围内**。Claude Code（Anthropic Messages）与 Gemini CLI（Gemini API）一期不直连；提取规则保留在 §4.5 仅为将来扩协议时零改动 |
 
 ---

@@ -370,12 +370,32 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- |
 | `channels`/`upstream_accounts`/`upstream_keys`/`models` | Detect + Fetch* | 资源身份登记，不以渠道名代身份；`site_family`、`external_user_id` | FR-002 |
 | `price_versions` | `FetchPricing` | 币种、计费单位、来源、查询/生效时间；**不可覆盖版本** | FR-012/013 |
+| `price_change_log` | `FetchPricing` **同一事务** | 见下方「价格变更留痕」 | FR-014/017 |
 | `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`balance_state`、`conservative_floor`、`quota_status` | FR-020/024/026 |
 | `upstream_keys` + `collector_snapshots` | `FetchKeys` | key 级 `remain_quota/expired_time/model_limits` + 限流快照（payload） | FR-021/028/031 |
 | `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 | ⏭ **二期** |
 | `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 | ⏭ **二期** |
 | `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
 | `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
+
+**价格变更留痕**（第 40 轮补：`price_change_log` 的 `from_version_id`/`to_version_id`/`direction`
+建好后**零引用**——没有任何写入方，FR-014「降价需再次确认」与 FR-017「价格变化记录和影响范围」
+双双落空；`GET /admin/prices/changes` 也就无数据可查）：
+
+`FetchPricing` 每次插入新 `price_versions` 行时，**同一事务**内比对上一版并留痕：
+
+| 情形 | `direction` | `confirmed` | 后续动作 |
+| --- | --- | --- | --- |
+| 新价 > 旧价 | `increase` | `true` | 直接生效（涨价照单全收，不需确认） |
+| 新价 < 旧价 | `decrease` | **`false`** | ⚠️ **不直接采信**（FR-014/AC-03）：降价可能是采集页面改版误读。生效但标记待验证，由一次真实扣费与预估一致后置 `true`（[05 §4.4](./05-scheduling-and-operations.md) 计费对账），或人工 `POST /admin/prices/changes/{id}/confirm` |
+| 价格未变但 `queried_at` 刷新 | `confirmed` | `true` | 仅刷新新鲜度，不改判 |
+| 采集失败/超期未采到 | `stale` | `false` | 不插 `price_versions`，只记一条 `stale` 留痕 + P3 告警（`category='data_stale'`） |
+
+- **比对口径**：`(input_price, output_price, cache_price, billing_unit)` 四项任一不同即算变更；
+  `billing_unit` 变了要**先归一再比大小**，否则 `per_1k_token` 换成 `per_1m_token` 会被误判成暴涨 1000 倍。
+- **首次采到该 `(channel, model)`**：`from_version_id` 为 NULL、`direction='confirmed'`，不算变更。
+- **`decrease` 未确认期间照常使用新价**：保守方向是"按更贵的算"，而低价会让 selector 更倾向选它——
+  故未确认的降价**不参与"低价优选"排序**（与 §1.1 序 6 价格陈旧的处置一致），只作保底。
 
 > **ASXS 归集键差异**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。ASXS 无 group 概念，其 `group_id` 列填**套餐标识**（ASXS 按 `(user, plan)` 聚合，见 §3.4）；采集器负责把家族差异映射到统一列。
 
@@ -386,6 +406,19 @@ type SubscriptionQuota struct {
 ## 5. 凭证生命周期状态机（核心风险区）
 
 三家族**都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分三套状态机，均以 `collector_credential` 持久化为唯一真相。
+
+**两列的持久化落点**（第 40 轮补：`collector_credentials.user_id_header_name` 与 `refresh_lock_key`
+建好后**零引用** —— §3.1 的 fan-out 结果只写进内存 `Session.UserIDHeader`，进程一重启就得重新试探
+七个头名；"按账号加互斥锁"也只是散文，锁键从哪来没说）：
+
+| 列 | 谁写 | 谁读 |
+| --- | --- | --- |
+| `user_id_header_name` | `Authenticate` 完成 fan-out 后**立即持久化**命中的头名（§3.1 七选一） | 后续每次采集直接取用，**不再 fan-out**；命中失效（401）时清空该列并重试试探 |
+| `refresh_lock_key` | 凭证登记时按账号生成，**同一上游账号的多条凭证共用同一值**（如 `refresh:<site_family>:<external_user_id>`） | Sub2API 刷新前 `pg_advisory_xact_lock(hashtext(refresh_lock_key))` 串行化——并发刷新会互相作废（§5.2） |
+
+- **为什么必须落库而非只在内存**：fan-out 是**七次带凭证的试探请求**，重启就重来一遍，
+  既慢又平白给上游制造异常鉴权记录；而互斥锁若只在进程内，**多实例部署时完全失效**——
+  [06](./06-deployment-and-operations.md) 的 compose 本来就可能跑多个采集器副本。
 
 ### 5.1 NewAPI 系统访问令牌（长期，互斥作废）
 

@@ -353,7 +353,8 @@ m02 = open("docs/dev/02-data-model.md").read()
 ddl_sql = "\n".join(re.findall(r"```sql\n(.*?)```", m02, re.S))
 
 # 二期整表推迟（[PRD §2.1](../PRD.md)），其列未被引用属预期
-PHASE2_TABLES = {"subscription_plans", "user_subscriptions", "subscription_waste_forecast"}
+PHASE2_TABLES = {"subscription_plans", "user_subscriptions", "subscription_waste_forecast",
+                 "subscription_quota_windows"}
 # 列名与 SQL 关键字/通用词同形，逐一核对成本高于收益，单独豁免并在此写明理由
 NOISY = {"currency", "region", "enabled", "created_at", "updated_at", "id"}
 
