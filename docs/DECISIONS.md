@@ -2,10 +2,10 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 确认日期 | 2026-07-22 |
+| 确认日期 | 2026-07-22（16 项参数 + 5 条新需求）；**2026-07-26 追加 [ISSUE-004](./issues/ISSUE-004-dev-preflight-feedback.md) 开工前裁决 20 条**（见文末） |
 | 确认人 | 项目负责人（Amsterlam） |
-| 确认方式 | 对 OPEN-ISSUES 全部决策点逐项对话式确认 |
-| 结果用途 | 作为 PRD v1.2 升版和开发计划的输入 |
+| 确认方式 | 对 OPEN-ISSUES 全部决策点逐项对话式确认；ISSUE-004 由 PM 逐条填决定 |
+| 结果用途 | 作为 PRD v1.2 升版和开发计划的输入；ISSUE-004 裁决作为 **PRD v1.4 基线**与 M0 开工的输入 |
 
 ## 贯穿全部决策的一条总原则
 
@@ -63,3 +63,23 @@
 7. 明确一期不存请求正文/上下文/头/体；账本元数据保留 180 天。
 8. 明确一期 Key 明文存储；规模假设 100～1000 QPS。
 9. 补入第三部分 5 条需求的确认版本；16 项参数以本记录数值为默认值写入。
+
+---
+
+## ISSUE-004 开工前反馈裁决（2026-07-26，PM 确认）
+
+> 来源：[ISSUE-004](./issues/ISSUE-004-dev-preflight-feedback.md)（开发接手前通读全量文档后的 20 条反馈）。**全部采纳**；落地时对其中 6 处按审计结果做了修正，见该文档 §0bis。本节是决议的**权威摘要**，细节与修正理由以 ISSUE-004 为准。
+
+1. **单级 SLA ＝ 单一承诺等级**：金银铜保留为默认模板种子，`sla_targets` 只配一档；调度 / canary / 测活判断改读 `routing_policies.is_committed`、`canary_eligible`、`probe_allowed` 显式字段，**不读等级名**，二期加等级零改结构。
+   ⚠️ **互斥口径以落地版为准**：CHECK 约束是 `NOT (is_committed AND (canary_eligible OR probe_allowed))` —— 承诺别名不进**任何**实验通道；`canary_eligible` 与 `probe_allowed` **可以并存**（非承诺别名两条验证轨都能用，M0 种子即如此）。原决议只写 `NOT(canary_eligible AND is_committed)`，那样承诺别名仍可能被主动测活选中。
+2. **`/v1/models` 由网关合成**，不透传上游目录；非别名 404、越权 403、`x-models-etag` 我方按别名表版本自生成并支持 `If-None-Match → 304`；上游 `Models()` 降级为探测 / 管理用途。**字节透传硬约束的适用范围限定为 SSE 响应流保真**，不含控制面元数据（这是显式推翻 [03 §4](./dev/03-upstream-layer.md) 契约表的一条，已在该表标注废止）。
+   📌 **后经实测修正风险方向**（[`verify/probe_codex_wire.py`](../verify/probe_codex_wire.py)）：Codex **不从 `/v1/models` 取模型名**，304 也非必需；真正风险是它原样发送自己 config.toml 里的模型名 → **接入前必须把 Codex 的 `model` 改成我方别名，否则 404**。该项已写入 [06 §7 接入前置](./dev/06-deployment-and-operations.md)。
+3. **缓存目标拆两层**：对外一期不承诺（≥90% 推二期）；内部切换抑制目标默认 **0.6** 可配。
+   ⚠️ 单一来源统一为 `config_params['cache_switch_min_hit_rate']`——原决议说"02 §6quater 不动"做不到：该节原文从 `sla_targets` 按 `sla_level` 查，既与 `config_params` 冲突，其 `WHERE sla_level=` 也与"不读等级名"冲突。
+4. **FR-060 修订**：测活允许"贴近真实负载的预置模板"（多轮上下文、工具定义、典型长度，运维维护），禁 hello/ping；有业务流量时 canary 优先。依据：FR-112 禁存正文 → 无流量时段本无真实正文可复用。模板保真度低于真实请求的代价**已明示并签收**。
+5. **canary 小时上限口径＝per-binding**（FR-121 措辞改"每路由资源（binding）每小时"）；渠道级总闸推二期、默认不启用。
+6. **T1 Codex 实机实验＝M0 期间独立 spike**，timebox 2~3 天，**不进 M0 验收门禁**，产出回填 [13 §1](./dev/13-research-reassessment.md)；上游波动跑不通则记录阻塞、不拖 M0。
+7. **补齐 7 项设计缺口**：内置 `system-probe` 探测凭证（不可外呼、不可被吊销/轮换/删除误伤、消费单独归因）；账号 / binding / 故障域三处停用列；容量保留＝登记上限＋DB 原子计数、**未登记即不保留**（`/admin/bindings` 须显式提示"保留未生效"）；计费容差默认 5%（关键项、走二次确认）＋ `GET /admin/ledger/reconciliation`；Prometheus `/metrics`（仅内网、profile 可选、默认不启动）；`alert_events` 写入路径提前到 M3；一期 **user ≡ gateway_client** ＋ Caddyfile 不代理 `/admin/*` 与 `/metrics`。
+   ➕ **另补决议未覆盖的 4 项**：`system-probe` 的 `rpm_limit` 等三项属性（不设会让探测风暴无上限）；FR-063 五维预算一期实际只有 global / binding / client 三个独立维度；AC-18 须以"已登记容量"为前置否则无从验证；webhook 失败计数须进 `/metrics`，否则"仅记日志不重试"就是静默失败。
+   ⚠️ 计费容差公式补下限保护：`abs(cost_variance)/estimated_cost` 在 `estimated_cost=0` 时除零（免费渠道／估算失败／0 token），低于 $0.01 改用绝对差额判定。
+8. **PRD 升 v1.4 并冻结基线**，同步 00/02/03/05/06/09/13/14/15 与 6 处文档残留；**D1/D2/D3/D5 风险签收**（同步写性能待 M4 压测冻结阈值、唯一许可优化＝组提交；REAL 类外站波动按重试窗口处理；币种 1:1 后果确认；AC-09 口径按"接管成功→仅扣探索预算、接管失败→两边都计"对齐）；**D4 最小告警 webhook 拉入 M4**（P1 单条 POST，失败仅记日志不重试、不阻塞落库，失败计数进 `/metrics`）。

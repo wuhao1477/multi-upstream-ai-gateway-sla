@@ -54,12 +54,12 @@ Codex 期待 `function_call` item 的 `status` 为 **`in_progress`** 而非 `com
 | 头 | 作用 | 后果 |
 | --- | --- | --- |
 | `x-codex-*`（限流快照） | Codex 读取上游限流状态 | 丢失则 Codex 无法感知限流 |
-| `x-models-etag` | 模型目录刷新 | 丢失则模型列表不更新 |
+| `x-models-etag` | 模型目录刷新 | 丢失则模型列表不更新。⚠️ **2026-07-26 起该头不再透传上游值**：`/v1/models` 由网关合成（A2 裁决），etag 由**我方按别名表版本自生成**并支持 `If-None-Match → 304`。上游的 etag 只在探测/管理面留存，不出现在对外响应里（[03 §4](./03-upstream-layer.md)） |
 | **`x-codex-turn-state`** | **会话粘性路由令牌，须跨轮回放** | **丢失则会话亲和断裂** |
 | request id 类 | 排障关联 | 丢失则无法与上游对账 |
 
 → `x-codex-turn-state` 是 [02 §4.5](./02-data-model.md) **此前未记录的会话亲和信号**，须补入提取链认知。
-→ 另需 **`GET /v1/models` 全量透传**（Codex 靠它刷新模型目录）。
+→ ~~另需 `GET /v1/models` 全量透传（Codex 靠它刷新模型目录）。~~ ⛔ **已于 2026-07-26 推翻**（A2 裁决 + `verify/probe_codex_wire.py` 实测）：Codex **不从该列表取模型名**，它发的是自己 config.toml 里配的名字。故 `/v1/models` 改为**网关合成别名列表**（透传真名会让 FR-117 别名策略整体失效）；真正的接入风险是"Codex 配的模型名必须换成我方别名，否则 404"，已写入 [06 §7 接入前置](./06-deployment-and-operations.md)。
 
 ### 1.4 其他客户端（结论不变）
 
@@ -155,7 +155,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 | 4 | **连接池楔死**：上游连接卡住会饿死后续所有请求 | codexcomp 实践 | 🟠 中高 |
 | 5 | **流式空闲超时**：上游读取停滞会永久占住连接 | codexcomp（>120s 阈值） | 🟠 中高 |
 | 6 | 下游中途断开的清理与上游取消传播 | codexcomp + 假设6 | 🟠 中 |
-| 7 | `GET /v1/models` 未透传 → Codex 模型目录不刷新 | codexcomp 实践 | 🟡 中低 |
+| 7 | ~~`GET /v1/models` 未透传 → Codex 模型目录不刷新~~ → **实际风险已改向**：Codex 发的是自己 config.toml 里的模型名，与该列表无关；真风险是"接入时未把它改成我方别名 → 404"（`verify/probe_codex_wire.py` 实测，见 §1.3） | codexcomp 实践 → 本项目实测推翻 | 🟡 中低（处置：[06 §7 接入前置](./06-deployment-and-operations.md)） |
 
 ---
 
@@ -197,7 +197,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 | 上游响应头透传清单（`x-codex-*`/`x-models-etag`/`x-codex-turn-state`） | 03 |
 | `x-codex-turn-state` 作为会话亲和信号 | [02 §4.5](./02-data-model.md) 补入 |
 | 连接池楔死、流式空闲超时、下游断开清理 | 03 + [12](./12-debuggability.md) 可观测项 |
-| `GET /v1/models` 透传 | 03 |
+| `GET /v1/models` **由网关合成**（原"透传"已于 2026-07-26 推翻，A2） | 03 §4、[09 §5](./09-admin-api.md) |
 | 上游按模型的协议能力探测（部分模型仅 Responses） | 03 + [05](./05-scheduling-and-operations.md) 候选过滤 |
 | AxonHub `hasResponseContent` 作内容感知参考 | 03 实现注记 |
 

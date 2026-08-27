@@ -4,21 +4,23 @@
 
 本仓库为**需求、选型与开发设计阶段的文档库**（暂不含代码实现）。开发设计见 [docs/dev/](docs/dev/00-overview-and-milestones.md)。
 
-## 当前阶段（截至 2026-07-25）
+## 当前阶段（截至 2026-07-26）
 
 | 事项 | 状态 |
 | --- | --- |
-| 产品需求 PRD | ✅ v1.3，16 项业务参数确认 + 运行时验证反馈已折入（ISSUE-003） |
+| 产品需求 PRD | ✅ **v1.4 基线已冻结**（2026-07-26）：16 项业务参数确认 + 运行时验证反馈（ISSUE-003）+ **开工前裁决 20 条（ISSUE-004）**全部折入 |
+| **开工前反馈（ISSUE-004）** | ✅ **已裁定并落地**：20 条全部采纳，其中 6 处经审计修正后落地（见 [ISSUE-004 §0bis](docs/issues/ISSUE-004-dev-preflight-feedback.md)） |
 | 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
 | AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
+| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 12 类检查 + DDL 在 postgres:16 真跑（100 条 DDL） |
 
 ## 文档地图
 
 ### 核心交付
-- [产品需求 PRD v1.3](docs/PRD.md) —— 需求主文档（FR-001～119、AC-01～32、默认策略、参数确认）
-- [决策确认记录 DECISIONS](docs/DECISIONS.md) —— 16 项参数 + 5 条新需求的确认结果
+- [产品需求 PRD v1.4](docs/PRD.md) —— 需求主文档（FR-001～121、AC-01～36、默认策略、参数确认）
+- [决策确认记录 DECISIONS](docs/DECISIONS.md) —— 16 项参数 + 5 条新需求 + **ISSUE-004 开工前裁决 20 条**
 - [未决问题清单 OPEN-ISSUES](docs/OPEN-ISSUES.md) —— 五部分问题及处理状态
 
 ### 技术选型
@@ -35,7 +37,8 @@
 - [ISSUE-002：四站实测探测结果](docs/issues/ISSUE-002-probe-results.md)
 - [ISSUE-002：多平台采集适配器设计](docs/issues/ISSUE-002-collector-adapter-design.md)
 - [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
-- [ISSUE-003：运行时/采集反馈的需求候选（待评审并入 PRD v1.3）](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md)
+- [ISSUE-003：运行时/采集反馈的需求候选](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md) —— ✅ 已并入 PRD v1.3
+- [ISSUE-004：开发开工前需求反馈](docs/issues/ISSUE-004-dev-preflight-feedback.md) —— ✅ **已裁定并落地（PRD v1.4）**：20 条决议 + 6 处审计修正
 
 ### 开发设计（2026-07-23 启动，07-25 转向自研）
 - [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
@@ -55,20 +58,24 @@
 - [14 验收矩阵](docs/dev/14-acceptance-matrix.md) —— 32 条 AC → 里程碑 → 可执行判定方法（PM 与开发的验收契约）
 - [15 一期范围与开工前确认清单](docs/dev/15-scope-and-preflight.md) —— 一期/二期范围（**订阅制移入二期**）+ 开工前必须确认的隐患清单
 
-### 运行时验证
+### 运行时验证与交付门禁
 - [verify/ — mock 上游场景集](verify/README.md)（AxonHub 六假设部分转历史；mock 场景转为自研透传层测试夹具）
+- `verify/gate.sh` —— **交付门禁**（CI 与本地同一份）：`check_docs.py` 12 类文档一致性检查 + `ddl-check.sh` 在 postgres:16 上真跑全部 DDL
+- `verify/probe_codex_wire.py` —— Codex 线上行为实测：**证实它发的模型名来自自身 config.toml、与 `/v1/models` 无关**（据此确定 A2 的合成方案安全，接入前须改 Codex 的 `model` 为我方别名）
 
 ## 推荐架构（一句话）
 
-**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（承担价格/余额/会话/缓存/测活/订阅额度决策）→ 自研上游透传层 → 真实上游。** 一期**无外部网关**（[11 转向](docs/dev/11-decision-full-selfbuilt.md)）；Responses 走**字节级透传**保真，订阅台账、双倍率、TTFT 判定、Attempt 账本全由自研核心负责。
+**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（承担价格/余额/会话/缓存/测活决策）→ 自研上游透传层 → 真实上游。** 一期**无外部网关**（[11 转向](docs/dev/11-decision-full-selfbuilt.md)）；Responses 走**字节级透传**保真，`/v1/models` 由网关**合成**别名列表（不透传上游目录），TTFT 判定与 Attempt 账本全由自研核心负责（⏭ 订阅台账与双倍率移入二期）。
 
 ## 关键约束
 
 - **使用场景**：个人 / 内部使用，不对外提供服务（决定许可证、合规与鉴权边界）。
 - **规模**：峰值 100～1000 QPS。
-- **对外协议**：OpenAI Chat Completions 与 Responses。
+- **对外协议**：OpenAI Chat Completions 与 Responses；对外模型名一律是**别名**（承载策略），非别名请求 404、越权 403。
 - **一期数据**：不存请求正文/上下文/头/体；账本元数据保留 ≥180 天。
+- **单一承诺等级**：一期只承诺一档 SLA；调度与实验流量判断读策略行的 `is_committed`/`canary_eligible`/`probe_allowed` **显式字段，不读等级名**（二期加等级零改结构）。
 - **策略配置化**：所有调度与经营策略以建议值为默认、设置页可改，关键项修改需二次确认。
+- **管理面边界**：`/admin/*` 与 `/metrics` 不经 Caddy 代理，仅容器网络/本机可达，且仍需管理令牌（两层缺一不可）。
 
 ## 编号约定
 

@@ -457,11 +457,13 @@ CREATE TABLE attempts (
                     -- canary：一期受控验证——**本来就要发的真实业务请求**被分给待验证 binding（不额外产生费用）
                     -- probe：主动测活（**一期第二轨**）——为探测而额外发起的请求（[05 §2.1~2.3](./05-scheduling-and-operations.md)）
 
-  -- ── 状态：网关原始 vs 归并（AC-30 核心）──
-  gateway_status    TEXT CHECK (gateway_status IN ('pending','completed','failed','canceled')), -- beta5 execution.status 原样
-  error_message     TEXT,                     -- beta5 execution.errorMessage 原文（元数据，非正文）
-  -- 归并后的取消/失败口径：beta5 canceled 仅指客户端取消，上游断开/内部超时归 failed
-  -- → 自研层按 errorMessage 归并（AC-30、假设2 语义澄清）
+  -- ── 状态：上游/中间层原始 vs 我方归并（AC-30 核心）──
+  -- ⚠️ 语义已在 2026-07-26（C6）从 AxonHub/beta5 时代改为自研口径：这两列**只承载"上游若回传了什么"**，
+  --    一期上游是中转站，通常只有 HTTP 状态与错误体，故 gateway_status 多为 NULL。**永不作为判定依据**。
+  gateway_status    TEXT CHECK (gateway_status IN ('pending','completed','failed','canceled')), -- 上游/中间层若回传其自身状态枚举 → 仅存证
+  error_message     TEXT,                     -- 上游错误原文（元数据，非正文）；归并的输入之一
+  -- 归并后的取消/失败口径：外部实现常把 canceled 只用于客户端取消，上游断开/内部超时归 failed
+  -- → 我方按 error_message + 观测事实自行归并（AC-30、ISSUE-001 假设2 语义澄清）
   cancel_reason     TEXT CHECK (cancel_reason IN
                       ('none','client_disconnect','sla_takeover','upstream_disconnect','internal_timeout','upstream_error')),
   attempt_status    TEXT NOT NULL DEFAULT 'pending'
@@ -518,7 +520,8 @@ CREATE TABLE attempts (
   -- ── 逐尝试 metrics（自算，AC-31）──
   content_aware_ttft_ms INTEGER,              -- 自算内容感知首字（排除 role-only/空SSE/心跳，AC-31/假设3/6）
                                               -- has_ttft_output=false 时恒为 NULL
-  gateway_reported_ttft_ms INTEGER,           -- beta5 metricsFirstTokenLatencyMs：仅存证、永不采信（AC-31）
+  gateway_reported_ttft_ms INTEGER,           -- 上游/中间层若回传首字类字段 → **仅存证、永不采信**（AC-31）
+                                              -- 命名保留"gateway_"前缀只为兼容既有引用；语义是"非我方自算的那个值"
   full_latency_ms   INTEGER,                  -- 总延迟（请求进入→完整结束）
   upstream_latency_ms INTEGER,                -- 上游耗时（发往上游→完整结束）
   -- 决策/网关自身开销 = full_latency_ms − upstream_latency_ms，用于 FR-110「P99≤50ms」自监控（测法见 06 §6）
@@ -571,16 +574,16 @@ CREATE TABLE attempt_usage (
   attempt_id        UUID NOT NULL,
   request_created_at TIMESTAMPTZ NOT NULL,    -- 冗余分区键
   upstream_seq      SMALLINT NOT NULL DEFAULT 1, -- 一期恒为 1；>1 保留给二期（FR-119）
-  prompt_tokens     INTEGER,                  -- beta5 usageLogs.promptTokens
-  completion_tokens INTEGER,                  -- completionTokens
-  total_tokens      INTEGER,                  -- totalTokens
-  prompt_cached_tokens INTEGER,               -- promptCachedTokens（缓存命中部分，FR-054）
+  prompt_tokens     INTEGER,                  -- 上游终帧 usage.prompt_tokens（旁路观察提取，[03 §7](./03-upstream-layer.md)）
+  completion_tokens INTEGER,                  -- usage.completion_tokens
+  total_tokens      INTEGER,                  -- usage.total_tokens
+  prompt_cached_tokens INTEGER,               -- usage.prompt_tokens_details.cached_tokens（缓存命中部分，FR-054）
   -- FR-056 预测需要**分母**：命中率 = prompt_cached_tokens / cacheable_prompt_tokens。
   -- 只有 prompt_tokens 不够——系统提示、工具定义等固定前缀才可缓存，用户新增的那一轮不可缓存，
   -- 拿 prompt_tokens 当分母会系统性低估命中率（开发视角审查第 27 轮 [P1]）。
   cacheable_prompt_tokens INTEGER,            -- 本次请求中**理论可缓存**的输入 token 数
-  total_cost        nonneg_usd,               -- beta5 usageLogs.totalCost
-  cost_items        JSONB,                    -- beta5 usageLogs.costItems（明细，元数据）
+  total_cost        nonneg_usd,               -- 该跳实际费用：上游若回传费用则用它，否则按价格版本自算（见 cost_source）
+  cost_items        JSONB,                    -- 费用明细（元数据；输入/输出/缓存分项，便于排障与对账）
   cost_source       TEXT NOT NULL DEFAULT 'upstream' CHECK (cost_source IN ('upstream','estimated')),
   -- 预估 vs 实际扣费差异（FR-016/019）：超容差标计费异常
   estimated_cost    nonneg_usd,
@@ -932,9 +935,10 @@ CREATE TABLE balance_signals (
   -- 信号自适应识别（FR-027、参数5）：组合错误码/文案正则/真实失败信号/余量归零
   signal_kind     TEXT CHECK (signal_kind IN ('error_code','error_text_regex','real_request_fail','quota_zeroed')),
   signal_evidence TEXT,                         -- 触发信号原文关键词（元数据，非正文）
-  -- 配额状态（FR-118、假设5）：未知默认保守排除（自研层补，AxonHub 默认保留）
+  -- 配额状态（FR-118、ISSUE-001 假设5）：**未知默认保守排除**，由我方 selector 执行
   quota_status    TEXT CHECK (quota_status IN ('available','warning','exhausted','unknown')),
-  -- ↑ 对齐 beta5 Channel.providerQuotaStatus；unknown → selector 默认排除（FR-118）
+  -- ↑ 由采集器按站型映射（NewAPI/Sub2API/ASXS 各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
+  --   ⚠️ 该保守默认是我方硬要求：任何上游或第三方组件的宽松默认（"未知即保留"）不得覆盖它。
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
