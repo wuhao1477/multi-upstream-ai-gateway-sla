@@ -14,7 +14,7 @@
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
 | AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
-| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 12 类检查 + DDL 在 postgres:16 真跑（100 条 DDL） |
+| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（100 条 DDL）；其中五类做过注入验证 |
 
 ## 文档地图
 

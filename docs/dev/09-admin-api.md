@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 定位 | 补齐设计审查发现的空缺：[02 `config_params`](./02-data-model.md) 有表有 `confirmed_twice` 列，但**无操作面**。本篇定义读写这些配置的**管理 API**，以及 FR-115 要求的"设置页明示含义/用法/影响 + 关键项二次确认" |
 | 输入 | [FR-115/116](../PRD.md)、[DECISIONS 总原则](../DECISIONS.md)（策略参数"建议默认 + 设置页可改，关键项二次确认"）、[02 数据模型](./02-data-model.md)、[05 调度与经营策略](./05-scheduling-and-operations.md)（策略语义来源） |
@@ -174,6 +174,9 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `balance_safety_reserve_ratio` | 0.02 | | 余额安全储备比例（[05 §5bis.2](./05-scheduling-and-operations.md) 的 safety_reserve） |
 | `balance_text_patterns` | `["余额","额度","欠费","insufficient","quota"]` | | 余额不足文案正则关键词表（[05 §5.3](./05-scheduling-and-operations.md)）；各中转站文案不同，按历史 `signal_evidence` 调 |
 | `balance_safety_reserve_min_usd` | 1.0 | | 安全储备下限，实际取 max(余额×比例, 本值) |
+| `balance_hours_warn` | 24 | | **可持续时间三档（FR-030）**，[05 §5.3](./05-scheduling-and-operations.md)：低于本值告警 P2 |
+| `balance_hours_stop_probe` | 6 | | 低于本值：停主动测活与高成本请求（该账号 binding 退出 probe 候选） |
+| `balance_hours_critical` | 1 | | 低于本值：置 `balance_state='critical'` → 由 §1.1bis 判据 1 排除出候选 |
 | `retention_months` | 7 | ✅ | 账本分区保留窗口（≥180 天，FR-112） |
 | **健康与冷却（参数 11）** ||||
 | `health_min_samples_1h` | 20 | | 样本门槛 |

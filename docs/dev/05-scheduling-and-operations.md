@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 定位 | 把 `selector`（候选选择与排序）与 `steward`（测活/冷却/订阅倾斜/告警/错误预算）落成可实现规则。数值全部来自 [DECISIONS](../DECISIONS.md) 参数确认，**作默认值 + 可配置**（存 [02 §2 `config_params`](./02-data-model.md)，关键项二次确认，FR-115） |
 | 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)（16 参数）、[02 数据模型](./02-data-model.md)、[03 上游对接层](./03-upstream-layer.md)、[01 架构](./01-architecture.md)（selector/steward 模块） |
@@ -139,16 +139,18 @@
   这正是 FR-006 后半句禁止的"未经授权替换模型或降低能力"，也是 [AC-15](./14-acceptance-matrix.md)「未旁路未降级模型」的断言对象。
   能力不匹配时**宁可失败也不悄悄换**：用户拿到一个没调用工具的回答，比拿到报错更难发现出了问题。
 
-### 1.1bis 余额/配额过滤的四条判据（FR-026 落地）
+### 1.1bis 余额/配额过滤的四条判据（**FR-025/FR-026** 落地）
 
 > ⚠️ **此前只写了"排除 exhausted/critical + 配额 unknown"**，而 [FR-026](../PRD.md) 还要求：*"使用最近可信余额扣除已知消耗形成保守下限；**无法形成安全下限时停止新付费请求**"*。`balance_signals.conservative_floor` 这一列早就建好了，**但 selector 从头到尾没有用过它**——FR-026 的后半句在整套设计里没有任何决策规则承载（本轮路径走查发现）。
 
-| # | 判据 | 处置 |
-| --- | --- | --- |
-| 1 | `balance_state ∈ {exhausted, critical}` | 排除 |
-| 2 | 配额 `unknown` | 排除（FR-118，保守默认） |
-| 3 | **`conservative_floor` 可形成且 > 0** | 通过；**用 floor 而非 `last_confirmed_balance` 参与后续判定**（标称余额可能早已被消耗掉） |
-| 4 | **`conservative_floor` 无法形成，或 ≤ 0** | **视同 `exhausted` 排除，停止向该资源发新付费请求**（FR-026 后半句） |
+| # | 判据 | 处置 | FR |
+| --- | --- | --- | --- |
+| 1 | `balance_state ∈ {exhausted, critical}` | 排除 | **FR-025**（账号余额/Key 额度/模型额度/周期限额任一不足即不得承接新请求） |
+| 2 | 配额 `unknown` | 排除（保守默认） | FR-118 |
+| 3 | **`conservative_floor` 可形成且 > 0** | 通过；**用 floor 而非 `last_confirmed_balance` 参与后续判定**（标称余额可能早已被消耗掉） | FR-026 |
+| 4 | **`conservative_floor` 无法形成，或 ≤ 0** | **视同 `exhausted` 排除，停止向该资源发新付费请求** | FR-026 后半句 |
+
+> **判据 1 即 FR-025 的唯一执行点**（第 43 轮补编号）：PRD 列举的四种不足（账号余额 / Key 额度 / 模型额度 / 周期限额）在数据层**统一收敛为** `balance_signals.balance_state`——采集器按站型把四类信号都映射到这一列（[04 §4](./04-collector-adapter.md)），故 selector 只需判一处。`critical` 也排除是**比 FR-025 更严**的处置，依据参数 5 的三档（<1h 临界即减流）。
 
 **"无法形成"的判定**（`balance_signals`，[02 §7](./02-data-model.md)）：`last_confirmed_balance IS NULL`，**或** `known_consumption_since IS NULL`（消耗不可知则下限无从算起），**或**该快照 `collector_snapshots_v.is_stale = true` 且期间发生过计费（陈旧确认点 + 未知消耗 = 下限不可信）。
 
@@ -538,6 +540,18 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 - **记录（FR-067）**：每次测活记 测活原因、决策快照、预算变化、首字、完整结果、缓存、费用、接管结果 → 落 [02](./02-data-model.md) `requests.decision_snapshot` + `requests.probe_kind='probe'` + `attempts.role='probe'`。
 - **达上限暂停（FR-068）**：探索预算达任一层上限即暂停新测活，**不影响正常稳定流量**（测活闸与主流量闸独立）。
 
+**再次测活的准入（FR-066，第 43 轮补编号）**：FR-066 要求"再次测活必须**同时**满足冷却结束、价格和余额有效、探索预算恢复、会话预算充足及接管容量可用"。它**不是新增一道闸**，而是把已有三处组合起来的**合取**，实现时按这张对照表逐项确认，缺任一项即不得再次探测：
+
+| FR-066 的五个条件 | 已有载体 | 位置 |
+| --- | --- | --- |
+| 冷却结束 | `health_state='canary'` 是候选前提；`cooling` 态**不在候选内**，冷却期满由状态机推回 `canary` 才重新可选 | §2.1bis 候选条件第 1 行 + §2.0 状态跃迁 |
+| 价格与余额有效 | selector 过滤序 5/6（`conservative_floor` 可形成且 >0、价格未超 48h） | §1.1bis 判据 3 + 序 6 |
+| 探索预算恢复 | 五维 `probe_budget_windows` 的条件 UPDATE——**日窗口自然滚动即为"恢复"**，不需要额外的解除动作 | §2.1bis 预算 SQL |
+| 会话预算充足 | `scope_kind='session'` 维；模板探测传哨兵 `'*'` 恒放行（探测不属于任何用户会话） | §2.1bis 的 `ss` CTE |
+| 接管容量可用 | "存在健康接管候选" + `capacity_ceiling_probe`（70% 天花板，不占接管保留） | §2.1bis 候选条件第 4 行 + [02 §6bis-2](./02-data-model.md) |
+
+> ⚠️ **"冷却结束"不可被理解成"给 cooling 态 binding 发探测"**：连续失败达阈值的 binding 会退回 `cooling` 并退避翻倍（§2.0），此期间**它不进 probe 候选**。等冷却到期回到 `canary`，才由本节的合取重新评估——这与"冷却期禁测活"（FR-065）是同一件事的两个方向，不得实现成两套判据。
+
 ## 3. steward：冷却、样本门槛与全资源不可用
 
 ### 3.1 样本门槛与观察期（参数11，可配置）
@@ -588,9 +602,21 @@ SELECT (SELECT count(*) FROM g)   AS g_ok,  (SELECT count(*) FROM t) AS t_ok,
 
 ---
 
-### 4.3 容量保留的执行载体（一期降精度不降语义）
+### 4.3 容量保留的执行载体（**FR-028/FR-029/FR-032** 落地，一期降精度不降语义）
 
 > 此前 §4.2 只有三档保留比例，**没有任何执行机制** —— 容量基数从哪来、谁扣减、并发怎么算，全都没定义。
+
+**三条 FR 在本节的分工**（第 43 轮补编号）：
+
+| FR | 要求 | 本节落点 |
+| --- | --- | --- |
+| **FR-028** | 记录 RPM/TPM/并发/上下文等限制，**并考虑进行中请求占用** | 基数＝`bindings.rpm_limit`/`concurrency_limit`；"进行中占用"＝`capacity_claims` 的 active 计数（不是估算） |
+| **FR-029** | 为稳定接管资源保留容量，**测活不得占满全部快速资源** | §4.2 接管保留档 + `capacity_ceiling_takeover`/`capacity_ceiling_probe` 两个天花板 |
+| **FR-032** | 按租户与等级设容量上限与保留量，**低等级流量和测活不得占用高等级保留** | 四类流量各自的 `capacity_ceiling_*`；一期"等级"＝`is_committed`（**读策略字段不读等级名**），"租户" ≡ gateway_client（B13） |
+
+> ⚠️ **FR-032 的"按租户"一期是降精度的**：个人/内部场景下 `tenant ≡ gateway_client`（B13 裁决），而一期**只有一个真实调用方**，故租户维度不设独立闸——四类 `capacity_ceiling_*` 已覆盖"低等级与测活不得占用高等级保留"这一实质要求。
+>
+> **二期加真多租户时需要补一列**：`capacity_claims` 现在**没有** `gateway_client_id`，租户归属只能经 `request_id → requests.gateway_client_id` 关联得到——而 dispatch 在 P99 路径上，多一次 JOIN 不可接受。故二期须把该列**反规范化进 `capacity_claims`**，并在天花板判定里加一维 `per-tenant`。**一期不加**（无消费者的列即悬空列，会被门禁的"悬空列"检查拦下）。
 
 **容量基数来源**：`bindings.rpm_limit` / `concurrency_limit`（[02](./02-data-model.md)），由 `/admin/bindings` 人工登记，或采集器的 `RateLimit()` 自动回填（`capacity_source` 记来源）。
 
@@ -778,7 +804,24 @@ COMMIT;
 
 - ⚠️ **`signal_evidence` 只存关键词与字段名，不存上游返回的完整报文**——错误体可能回显请求片段，
   存整段会把正文带进库，违反 FR-112。
-- **正则可配置**（`balance_text_patterns`），因为各家中转站文案不同；调正则的依据就是历史 `signal_evidence`。保守储备与三档处置（<24h 告警 / <6h 停测活与高成本 / <1h 临界减普通流量，参数5）。
+- **正则可配置**（`balance_text_patterns`），因为各家中转站文案不同；调正则的依据就是历史 `signal_evidence`。
+
+**余额可持续时间与三档处置（FR-030 落地，第 43 轮补编号）**：
+
+```text
+可持续小时数 = conservative_floor ÷ 近 1h 实际消耗速度（USD/h）
+  ├─ 速度取 attempt_usage 近 1h 汇总 ÷ 1；速度为 0（无消耗）→ 视为无限，跳过本节
+  └─ 用 conservative_floor 而非标称余额（与 §1.1bis 判据 3 同源，口径唯一）
+```
+
+| 可持续 | 处置 | 落点 |
+| --- | --- | --- |
+| < 24h | 告警 **P2**（`category='balance'`，留出至少一个工作日充值反应时间） | [02 `alert_events`](./02-data-model.md) |
+| < 6h | **停主动测活与高成本请求**：该账号下全部 binding 退出 probe 候选（§2.1bis 候选条件追加此判据），且退出低价优选之外的"高成本"排序位 | `probe_budget_windows` 不扣、直接不进候选 |
+| < 1h | 置 `balance_state='critical'` → 由 §1.1bis 判据 1 **排除出候选**（减普通流量的最终形态） | `balance_signals.balance_state` |
+
+- **FR-030 是 P1**：三档阈值走 `config_params`（`balance_hours_warn` / `balance_hours_stop_probe` / `balance_hours_critical`，默认 24 / 6 / 1）。
+- **与 FR-025 的分工**：FR-030 是**预测性**降级（还有钱但撑不久），FR-025 是**确定性**排除（已经不足）；前者通过把状态推到 `critical` 汇入后者，**不新增过滤层**。
 
 ---
 

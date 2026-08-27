@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
 | 日期 | 2026-07-23 |
 | 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
 | 输入 | [PRD v1.4](../PRD.md)（FR-001~121、**AC-01~36**、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求 + **ISSUE-004 开工前裁决 20 条**）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设；其 AxonHub schema 适配表已随 [11 转向](./11-decision-full-selfbuilt.md) 转为历史）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |

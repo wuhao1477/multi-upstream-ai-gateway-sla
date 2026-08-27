@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 28 轮对抗性审查 + 2 轮开发视角走查 + PM 开工前裁决；变更须走版本记录 |
+| 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
 | 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 三家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
 | 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md)、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)、[00 总览](./00-overview-and-milestones.md)、[01 架构](./01-architecture.md) |
