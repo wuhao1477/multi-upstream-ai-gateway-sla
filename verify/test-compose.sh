@@ -68,6 +68,25 @@ if echo "$LOGS" | grep -q "does not exist"; then
 fi
 echo "   ✅ 无建表竞态"
 
+# 种子竞态：两个实例同时灌 71 键，WHERE NOT EXISTS 挡不住并发
+# （检查与插入之间有窗口，两侧都判"不存在"→ 同一 version=1 撞唯一约束）。
+# 这是本脚本抓到的第二个 bug，修法是 ON CONFLICT DO NOTHING。
+if echo "$LOGS" | grep -qi "duplicate key"; then
+  echo "❌ 日志出现 \"duplicate key\" —— 种子在并发下不幂等"
+  echo "$LOGS" | grep -i "duplicate key" | head -3
+  exit 1
+fi
+echo "   ✅ 种子并发安全（无唯一约束冲突）"
+
+# 键数必须恰好等于可种子化项：多了说明重复插入，少了说明有实例插一半就崩
+WANT_KEYS=$(grep -c 'EnvSourced: false}' internal/config/params_gen.go)
+GOT_KEYS=$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d sla -tAc \
+  "select count(*) from config_params where scope_type='global'" | tr -d ' \r')
+[ "$GOT_KEYS" = "$WANT_KEYS" ] || {
+  echo "❌ 双实例启动后配置键数 = $GOT_KEYS，期望 $WANT_KEYS"
+  exit 1; }
+echo "   ✅ 配置键数 $WANT_KEYS（双实例并发灌种子后仍准确）"
+
 echo "── 4/5 AC-27（M0/P1 形态）：停一个实例，30 次请求全成功 ──"
 "${COMPOSE[@]}" stop sla-core-a >/dev/null
 sleep 6   # 等 Caddy 健康探测摘除（health_interval 2s）

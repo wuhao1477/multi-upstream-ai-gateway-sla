@@ -1,3 +1,9 @@
+{
+	# 本地/内网部署用自签，不去 Let's Encrypt 申请证书
+	local_certs
+	admin off
+}
+
 # Caddy：TLS + 轮询 LB + 健康探测摘除故障实例（06 §1）
 #
 # ⚠️ 边界纪律（06 §1、09 §1）：**只代理 /v1/* 与 /healthz**。
@@ -11,12 +17,6 @@
 #
 # P1 阶段说明：/v1/* 尚不存在（数据平面属 P2），故经 Caddy 实际只有
 # /healthz 可达。AC-27 在 M0/P1 阶段就是打它（14 AC-27 第 45 轮补充）。
-
-{
-	# 本地/内网部署用自签，不去 Let's Encrypt 申请证书
-	local_certs
-	admin off
-}
 
 :443, :80 {
 	# ── 数据平面（P2 起可用）──

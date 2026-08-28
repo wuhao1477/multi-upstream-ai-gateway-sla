@@ -44,16 +44,24 @@ func SeedConfigParams(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) 
 		// param_value 是 JSONB：数值与布尔按字面量存，字符串加引号。
 		jsonVal := toJSONLiteral(p.Default)
 
-		// scope_type='global' 时 scope_id 恒为哨兵 '*'（02 §2：用 NULL 会让
-		// 唯一约束失效，因为 PG 普通 UNIQUE 允许多行 NULL）。
+		// ⚠️ 必须用 ON CONFLICT DO NOTHING，**不能用 WHERE NOT EXISTS**
+		// （首版就是后者，被双实例 compose 抓到）：子查询不加锁，两个实例
+		// 同时启动时都看到"不存在"，然后都插 version=1 → 撞唯一约束，
+		// 后到的实例启动失败。这是典型的 check-then-act 竞态。
+		//
+		// 为什么不把种子也纳入选主锁：种子天然幂等（每键一行、值不覆盖），
+		// 用 ON CONFLICT 就够，且对"将来出现别的并发来源"同样安全；
+		// 扩大锁范围只会让启动串行化更久。
+		//
+		// **不覆盖已有值**的语义由此保持不变：
+		//   · 键已存在 version=1 → 撞约束 → DO NOTHING
+		//   · 运维改过（存在 version=2）→ 种子仍插 version=1，撞约束 → DO NOTHING
 		tag, err := tx.Exec(ctx, `
 INSERT INTO config_params (scope_type, scope_id, param_key, param_value,
                            is_critical, version, confirmed_twice, change_reason)
-SELECT 'global', '*', $1, $2::jsonb, $3, 1, $3, '出厂默认值（09 §4bis 种子）'
-WHERE NOT EXISTS (
-  SELECT 1 FROM config_params
-   WHERE scope_type='global' AND scope_id='*' AND param_key=$1
-)`, p.Key, jsonVal, p.Critical)
+VALUES ('global', '*', $1, $2::jsonb, $3, 1, $3, '出厂默认值（09 §4bis 种子）')
+ON CONFLICT (scope_type, scope_id, param_key, version) DO NOTHING`,
+			p.Key, jsonVal, p.Critical)
 		if err != nil {
 			return fmt.Errorf("插入配置项 %s: %w", p.Key, err)
 		}
