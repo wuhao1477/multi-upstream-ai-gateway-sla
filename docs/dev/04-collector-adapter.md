@@ -57,6 +57,7 @@ const (
 	//    此前 Sub2API/ASXS 的 Capabilities() 标 supported 而 FetchSubscriptionQuotas 又返回
 	//    ErrUnsupported —— 自相矛盾，且 M3 的 AC-28 要求「能力矩阵与实现一致」，照原文必挂（第 18 轮 [high]）。
 	CapPricing            Capability = "pricing"
+	CapModelCatalog       Capability = "model_catalog"   // FR-126（P1 新增）
 )
 
 type CapabilityMap map[Capability]SupportLevel
@@ -90,6 +91,12 @@ type CollectorAdapter interface {
 	// 订阅周期额度（FR-033～039）。⏭ **一期不实现**（[15 §1.2](./15-scope-and-preflight.md)）：
 	// 一期所有站型统一返回 ErrUnsupported；二期按站型实现。
 	FetchSubscriptionQuotas(ctx context.Context, s Session) ([]SubscriptionQuota, error)
+
+	// 渠道可用模型目录（FR-126，**P1 新增**）：上游声称可用的**全部**模型。
+	// 与 FetchPricing 的区别：Pricing 产出权威价格版本（FR-012 不可覆盖），
+	// 本方法产出"上游有哪些模型"的清单——两者可能来自同一端点，但落库目标不同
+	// （前者 price_versions，后者 channel_model_catalog）。
+	FetchModelCatalog(ctx context.Context, s Session) ([]CatalogModel, error)
 
 	// 模型价格：输入/输出/缓存倍率（FR-010/012/013）
 	FetchPricing(ctx context.Context, s Session) (Pricing, error)
@@ -198,16 +205,31 @@ type Key struct {
 }
 
 type Group struct {
-	GroupRef        string
-	RateMultiplier  float64 // 分组倍率
+	GroupRef        string   // → channel_groups.group_ref（P1 落库）
+	RateMultiplier  float64  // 分组倍率 → channel_groups.rate_multiplier（P1 落库）
+	AvailableModels []string // 该分组可获取的模型（FR-124）→ group_models.model_name（P1 落库）
+	RPMLimit        int      // → 与 Key 级限流一并登记（FR-127）
+	// ── 以下字段 P1 采集但**不落结构化列**，只进 collector_snapshots.payload ──
+	// 理由（[ISSUE-005 §3.1](../issues/ISSUE-005-phase1-upstream-inventory.md)）：它们的消费者
+	// 都在 P2/P3 调度（高峰倍率影响成本排序、独占与平台影响候选过滤），P1 无消费者。
+	// 需要时按 payload 回填结构化列即可，不丢数据。
 	PeakEnabled     bool
 	PeakMultiplier  float64
 	PeakStart, PeakEnd string
 	SubscriptionType string
 	Platform        string // openai / anthropic 等
-	RPMLimit        int
 	IsExclusive     bool
 	Meta            SourceMeta
+}
+
+// CatalogModel（FR-126，P1）：渠道模型目录的一行 → channel_model_catalog
+// **无 token 上界字段**——那是"可路由模型"（models 表）的必填项，目录不需要，
+// 这正是目录必须独立于 models 的原因（[02 §1.3](./02-data-model.md)）。
+type CatalogModel struct {
+	ModelName    string  // 上游原始名 → channel_model_catalog.model_name
+	InputPrice   float64 // → channel_model_catalog.input_price（归一美元）
+	OutputPrice  float64 // → channel_model_catalog.output_price
+	Meta         SourceMeta
 }
 
 type SubscriptionQuota struct {
@@ -275,7 +297,8 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: supported, groups: supported, pricing: supported, subscription_quotas: unsupported}
+{account: supported, keys: supported, groups: supported, pricing: supported,
+ model_catalog: supported, subscription_quotas: unsupported}
 ```
 
 ### 3.2 Sub2API 系（molifang + hyhawang 实测 + 源码级 ent schema 解析）
@@ -310,7 +333,8 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: supported, groups: supported, pricing: degraded, subscription_quotas: **unsupported（一期）**}
+{account: supported, keys: supported, groups: supported, pricing: degraded,
+ model_catalog: supported, subscription_quotas: **unsupported（一期）**}
 ```
 （价格倍率经 `/api/v1/groups/available.rate_multiplier` 与分组耦合，非独立价格表，标 `degraded`。）
 
@@ -342,7 +366,8 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: unsupported, groups: unsupported, pricing: degraded, subscription_quotas: **unsupported（一期）**}
+{account: supported, keys: unsupported, groups: unsupported, pricing: degraded,
+ model_catalog: degraded, subscription_quotas: **unsupported（一期）**}
 ```
 （ASXS 无独立 Key/分组管理视图；价格并入套餐 products，标 `degraded`。）
 
@@ -355,6 +380,7 @@ type SubscriptionQuota struct {
 | `groups` | supported | supported | unsupported |
 | `subscription_quotas` | **unsupported** | **unsupported（一期）** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
 | `pricing` | supported（公开） | degraded | degraded |
+| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | supported（`/api/v1/groups/available` 带分组模型） | **degraded**（模型并入套餐 products，非独立目录端点） | 
 | 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 | JWT 7d，无 refresh，账密重登 |
 | 额度单位 | `quota/quota_per_unit` | USD 浮点 | `micros/1e6` |
 | 共享额度归集键 | Key 独立 | `(user,group)` | `(user,plan)` |
@@ -372,7 +398,9 @@ type SubscriptionQuota struct {
 | `price_versions` | `FetchPricing` | 币种、计费单位、来源、查询/生效时间；**不可覆盖版本** | FR-012/013 |
 | `price_change_log` | `FetchPricing` **同一事务** | 见下方「价格变更留痕」 | FR-014/017 |
 | `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`confirmed_at`、`balance_state`、`quota_status`、`signal_kind`、`signal_evidence`。⚠️ **不写 `known_consumption_since` 与 `conservative_floor`**，见下方列归属 | FR-020/024/026 |
-| `upstream_keys` + `collector_snapshots` | `FetchKeys` | key 级 `remain_quota/expired_time/model_limits` + 限流快照（payload） | FR-021/028/031 |
+| `upstream_keys` + `collector_snapshots` | `FetchKeys` | **P1 起写结构化列**：`remain_quota_usd`、`used_quota_usd`、`rpm_limit`、`concurrency_limit`、`quota_synced_at`、`expired_time`、`model_limits`、`channel_group_id`（[02 §1.3](./02-data-model.md)）；**用量历史**另写 `collector_snapshots(scope_type='key')` 的 payload。<br>⚠️ **第 44 轮修正**：上一版写"key 级 `remain_quota/...`"——`upstream_keys` **此前根本没有这些列**（既有错误，非笔误），采回的额度只能塞 payload，"这把 Key 还剩多少"查不出来。P1 补列后本行才成立 | FR-021/028/031、**FR-122/125/127** |
+| `channel_groups` + `group_models` | `FetchGroups` | `group_ref`、`rate_multiplier`（结构化列）；`AvailableModels` → `group_models.model_name`（FR-124）。**高峰倍率/独占/平台仍只进 payload**（P1 无消费者，见 §1 结构注释） | **FR-123/124** |
+| `channel_model_catalog` | `FetchModelCatalog` | `model_name`、`input_price`、`output_price`、`first_seen_at`（首次采到时写入，之后不变）、`last_seen_at`（每轮刷新）。**无 token 上界**——那是 `models` 的必填项 | **FR-126** |
 | `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 | ⏭ **二期** |
 | `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 | ⏭ **二期** |
 | `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |

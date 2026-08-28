@@ -230,7 +230,28 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 ---
 
-## 5. 其余管理端点（M1~M4 逐步）
+## 5. 其余管理端点（P1~P3 逐步）
+
+> **阶段列读法**（[PRD §2.1.0](../PRD.md)）：**P1** = 上游采集与管理；**P2** = 原 M1+M2（网关核心）；**P3** = 原 M3+M4（调度与经营）。下表原有的 M0~M4 标记继续有效，P1 行为本轮新增。
+
+### 5.0 P1 端点：上游资产采集与管理（FR-122~128）
+
+> 这 10 个端点构成 P1 的**全部对外面**（管理平面）。P1 **不新增任何 `/v1/*` 端点**。
+
+| 端点 | 作用 | 阶段 |
+| --- | --- | --- |
+| `GET /admin/channels`、`POST /admin/channels`、`PATCH /admin/channels/{id}` | 渠道 CRUD。此前只能经 `/admin/bindings` 间接建渠道，无独立管理面 | **P1** |
+| `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / 异常项计数（FR-128 展示面、FR-129 并入） | **P1** |
+| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）：按站型依次跑 `FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`，返回**逐项结果与耗时**；该站型不支持的项返回 `unsupported` 而非静默留空（与 AC-28 同口径）。⚠️ 须限流（同渠道最小间隔，[04 §6](./04-collector-adapter.md)），防手点触发上游风控 | **P1** |
+| `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
+| `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；可设 `channel_group_id` | **P1** |
+| `POST /admin/keys/{id}/rotate`、`POST /admin/keys/{id}/disable` | Key 轮换与停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
+| `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（FR-125）：读 `collector_snapshots(scope_type='key')` 的 payload 时序，返回剩余/已用/请求数曲线 | **P1** |
+| `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
+| `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
+| `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
+
+### 5.1 其余端点（P2~P3）
 
 | 端点 | 作用 | 里程碑 |
 | --- | --- | --- |

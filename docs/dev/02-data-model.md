@@ -5,7 +5,7 @@
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
 | 日期 | 2026-07-23 |
 | 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
-| 输入 | [PRD v1.4](../PRD.md)（FR-001~121、**AC-01~36**、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求 + **ISSUE-004 开工前裁决 20 条**）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设；其 AxonHub schema 适配表已随 [11 转向](./11-decision-full-selfbuilt.md) 转为历史）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
+| 输入 | [PRD v1.5](../PRD.md)（FR-001~128、**AC-01~40**、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求 + **ISSUE-004 开工前裁决 20 条** + **ISSUE-005 交付切分 11 条**）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设；其 AxonHub schema 适配表已随 [11 转向](./11-decision-full-selfbuilt.md) 转为历史）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
 | 覆盖范围 | 本篇定义**自研 SLA 核心的 PG 库**结构。转向自研后（[11](./11-decision-full-selfbuilt.md)），本库是**账本唯一真相源**，无外部网关账本需对账 |
 
 ---
@@ -230,6 +230,81 @@ CREATE INDEX idx_bindings_channel     ON bindings(channel_id);
 ```
 
 **服务 FR/AC**：FR-001~006、FR-022、FR-031、FR-044/045、FR-055、FR-095、FR-113；AC-01、AC-04、AC-05、AC-11。
+
+---
+
+### 1.3 上游分组与模型目录（**交付阶段 P1**，FR-123~127）
+
+> **为什么这三张表必须存在**（[ISSUE-005 §3](../issues/ISSUE-005-phase1-upstream-inventory.md)）：
+> ① 全库此前**没有 group 实体** —— 分组只是 `multiplier_versions.group_multiplier` 一个数字，而 [04](./04-collector-adapter.md) 的 `Group` 结构（倍率/限流/可用模型）采回来无表可落，只能塞 `collector_snapshots.payload`，查不了也喂不进任何规则。
+> ② `upstream_keys` **没有任何余额/用量列**，而 [04 §4](./04-collector-adapter.md) 声称 `FetchKeys` 写它 —— 属既有错误，"这把 Key 还剩多少额度"目前查不出来。
+> ③ 「渠道全部可用模型」只能进 `models`，而它强制 `max_input_tokens`/`max_output_tokens`（§2bis 预留上界的硬前置）；20 渠道 × 200~300 模型不可能手填。
+>
+> **最小设计原则**（ponytail 决策阶梯）：只建 P1 有消费者的列。高峰倍率、独占标记、平台归属、自报能力位、`enabled_model_id` 等 11 个字段**刻意不建** —— 它们的消费者都在 P2/P3 调度，需要时 `ALTER ADD COLUMN` 无损。自报能力位另有一层理由：P2 本就要用 `Probe()` 实测（[03 §8](./03-upstream-layer.md)），现在采自报值等于存一份将被推翻的数据。
+
+```sql
+-- 渠道分组（FR-123）：倍率 / 限流 / 可用模型的载体
+CREATE TABLE channel_groups (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
+  rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
+  fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
+  UNIQUE (channel_id, group_ref)
+);
+
+-- 分组可用模型（FR-124）：用上游原始模型名，**不要求已登记进 models**
+-- 这是它不能借道 channel_models 的原因——后者的 model_id 外键指向 models
+CREATE TABLE group_models (
+  channel_group_id BIGINT NOT NULL REFERENCES channel_groups(id) ON DELETE CASCADE,
+  model_name    TEXT NOT NULL,
+  fetched_at    TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (channel_group_id, model_name)
+);
+
+-- 渠道模型目录（FR-126）：上游声称可用的全部模型，**无 token 上界约束**
+-- 与 models/channel_models（可路由模型）是两层：目录=上游有什么，可路由=我们决定用什么
+CREATE TABLE channel_model_catalog (
+  channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  model_name    TEXT NOT NULL,               -- 上游原始名
+  input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
+  output_price  nonneg_usd,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  PRIMARY KEY (channel_id, model_name)
+);
+
+-- upstream_keys 补 6 列（FR-122/125/127）
+ALTER TABLE upstream_keys
+  ADD COLUMN channel_group_id BIGINT REFERENCES channel_groups(id),  -- Key 归属分组（FR-123）
+  ADD COLUMN remain_quota_usd nonneg_usd,     -- 剩余额度（归一美元，FR-125）
+  ADD COLUMN used_quota_usd   nonneg_usd,     -- 已用额度（FR-125）
+  ADD COLUMN rpm_limit        INTEGER,        -- 上游 Key 级 RPM（FR-127；**P1 只存不判**）
+  ADD COLUMN concurrency_limit INTEGER,       -- 上游 Key 级并发（FR-127；同上）
+  ADD COLUMN quota_synced_at  TIMESTAMPTZ;    -- 最近同步时刻（陈旧判定，FR-128）
+```
+
+**索引**
+
+```sql
+CREATE INDEX idx_chgroups_channel ON channel_groups(channel_id);
+CREATE INDEX idx_catalog_channel  ON channel_model_catalog(channel_id, last_seen_at DESC);
+CREATE INDEX idx_keys_group       ON upstream_keys(channel_group_id);
+```
+
+**几处刻意的取舍**
+
+| 决定 | 理由 |
+| --- | --- |
+| Key 用量**历史**不建新表 | 复用已有 `collector_snapshots`（`scope_type='key'` + `payload` JSONB + 三元组 + 保留策略 + 索引全都在）。`upstream_keys` 六列只存**当前值**供列表展示 |
+| Key 归属分组用**单列**而非关联表 | 20 个渠道均为中转站，Key 建好后分组基本固定。多对多要传导到 `bindings` 唯一性定义与健康统计，代价不对等 |
+| `group_models` 不设 `available` 布尔 | 采到即可用，采不到即删行。恒为 true 的列没有信息量 |
+| 目录不存 `cache_price`/`billing_unit` | 权威价在 `price_versions`（不可覆盖版本，FR-012）；目录两列只为"看一眼贵不贵" |
+| 目录不设 `enabled_model_id` | P1 无路由，"启用模型"这个动作不存在。P2 要启用时按 `(channel_id, model_name)` 匹配 `models.canonical_name` 即可 |
+| **`topup_rate` 不建**（充值倍率） | 唯一消费者是成本排序，P1 无成本排序。**P3 必建**——不建则 1:2 充值渠道成本被高估 2 倍（[ISSUE-005 §6 T-1](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
+
+**服务 FR/AC**：FR-122~128；AC-37、AC-38、AC-39、AC-40。
 
 ---
 
@@ -1630,11 +1705,13 @@ CREATE TABLE attempts (
                     -- canary：一期受控验证——**本来就要发的真实业务请求**被分给待验证 binding（不额外产生费用）
                     -- probe：主动测活（**一期第二轨**）——为探测而额外发起的请求（[05 §2.1~2.3](./05-scheduling-and-operations.md)）
 
-  -- ── 状态：上游/中间层原始 vs 我方归并（AC-30 核心）──
-  -- ⚠️ 语义已在 2026-07-26（C6）从 AxonHub/beta5 时代改为自研口径：这两列**只承载"上游若回传了什么"**，
-  --    一期上游是中转站，通常只有 HTTP 状态与错误体，故 gateway_status 多为 NULL。**永不作为判定依据**。
-  gateway_status    TEXT CHECK (gateway_status IN ('pending','completed','failed','canceled')), -- 上游/中间层若回传其自身状态枚举 → 仅存证
-  error_message     TEXT,                     -- 上游错误原文（元数据，非正文）；归并的输入之一
+  -- ── 状态：上游原始 vs 我方归并（AC-30 核心）──
+  -- ⚠️ 第 44 轮删除了 `gateway_status`（原 beta5 `execution.status` 存证列）：
+  --    C6 只改了它的注释、没删列，而**全库没有任何规则读写它**（收窄后的悬空列检查抓出）。
+  --    转向自研后（[11](./11-decision-full-selfbuilt.md)）数据面没有外部网关，上游是中转站、
+  --    只回 HTTP 状态与错误体，不存在"网关自身状态枚举"可存；且原注释自己写着
+  --    "永不作为判定依据""多为 NULL"。归并所需的输入只有 error_message + 我方观测事实。
+  error_message     TEXT,                     -- 上游错误原文（元数据，非正文）；**归并的唯一外部输入**
   -- 归并后的取消/失败口径：外部实现常把 canceled 只用于客户端取消，上游断开/内部超时归 failed
   -- → 我方按 error_message + 观测事实自行归并（AC-30、ISSUE-001 假设2 语义澄清）
   cancel_reason     TEXT CHECK (cancel_reason IN

@@ -146,6 +146,47 @@ CREATE INDEX idx_keys_account_status  ON upstream_keys(account_id, status);
 
 CREATE INDEX idx_bindings_channel     ON bindings(channel_id);
 
+CREATE TABLE channel_groups (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
+  rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
+  fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
+  UNIQUE (channel_id, group_ref)
+);
+
+CREATE TABLE group_models (
+  channel_group_id BIGINT NOT NULL REFERENCES channel_groups(id) ON DELETE CASCADE,
+  model_name    TEXT NOT NULL,
+  fetched_at    TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (channel_group_id, model_name)
+);
+
+CREATE TABLE channel_model_catalog (
+  channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  model_name    TEXT NOT NULL,               -- 上游原始名
+  input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
+  output_price  nonneg_usd,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  PRIMARY KEY (channel_id, model_name)
+);
+
+ALTER TABLE upstream_keys
+  ADD COLUMN channel_group_id BIGINT REFERENCES channel_groups(id),  -- Key 归属分组（FR-123）
+  ADD COLUMN remain_quota_usd nonneg_usd,     -- 剩余额度（归一美元，FR-125）
+  ADD COLUMN used_quota_usd   nonneg_usd,     -- 已用额度（FR-125）
+  ADD COLUMN rpm_limit        INTEGER,        -- 上游 Key 级 RPM（FR-127；**P1 只存不判**）
+  ADD COLUMN concurrency_limit INTEGER,       -- 上游 Key 级并发（FR-127；同上）
+  ADD COLUMN quota_synced_at  TIMESTAMPTZ;    -- 最近同步时刻（陈旧判定，FR-128）
+
+CREATE INDEX idx_chgroups_channel ON channel_groups(channel_id);
+
+CREATE INDEX idx_catalog_channel  ON channel_model_catalog(channel_id, last_seen_at DESC);
+
+CREATE INDEX idx_keys_group       ON upstream_keys(channel_group_id);
+
 CREATE TABLE routing_policies (
   id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name           TEXT NOT NULL,               -- 如 sla-gold / sla-silver / sla-bronze（仅默认模板，可自定义）
@@ -457,11 +498,13 @@ CREATE TABLE attempts (
                     -- canary：一期受控验证——**本来就要发的真实业务请求**被分给待验证 binding（不额外产生费用）
                     -- probe：主动测活（**一期第二轨**）——为探测而额外发起的请求（[05 §2.1~2.3](./05-scheduling-and-operations.md)）
 
-  -- ── 状态：上游/中间层原始 vs 我方归并（AC-30 核心）──
-  -- ⚠️ 语义已在 2026-07-26（C6）从 AxonHub/beta5 时代改为自研口径：这两列**只承载"上游若回传了什么"**，
-  --    一期上游是中转站，通常只有 HTTP 状态与错误体，故 gateway_status 多为 NULL。**永不作为判定依据**。
-  gateway_status    TEXT CHECK (gateway_status IN ('pending','completed','failed','canceled')), -- 上游/中间层若回传其自身状态枚举 → 仅存证
-  error_message     TEXT,                     -- 上游错误原文（元数据，非正文）；归并的输入之一
+  -- ── 状态：上游原始 vs 我方归并（AC-30 核心）──
+  -- ⚠️ 第 44 轮删除了 `gateway_status`（原 beta5 `execution.status` 存证列）：
+  --    C6 只改了它的注释、没删列，而**全库没有任何规则读写它**（收窄后的悬空列检查抓出）。
+  --    转向自研后（[11](./11-decision-full-selfbuilt.md)）数据面没有外部网关，上游是中转站、
+  --    只回 HTTP 状态与错误体，不存在"网关自身状态枚举"可存；且原注释自己写着
+  --    "永不作为判定依据""多为 NULL"。归并所需的输入只有 error_message + 我方观测事实。
+  error_message     TEXT,                     -- 上游错误原文（元数据，非正文）；**归并的唯一外部输入**
   -- 归并后的取消/失败口径：外部实现常把 canceled 只用于客户端取消，上游断开/内部超时归 failed
   -- → 我方按 error_message + 观测事实自行归并（AC-30、ISSUE-001 假设2 语义澄清）
   cancel_reason     TEXT CHECK (cancel_reason IN

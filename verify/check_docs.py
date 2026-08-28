@@ -86,8 +86,14 @@ tables = set(re.findall(r"CREATE TABLE (\w+)", alltext))
 #    （如 price_versions.confirmed）。只看建表体会把真实存在的列误报成不存在，
 #    进而诱使人去"修"一份本来正确的文档（第 41 轮踩到）。
 altered = {}
-for m in re.finditer(r"ALTER TABLE (\w+) ADD COLUMN (?:IF NOT EXISTS )?(\w+)", alltext):
-    altered.setdefault(m.group(1), set()).add(m.group(2))
+# ⚠️ 一条 ALTER 可以逗号分隔加**多列**（[02 §1.3](../docs/dev/02-data-model.md) 的
+#    `upstream_keys` 一次加 6 列）。原正则只取 `ALTER TABLE t` 紧邻的第一个
+#    ADD COLUMN，后 5 列全被误报成"不存在"（第 44 轮）。故先切出整条 ALTER
+#    语句（到分号为止），再在其中找出全部 ADD COLUMN。
+for m in re.finditer(r"ALTER TABLE (\w+)([^;]*);", alltext, re.S):
+    tbl, body = m.group(1), m.group(2)
+    for c in re.finditer(r"ADD COLUMN (?:IF NOT EXISTS )?(\w+)", body):
+        altered.setdefault(tbl, set()).add(c.group(1))
 
 miss = []
 for t, c in set(re.findall(r"`(\w+)\.(\w+)`", alltext)):
@@ -365,17 +371,21 @@ for line in head.strip().split("\n"):
     for m in re.finditer(r"AC-(\d+(?:/\d+)*)", line):
         for x in m.group(1).split("/"):
             p1set.add(f"AC-{int(x):02d}")
-declared = re.search(r"\| 合计（一期） \| \| \*\*(\d+)\*\* \|", m14)
+declared = re.search(r"\| 合计（一期） \|[^|]*\| \| \*\*(\d+)\*\* \|", m14)
 if declared and int(declared.group(1)) != len(p1set):
     cnt.append(f"14 声明一期 {declared.group(1)} 条，里程碑表实际 {len(p1set)} 条")
 p2 = set()
-for m in re.finditer(r"⏭ \*\*二期[^|]*\| ([^|]*) \| (\d+) \|", m14):
-    for x in re.findall(r"AC-\d+", m.group(1)):
-        p2.add(x)
+# 第 44 轮：里程碑表加了「交付阶段」列，二期行变成 `| ⏭ **二期…** | P4 | AC-20… | 5 |`，
+# 原正则要求"⏭ **二期"与 AC 列之间只有一个 `|`，加列后失配 → 二期恒为 0。
+# 改为宽松匹配：只要该行以 ⏭ **二期 开头，取行内全部 AC 编号。
+for line in m14.split("\n"):
+    if re.match(r"\|\s*⏭ \*\*二期", line):
+        p2.update(re.findall(r"AC-\d+", line))
 if p1set & p2:
     cnt.append(f"同一 AC 同时在一期与二期表：{sorted(p1set & p2)}")
-if len(p1set) + len(p2) != 36:
-    cnt.append(f"一期 {len(p1set)} + 二期 {len(p2)} ≠ 36")
+TOTAL_AC = 40   # 一期 35（含 P1 的 AC-37~40）+ 二期 5，见 [PRD §2.1.0](../docs/PRD.md)
+if len(p1set) + len(p2) != TOTAL_AC:
+    cnt.append(f"一期 {len(p1set)} + 二期 {len(p2)} ≠ {TOTAL_AC}")
 report("AC 计数自洽", cnt)
 
 
@@ -403,7 +413,11 @@ for m in re.finditer(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)\s*\((.*?)\n\)", ddl
         ):
             tbl_cols.setdefault(c.group(1), set()).add(tbl)
 
-alldocs = "".join(open(f).read() for f in glob.glob("docs/**/*.md", recursive=True))
+# ⚠️ 只统计**规则文档**（dev/ + PRD）里的引用，**不含 docs/issues/**（第 44 轮收窄）。
+#    issue 是提案与裁决记录，不是规则载体：一个列只要在 issue 里被提过就算"有承载",
+#    会让"建了表但规则没写"整类问题静默通过 —— 实测 channel_groups.group_ref 与
+#    channel_model_catalog.first_seen_at 就是这样蒙过检查的（当时 04/09 尚未落笔）。
+alldocs = "".join(ALLDEV.values())
 defined_only = "\n".join(defining_blocks)
 
 dead = []

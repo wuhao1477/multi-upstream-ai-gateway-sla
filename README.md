@@ -4,17 +4,19 @@
 
 本仓库为**需求、选型与开发设计阶段的文档库**（暂不含代码实现）。开发设计见 [docs/dev/](docs/dev/00-overview-and-milestones.md)。
 
-## 当前阶段（截至 2026-07-26）
+## 当前阶段（截至 2026-07-27）
 
 | 事项 | 状态 |
 | --- | --- |
-| 产品需求 PRD | ✅ **v1.4 基线已冻结**（2026-07-26）：16 项业务参数确认 + 运行时验证反馈（ISSUE-003）+ **开工前裁决 20 条（ISSUE-004）**全部折入 |
+| 产品需求 PRD | ✅ **v1.5 基线已冻结**（2026-07-27）：16 项业务参数确认 + 运行时验证反馈（ISSUE-003）+ 开工前裁决 20 条（ISSUE-004）+ **交付切分（ISSUE-005）**全部折入 |
+| **当前交付阶段** | 🚧 **P1 ＝ 多上游渠道采集与管理**（[ISSUE-005](docs/issues/ISSUE-005-phase1-upstream-inventory.md)）。**不含请求转发**；网关核心属 P2、调度经营属 P3、订阅制属 P4。交付进度表见 [PRD §2.1.0](docs/PRD.md) |
 | **开工前反馈（ISSUE-004）** | ✅ **已裁定并落地**：20 条全部采纳，其中 6 处经审计修正后落地（见 [ISSUE-004 §0bis](docs/issues/ISSUE-004-dev-preflight-feedback.md)） |
+| **交付切分（ISSUE-005）** | ✅ **已裁定并落地**：11 条全部采纳。「一期/二期」自此只表**需求范围**，交付进度另立 **P1~P4**；既有 331 处期别标签一字未改 |
 | 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
 | AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
-| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（100 条 DDL）；其中五类做过注入验证 |
+| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（**107 条 DDL**）；其中**七类做过注入验证** |
 
 ## 文档地图
 
@@ -39,6 +41,7 @@
 - [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
 - [ISSUE-003：运行时/采集反馈的需求候选](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md) —— ✅ 已并入 PRD v1.3
 - [ISSUE-004：开发开工前需求反馈](docs/issues/ISSUE-004-dev-preflight-feedback.md) —— ✅ **已裁定并落地（PRD v1.4）**：20 条决议 + 6 处审计修正
+- [ISSUE-005：交付切分——P1 只做上游采集与管理](docs/issues/ISSUE-005-phase1-upstream-inventory.md) —— ✅ **已裁定并落地（PRD v1.5）**：11 条决议；含数据库最小设计的逐项理由与 6 项后续阶段任务台账
 
 ### 开发设计（2026-07-23 启动，07-25 转向自研）
 - [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
