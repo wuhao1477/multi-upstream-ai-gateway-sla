@@ -197,7 +197,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `billing_abs_tolerance_usd` | 0.05 | | |
 | `billing_recovery_streak` | 20 | | 连续一致次数后恢复 |
 | **告警** ||||
-| `alert_webhook_url` | 空 | ✅ | 为空则不外发（[06 §5bis](./06-deployment-and-operations.md)） |
+| `alert_webhook_url` | `""` | ✅ | 为空则不外发（[06 §5bis](./06-deployment-and-operations.md)）。⚠️ 默认值写作 `""` 而非"空"字样：种子按字面量入库，写"空"会让 P3 的 webhook 代码拿到一个名为"空"的 URL 去 POST，而不是识别为未配置 |
 | `alert_recovery_checks` | 3 | | 判据连续几轮不成立才转 `recovering`（[05 §5.2bis](./05-scheduling-and-operations.md) 生命周期表） |
 | `key_invalid_streak` | 3 | | 连续 401/403 判 Key 失效 |
 | `all_unavail_checks` | 2 | | 连续几轮空候选判全不可用 |

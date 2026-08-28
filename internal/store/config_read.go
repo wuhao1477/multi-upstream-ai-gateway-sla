@@ -79,10 +79,26 @@ func jsonToScalar(raw []byte) (string, error) {
 			return "true", nil
 		}
 		return "false", nil
+	case []any:
+		// 数组类配置确实存在：balance_text_patterns 是余额不足的文案关键词表
+		// （09 §4bis / 05 §5.3）。首版把数组一并拒了，会让配置加载在这一个键上
+		// 直接失败 —— 而它是 P3 余额信号识别的输入。
+		// 原样回传紧凑 JSON，由使用方按需解析成 []string。
+		return string(compactJSON(raw)), nil
 	default:
-		// 对象/数组类配置一期不存在；出现即为数据错误，报出来而非静默 Sprint
+		// 对象类配置一期不存在；出现即为数据错误，报出来而非静默 Sprint
 		return "", fmt.Errorf("不支持的配置值类型 %T（值 %q）", v, string(raw))
 	}
+}
+
+// compactJSON 去掉 JSONB 回读时可能带的空白，保证与文档字面量可比对
+// （种子写入与读出必须还原同一字符串，见 TestSeedReadRoundTrip）。
+func compactJSON(raw []byte) []byte {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return raw
+	}
+	return buf.Bytes()
 }
 
 // bytesReader 避免为一次解码引入额外依赖。

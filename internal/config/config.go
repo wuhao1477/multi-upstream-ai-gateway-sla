@@ -51,9 +51,16 @@ type Snapshot struct {
 }
 
 // NewSnapshot 用库中取值构造快照；未提供的键回落到文档默认值。
+//
+// **跳过 EnvSourced 项**（目前只有 admin_token）：它们不落 config_params，
+// 其"默认值"在文档里是一句说明（"由 env ADMIN_TOKEN 注入"）而不是真值，
+// 放进快照会让调用方读到那句中文当令牌用。
 func NewSnapshot(dbValues map[string]string) *Snapshot {
 	v := make(map[string]string, len(Params))
 	for _, p := range Params {
+		if p.EnvSourced {
+			continue
+		}
 		if got, ok := dbValues[p.Key]; ok {
 			v[p.Key] = got
 		} else {
@@ -125,6 +132,9 @@ func (s *Snapshot) Bool(key string) (bool, error) {
 // 而不是等到采集器凌晨跑到那一行才失败。
 func (s *Snapshot) Validate() error {
 	for _, p := range Params {
+		if p.EnvSourced {
+			continue // 不在快照里，无从校验
+		}
 		var err error
 		switch inferKind(p.Default) {
 		case kindInt:

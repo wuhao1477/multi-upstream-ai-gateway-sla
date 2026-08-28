@@ -102,6 +102,11 @@ jobs:
       - name: 迁移集成测试（临时 PG）
         run: make test-integration
 
+      # 走 curl 的端到端测试：二次确认两步提交、乐观锁 409、幂等去重、
+      # 表外键 400、令牌鉴权、admin_token 不落库。单测覆盖不到这些跨层行为。
+      - name: 管理 API 端到端测试（临时 PG + 真 sla-core）
+        run: make test-api
+
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
       # 余下两道守卫随对应功能接入：

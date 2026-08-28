@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
@@ -25,23 +26,41 @@ func TestToJSONLiteral(t *testing.T) {
 	}
 }
 
-// TestAllDefaultsProduceValidJSON 全部 72 个默认值都必须能转成合法 JSON，
+// TestAllDefaultsProduceValidJSON 全部可种子化的默认值都必须是合法 JSON，
 // 否则种子会在那一行 INSERT 失败 —— 而那是启动路径。
 func TestAllDefaultsProduceValidJSON(t *testing.T) {
 	for _, p := range config.Params {
+		if p.EnvSourced {
+			continue // 不落表，其"默认值"是一句说明而非真值
+		}
 		lit := toJSONLiteral(p.Default)
 		if lit == "" {
 			t.Errorf("键 %s 的默认值 %q 转出空字面量", p.Key, p.Default)
+			continue
 		}
-		// 粗校验：非数值/布尔的必须被引号包住
-		switch lit {
-		case "true", "false":
-		default:
-			if !isNumeric(lit) && (lit[0] != '"' || lit[len(lit)-1] != '"') {
-				t.Errorf("键 %s 的字面量 %q 既非数值也未加引号，JSONB 会解析失败",
-					p.Key, lit)
+		if !json.Valid([]byte(lit)) {
+			t.Errorf("键 %s 的字面量 %q 不是合法 JSON，JSONB 会拒绝入库",
+				p.Key, lit)
+		}
+	}
+}
+
+// EnvSourced 项必须被排除在种子之外。
+// admin_token 若落进 config_params，管理 API 就能改自己的鉴权令牌 = 提权
+// （09 §4bis：不落 config_params，避免自己改自己）。
+func TestEnvSourcedExcluded(t *testing.T) {
+	var found bool
+	for _, p := range config.Params {
+		if p.Key == "admin_token" {
+			found = true
+			if !p.EnvSourced {
+				t.Error("admin_token 必须标 EnvSourced —— 否则会被种子写进 config_params，" +
+					"而管理 API 能改该表 = 能改自己的鉴权令牌")
 			}
 		}
+	}
+	if !found {
+		t.Fatal("清单里找不到 admin_token")
 	}
 }
 

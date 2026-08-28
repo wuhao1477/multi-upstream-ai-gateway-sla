@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -31,8 +32,15 @@ func SeedConfigParams(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // 已 Commit 后 Rollback 是 no-op
 
-	var inserted int
+	var inserted, skipped int
 	for _, p := range config.Params {
+		// EnvSourced 项**不落表**（09 §4bis 对 admin_token 的原文：
+		// "不落 config_params（避免自己改自己）"）。若写进去，管理 API 就能
+		// 修改自己的鉴权令牌 —— 那是提权，不只是设计洁癖问题。
+		if p.EnvSourced {
+			skipped++
+			continue
+		}
 		// param_value 是 JSONB：数值与布尔按字面量存，字符串加引号。
 		jsonVal := toJSONLiteral(p.Default)
 
@@ -56,9 +64,11 @@ WHERE NOT EXISTS (
 		return fmt.Errorf("提交种子: %w", err)
 	}
 
+	seedable := len(config.Params) - skipped
 	logger.Info("配置种子完成",
-		"inserted", inserted, "total", len(config.Params),
-		"existing", len(config.Params)-inserted)
+		"inserted", inserted, "seedable", seedable,
+		"existing", seedable-inserted,
+		"env_sourced_skipped", skipped)
 	return nil
 }
 
@@ -75,6 +85,11 @@ func toJSONLiteral(def string) string {
 	if isNumeric(def) {
 		return def
 	}
+	// 已是合法 JSON 数组/对象的字面量原样用（balance_text_patterns 是关键词表）。
+	// 首版会把它当普通字符串再套一层引号，读回来就成了带引号的字符串而非数组。
+	if looksLikeJSONComposite(def) && json.Valid([]byte(def)) {
+		return def
+	}
 	// 字符串需要 JSON 引号；内部引号转义
 	out := make([]rune, 0, len(def)+2)
 	out = append(out, '"')
@@ -86,6 +101,14 @@ func toJSONLiteral(def string) string {
 	}
 	out = append(out, '"')
 	return string(out)
+}
+
+// looksLikeJSONComposite 判断字面量是否为 JSON 数组或对象。
+func looksLikeJSONComposite(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+	return (s[0] == '[' && s[len(s)-1] == ']') || (s[0] == '{' && s[len(s)-1] == '}')
 }
 
 func isNumeric(s string) bool {

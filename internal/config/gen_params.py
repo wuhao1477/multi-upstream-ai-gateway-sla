@@ -15,6 +15,30 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "docs/dev/09-admin-api.md"
 OUT = ROOT / "internal/config/params_gen.go"
 
+def clean_default(cell: str) -> str:
+    """剥掉表格单元里的 Markdown 装饰，只留值本身。
+
+    ⚠️ 首版没做这件事，于是 `false` 带着反引号进了生成物 —— 五个布尔项的默认值
+    变成字面量 "`false`"，inferKind 判成字符串、Snapshot.Bool() 直接解析失败，
+    而 Validate 因为判成字符串而不检查它，问题会一直潜伏到运行时真去读那个键。
+    """
+    s = cell.strip()
+    # 去粗体/斜体标记
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    # 整体被反引号包住 → 取内容（数组类默认值 `["a","b"]` 也走这条）
+    m = re.fullmatch(r"`(.+)`", s)
+    if m:
+        s = m.group(1)
+    s = s.strip()
+    # `""` 表示空字符串默认值（如 alert_webhook_url：为空则不外发）。
+    # 文档里若写"空"这类中文字样，种子会把它当字面量入库 —— P3 的 webhook
+    # 代码就会拿到一个名为"空"的 URL 去 POST。故只认 `""` 这一种写法。
+    if s == '""':
+        return ""
+    return s
+
+
+
 seg_all = SRC.read_text()
 seg = seg_all[seg_all.index("## 4bis."): seg_all.index("## 5.")]
 
@@ -29,11 +53,16 @@ for line in seg.split("\n"):
     cells = [c.strip() for c in line.strip().strip("|").split("|")]
     if not cells or not re.fullmatch(r"`[a-z0-9_]+`", cells[0]):
         continue
+    raw_default = cells[1] if len(cells) > 1 else ""
     rows.append({
         "key": cells[0].strip("`"),
-        "default": cells[1] if len(cells) > 1 else "",
+        "default": clean_default(raw_default),
         "critical": len(cells) > 2 and "✅" in cells[2],
         "group": group or "",
+        # env 来源的项不落 config_params（09 §4bis 对 admin_token 的原文：
+        # "不落 config_params（避免自己改自己）；此处仅登记其存在"）。
+        # 不排除会导致：管理 API 能改自己的鉴权令牌 = 提权。
+        "env_sourced": "env" in raw_default and "注入" in raw_default,
     })
 
 assert rows, "未从 §4bis 提取到任何键——文档结构可能变了"
@@ -56,9 +85,13 @@ lines = [
     "// ParamSpec 是一个配置项的静态元数据（09 §4 ParamMeta 的落地形态）。",
     "type ParamSpec struct {",
     "\tKey      string",
-    "\tDefault  string // 文档声明的默认值，原样保留（解析交给使用方）",
+    "\tDefault  string // 文档声明的默认值，已剥离 Markdown 装饰",
     "\tCritical bool   // is_critical：修改需二次确认（FR-115）",
     "\tGroup    string // 设置页分组",
+    "\t// EnvSourced：值由环境变量注入，**不落 config_params**。",
+    "\t// 目前只有 admin_token（09 §4bis：避免自己改自己）——若把它写进表，",
+    "\t// 管理 API 就能改自己的鉴权令牌，等于提权。种子与快照都必须跳过它。",
+    "\tEnvSourced bool",
     "}",
     "",
     f"// Params 是全部 {len(rows)} 个配置项，顺序与文档一致。",
@@ -66,9 +99,10 @@ lines = [
 ]
 for r in rows:
     lines.append(
-        "\t{Key: %s, Default: %s, Critical: %s, Group: %s},"
+        "\t{Key: %s, Default: %s, Critical: %s, Group: %s, EnvSourced: %s},"
         % (go_lit(r["key"]), go_lit(r["default"]),
-           "true" if r["critical"] else "false", go_lit(r["group"]))
+           "true" if r["critical"] else "false", go_lit(r["group"]),
+           "true" if r["env_sourced"] else "false")
     )
 lines += ["}", ""]
 

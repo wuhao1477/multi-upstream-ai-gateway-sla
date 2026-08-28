@@ -2,6 +2,14 @@ package config
 
 import "testing"
 
+// allowsEmptyDefault 列出"空字符串就是正确默认值"的键及理由。
+// 白名单而非无条件放行：空默认值多半是文档漏填，只有明确语义的才该为空。
+var allowsEmptyDefault = map[string]bool{
+	// 为空 = 不外发告警（06 §5bis）。写成"空"字样会让 P3 拿到一个
+	// 名为"空"的 URL 去 POST，故文档用 `""` 表示、生成物为空串。
+	"alert_webhook_url": true,
+}
+
 // TestParamsMatchDoc 守住"生成物与文档同步"这条线。
 // 数量断言是刻意的：文档加键忘了跑 make gen-params 时，这条会红。
 func TestParamsMatchDoc(t *testing.T) {
@@ -17,8 +25,11 @@ func TestParamsMatchDoc(t *testing.T) {
 			t.Errorf("键重复: %s", p.Key)
 		}
 		seen[p.Key] = true
-		if p.Default == "" {
-			t.Errorf("键 %s 无默认值——§4bis 要求每项都有出厂默认值（FR-115）", p.Key)
+		// 空字符串是**合法**默认值：alert_webhook_url 为空即"不外发"
+		// （06 §5bis）。故只对非空白名单外的项要求有值。
+		if p.Default == "" && !allowsEmptyDefault[p.Key] {
+			t.Errorf("键 %s 无默认值——§4bis 要求每项都有出厂默认值（FR-115）。"+
+				"若空值是刻意的，加入 allowsEmptyDefault 并说明理由", p.Key)
 		}
 	}
 }

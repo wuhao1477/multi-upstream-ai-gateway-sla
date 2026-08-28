@@ -68,6 +68,10 @@ mig-check: ## 校验 migrations/ 与 02 的对象集合一致
 test-integration: ## 起临时 PG 跑迁移与种子的集成测试（需 Docker）
 	./verify/test-migrate.sh
 
+.PHONY: test-api
+test-api: ## /admin/config 端到端测试（需 Docker）
+	./verify/test-config-api.sh
+
 .PHONY: docs-gate
 docs-gate: ## 文档一致性 12 类 + DDL 真跑（需 Docker）
 	./verify/gate.sh

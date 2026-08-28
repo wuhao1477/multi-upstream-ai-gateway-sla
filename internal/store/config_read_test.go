@@ -42,9 +42,30 @@ func TestJSONToScalarPreservesDecimalLiteral(t *testing.T) {
 	}
 }
 
-// 对象/数组类值一期不存在；出现即数据错误，必须报错而非静默 Sprint。
-func TestJSONToScalarRejectsComposite(t *testing.T) {
-	for _, raw := range []string{`{"a":1}`, `[1,2]`, `null`} {
+// 数组类值必须支持：balance_text_patterns 是余额不足文案关键词表
+// （09 §4bis / 05 §5.3），是 P3 余额信号识别的输入。
+// 首版把数组一并拒了，会让配置加载在这一个键上直接失败。
+func TestJSONToScalarSupportsArray(t *testing.T) {
+	got, err := jsonToScalar([]byte(`["余额","额度"]`))
+	if err != nil {
+		t.Fatalf("数组类配置应被支持: %v", err)
+	}
+	if got != `["余额","额度"]` {
+		t.Fatalf("数组应原样紧凑回传，得到 %q", got)
+	}
+	// JSONB 回读可能带空白，须归一后与文档字面量可比对
+	got2, err := jsonToScalar([]byte(`[ "a" , "b" ]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2 != `["a","b"]` {
+		t.Fatalf("空白未归一: %q", got2)
+	}
+}
+
+// 对象与 null 一期确实不存在，出现即数据错误。
+func TestJSONToScalarRejectsObjectAndNull(t *testing.T) {
+	for _, raw := range []string{`{"a":1}`, `null`} {
 		if _, err := jsonToScalar([]byte(raw)); err == nil {
 			t.Errorf("jsonToScalar(%s) 应报错", raw)
 		}
