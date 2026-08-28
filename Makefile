@@ -12,9 +12,10 @@ help: ## 列出可用目标
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## 编译 sla-core 与 collector
+build: ## 编译 sla-core、collector、migrate
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/sla-core ./cmd/sla-core
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/collector ./cmd/collector
+	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/migrate ./cmd/migrate
 
 .PHONY: test
 test: ## 跑全部单测
@@ -55,12 +56,24 @@ gen-check: gen-params ## 校验生成物与文档同步（CI 用）
 	fi
 	@echo "✅ 配置键清单与文档同步"
 
+.PHONY: migrate
+migrate: ## 应用迁移与配置种子（需 DATABASE_URL 或 -dsn）
+	$(GO) run ./cmd/migrate
+
+.PHONY: mig-check
+mig-check: ## 校验 migrations/ 与 02 的对象集合一致
+	python3 verify/check_migrations.py
+
+.PHONY: test-integration
+test-integration: ## 起临时 PG 跑迁移与种子的集成测试（需 Docker）
+	./verify/test-migrate.sh
+
 .PHONY: docs-gate
 docs-gate: ## 文档一致性 12 类 + DDL 真跑（需 Docker）
 	./verify/gate.sh
 
 .PHONY: check
-check: fmt-check vet test gen-check ## 提交前自检（不含需 Docker 的 DDL 真跑）
+check: fmt-check vet test gen-check mig-check ## 提交前自检（不含需 Docker 的项）
 
 .PHONY: clean
 clean: ## 清理产物

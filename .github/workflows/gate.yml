@@ -90,8 +90,21 @@ jobs:
       - name: 配置键清单与文档同步
         run: make gen-check
 
-      # ── 三道硬约束守卫随对应功能接入（[10 §3](docs/dev/10-project-structure.md)）──
-      # FR-112 不可存列断言：随 #2 迁移落地（现在无 migrations/ 可扫）
-      # sk- 前缀脱敏断言：随 #9 Key 管理端点落地（现在无端点会打印凭证）
-      # billing_unit 缩放断言：随 #7 价格采集落地（现在无成本计算代码）
-      # ⚠️ 三者都在对应 issue 的完成标准里，勿让 issue 关闭时漏掉本文件的启用。
+      # migrations/ 是 schema 真相源（02 §9.1bis 规则 3），文档随其后。
+      # 两边必然有漂移风险：改文档忘加迁移（新环境缺表）或反之（文档不再可信，
+      # 而 04/05/09 全部规则都引用它）。故比对对象与列集合。
+      - name: 迁移与文档一致
+        run: make mig-check
+
+      # 真起 PG 跑迁移与种子：幂等、选主、72 键、分区子表、P1 三表六列。
+      # ⚠️ 这是 ddl-check.sh 明确不覆盖的部分（它只验建表能否跑通，
+      #    不验分区子表创建与迁移系统本身）。
+      - name: 迁移集成测试（临时 PG）
+        run: make test-integration
+
+      # FR-112 不可存列断言已作为单测实现（internal/store 的
+      # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
+      # 余下两道守卫随对应功能接入：
+      #   sk- 前缀脱敏断言 → #9 Key 管理端点（现在无端点会打印凭证）
+      #   billing_unit 缩放断言 → #7 价格采集（现在无成本计算代码）
+      # ⚠️ 两者都在对应 issue 的完成标准里，勿让 issue 关闭时漏掉本文件的启用。
