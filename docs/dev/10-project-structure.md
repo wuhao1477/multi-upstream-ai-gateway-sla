@@ -49,7 +49,9 @@ multi-upstream-ai-gateway-sla/
 │   ├── docker-compose.yml     # Caddy + 2×core + PG + collector(06 §1)
 │   ├── Caddyfile
 │   └── .env.example
-└── .github/workflows/ci.yml   # 或对应 CI
+└── .github/workflows/
+    └── gate.yml            # 交付门禁：直接调 verify/gate.sh(文档12类+DDL真跑)
+                            # M0 起在此补 go build/test/lint 与 FR-112、脱敏断言
 ```
 
 **包边界原则**：一个 `internal/` 子包对应 [01 §2](./01-architecture.md) 的一个模块，**依赖单向**：`protocol → policy → selector → executor → upstream`；`ledger`/`steward` 读写 `store`；`store` 不反向依赖业务包。
@@ -126,7 +128,7 @@ multi-upstream-ai-gateway-sla/
 | M0 固定种子加载 + 种子校验断言 | `migrations/0002_seed_m0.sql`、`internal/bootstrap` |
 | 入站鉴权与配额基础（AC-27 + AC-33-M0） | `internal/protocol`、`internal/admin`、`internal/store` |
 | `system-probe` 内置凭证（外呼必拒、不可吊销） | `migrations/0002_seed_m0.sql`、`internal/admin` |
-| CI：构建 + **DDL 真跑**（`verify/ddl-check.sh`）+ 加载 + 不可存列 + 脱敏断言 | `.github/workflows/ci.yml`、`make test`、`make migrate` |
+| CI：构建 + **DDL 真跑**（`verify/ddl-check.sh`）+ 加载 + 不可存列 + 脱敏断言 | [`.github/workflows/gate.yml`](../../.github/workflows/gate.yml)（**已建**，当前跑文档 12 类 + DDL 真跑 + 抽取产物漂移校验）、`make test`、`make migrate`。⚠️ Go 相关的四项随 M0 骨架补入同一 workflow |
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
 | bootstrap 选主（避免双 core 重复迁移） | `internal/bootstrap` advisory lock；建议加双 core 并发冷启动的集成测试 |
 

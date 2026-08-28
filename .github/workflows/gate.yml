@@ -1,0 +1,57 @@
+name: gate
+
+# 交付门禁：文档一致性 12 类检查 + DDL 在 postgres:16 真跑。
+#
+# 与本地**同一份脚本**（verify/gate.sh）——这是 00 §5 与 README 声称的
+# "CI 与本地共用一份门禁"的落地。此前该说法只是计划：gate.sh 已存在，
+# 但没有任何 workflow 去跑它，于是"DDL 真跑"只在有 Docker 的开发机上偶发进行。
+#
+# 现阶段仓库仍是纯文档（无 go.mod），故只跑文档与 DDL 两道。
+# M0 起 Go 骨架落地后，在下方 build 作业里补 go build / test / lint
+# 与 FR-112 不可存列断言、凭证脱敏断言（[10 §3](docs/dev/10-project-structure.md)）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest 自带 python3 与 docker，无需额外安装：
+      # check_docs.py / extract_ddl.py 只用标准库（glob/os/re/sys），
+      # ddl-check.sh 用 docker run 起临时 postgres:16。
+      - name: 环境自检
+        run: |
+          python3 --version
+          docker --version
+
+      - name: 门禁（文档一致性 + DDL 真跑）
+        run: ./verify/gate.sh
+
+      # 门禁失败时保留抽取产物，便于在 Actions 页面直接看 DDL 全文定位
+      - name: 上传 DDL 抽取产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddl-extracted
+          path: verify/ddl-extracted.sql
+          if-no-files-found: warn
+
+      # ddl-extracted.sql 是 02 的派生物并已入库；若与提交内容不一致，
+      # 说明有人改了 02 的 sql 块却没重跑抽取 —— 这会让入库的 DDL 与文档脱节。
+      - name: 校验 ddl-extracted.sql 与文档同步
+        run: |
+          if ! git diff --quiet -- verify/ddl-extracted.sql; then
+            echo "::error::verify/ddl-extracted.sql 与 docs/dev/02-data-model.md 不一致。"
+            echo "请在本地跑 python3 verify/extract_ddl.py 后一并提交。差异："
+            git --no-pager diff -- verify/ddl-extracted.sql
+            exit 1
+          fi
+          echo "✅ ddl-extracted.sql 与文档同步"

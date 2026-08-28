@@ -16,7 +16,7 @@
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
 | 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
 | AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
-| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（**107 条 DDL**）；其中**七类做过注入验证** |
+| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（**107 条 DDL**）；其中**七类做过注入验证**。**CI 已接入**（[gate.yml](.github/workflows/gate.yml)，2026-07-27）——push/PR 到 main 自动跑同一份脚本，本地无需装 Docker |
 
 ## 文档地图
 
@@ -63,7 +63,7 @@
 
 ### 运行时验证与交付门禁
 - [verify/ — mock 上游场景集](verify/README.md)（AxonHub 六假设部分转历史；mock 场景转为自研透传层测试夹具）
-- `verify/gate.sh` —— **交付门禁**（CI 与本地同一份）：`check_docs.py` 12 类文档一致性检查 + `ddl-check.sh` 在 postgres:16 上真跑全部 DDL
+- `verify/gate.sh` —— **交付门禁**（CI 与本地**同一份脚本**）：`check_docs.py` 12 类文档一致性检查 + `ddl-check.sh` 在 postgres:16 上真跑全部 DDL。CI 入口 [`.github/workflows/gate.yml`](.github/workflows/gate.yml)：push/PR 到 main 自动跑，另校验 `ddl-extracted.sql` 未与 02 脱节
 - `verify/probe_codex_wire.py` —— Codex 线上行为实测：**证实它发的模型名来自自身 config.toml、与 `/v1/models` 无关**（据此确定 A2 的合成方案安全，接入前须改 Codex 的 `model` 为我方别名）
 
 ## 推荐架构（一句话）
