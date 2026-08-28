@@ -38,14 +38,35 @@ assert d.get('note'), '缺少 note 声明（06 §6 健康语义分层）'
 print('   ✅', d['status'], '| db', d['db'], '| snapshot', d['config_snapshot'])
 "
 
-echo "── 3/5 两个实例都真的在服务 ──"
-# 迁移选主：只有一个实例应执行迁移，另一个跳过
-MIGLOG=$("${COMPOSE[@]}" logs sla-core-a sla-core-b 2>/dev/null | grep -c "已应用迁移" || true)
-SKIPLOG=$("${COMPOSE[@]}" logs sla-core-a sla-core-b 2>/dev/null | grep -c "另一实例正在执行迁移" || true)
-echo "   迁移日志行=$MIGLOG 跳过日志=$SKIPLOG"
-# 12 个文件被一个实例应用；另一实例要么跳过、要么因已应用而无输出
-[ "$MIGLOG" -ge 12 ] || { echo "❌ 迁移未完整执行"; exit 1; }
-echo "   ✅ 选主生效（迁移只执行一遍）"
+echo "── 3/5 选主：迁移只执行一遍，落败者等待而非跳过 ──"
+# ⚠️ 这一步抓到过真 bug：首版落败者 return nil 直接去灌种子，而抢到锁的
+#    实例还没建出 config_params → "relation config_params does not exist"。
+#    单实例集成测试因无竞争而完全看不出来，只有双实例 compose 能暴露。
+WANT_MIG=$(ls migrations/*.sql | wc -l | tr -d ' ')
+LOGS=$("${COMPOSE[@]}" logs sla-core-a sla-core-b collector 2>/dev/null)
+APPLIED=$(echo "$LOGS" | grep -c "已应用迁移" || true)
+# 每个文件恰好被应用一次：多于此说明选主失效（两个实例都跑了）
+[ "$APPLIED" = "$WANT_MIG" ] || {
+  echo "❌ 「已应用迁移」日志 $APPLIED 行，期望恰好 $WANT_MIG（每文件一次）"
+  echo "   多于期望 = 选主失效；少于 = 迁移不完整"
+  exit 1; }
+echo "   ✅ $WANT_MIG 个迁移各执行一次（选主生效）"
+
+# 落败者必须**成功完成初始化**，不能因为表还没建好而报错退出
+INIT_OK=$(echo "$LOGS" | grep -c "初始化完成" || true)
+[ "$INIT_OK" -ge 2 ] || {
+  echo "❌ 只有 $INIT_OK 个实例完成初始化，期望 ≥2（core-a/b 都要成功）"
+  echo "$LOGS" | grep -iE "error|失败" | head -5
+  exit 1; }
+echo "   ✅ 两个实例都完成初始化（落败者等待后继续，不是跳过）"
+
+# 不得出现建表竞态的痕迹
+if echo "$LOGS" | grep -q "does not exist"; then
+  echo "❌ 日志出现 \"does not exist\" —— 建表与用表存在竞态"
+  echo "$LOGS" | grep "does not exist" | head -3
+  exit 1
+fi
+echo "   ✅ 无建表竞态"
 
 echo "── 4/5 AC-27（M0/P1 形态）：停一个实例，30 次请求全成功 ──"
 "${COMPOSE[@]}" stop sla-core-a >/dev/null

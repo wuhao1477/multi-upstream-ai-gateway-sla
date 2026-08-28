@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -87,15 +88,29 @@ func Migrate(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) error {
 		logger = slog.Default()
 	}
 
-	// 选主：取不到锁说明另一实例正在迁移，直接返回让调用方轮询就绪。
-	var got bool
-	if err := conn.QueryRow(ctx,
-		"SELECT pg_try_advisory_lock($1)", advisoryLockKey).Scan(&got); err != nil {
-		return fmt.Errorf("取咨询锁: %w", err)
+	// 选主：**阻塞式**取锁（06 §2.2）。
+	//
+	// ⚠️ 首版用的是 try 版本，取不到就 return nil 并注释"让调用方轮询就绪"——
+	// 但**没有任何调用方实现轮询**：bootstrap.Run 紧接着就去灌种子，而此时
+	// 抢到锁的实例可能还没建出 config_params。双实例 compose 一起来立刻炸
+	// （"relation config_params does not exist"），单实例集成测试因为没有竞争
+	// 而完全看不出来 —— 这个 bug 是 verify/test-compose.sh 抓到的。
+	//
+	// 改为阻塞取锁：落败者在此等待，等抢到时迁移已完成，它读 schema_migrations
+	// 发现全都应用过、逐个跳过，然后正常继续灌种子。**不需要任何轮询逻辑**——
+	// "等对方建完表"这件事由锁本身表达。
+	//
+	// 阻塞不会永久挂：ctx 带超时（bootstrap 给 2 分钟），pgx 会在 ctx 取消时
+	// 中断等待并返回错误 —— 那种情况下启动失败是正确行为（迁移没跑完就服务，
+	// 会读到半截 schema）。
+	lockStart := time.Now()
+	if _, err := conn.Exec(ctx,
+		"SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
+		return fmt.Errorf("取咨询锁（可能是另一实例迁移超时）: %w", err)
 	}
-	if !got {
-		logger.Info("另一实例正在执行迁移，跳过（选主，06 §2.2）")
-		return nil
+	if waited := time.Since(lockStart); waited > 200*time.Millisecond {
+		logger.Info("等待另一实例完成迁移后继续（选主，06 §2.2）",
+			"waited_ms", waited.Milliseconds())
 	}
 	defer func() {
 		if _, err := conn.Exec(ctx,

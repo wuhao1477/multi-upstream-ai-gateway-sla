@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -146,5 +147,29 @@ func TestPartitionParentsArePartitioned(t *testing.T) {
 		if !re.MatchString(all) {
 			t.Errorf("%s 应为 RANGE 分区表（02 §9.1 保留窗口靠 DETACH+DROP）", tbl)
 		}
+	}
+}
+
+// TestMigrateUsesBlockingLock 守住选主协议：必须用**阻塞式** pg_advisory_lock，
+// 不能用 pg_try_advisory_lock。
+//
+// 背景（真 bug，由双实例 compose 抓到）：首版用 try 版本，取不到锁就 return nil
+// 并注释"让调用方轮询就绪" —— 但没有任何调用方实现轮询，bootstrap.Run 紧接着
+// 去灌种子，而抢到锁的实例还没建出 config_params。单实例测试无竞争，看不出来。
+//
+// 这条测试读源码而非跑库：意图是"锁的语义不许被改回 try"，而那是静态事实。
+func TestMigrateUsesBlockingLock(t *testing.T) {
+	src, err := os.ReadFile("migrate.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 去掉注释再扫 —— 上面那段说明本身就提到了 try 版本的名字。
+	code := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(string(src), "")
+	if strings.Contains(code, "pg_try_advisory_lock") {
+		t.Error("选主必须用阻塞式 pg_advisory_lock：try 版本的落败者会带着" +
+			"未建好的 schema 继续执行，双实例启动必炸（见本测试注释）")
+	}
+	if !strings.Contains(code, "pg_advisory_lock") {
+		t.Error("找不到 pg_advisory_lock —— 选主逻辑是否被删了？")
 	}
 }
