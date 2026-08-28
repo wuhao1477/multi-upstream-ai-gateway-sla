@@ -313,9 +313,12 @@ func ListGroupModels(ctx context.Context, conn *pgx.Conn, groupID int64) ([]stri
 
 // CatalogEntry 是模型目录的一行。
 type CatalogEntry struct {
-	ModelName   string    `json:"model_name"`
-	InputPrice  *float64  `json:"input_price,omitempty"`
-	OutputPrice *float64  `json:"output_price,omitempty"`
+	ModelName   string   `json:"model_name"`
+	InputPrice  *float64 `json:"input_price,omitempty"`
+	OutputPrice *float64 `json:"output_price,omitempty"`
+	// BillingUnit 是上面两个价格的口径，**必须与价格一同展示**。
+	// nil = 上游未声明，消费方按未知处理（02 §1.3bis）。
+	BillingUnit *string   `json:"billing_unit,omitempty"`
 	FirstSeenAt time.Time `json:"first_seen_at"`
 	LastSeenAt  time.Time `json:"last_seen_at"`
 	// Stale 表示疑似下架（last_seen_at 落后于最新一轮采集）。
@@ -331,6 +334,11 @@ func ListCatalog(
 	ctx context.Context, conn *pgx.Conn, channelID int64,
 	staleOnly bool, missingRounds int, intervalHours int,
 ) ([]CatalogEntry, error) {
+	// ⚠️ 排序**先按 billing_unit 再按价格**：两种口径的数值区间重叠
+	// （实测按次 0.004~7 vs 倍率 0.01~175），跨口径按价格排会把
+	// $7/次 的视频模型排在"倍率 175"之前，读者据此选型必然选错。
+	// 分段后同段内可比，段间由 unit 列显式隔开（02 §1.3bis）。
+	//
 	// 落后阈值 = 轮数 × 采集周期
 	lag := time.Duration(missingRounds) * time.Duration(intervalHours) * time.Hour
 	if lag <= 0 {
@@ -340,13 +348,13 @@ func ListCatalog(
 WITH newest AS (
   SELECT max(last_seen_at) AS t FROM channel_model_catalog WHERE channel_id = $1
 )
-SELECT c.model_name, c.input_price, c.output_price,
+SELECT c.model_name, c.input_price, c.output_price, c.billing_unit,
        c.first_seen_at, c.last_seen_at,
        (n.t IS NOT NULL AND c.last_seen_at < n.t - $2::interval) AS stale
   FROM channel_model_catalog c CROSS JOIN newest n
  WHERE c.channel_id = $1
    AND ($3 = false OR (n.t IS NOT NULL AND c.last_seen_at < n.t - $2::interval))
- ORDER BY c.input_price NULLS LAST, c.model_name`,
+ ORDER BY c.billing_unit NULLS LAST, c.input_price NULLS LAST, c.model_name`,
 		channelID, lag.String(), staleOnly)
 	if err != nil {
 		return nil, fmt.Errorf("列渠道 %d 目录: %w", channelID, err)
@@ -356,7 +364,7 @@ SELECT c.model_name, c.input_price, c.output_price,
 	for rows.Next() {
 		var e CatalogEntry
 		if err := rows.Scan(&e.ModelName, &e.InputPrice, &e.OutputPrice,
-			&e.FirstSeenAt, &e.LastSeenAt, &e.Stale); err != nil {
+			&e.BillingUnit, &e.FirstSeenAt, &e.LastSeenAt, &e.Stale); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

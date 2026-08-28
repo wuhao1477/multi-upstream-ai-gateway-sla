@@ -221,7 +221,8 @@ func (a *ASXSAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, err
 
 // FetchModelCatalog 取套餐可用模型 —— **degraded**（04 §3.3）。
 //
-// ASXS 无独立目录端点，模型名藏在套餐里；单价一律缺失。
+// ASXS 无独立目录端点，模型名藏在套餐里；单价一律缺失，
+// 故 BillingUnit 也留空（无价即无口径，同 Sub2API 的理由）。
 func (a *ASXSAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]CatalogModel, error) {
 	m, _, err := a.C.getJSONAuth(ctx, s, "/api/me/purchase/products")
 	if err != nil {

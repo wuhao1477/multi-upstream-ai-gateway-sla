@@ -204,6 +204,9 @@ try {
   const gmText = await page.$eval('#gm', el => el.textContent);
   check('分组可用模型可查（FR-124）', /gpt-5\.5/.test(gmText),
     gmText.replace(/\s+/g, ' ').slice(0, 80));
+  // 标题必须给**上游分组名**：内部 id 逐次采集会变，"分组 2"对不上上游的 vip
+  check('分组可用模型标出上游分组名', /分组\s*(default|vip|svip)/.test(gmText),
+    gmText.replace(/\s+/g, ' ').slice(0, 40));
 
   await page.screenshot({ path: `${SHOT}/06-groups.png` });
 
@@ -211,8 +214,28 @@ try {
   await page.waitForFunction(
     () => /输入价/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
-  const catRows = await page.$$eval('#detail-body tbody tr', rs => rs.length);
-  check('模型目录已渲染', catRows === 8, `${catRows} 个模型（期望 8）`);
+  const catCells = await page.$$eval('#detail-body tbody tr',
+    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  check('模型目录已渲染', catCells.length === 9, `${catCells.length} 个模型（期望 9）`);
+
+  // 价格必须与口径同格显示：真实站点 15% 的模型按次计价，其绝对美元价
+  // 与倍率的数值区间**重叠**，光看数字分不出 "$3.5/次" 和 "倍率 3.5"。
+  const kling = catCells.find(c => c[0] === 'kling-video-pro');
+  check('按次计价模型标出 /次（FR-124）',
+    !!kling && kling[1].includes('/次'), kling ? kling[1] : '未找到该模型');
+  const gpt4o = catCells.find(c => c[0] === 'gpt-4o');
+  check('倍率模型标出 ×倍率',
+    !!gpt4o && gpt4o[1].includes('×倍率'), gpt4o ? gpt4o[1] : '未找到该模型');
+
+  // 排序必须**先分段再比价**：kling 的 3.5 落在倍率区间 0.5~30 之内，
+  // 若跨口径按价格排它会插到 claude-4-sonnet(6) 之前，读者据此选型
+  // 会把 $3.5/次 的视频模型当成"比 opus 便宜"。分段后它必须在末尾。
+  const klingIdx = catCells.findIndex(c => c[0] === 'kling-video-pro');
+  const ratioIdx = catCells.map((c, i) => c[1].includes('×倍率') ? i : -1)
+    .filter(i => i >= 0);
+  check('目录按口径分段排序（按次段整体在倍率段之后）',
+    klingIdx > Math.max(...ratioIdx),
+    `按次行 #${klingIdx}，倍率行 #${ratioIdx.join(',')}`);
   await page.screenshot({ path: `${SHOT}/07-catalog.png` });
 
   await page.click('#btn-keys');

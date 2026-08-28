@@ -292,6 +292,10 @@ func (a *Sub2APIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, 
 // 单价缺失（见 FetchPricing）→ 目录里 InputPrice/OutputPrice 留 0
 // 并标 Degraded。**留 0 而非省略**是因为目录的价格列本就允许空
 // （02 §1.3 nonneg_usd 可空），且 Meta 已说明缺什么。
+//
+// BillingUnit 同样留空：**没有价格就没有口径**。不要"顺手"填
+// per_1m_token —— 那会让下游以为这里有个已知单位的 0 价，
+// 而 NULL 才如实表达"上游没声明"（02 §1.3bis）。
 func (a *Sub2APIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]CatalogModel, error) {
 	groups, err := a.FetchGroups(ctx, s)
 	if err != nil {

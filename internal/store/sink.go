@@ -308,16 +308,19 @@ func (s *CollectorSink) SaveCatalog(
 		if m.ModelName == "" {
 			continue
 		}
+		// billing_unit 用 NULLIF 落空而非补默认值：degraded 站型无价也无口径，
+		// 补 'per_1m_token' 会把"未声明"伪装成"已知按 token 计价"（02 §1.3bis）。
 		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_model_catalog (channel_id, model_name, input_price, output_price,
-                                   first_seen_at, last_seen_at)
-VALUES ($1,$2,$3,$4,$5,$5)
+                                   billing_unit, first_seen_at, last_seen_at)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$6)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price  = EXCLUDED.input_price,
        output_price = EXCLUDED.output_price,
+       billing_unit = EXCLUDED.billing_unit,
        last_seen_at = EXCLUDED.last_seen_at`,
 			channelID, m.ModelName, nullFloat(m.InputPrice), nullFloat(m.OutputPrice),
-			m.Meta.FetchedAt); err != nil {
+			m.BillingUnit, m.Meta.FetchedAt); err != nil {
 			return n, fmt.Errorf("写目录条目 %s: %w", m.ModelName, err)
 		}
 		n++

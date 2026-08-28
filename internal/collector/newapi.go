@@ -171,38 +171,45 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 	return out, nil
 }
 
-// FetchGroups 由 /api/pricing 的 group_ratio 派生分组（04 §3.1）。
+// FetchGroups 由 /api/pricing 派生分组（04 §3.1 + 第 46 轮实测修正）。
 //
-// NewAPI 没有独立的分组端点，分组倍率藏在公开的定价响应里。
-// 可用模型则由 model_ratio 的键集合给出 —— 对 NewAPI 而言"分组能用哪些模型"
-// 需要看 model_ratio 与该分组的启用关系，一期取全量模型作为该分组可用集合
-// （NewAPI 的分组主要影响倍率而非可见性）。
+// NewAPI 没有独立的分组端点，分组倍率藏在定价响应的顶层 group_ratio 里。
+// 可用模型（FR-124）来自每个模型的 enable_groups —— 这是**按分组精确归属**，
+// 不是"全量模型都给每个分组"。
+//
+// ⚠️ 首版把可用模型写成 `asMap(d["model_ratio"])` 的键集合，对真实站点
+// 恒为空（新版没有这个映射表），于是 group_models 一行都没写进去，
+// 而 sync 报的却是 ok —— 绿色状态、空数据。20 个真实站点全中。
 func (a *NewAPIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, error) {
 	m, _, err := a.C.getJSONAuth(ctx, s, "/api/pricing")
 	if err != nil {
 		return nil, err
 	}
-	d := unwrapData(m)
-	ratios := asMap(d["group_ratio"])
-	if len(ratios) == 0 {
+	pr, err := parseNewAPIPricing(m)
+	if err != nil {
+		return nil, err
+	}
+	if len(pr.GroupRatios) == 0 {
 		return nil, fmt.Errorf("/api/pricing 无 group_ratio，无法派生分组")
 	}
 
-	models := make([]string, 0, len(asMap(d["model_ratio"])))
-	for name := range asMap(d["model_ratio"]) {
-		models = append(models, name)
-	}
-
 	now := time.Now()
-	out := make([]Group, 0, len(ratios))
-	for ref, v := range ratios {
-		r, _ := asFloat(v)
-		out = append(out, Group{
+	out := make([]Group, 0, len(pr.GroupRatios))
+	for ref, ratio := range pr.GroupRatios {
+		g := Group{
 			GroupRef:        ref,
-			RateMultiplier:  r,
-			AvailableModels: models,
+			RateMultiplier:  ratio,
+			AvailableModels: pr.GroupModels[ref],
 			Meta:            NewAPIMeta("/api/pricing", now),
-		})
+		}
+		// 该分组一个模型都没有：可能是站点只在 usable_group 里列了它、
+		// 却没有任何模型 enable 它。标 degraded 让运维看得见，
+		// 而不是让 group_models 静默为空（FR-124 的采集目标就是这份清单）。
+		if len(g.AvailableModels) == 0 {
+			g.Meta.Degraded = true
+			g.Meta.MissingFields = []string{"available_models"}
+		}
+		out = append(out, g)
 	}
 	return out, nil
 }
@@ -214,47 +221,31 @@ func (a *NewAPIAdapter) FetchSubscriptionQuotas(context.Context, Session) ([]Sub
 
 // FetchPricing 取模型价格（FR-010/012/013）。
 //
-// NewAPI 的 /api/pricing 是**倍率**而非绝对价格：model_ratio 是相对基准价的
-// 倍数。一期按"倍率即价格数值"落库并在 billing_unit 标明口径 ——
-// 绝对价格需要基准价，而那是站点私有配置、公开端点不给。
-// 这是已知的精度局限，不是遗漏（FR-011：采不到的按人工录入补）。
+// 两种计价形态（第 46 轮实测，1525 个真实模型条目）：
+//   - quota_type=0 倍率计价：model_ratio 是相对基准价的倍数
+//   - quota_type=1 固定价：model_price 是每次调用的绝对价格
+//
+// 两者**单位不同**（per_1m_token vs per_call），必须逐模型区分 ——
+// 混为一谈会让固定价模型的成本估算差若干个数量级（实测 235/1525 是固定价）。
 func (a *NewAPIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, error) {
 	m, _, err := a.C.getJSONAuth(ctx, s, "/api/pricing")
 	if err != nil {
 		return Pricing{}, err
 	}
-	d := unwrapData(m)
-	modelRatio := asMap(d["model_ratio"])
-	if len(modelRatio) == 0 {
-		return Pricing{}, fmt.Errorf("/api/pricing 无 model_ratio")
+	pr, err := parseNewAPIPricing(m)
+	if err != nil {
+		return Pricing{}, err
 	}
-	completion := asMap(d["completion_ratio"])
-	cache := asMap(d["cache_ratio"])
+	if len(pr.Models) == 0 {
+		return Pricing{}, fmt.Errorf("/api/pricing 未解析出任何模型价格")
+	}
 
 	p := Pricing{
-		GroupRatios: map[string]float64{},
+		GroupRatios: pr.GroupRatios,
 		Meta:        NewAPIMeta("/api/pricing", time.Now()),
 	}
-	for name, v := range modelRatio {
-		in, _ := asFloat(v)
-		out := in
-		if c, ok := asFloat(completion[name]); ok {
-			// completion_ratio 是相对 model_ratio 的倍数
-			out = in * c
-		}
-		mp := ModelPrice{
-			ModelName: name, InputPrice: in, OutputPrice: out,
-			// NewAPI 的倍率以"每 1M token 的基准价倍数"表达
-			BillingUnit: "per_1m_token",
-		}
-		if cr, ok := asFloat(cache[name]); ok {
-			mp.CachePrice = in * cr
-		}
-		p.Models = append(p.Models, mp)
-	}
-	for ref, v := range asMap(d["group_ratio"]) {
-		r, _ := asFloat(v)
-		p.GroupRatios[ref] = r
+	for _, it := range pr.Models {
+		p.Models = append(p.Models, it.toModelPrice())
 	}
 	return p, nil
 }
@@ -263,18 +254,27 @@ func (a *NewAPIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, e
 //
 // 与 FetchPricing 同源端点但落库目标不同（channel_model_catalog vs
 // price_versions）：目录回答"上游有什么"，价格版本是不可覆盖的计价依据。
+// **无 token 上界** —— 那是 models 表（可路由模型）的必填项，目录不需要，
+// 这正是目录必须独立于 models 的原因（02 §1.3）。
 func (a *NewAPIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]CatalogModel, error) {
-	pr, err := a.FetchPricing(ctx, s)
+	m, _, err := a.C.getJSONAuth(ctx, s, "/api/pricing")
 	if err != nil {
 		return nil, err
 	}
+	pr, err := parseNewAPIPricing(m)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	out := make([]CatalogModel, 0, len(pr.Models))
-	for _, mp := range pr.Models {
+	for _, it := range pr.Models {
+		mp := it.toModelPrice()
 		out = append(out, CatalogModel{
-			ModelName:   mp.ModelName,
+			ModelName:   it.Name,
 			InputPrice:  mp.InputPrice,
 			OutputPrice: mp.OutputPrice,
+			BillingUnit: mp.BillingUnit,
 			Meta:        NewAPIMeta("/api/pricing", now),
 		})
 	}

@@ -221,6 +221,15 @@ type CatalogModel struct {
 	ModelName   string
 	InputPrice  float64
 	OutputPrice float64
+	// BillingUnit 是 InputPrice/OutputPrice 的口径，**不可省略**。
+	//
+	// 实测（第 46 轮，65 个真实站点）：NewAPI 同一个 /api/pricing 里
+	// 混着两种口径，1369 个模型中 208 个（15%）是 per_call 绝对价，
+	// 其余是 per_1m_token 倍率；而两者数值区间**重叠**
+	// （按次 0.08~0.56 vs 倍率 0.685~30）。
+	// 于是"看数值猜口径"不成立 —— 没有这个字段，目录里的价格就是个
+	// 无单位的数字，把 $0.15/次 当倍率 0.15 排序会让最贵的模型显得最便宜。
+	BillingUnit string
 	Meta        SourceMeta
 }
 

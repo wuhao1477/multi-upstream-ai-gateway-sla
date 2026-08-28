@@ -142,6 +142,7 @@ func run(addr, dsn string, logger *slog.Logger) error {
 	srv.SaveDetected = credStore.SaveDetected
 	srv.Routes(mux)
 	srv.UpstreamRoutes(mux)
+	srv.ImportRoutes(mux)
 	srv.WebRoutes(mux)
 
 	httpSrv := &http.Server{

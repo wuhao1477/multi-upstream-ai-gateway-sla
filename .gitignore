@@ -18,3 +18,7 @@ coverage.*
 # 浏览器验收的依赖与产物
 verify/ui/node_modules/
 verify/ui/package-lock.json
+
+# Python
+__pycache__/
+*.pyc

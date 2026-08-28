@@ -9,6 +9,8 @@
 · expired_time = -1 表示永不过期
 · model_limits_enabled=false 的那把 Key 带一个 model_limits 残留值，
   验证采集器不会把它当权限用
+· /api/pricing 是**模型对象数组**（不是旧文档里的 dict），且混着两种计价
+  口径（quota_type 0=倍率 / 1=按次绝对价），验证 billing_unit 逐条落库
 
 用法：python3 verify/mock_newapi.py [port]
 """
@@ -52,18 +54,48 @@ TOKENS = {
     ],
 }
 
+# ⚠️ 用**真实站点的形态**（2026-08 实测 20/20 站）：data 是模型对象数组、
+# group_ratio 在顶层、分组可用模型来自各模型的 enable_groups。
+#
+# 此前这里是 04 §3.1 记录的旧 dict 形态（data.model_ratio 为"模型名→倍率"
+# 字典），于是浏览器验收全绿、而真实站点一个价格都采不到、group_models
+# 更是静默写 0 行 —— **夹具照着已过时的文档写，验收就成了自我印证**。
+# 旧形态的兼容分支另有单测覆盖（newapi_pricing_test.go）。
+def _m(name, ratio, groups, completion=0, cache=0, per_call=0.0):
+    """构造一个模型条目；per_call>0 时为按次计价（quota_type=1）。"""
+    it = {
+        "model_name": name,
+        "quota_type": 1 if per_call else 0,
+        "model_ratio": ratio,
+        "model_price": per_call,
+        "enable_groups": groups,
+    }
+    if completion:
+        it["completion_ratio"] = completion
+    if cache:
+        it["cache_ratio"], it["has_cache"] = cache, True
+    return it
+
+
+ALL = ["default", "vip", "svip"]
 PRICING = {
     "success": True,
-    "data": {
-        "model_ratio": {
-            "gpt-5.5": 15, "gpt-4o": 5, "claude-4-opus": 30,
-            "claude-4-sonnet": 6, "gemini-3-pro": 4, "deepseek-v4": 0.5,
-            "qwen-3-max": 1.2, "llama-4-405b": 2.5,
-        },
-        "completion_ratio": {"gpt-5.5": 3, "claude-4-opus": 5, "gpt-4o": 4},
-        "cache_ratio": {"gpt-5.5": 0.5, "gpt-4o": 0.5},
-        "group_ratio": {"default": 1.0, "vip": 0.8, "svip": 0.6},
-    },
+    "group_ratio": {"default": 1.0, "vip": 0.8, "svip": 0.6},
+    "pricing_version": "mock-v2",
+    "data": [
+        _m("gpt-5.5", 15, ALL, completion=3, cache=0.5),
+        _m("gpt-4o", 5, ALL, completion=4, cache=0.5),
+        _m("claude-4-opus", 30, ["vip", "svip"], completion=5),
+        _m("claude-4-sonnet", 6, ALL),
+        _m("gemini-3-pro", 4, ALL),
+        _m("deepseek-v4", 0.5, ALL),
+        _m("qwen-3-max", 1.2, ALL),
+        _m("llama-4-405b", 2.5, ["default"]),
+        # 按次计价模型：真实站点 15% 是这一类，且其绝对美元价与上面的倍率
+        # **数值区间重叠**（这里 3.5 就落在倍率 0.5~30 之间），
+        # 是"必须显示 billing_unit"的活证据。
+        _m("kling-video-pro", 0, ALL, per_call=3.5),
+    ],
 }
 
 

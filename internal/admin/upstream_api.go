@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -574,13 +575,7 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	staleOnly := r.URL.Query().Get("stale") == "true"
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	limit, offset := 100, 0
-	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 1000 {
-		limit = v
-	}
-	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
-		offset = v
-	}
+	limit, offset := parsePaging(r.URL.Query())
 
 	rounds, interval := 3, 12
 	if s.Snapshot != nil {
@@ -629,6 +624,30 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── 辅助 ──
+
+// 分页上限。真实渠道目录实测最大 1369 个模型，故上限不能太小。
+const (
+	pagingDefault = 100
+	pagingMax     = 1000
+)
+
+// parsePaging 解析 limit/offset。
+//
+// 超上限**截到上限**而非退回默认值：`?limit=1369` 若静默返回 100 行，
+// 运维会据此认为"这渠道只有 100 个模型"——**静默截断比报错更坏**，
+// 因为它给出的是一个看起来完整的错答案。截到 1000 后配合响应里的 total
+// 能看出还有下一页；退回 100 则连"被截了"都无从察觉。
+// 非法值（负数、非数字）走默认值，不报错：分页参数不是业务语义。
+func parsePaging(q url.Values) (limit, offset int) {
+	limit, offset = pagingDefault, 0
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		limit = min(v, pagingMax)
+	}
+	if v, err := strconv.Atoi(q.Get("offset")); err == nil && v >= 0 {
+		offset = v
+	}
+	return limit, offset
+}
 
 func (s *Server) withConn(w http.ResponseWriter, r *http.Request, fn func(*pgx.Conn)) {
 	conn, release, err := s.DB.Acquire(r.Context())

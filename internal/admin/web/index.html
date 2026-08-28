@@ -386,7 +386,8 @@ $('#btn-groups').addEventListener('click', async () => {
     const rows = d.items.map(g => `<tr>
       <td><code>${esc(g.group_ref)}</code></td>
       <td>${g.rate_multiplier != null ? g.rate_multiplier : '<span class="dim">未知</span>'}</td>
-      <td><button class="ghost" data-g="${g.id}">${g.model_count} 个模型</button></td>
+      <td><button class="ghost" data-g="${g.id}" data-name="${esc(g.group_ref)}"
+        >${g.model_count} 个模型</button></td>
       <td class="dim">${new Date(g.fetched_at).toLocaleString('zh-CN')}</td>
     </tr>`).join('');
     $('#detail-body').innerHTML = `<h2 style="margin-top:16px">分组</h2>
@@ -396,8 +397,11 @@ $('#btn-groups').addEventListener('click', async () => {
     $('#detail-body').querySelectorAll('button[data-g]').forEach(b =>
       b.addEventListener('click', async () => {
         const m = await api(`/admin/channel-groups/${b.dataset.g}/models`);
+        // 标题用**上游分组名**而非内部 id：id 逐次采集会变（实测两次运行里
+        // 同一个 id 指向了不同分组），运维看"分组 2"无从对应到上游的 vip/default。
         $('#gm').innerHTML = `<p class="dim" style="font-size:12px;margin-top:10px">
-          分组 ${b.dataset.g} 可用模型（${m.count}）：${m.models.map(esc).join('、') || '无'}</p>`;
+          分组 <code>${esc(b.dataset.name)}</code> 可用模型（${m.count}）：${
+            m.models.map(esc).join('、') || '无'}</p>`;
       }));
   } catch (e) { toast('加载分组失败：' + e.message, 'bad'); }
 });
@@ -410,10 +414,19 @@ $('#btn-catalog').addEventListener('click', async () => {
         '<div class="empty">目录为空，先点“立即采集”</div>';
       return;
     }
+    // 口径必须与价格同格显示：per_call 是每次调用的绝对美元价，
+    // per_1m_token 是倍率，两者数值区间重叠，光看数字无法分辨。
+    const unitLabel = u => u === 'per_call' ? '/次'
+      : u === 'per_1m_token' ? '×倍率'
+      : u === 'per_1k_token' ? '×倍率(1k)'
+      : u === 'per_token' ? '×倍率(token)'
+      : '<span class="warn" title="上游未声明口径，勿假定默认值">口径未知</span>';
+    const price = (v, u) => v == null ? '<span class="dim">—</span>'
+      : `${v} <span class="dim">${unitLabel(u)}</span>`;
     const rows = d.items.map(m => `<tr>
       <td><code>${esc(m.model_name)}</code></td>
-      <td>${m.input_price ?? '<span class="dim">—</span>'}</td>
-      <td>${m.output_price ?? '<span class="dim">—</span>'}</td>
+      <td>${price(m.input_price, m.billing_unit)}</td>
+      <td>${price(m.output_price, m.billing_unit)}</td>
       <td class="${m.stale ? 'warn' : 'dim'}">${m.stale ? '疑似下架' : '在架'}</td>
     </tr>`).join('');
     $('#detail-body').innerHTML = `<h2 style="margin-top:16px">模型目录
@@ -421,7 +434,9 @@ $('#btn-catalog').addEventListener('click', async () => {
       <table><thead><tr><th>模型</th><th>输入价</th><th>输出价</th>
       <th>状态</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="dim" style="font-size:12px">目录是“上游有什么”，
-      与“已登记为可路由模型”是两层：目录不需要 token 上界（02 §1.3）</p>`;
+      与“已登记为可路由模型”是两层：目录不需要 token 上界（02 §1.3）。
+      <br>⚠️ 按口径分段排序：<code>/次</code>是每次调用的绝对美元价，
+      <code>×倍率</code>是相对基准价的倍数，<b>跨段不可直接比大小</b></p>`;
   } catch (e) { toast('加载目录失败：' + e.message, 'bad'); }
 });
 

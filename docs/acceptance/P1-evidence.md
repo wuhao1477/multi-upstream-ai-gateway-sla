@@ -3,11 +3,11 @@
 | 项目 | 内容 |
 | --- | --- |
 | 阶段 | **P1：多上游渠道采集与管理**（[PRD §2.1.0](../PRD.md)、[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
-| 日期 | 2026-08-28 |
+| 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
-| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② mock NewAPI 上游（`verify/mock_newapi.py`，字段形态照 04 §3.1 实测构造）③ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `make test-ui` 一键起 PG + mock + sla-core + Chrome；CI 第 12 步同一脚本，在 GitHub Linux runner 上独立跑通 |
-| 结论 | **AC-37/38/39/40 全部通过；浏览器验收 29/29** |
+| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ mock NewAPI 上游（`verify/mock_newapi.py`，字段形态照真实站点实测构造）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
+| 可复现 | `make test-ui` 一键起 PG + mock + sla-core + Chrome；CI 第 12 步同一脚本，在 GitHub Linux runner 上独立跑通。全渠道覆盖率报告：`verify/coverage_report.py` |
+| 结论 | **AC-37/38/39/40 全部通过；浏览器验收 33/33；全渠道覆盖率报告已产出（§2.1）** |
 
 ---
 
@@ -33,28 +33,33 @@
 account              ok    rows=1
 groups               ok    rows=3
 keys                 ok    rows=2
-pricing              ok
-model_catalog        ok    rows=8
+pricing              ok    rows=0   「采到 9 个模型价格，其中 9 个未登记为可路由
+                                     模型（models 表无对应行）→ 不写 price_versions，
+                                     价格已存入模型目录备查」
+model_catalog        ok    rows=9
 subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 ```
+
+> `pricing` 的 `rows=0` **必须带备注**：P1 不登记任何可路由模型（AC-39），故价格版本必然写 0 行 —— 这是预期行为。但"ok + rows=0 + 无备注"让运维无法把它与"采集坏了"区分开，而同样的输出在 P3 就是故障。如实记 note，不让 `ok` 替它兜着。
 
 | 断言 | 实测 |
 | --- | --- |
 | 逐项结果与耗时 | ✅ 6 项各有 status/rows/elapsed_ms |
-| 四类数据均更新 | ✅ `channel_groups` 3 行、`group_models` 24 行、`channel_model_catalog` 8 行、`upstream_keys.quota_synced_at` 前进 |
+| 四类数据均更新 | ✅ `channel_groups` 3 行、`group_models` 24 行、`channel_model_catalog` 9 行、`upstream_keys.quota_synced_at` 前进 |
 | **不支持项显式上报** | ✅ `subscription_quotas` 出现在 items 里且标 `unsupported`，**不静默省略** |
 | 声明与实现一致 | ✅ 包级测试 `TestUnsupportedDeclarationsReturnErrUnsupported` 逐家族断言"声明 unsupported ⟺ 返回 `ErrUnsupported`"，且"声明 degraded 的**不得**返回 `ErrUnsupported`" |
 | 限流生效 | ✅ 60s 内重复调用返回 **429** 且 `items` 全 `skipped`，**不打上游** |
 
-> ⚠️ **三家族只有 NewAPI 走了真实端到端**：Sub2API 与 ASXS 的适配器有完整包级测试（字段映射、凭证状态机、degraded 语义），但**尚未对真实站点跑过**。那需要真实凭证（[15 §1bis](../dev/15-scope-and-preflight.md) 的基线站点），属 §3 的遗留项。
+> ✅ **NewAPI 与 Sub2API 均已走真实端到端**（§2.1：52 + 13 个真实站点）。**ASXS 仍只有包级测试** —— 运营导出的 65 个站点里没有 ASXS 站型，无从验证，属 §3.1 的遗留项。
 
 ### AC-39 目录容纳大量模型且不产生可路由模型行
 
 | 断言 | 实测 |
 | --- | --- |
-| 全量入目录、**无需 token 上界** | ✅ 8 个模型全部入库，`channel_model_catalog` 无 token 上界列 |
-| **`models` 表不产生任何行** | ✅ `models = 0`、`channel_models = 0` —— 这是本条的核心：目录（上游有什么）与可路由模型（我们决定用什么）是两层，否则 20 渠道 × 200~300 模型要手填几千行 token 上界 |
-| 可分页与排序 | ✅ `?limit/offset/q` 生效，按价格排序（NULL 末位） |
+| 全量入目录、**无需 token 上界** | ✅ mock 9 个模型全部入库；**真实站点最大单渠道 1369 个模型**（redacted-channel-03 API），`channel_model_catalog` 无 token 上界列 |
+| **`models` 表不产生任何行** | ✅ 真库 65 渠道 2782 行目录之后 `models = 0`、`channel_models = 0` —— 这是本条的核心：目录（上游有什么）与可路由模型（我们决定用什么）是两层。**"容纳大量模型"由真实数据兑现**：若两层合一，光这 2782 行就要手填 2782 个 token 上界 |
+| 可分页与排序 | ✅ `?limit/offset/q` 生效；排序**先按 `billing_unit` 分段再按价格**（NULL 末位）—— 跨口径比价无意义（§4 第 11 项）|
+| 口径逐条落库 | ✅ 单渠道 1369 行中 `per_1m_token` 1161 行（0.01~175）、`per_call` 208 行（$0.004~7/次），**区间重叠**故不可由数值反推口径 |
 
 ### AC-40 模型下架识别
 
@@ -74,35 +79,46 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 | --- | --- |
 | AC-37~40 全绿 | ✅ 见 §1 |
 | #1~#11 全部关闭 | ✅ 12 个 issue 全关（#13 EPIC 收尾） |
-| 证据留档 | ✅ 本文件 + 截图 `/tmp/sla-ui-shots/`（9 张，含 fullPage） |
+| 证据留档 | ✅ 本文件 + 截图 `/tmp/sla-ui-shots/`（8 张 + `results.json`，含 fullPage）+ 覆盖率报告 `/tmp/p1-coverage.json` |
 | 门禁全绿 | ✅ CI 12 步：文档 12 类 + DDL 真跑 + 迁移一致 + 迁移集成 + 管理 API + compose 冒烟 + **浏览器验收** |
-| 全渠道 sync 覆盖率报告 | ❌ **未完成** —— 见 §3 |
+| 全渠道 sync 覆盖率报告 | ✅ 见 §2.1 |
+
+### 2.1 全渠道覆盖率报告（65 个真实站点）
+
+`ADMIN_TOKEN=… python3 verify/coverage_report.py` → `/tmp/p1-coverage.json`，2026-08-29 01:07，**65 渠道 / 86.4 秒**（并发 6，刻意保守：避免被上游当扫描，也避免我方过载造成假失败）。
+
+| 家族 | 渠道 | 可用 | 凭证失效 | account | groups | keys | pricing | model_catalog | subscription_quotas |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| newapi | 52 | 43 | 8 | 43 ok / 1 failed | 43 ok / 1 failed | 44 ok | **38 ok / 6 failed** | 44 ok | 44 unsupported |
+| sub2api | 13 | 2 | 11 | 2 ok | 2 ok | 2 ok | 2 ok | 2 ok | 2 unsupported |
+
+**19 个渠道 fatal，原因单一且全部是"凭证失效/鉴权失败"** —— 与运营给出的说明一致（"有些能用，有些不能用"）。按 FR-011 这些转人工录入，`need_manual` 段落已逐站列名留档。
+
+落库结果：`channel_model_catalog` **2782 行 / 38 渠道**、`channel_groups` **203 行 / 45 渠道**、`group_models` **5546 行**；`models` 与 `price_versions` **均为 0 行**，与 AC-39 一致（目录不产生可路由模型，价格版本只为已登记模型写）。
+
+> 15 T6 的验证点（"~20 个渠道的价格数据是否都采得到"）由此回答：**可用渠道里 40/45 采到价格**（89%），6 个 newapi 站点的 `/api/pricing` 失败。剩余失败不是解析问题而是站点侧不提供该端点或返回非预期结构，按 FR-011 转人工。
 
 ---
 
 ## 3. 未完成项（诚实记录，不算通过）
 
-### 3.1 全渠道覆盖率报告（P1 退出标准之一）
+### 3.1 ASXS 未对真实站点验证
 
-[00 §3](../dev/00-overview-and-milestones.md) 要求"对**全部真实渠道**跑一次全量 sync 并留存覆盖率报告"，它同时提前完成 [15 T6](../dev/15-scope-and-preflight.md) 的验证点（~20 个渠道的价格数据是否都采得到）。
+Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok）。**ASXS 仍只有包级测试** —— 运营导出的 65 个站点里 `Detect` 分桶结果是 52 newapi + 13 sub2api，**一个 ASXS 站点都没有**，无从验证。其适配器的字段映射、凭证状态机、degraded 语义有包级测试覆盖，但真实响应形态未经确认。
 
-**当前只对 1 个 mock 站点验过**。缺的是真实渠道的凭证 —— 这不是代码问题，是输入问题：需要运营提供约 20 个渠道的站点地址与采集凭证。
+### 3.2 `billing_unit` 缩放守卫未接入 CI
 
-**这一项未完成，故 P1 严格意义上尚未退出**。已具备的是：跑这份报告所需的全部能力（`Detect` 批量分桶、逐渠道 sync、inventory 异常分类），执行只需凭证到位。
-
-### 3.2 Sub2API / ASXS 未对真实站点验证
-
-见 AC-38 的备注。两个适配器的包级测试覆盖了字段映射与凭证状态机，但真实站点的响应形态可能与实测记录有出入（04 的记录来自 2026-07 的四站实测，站点会升级）。
-
-### 3.3 `billing_unit` 缩放守卫未接入 CI
-
-[#11](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/11) 把这道断言标为"随 #7 落地"。实际情况：价格采集已完成，但**成本计算的消费方在 P3**（P1 无成本排序），故 CI 里暂无可断言的计算路径。已在 workflow 注释保留待办。
+[#11](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/11) 把这道断言标为"随 #7 落地"。列本身已在 2026-08-29 补齐（迁移 015，见 §4 第 9 项），采集侧逐条落库、消费侧分段展示都有断言；**但成本计算的消费方在 P3**（P1 无成本排序），故 CI 里暂无可断言的**计算**路径。已在 workflow 注释保留待办。
 
 ⚠️ 这条不可遗忘：漏缩放会把每笔成本**放大 100 万倍**（`per_1m_token` 是默认单位），进而让预留、配额、错误预算、告警阈值全部失真（02 §3）。
 
+### 3.3 迁移前采集的 1413 行目录数据 `billing_unit` 为 NULL
+
+迁移 015 之前采集的行没有口径可填（信息在采集时就没留下），只能等各渠道下一轮采集自然回填。当前 2782 行里 1369 行有口径、1413 行为 NULL。**这不是缺陷而是 NULL 的正确用法**：消费方本就必须把 NULL 当"上游未声明"处理，不得假定默认口径（02 §1.3bis）。
+
 ---
 
-## 4. 实测中发现并修复的缺陷（8 个）
+## 4. 实测中发现并修复的缺陷（14 个）
 
 只有真跑才会暴露的那些，值得单独记：
 
@@ -116,10 +132,20 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 | 6 | 探测出 `quota_per_unit` 却**只回显不落库** → sync 时因缺它而失败 | 端到端 |
 | 7 | inventory 对**全新渠道报"✓ 无异常项"** —— 而它没凭证、根本采不了 | 浏览器验收 |
 | 8 | 凭证刷新的锁内 double-check 读了**调用方自己的旧副本** → 10 并发刷 10 次，真实环境下后 9 次互相作废 `refresh_token` | 并发单测 |
+| 9 | `/api/pricing` 解析按 04 §3.1 记录的 **dict 形态**写，而真实站点返回**模型对象数组** → **43/44 站一个价格都采不到**，且 `group_models` 静默写 0 行（无报错，因为"空 map"是合法输入）| 65 真实站点 |
+| 10 | `channel_model_catalog` **无 `billing_unit` 列** → 按次绝对价与倍率混存为无单位数字（迁移 015 补列）| 65 真实站点 |
+| 11 | `ListCatalog` **跨口径按价格排序**、UI 渲染裸数字 → `$7/次` 的视频模型显示得比"倍率 175"便宜 | 真库 + 浏览器 |
+| 12 | sync 的 pricing 步骤报 `ok rows=0` **且无备注** → 运维分不清"写成功了"和"一行都没写"（后者在 P1 是预期、在 P3 是故障）| 真库 |
+| 13 | `?limit` 超上限**静默退回默认 100** 而非截到 1000 → 1369 模型的渠道看起来只有 100 个 | 真库分页 |
+| 14 | 分组可用模型的标题用**内部 DB id**（"分组 2"）而非上游分组名 → id 逐次采集会变（连续两次验收里同一 id 指向了不同分组），运维对不上上游的 vip/default | 浏览器验收跑两遍 |
 
 > 第 6 项值得注意：它恰好由"宁可失败也不猜"的守卫暴露。若当初给 `quota_per_unit` 写了默认值 500000，它会**静默算错余额**（差 50 万倍）而无人察觉。
 >
 > 第 8 项的教训：串行化的目的不是排队，是**让后到者看见先到者的结果**。
+>
+> **第 9 项是本轮最贵的一课**：包级单测和 mock 都是绿的，因为夹具照着 04 §3.1 的文档写，**而那份文档记的形态已经过时**。测试于是变成自我印证 —— 它证明的是"代码符合我对协议的理解"，不是"代码能对付真实站点"。修完形态：pricing 覆盖率 **2.3% → 86.4%**、catalog **2.3% → 100%**、`group_models` **0 → 5546 行**。已把 mock 与单测夹具一并改成真实形态（旧 dict 形态另留兼容分支与单测）。
+>
+> 第 10~11 项是同一个疏漏的两端：光有列不够，**消费侧不显示口径，列就等于没有**。真实数据里两种口径的数值区间确实重叠（按次 0.004~7 / 倍率 0.01~175），"看数值猜口径"从一开始就不成立。
 
 另修 4 处**测试脚本自身**的缺陷（我的断言错，不是应用错），其中最能说明问题的一处：脚本化跑第一次就失败 —— 它等 `#channels table`，而干净库是空状态；我的手工验证之所以过，是因为库里残留着先前手点建的渠道。**空库才是"运维第一次打开界面"的真实情形。**
 

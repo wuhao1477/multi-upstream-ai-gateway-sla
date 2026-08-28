@@ -123,11 +123,22 @@ func newAPISite(t *testing.T) *httptest.Server {
 				 "group":"default","model_limits_enabled":false,"model_limits":"stale-value"}
 			]}`))
 		case "/api/pricing":
-			_, _ = w.Write([]byte(`{"data":{
-				"model_ratio":{"gpt-4":15,"gpt-3.5":1},
-				"completion_ratio":{"gpt-4":3},
-				"cache_ratio":{"gpt-4":0.5},
-				"group_ratio":{"default":1,"vip":0.8}}}`))
+			// ⚠️ 用**真实站点的形态**（2026-08 实测 20/20 站）：data 是模型对象
+			// 数组、group_ratio 在顶层。此前这里是 04 §3.1 记录的 dict 形态，
+			// 于是单测全绿而真实站点一个价格都采不到 —— 夹具照文档写、
+			// 文档又已过时，测试就成了自我印证。旧形态另有专门测试覆盖。
+			_, _ = w.Write([]byte(`{"success":true,
+				"group_ratio":{"default":1,"vip":0.8},
+				"pricing_version":"abc123",
+				"data":[
+				  {"model_name":"gpt-4","quota_type":0,"model_ratio":15,
+				   "completion_ratio":3,"cache_ratio":0.5,
+				   "enable_groups":["default","vip"]},
+				  {"model_name":"gpt-3.5","quota_type":0,"model_ratio":1,
+				   "enable_groups":["default","vip"]},
+				  {"model_name":"mj-relax","quota_type":1,"model_price":0.15,
+				   "enable_groups":["default"]}
+				]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -324,8 +335,26 @@ func TestNewAPIModelCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cat) != 2 {
-		t.Fatalf("目录条数 = %d，期望 2", len(cat))
+	if len(cat) != 3 {
+		t.Fatalf("目录条数 = %d，期望 3", len(cat))
+	}
+
+	// 目录必须**逐条带上口径**。此前只断言条数，于是 billing_unit 一直没落库，
+	// 而真实站点 15% 的模型是按次计价、数值区间又与倍率重叠
+	// （实测按次 0.004~7 vs 倍率 0.01~175）—— 目录里就成了无单位的数字。
+	byName := map[string]CatalogModel{}
+	for _, c := range cat {
+		byName[c.ModelName] = c
+	}
+	if u := byName["gpt-4"].BillingUnit; u != "per_1m_token" {
+		t.Errorf("gpt-4 目录口径 = %q，期望 per_1m_token", u)
+	}
+	if u := byName["mj-relax"].BillingUnit; u != "per_call" {
+		t.Errorf("mj-relax 目录口径 = %q，期望 per_call", u)
+	}
+	// 按次价取 model_price 而非 model_ratio（后者为 0）
+	if p := byName["mj-relax"].InputPrice; p != 0.15 {
+		t.Errorf("mj-relax 目录价 = %v，期望 0.15", p)
 	}
 }
 

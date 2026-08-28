@@ -294,9 +294,33 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- | --- |
 | `FetchAccount` | `/api/user/self` | `quota`、`used_quota`、`request_count`、`group` | `BalanceUSD=quota/qpu`、`UsedUSD=used_quota/qpu`、`UserID` | FR-020/024 |
 | `FetchKeys` | `/api/token` | `expired_time`、`remain_quota`、`unlimited_quota`、`used_quota`、`model_limits`、`model_limits_enabled`、`allow_ips`、`group` | `ExpiredAt`、`RemainQuotaUSD`、`Unlimited`、`ModelLimits`、`GroupRef` | FR-003/028/031 |
-| `FetchGroups` | 由 `/api/pricing.group_ratio` 派生 | `group_ratio` | `RateMultiplier` | FR-010 |
-| `FetchPricing` | `/api/pricing`（**公开**） | `model_ratio`、`group_ratio`、`cache_ratio`、`completion_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
+| `FetchGroups` | 由 `/api/pricing` 派生 | 顶层 `group_ratio` + 各模型 `enable_groups` **反转** | `RateMultiplier`、`AvailableModels`（FR-124） | FR-010/123/124 |
+| `FetchPricing` | `/api/pricing`（**公开**） | `quota_type`、`model_ratio`、`model_price`、`completion_ratio`、`cache_ratio`、顶层 `group_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
+| `FetchModelCatalog` | `/api/pricing` | `model_name` + 上列价格字段 | `channel_model_catalog`（含 `billing_unit`） | FR-126 |
 | `FetchSubscriptionQuotas` | —— | —— | `ErrUnsupported` | FR-034 |
+
+**`/api/pricing` 的真实响应形状**（第 46 轮实测 20 个可达站点，**20/20 为下述形状，0 个为旧形状**）
+
+```jsonc
+{
+  "data": [                        // ← **模型对象数组**，不是 {model_ratio:{...}} 字典
+    { "model_name": "gpt-4o",
+      "quota_type": 0,             // 0=倍率计价，1=按次固定价
+      "model_ratio": 2.5,          // quota_type=0 时取此（相对基准价的倍率）
+      "model_price": 0,            // quota_type=1 时取此（每次调用绝对美元价）
+      "completion_ratio": 4,       // 输出价 = model_ratio × completion_ratio
+      "cache_ratio": 0.5, "has_cache": true,
+      "enable_groups": ["default","vip"]   // ← 分组可用模型的**唯一**来源
+    }
+  ],
+  "group_ratio": { "default": 1, "vip": 0.8 },   // ← **顶层**，不在 data 内
+  "version": "..."
+}
+```
+
+> ⚠️ **历史陷阱（已修）**：早期文档记的是 `data.model_ratio` 为"模型名→倍率"字典。按字典解析时，43/44 个真实站点报"无 model_ratio"，`group_models` 更是**静默采到 0 行**却报 `ok`——因为 `model_ratio` 的键恒为空。适配器现同时兼容两种形状；命中旧字典形状时 `GroupModels` **留空而非虚构**"每个分组都有全部模型"。修复后价格覆盖率 2.3% → 86.4%，目录 2.3% → 100%，`group_models` 0 → 5546 行。
+
+> ⚠️ **`quota_type` 决定口径，不可省略**：`quota_type=1` 的 `model_price` 是**每次调用的绝对美元价**（`billing_unit=per_call`），与倍率**数值区间重叠**（实测按次 0.08~0.56，倍率 0.685~30），无法从数值反推。实测某站 1369 个模型中 208 个（15%）为按次计价。落库必须带 `billing_unit`（[02 §1.3bis](./02-data-model.md)）。
 
 > ⚠️ **`/api/user/token` 是"重新生成"而非"读取"** —— 实测每次调用都返回新令牌并**立即作废旧令牌**。本版本 `/api/user/self` 不回显 `access_token`，无法惰性"读不到再建"。采集器**只在初始化时调用一次并持久化**，运行时**禁止**重新生成（§5 状态机 N-1）。
 

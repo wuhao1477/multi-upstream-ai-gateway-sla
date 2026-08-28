@@ -168,6 +168,9 @@ CREATE TABLE channel_model_catalog (
   model_name    TEXT NOT NULL,               -- 上游原始名
   input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
   output_price  nonneg_usd,
+  -- billing_unit：上面两列的**口径**（第 46 轮真实数据补，见下方说明）
+  billing_unit  TEXT CHECK (billing_unit IN
+                  ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
   PRIMARY KEY (channel_id, model_name)

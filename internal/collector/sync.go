@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -187,6 +188,21 @@ func (s *Syncer) Sync(ctx context.Context, cred Credential) (*SyncResult, error)
 		if err != nil {
 			return 0, 0, "", err
 		}
+		// ⚠️ 采到 ≠ 写入：价格版本按 (channel, model) 作用域，只为**已登记进
+		// models 的可路由模型**写行（02 §2bis：models 要求 token 上界必填，
+		// 目录阶段拿不到，故不自动建行）。P1 不登记任何可路由模型（AC-39），
+		// 于是这里**必然 n=0**。
+		//
+		// 不说明就会退化成"ok + rows=0 + 无备注"——运维无法区分"写成功了"
+		// 和"一行都没写"，而后者在 P1 是**预期行为**、在 P3 则是**故障**。
+		// 同 ④ 未登记 Key 的处理：如实记 note，而不是让 ok 替它兜着。
+		if skipped := len(p.Models) - n; skipped > 0 {
+			extra := fmt.Sprintf(
+				"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
+					"不写 price_versions，价格已存入模型目录备查",
+				len(p.Models), skipped)
+			return n, 0, joinNotes(degradedNote(p.Meta), extra), nil
+		}
 		return n, 0, degradedNote(p.Meta), nil
 	})
 
@@ -271,6 +287,20 @@ func degradedNote(m SourceMeta) string {
 		return "该站型此项为 degraded（部分字段缺失）"
 	}
 	return fmt.Sprintf("degraded：缺 %v，需人工补录（FR-011）", m.MissingFields)
+}
+
+// joinNotes 拼接多条备注，跳过空串。
+//
+// degraded 与"未登记模型"是两件独立的事，可能同时成立
+// （如 Sub2API 既缺单价、又没有可路由模型），任一条被另一条挤掉都是信息丢失。
+func joinNotes(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, "；")
 }
 
 // HasFailure 报告是否有任何一项失败，供调用方决定 HTTP 状态码。

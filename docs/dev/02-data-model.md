@@ -270,6 +270,9 @@ CREATE TABLE channel_model_catalog (
   model_name    TEXT NOT NULL,               -- 上游原始名
   input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
   output_price  nonneg_usd,
+  -- billing_unit：上面两列的**口径**（第 46 轮真实数据补，见下方说明）
+  billing_unit  TEXT CHECK (billing_unit IN
+                  ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
   PRIMARY KEY (channel_id, model_name)
@@ -324,14 +327,32 @@ COMMIT;
 
 ```sql
 INSERT INTO channel_model_catalog
-       (channel_id, model_name, input_price, output_price, first_seen_at, last_seen_at)
-VALUES (:cid, :name, :in_price, :out_price, :now, :now)
+       (channel_id, model_name, input_price, output_price, billing_unit,
+        first_seen_at, last_seen_at)
+VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''), :now, :now)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price   = EXCLUDED.input_price,
        output_price  = EXCLUDED.output_price,
+       billing_unit  = EXCLUDED.billing_unit,
        last_seen_at  = EXCLUDED.last_seen_at;
        -- ⚠️ **不更新 first_seen_at** —— 它记录"首次见到"，被覆盖就永久丢失
 ```
+
+**`billing_unit` 为何必需**（第 46 轮实测发现，不是理论洁癖）
+
+同一个 NewAPI 的 `/api/pricing` 里**混着两种口径**，靠 `quota_type` 区分：
+
+| `quota_type` | 取价字段 | 语义 | 口径 |
+| --- | --- | --- | --- |
+| `0` | `model_ratio` | 相对基准价的**倍率** | `per_1m_token` |
+| `1` | `model_price` | 每次调用的**绝对美元价** | `per_call` |
+
+实测某真实站点 1369 个模型中 **208 个（15%）是按次计价**，而两种口径的**数值区间重叠**——按次价样本 `0.15 / 0.56 / 0.22 / 0.08`，倍率样本 `30 / 2 / 0.685`。因此**无法从数值反推口径**：把 `$0.15/次` 当成倍率 `0.15` 参与成本排序，会让按次计价的模型显得比实际便宜若干个数量级，而这类模型（绘图、视频）往往恰恰是最贵的。
+
+这就是 [§3](#3-计价与账务) 与 [#7](https://github.com/) 一直强调的 `billing_unit` 缩放风险，只不过它先在 P1 的目录表上现形，而不是等到 P3 的成本计算。
+
+- **无价则口径留 NULL**：Sub2API/ASXS 是 degraded 站型、单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
+- **消费方义务**：读 `input_price` 前必须先读 `billing_unit`，缺失时**不得**假定任何默认口径。
 
 - **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断——`last_seen_at` 停止前进**本身就是下架信号**。
 - **下架判据**：`last_seen_at` 连续 `catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）轮采集未前进 → 视为下架，触发 P3 告警（AC-40）。用"轮数"而非"时长"是因为采集周期可配，轮数对周期变化免疫。
