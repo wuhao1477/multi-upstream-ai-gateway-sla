@@ -27,6 +27,14 @@ jobs:
       # ubuntu-latest 自带 python3 与 docker，无需额外安装：
       # check_docs.py / extract_ddl.py 只用标准库（glob/os/re/sys），
       # ddl-check.sh 用 docker run 起临时 postgres:16。
+      #
+      # 📌 关于 Node：本项目技术栈是 **Go**，门禁脚本是 shell + python3，
+      #    **构建链路完全不经 Node**。唯一的 Node 来源是 `actions/checkout`
+      #    这个官方 action —— GitHub 的 JS action 跑在 runner 自带的 Node 上，
+      #    与被测项目的技术栈无关（Go 项目用官方 action 同样是标准做法）。
+      #    若要彻底无 Node，可把 checkout 换成手写 `git clone`，但那要自行
+      #    处理 token、depth、ref 与 PR merge commit，得不偿失。
+      #    Node 20 弃用告警是 GitHub 侧的迁移节奏，待其发 v5 再升即可。
       - name: 环境自检
         run: |
           python3 --version
@@ -35,14 +43,10 @@ jobs:
       - name: 门禁（文档一致性 + DDL 真跑）
         run: ./verify/gate.sh
 
-      # 门禁失败时保留抽取产物，便于在 Actions 页面直接看 DDL 全文定位
-      - name: 上传 DDL 抽取产物
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddl-extracted
-          path: verify/ddl-extracted.sql
-          if-no-files-found: warn
+      # ⚠️ 刻意不上传 ddl-extracted.sql 为 artifact（第 45 轮删除）：
+      #    该文件**已入库**，且随时可由 `python3 verify/extract_ddl.py` 从
+      #    02 重新生成 —— artifact 是第三份副本，纯冗余，还多引一个
+      #    JS action（Node 运行时）。失败时直接看仓库文件或本地重跑即可。
 
       # ddl-extracted.sql 是 02 的派生物并已入库；若与提交内容不一致，
       # 说明有人改了 02 的 sql 块却没重跑抽取 —— 这会让入库的 DDL 与文档脱节。
@@ -55,3 +59,21 @@ jobs:
             exit 1
           fi
           echo "✅ ddl-extracted.sql 与文档同步"
+
+  # ── M0 起启用：Go 构建与测试（[10 §3](docs/dev/10-project-structure.md) 的门禁清单）──
+  # 现在仓库无 go.mod，作业会直接失败，故先注释保留骨架，避免 M0 重新摸索。
+  # build:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-go@v5          # 亦为 JS action；Go 工具链本身与 Node 无关
+  #       with:
+  #         go-version-file: go.mod          # 跟随 go.mod 声明，不锁死 patch（10 开放点1）
+  #     - run: make build                    # 编译 cmd/sla-core、cmd/collector
+  #     - run: make test                     # 含 SSE 扫描器判定用例与 outbox 重放幂等性
+  #     - run: make lint                     # golangci-lint
+  #     - run: make migrate                  # 对一次性 PG 应用 migrations/
+  #     # 以下三道是硬约束的机器守卫，不可省（[10 §3](docs/dev/10-project-structure.md)）：
+  #     - run: ./verify/assert-no-body-columns.sh   # FR-112：账本表禁 body/messages/prompt/headers 列
+  #     - run: ./verify/assert-no-secret-leak.sh    # 日志与抓包不得出现 sk- 前缀（15 O3）
+  #     - run: ./verify/assert-billing-unit.sh      # per_1m_token 单价3.0×1000token 必须=0.003 而非3000
