@@ -91,6 +91,10 @@ type configItem struct {
 	Group          string `json:"group"`
 	Version        int    `json:"version,omitempty"`
 	ConfirmedTwice bool   `json:"confirmed_twice,omitempty"`
+	// EnvSourced 项在清单里可见但不可改（09 §4bis"此处仅登记其存在"），
+	// 且**不回显其值** —— admin_token 的值就是当前鉴权令牌本身。
+	EnvSourced bool   `json:"env_sourced,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 func (s *Server) listConfig(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +113,16 @@ func (s *Server) listConfig(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]configItem, 0, len(config.Params))
 	for _, p := range config.Params {
+		if p.EnvSourced {
+			// 登记其存在但**不回显值也不回显默认值** ——
+			// admin_token 的"值"就是当前鉴权令牌，回显等于泄露（FR-094）。
+			items = append(items, configItem{
+				Key: p.Key, IsCritical: p.Critical, Group: p.Group,
+				EnvSourced: true,
+				Note:       "由环境变量注入，不落 config_params、不可经本接口修改",
+			})
+			continue
+		}
 		v, ok := values[p.Key]
 		if !ok {
 			// 未生效（关键项未确认）或库中缺失 → 展示默认值，与快照行为一致

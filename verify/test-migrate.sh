@@ -33,10 +33,14 @@ TABLES=$(q "select count(*) from information_schema.tables where table_schema='p
 echo "   public 表/视图数: $TABLES"
 [ "$TABLES" -ge 45 ] || { echo "❌ 对象数偏少（期望 ≥45）"; exit 1; }
 
-echo "── 2/5 种子：72 键 ──"
+echo "── 2/5 种子：可种子化的键全部灌入 ──"
+# 期望值**从生成物算出**而不写死：72 键里 EnvSourced 的不落表
+# （admin_token，09 §4bis 避免自己改自己），故库中应是 72-1=71。
+# 写死数字会在下次新增 EnvSourced 项时又挂一次。
+WANT=$(grep -c 'EnvSourced: false}' internal/config/params_gen.go)
 KEYS=$(q "select count(*) from config_params where scope_type='global'")
-[ "$KEYS" = "72" ] || { echo "❌ 配置键数 = $KEYS，期望 72"; exit 1; }
-echo "   ✅ 72 键已灌入"
+[ "$KEYS" = "$WANT" ] || { echo "❌ 配置键数 = $KEYS，期望 $WANT（可种子化项）"; exit 1; }
+echo "   ✅ $WANT 键已灌入（EnvSourced 项按设计不落表）"
 
 CRIT=$(q "select count(*) from config_params where is_critical")
 [ "$CRIT" = "12" ] || { echo "❌ 关键项 = $CRIT，期望 12"; exit 1; }
@@ -56,10 +60,10 @@ echo "   ✅ catalog_missing_rounds = 3"
 echo "── 3/5 幂等：重复迁移 ──"
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
 KEYS2=$(q "select count(*) from config_params where scope_type='global'")
-[ "$KEYS2" = "72" ] || { echo "❌ 重复迁移后键数变成 $KEYS2，种子不幂等"; exit 1; }
+[ "$KEYS2" = "$WANT" ] || { echo "❌ 重复迁移后键数变成 $KEYS2，种子不幂等"; exit 1; }
 APPLIED=$(q "select count(*) from schema_migrations")
 [ "$APPLIED" = "12" ] || { echo "❌ schema_migrations = $APPLIED，期望 12"; exit 1; }
-echo "   ✅ 重复执行不重复插入（键 72、迁移记录 12）"
+echo "   ✅ 重复执行不重复插入（键 $WANT、迁移记录 12）"
 
 echo "── 4/5 运维改过的值不被重启抹回 ──"
 q "update config_params set param_value='99'::jsonb

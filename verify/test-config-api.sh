@@ -53,11 +53,22 @@ echo "── 1/9 鉴权 ──"
 if grep -q "$TOKEN" /tmp/resp.json; then fail "响应回显了管理令牌"; fi
 echo "   ✅ 401/401/200，令牌不回显"
 
-echo "── 2/9 列表：72 键 ──"
+echo "── 2/9 列表：全部键可见，EnvSourced 项不回显值 ──"
 code "${auth[@]}" "$A/config" >/dev/null
+TOTAL=$(grep -c '{Key: ' internal/config/params_gen.go)
 N=$(python3 -c "import json;print(json.load(open('/tmp/resp.json'))['count'])")
-[ "$N" = "72" ] || fail "配置项数 = $N，期望 72"
-echo "   ✅ 72 键"
+[ "$N" = "$TOTAL" ] || fail "配置项数 = $N，期望 $TOTAL"
+# admin_token 应可见但不回显值/默认值（其"值"就是当前鉴权令牌，FR-094）
+python3 - <<'PYEOF'
+import json
+items={i["key"]:i for i in json.load(open('/tmp/resp.json'))["items"]}
+t=items.get("admin_token")
+assert t is not None, "admin_token 应在清单里可见（09 §4bis 登记其存在）"
+assert t.get("env_sourced") is True, "admin_token 应标 env_sourced"
+assert not t.get("value"), "admin_token 不得回显值：其值就是当前鉴权令牌"
+assert not t.get("default"), "admin_token 不得回显默认值（那是一句说明）"
+PYEOF
+echo "   ✅ $TOTAL 键可见，admin_token 不回显值"
 
 echo "── 3/9 表外键必须 400（09 §3 白名单语义）──"
 C=$(code "${auth[@]}" -X POST "$A/config/preview" \
