@@ -106,7 +106,7 @@ echo "   ✅ 种子并发安全（无唯一约束冲突）"
 
 # 键数必须恰好等于可种子化项：多了说明重复插入，少了说明有实例插一半就崩
 WANT_KEYS=$(grep -c 'EnvSourced: false}' internal/config/params_gen.go)
-GOT_KEYS=$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d sla -tAc \
+GOT_KEYS=$("${COMPOSE[@]}" exec -T postgres psql -U sla -d sla -tAc \
   "select count(*) from config_params where scope_type='global'" | tr -d ' \r')
 [ "$GOT_KEYS" = "$WANT_KEYS" ] || {
   echo "❌ 双实例启动后配置键数 = $GOT_KEYS，期望 $WANT_KEYS"
