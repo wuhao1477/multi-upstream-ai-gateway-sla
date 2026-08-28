@@ -9,7 +9,7 @@
 | 事项 | 状态 |
 | --- | --- |
 | 产品需求 PRD | ✅ **v1.5 基线已冻结**（2026-07-27）：16 项业务参数确认 + 运行时验证反馈（ISSUE-003）+ 开工前裁决 20 条（ISSUE-004）+ **交付切分（ISSUE-005）**全部折入 |
-| **当前交付阶段** | 🚧 **P1 ＝ 多上游渠道采集与管理**（[ISSUE-005](docs/issues/ISSUE-005-phase1-upstream-inventory.md)）。**不含请求转发**；网关核心属 P2、调度经营属 P3、订阅制属 P4。交付进度表见 [PRD §2.1.0](docs/PRD.md) |
+| **当前交付阶段** | 🚧 **P1 ＝ 多上游渠道采集与管理**（[ISSUE-005](docs/issues/ISSUE-005-phase1-upstream-inventory.md)）。**不含请求转发**；网关核心属 P2、调度经营属 P3、订阅制属 P4。交付进度表见 [PRD §2.1.0](docs/PRD.md)。<br>**开发工作项**：[EPIC #13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13)（含依赖链与第一周顺序）、[P1 milestone](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/milestone/1) |
 | **开工前反馈（ISSUE-004）** | ✅ **已裁定并落地**：20 条全部采纳，其中 6 处经审计修正后落地（见 [ISSUE-004 §0bis](docs/issues/ISSUE-004-dev-preflight-feedback.md)） |
 | **交付切分（ISSUE-005）** | ✅ **已裁定并落地**：11 条全部采纳。「一期/二期」自此只表**需求范围**，交付进度另立 **P1~P4**；既有 331 处期别标签一字未改 |
 | 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
