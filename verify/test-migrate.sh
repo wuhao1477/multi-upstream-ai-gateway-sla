@@ -42,9 +42,12 @@ KEYS=$(q "select count(*) from config_params where scope_type='global'")
 [ "$KEYS" = "$WANT" ] || { echo "❌ 配置键数 = $KEYS，期望 $WANT（可种子化项）"; exit 1; }
 echo "   ✅ $WANT 键已灌入（EnvSourced 项按设计不落表）"
 
+# 同样派生：关键项里 EnvSourced 的不落表（admin_token 既关键又 env 来源）
+WANT_CRIT=$(grep -c 'Critical: true, Group: "[^"]*", EnvSourced: false}' \
+  internal/config/params_gen.go)
 CRIT=$(q "select count(*) from config_params where is_critical")
-[ "$CRIT" = "12" ] || { echo "❌ 关键项 = $CRIT，期望 12"; exit 1; }
-echo "   ✅ 12 个关键项"
+[ "$CRIT" = "$WANT_CRIT" ] || { echo "❌ 关键项 = $CRIT，期望 $WANT_CRIT"; exit 1; }
+echo "   ✅ $WANT_CRIT 个关键项（EnvSourced 的关键项不落表）"
 
 # 关键项种子必须 confirmed_twice=true，否则决策路径读不到它们（09 §3）
 UNCONF=$(q "select count(*) from config_params where is_critical and not confirmed_twice")
@@ -52,18 +55,22 @@ UNCONF=$(q "select count(*) from config_params where is_critical and not confirm
 echo "   ✅ 关键项均已标记确认（出厂默认值不需人为二次确认）"
 
 # 第 45 轮补的键必须在，且默认值正确 —— 取 0 会让每轮采集都判模型下架
+WANT_ROUNDS=$(sed -n 's/.*{Key: "catalog_missing_rounds", Default: "\([^"]*\)".*/\1/p' \
+  internal/config/params_gen.go)
 MISSING=$(q "select coalesce((select param_value#>>'{}' from config_params
   where param_key='catalog_missing_rounds'),'ABSENT')")
-[ "$MISSING" = "3" ] || { echo "❌ catalog_missing_rounds = $MISSING，期望 3"; exit 1; }
-echo "   ✅ catalog_missing_rounds = 3"
+[ "$MISSING" = "$WANT_ROUNDS" ] || {
+  echo "❌ catalog_missing_rounds = $MISSING，期望 $WANT_ROUNDS"; exit 1; }
+echo "   ✅ catalog_missing_rounds = $WANT_ROUNDS（取 0 会让每轮都判模型下架）"
 
 echo "── 3/5 幂等：重复迁移 ──"
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
 KEYS2=$(q "select count(*) from config_params where scope_type='global'")
 [ "$KEYS2" = "$WANT" ] || { echo "❌ 重复迁移后键数变成 $KEYS2，种子不幂等"; exit 1; }
+WANT_MIG=$(ls migrations/*.sql | wc -l | tr -d ' ')
 APPLIED=$(q "select count(*) from schema_migrations")
-[ "$APPLIED" = "12" ] || { echo "❌ schema_migrations = $APPLIED，期望 12"; exit 1; }
-echo "   ✅ 重复执行不重复插入（键 $WANT、迁移记录 12）"
+[ "$APPLIED" = "$WANT_MIG" ] || { echo "❌ schema_migrations = $APPLIED，期望 $WANT_MIG"; exit 1; }
+echo "   ✅ 重复执行不重复插入（键 $WANT、迁移记录 $WANT_MIG）"
 
 echo "── 4/5 运维改过的值不被重启抹回 ──"
 q "update config_params set param_value='99'::jsonb
