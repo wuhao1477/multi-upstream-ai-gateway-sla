@@ -19,14 +19,14 @@ CURL=(curl -sk --max-time 5)
 
 ready=false
 for _ in $(seq 1 90); do
-  if "${CURL[@]}" https://127.0.0.1/healthz >/dev/null 2>&1; then ready=true; break; fi
+  if "${CURL[@]}" https://localhost/healthz >/dev/null 2>&1; then ready=true; break; fi
   sleep 2
 done
 $ready || { echo "❌ 90 次重试后 /healthz 仍不可达"; "${COMPOSE[@]}" logs --tail=40; exit 1; }
 echo "   ✅ 栈已就绪"
 
 echo "── 2/5 /healthz 内容正确 ──"
-BODY=$("${CURL[@]}" https://127.0.0.1/healthz)
+BODY=$("${CURL[@]}" https://localhost/healthz)
 echo "$BODY" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -87,23 +87,37 @@ GOT_KEYS=$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d sla -tAc \
   exit 1; }
 echo "   ✅ 配置键数 $WANT_KEYS（双实例并发灌种子后仍准确）"
 
+# collector 容器必须真的跑 collector。
+# ⚠️ 抓到过：compose 用 command 覆盖，而 Dockerfile 的 ENTRYPOINT 是 /sla-core，
+#    command 只覆盖 CMD → 实际执行 `/sla-core /collector`，sla-core 忽略多余
+#    参数照常启动。症状是 collector 容器打出"sla-core 启动"，采集器根本没跑。
+CLOG=$("${COMPOSE[@]}" logs collector 2>/dev/null)
+if echo "$CLOG" | grep -q "sla-core 启动"; then
+  echo "❌ collector 容器在跑 sla-core —— entrypoint 未生效（见本段注释）"
+  exit 1
+fi
+echo "$CLOG" | grep -q "collector 启动" || {
+  echo "❌ collector 容器没有打出 \"collector 启动\""
+  echo "$CLOG" | tail -5; exit 1; }
+echo "   ✅ collector 容器跑的是 collector"
+
 echo "── 4/5 AC-27（M0/P1 形态）：停一个实例，30 次请求全成功 ──"
 "${COMPOSE[@]}" stop sla-core-a >/dev/null
 sleep 6   # 等 Caddy 健康探测摘除（health_interval 2s）
 FAIL=0
 for i in $(seq 1 30); do
-  "${CURL[@]}" -o /dev/null -w "" https://127.0.0.1/healthz || FAIL=$((FAIL+1))
+  "${CURL[@]}" -o /dev/null -w "" https://localhost/healthz || FAIL=$((FAIL+1))
 done
 [ "$FAIL" = "0" ] || { echo "❌ 停一个实例后有 $FAIL/30 次失败（AC-27 要求全部成功）"; exit 1; }
 echo "   ✅ 30/30 成功"
 "${COMPOSE[@]}" start sla-core-a >/dev/null
 sleep 6
-"${CURL[@]}" https://127.0.0.1/healthz >/dev/null || { echo "❌ 恢复后不可达"; exit 1; }
+"${CURL[@]}" https://localhost/healthz >/dev/null || { echo "❌ 恢复后不可达"; exit 1; }
 echo "   ✅ 实例恢复后自动纳入"
 
 echo "── 5/5 边界：/admin 与 /metrics 从宿主机不可达（06 §1）──"
 for p in /admin/config /metrics; do
-  C=$("${CURL[@]}" -o /dev/null -w "%{http_code}" "https://127.0.0.1$p" || echo "000")
+  C=$("${CURL[@]}" -o /dev/null -w "%{http_code}" "https://localhost$p" || echo "000")
   # 期望 404（Caddyfile 的 handle 兜底），绝不能是 200/401
   #（401 也意味着请求到了 sla-core —— 那说明代理了它）
   [ "$C" = "404" ] || { echo "❌ $p 返回 $C，应为 404（未代理）"; exit 1; }

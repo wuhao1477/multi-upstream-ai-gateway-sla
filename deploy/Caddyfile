@@ -18,7 +18,13 @@
 # P1 阶段说明：/v1/* 尚不存在（数据平面属 P2），故经 Caddy 实际只有
 # /healthz 可达。AC-27 在 M0/P1 阶段就是打它（14 AC-27 第 45 轮补充）。
 
-:443, :80 {
+# 站点名可经 env 覆盖（部署到内网域名时设 SITE_ADDRESS）。
+#
+# ⚠️ 默认必须是具体主机名而非裸 `:443`（CI 冒烟抓到）：站点写 `:443` 时
+#    Caddy 没有站点名可据以签发证书，而对 **IP 发起的 HTTPS 请求不带 SNI**，
+#    于是 TLS 握手直接失败 —— 表现是"Caddy 日志一切正常、curl 却连不上"。
+#    写成 localhost 后内网 CA 会把 localhost 与 127.0.0.1 一并签进 SAN。
+{$SITE_ADDRESS:localhost} {
 	# ── 数据平面（P2 起可用）──
 	@v1 path /v1/*
 	handle @v1 {

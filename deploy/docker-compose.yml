@@ -72,7 +72,11 @@ services:
   # 06 开放点 3 已定一期同二进制子命令；这里作为独立服务起，便于单独观察日志。
   collector:
     <<: *core
-    command: ["/collector"]
+    # ⚠️ 必须用 entrypoint 而非 command：Dockerfile 的 ENTRYPOINT 是 /sla-core，
+    #    command 只覆盖 CMD → 实际会执行 `/sla-core /collector`，sla-core 忽略
+    #    多余参数照常启动。CI 日志里 collector 容器打出"sla-core 启动"就是这个
+    #    症状 —— 采集器根本没跑，而三个实例都在服务管理面。
+    entrypoint: ["/collector"]
     healthcheck:
       disable: true
 
