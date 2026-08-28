@@ -127,6 +127,11 @@ type Credential struct {
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。
 	UserIDHeaderName string
 	TokenExpiresAt   time.Time
+	// BaseURL 是该渠道的站点地址（随渠道登记而来）。
+	BaseURL string
+	// QuotaPerUnit 是 NewAPI 系的额度换算基数，来自 Detect。
+	// **不设默认值**：猜错会让余额差几十万倍（newapi.go FetchAccount）。
+	QuotaPerUnit float64
 }
 
 // Session 是鉴权后的会话句柄。

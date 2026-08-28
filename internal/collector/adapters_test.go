@@ -1,0 +1,661 @@
+package collector
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// allAdapters 返回三家族适配器，供矩阵型断言复用。
+func allAdapters(c *Client) map[Family]Adapter {
+	return map[Family]Adapter{
+		FamilyNewAPI:  NewNewAPIAdapter(c),
+		FamilySub2API: NewSub2APIAdapter(c),
+		FamilyASXS:    NewASXSAdapter(c),
+	}
+}
+
+// TestCapabilitiesMatchDocMatrix 断言三家族的能力声明与 04 §3.4 矩阵逐格一致。
+//
+// 这是 AC-28 的核心判据（"各自 Capabilities() 与 04 §3.4 矩阵一致"）。
+// 写成表格是刻意的：文档那张表就是表格，逐格对照才能发现漏改。
+func TestCapabilitiesMatchDocMatrix(t *testing.T) {
+	// 04 §3.4 三家族能力矩阵总表
+	want := map[Family]CapabilityMap{
+		FamilyNewAPI: {
+			CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
+			CapPricing: Supported, CapModelCatalog: Supported,
+			CapSubscriptionQuotas: Unsupported,
+		},
+		FamilySub2API: {
+			CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
+			CapPricing: Degraded, CapModelCatalog: Supported,
+			CapSubscriptionQuotas: Unsupported,
+		},
+		FamilyASXS: {
+			CapAccount: Supported, CapKeys: Unsupported, CapGroups: Unsupported,
+			CapPricing: Degraded, CapModelCatalog: Degraded,
+			CapSubscriptionQuotas: Unsupported,
+		},
+	}
+	for fam, ad := range allAdapters(nil) {
+		got := ad.Capabilities()
+		exp := want[fam]
+		if len(got) != len(exp) {
+			t.Errorf("%s 声明 %d 项能力，矩阵有 %d 项", fam, len(got), len(exp))
+		}
+		for cap, lvl := range exp {
+			if got[cap] != lvl {
+				t.Errorf("%s.%s = %q，矩阵是 %q（04 §3.4）", fam, cap, got[cap], lvl)
+			}
+		}
+	}
+}
+
+// TestUnsupportedDeclarationsReturnErrUnsupported 是 AC-28/AC-38 的"声明与
+// 实现一致"判定：声明 unsupported 的能力**必须**返回 ErrUnsupported。
+//
+// 04 §1 记录过这个坑：此前 Sub2API/ASXS 声明 supported 而实现返回
+// ErrUnsupported，自相矛盾，AC-28 必挂。
+func TestUnsupportedDeclarationsReturnErrUnsupported(t *testing.T) {
+	ctx := context.Background()
+	for fam, ad := range allAdapters(nil) {
+		caps := ad.Capabilities()
+		s := Session{Family: fam, BaseURL: "http://127.0.0.1:1"} // 不可达，确保没真发请求
+
+		check := func(cap Capability, call func() error) {
+			t.Helper()
+			err := call()
+			if caps[cap] == Unsupported {
+				if !errors.Is(err, ErrUnsupported) {
+					t.Errorf("%s 声明 %s=unsupported，但实现未返回 ErrUnsupported（得到 %v）"+
+						" —— AC-28 要求声明与实现一致", fam, cap, err)
+				}
+				return
+			}
+			// 声明 supported/degraded 的**不得**返回 ErrUnsupported。
+			// 这里请求必然因网络失败，只断言错误类型不是 ErrUnsupported。
+			if errors.Is(err, ErrUnsupported) {
+				t.Errorf("%s 声明 %s=%s，却返回了 ErrUnsupported —— "+
+					"degraded 是能力声明不是运行时状态（04 §3.4bis）", fam, cap, caps[cap])
+			}
+		}
+
+		check(CapKeys, func() error { _, err := ad.FetchKeys(ctx, s); return err })
+		check(CapGroups, func() error { _, err := ad.FetchGroups(ctx, s); return err })
+		check(CapSubscriptionQuotas, func() error {
+			_, err := ad.FetchSubscriptionQuotas(ctx, s)
+			return err
+		})
+	}
+}
+
+// ── NewAPI 适配器 ──
+
+func newAPISite(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 04 §3.1：必须同时带 Authorization 与用户 ID 头，否则 401
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// 只认 Veloera-User —— 模拟一个二开站点改了头名，验证 fan-out
+		if r.Header.Get("Veloera-User") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/status":
+			_, _ = w.Write([]byte(`{"data":{"quota_per_unit":500000,"turnstile_check":false}}`))
+		case "/api/user/self":
+			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":1000000,"used_quota":250000}}`))
+		case "/api/token":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":7,"remain_quota":500000,"used_quota":100000,"unlimited_quota":false,
+				 "expired_time":-1,"group":"vip","model_limits_enabled":true,
+				 "model_limits":"gpt-4,gpt-3.5","request_count":123},
+				{"id":8,"remain_quota":0,"unlimited_quota":true,"expired_time":1900000000,
+				 "group":"default","model_limits_enabled":false,"model_limits":"stale-value"}
+			]}`))
+		case "/api/pricing":
+			_, _ = w.Write([]byte(`{"data":{
+				"model_ratio":{"gpt-4":15,"gpt-3.5":1},
+				"completion_ratio":{"gpt-4":3},
+				"cache_ratio":{"gpt-4":0.5},
+				"group_ratio":{"default":1,"vip":0.8}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// fan-out 必须能命中被二开改过的头名（04 §3.1）。
+func TestNewAPIAuthenticateFanOutFindsHeader(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s, err := ad.Authenticate(context.Background(), Credential{
+		Family: FamilyNewAPI, BaseURL: srv.URL,
+		AccessToken: "tok", ExternalUserID: "42", QuotaPerUnit: 500000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UserIDHeader != "Veloera-User" {
+		t.Fatalf("fan-out 命中的头名 = %q，期望 Veloera-User", s.UserIDHeader)
+	}
+}
+
+// 缺 external_user_id 必然 401，应提前拒绝而不是白打七次请求。
+func TestNewAPIAuthenticateRequiresUserID(t *testing.T) {
+	ad := NewNewAPIAdapter(NewClient(0))
+	_, err := ad.Authenticate(context.Background(), Credential{
+		Family: FamilyNewAPI, BaseURL: "http://x", AccessToken: "tok",
+	})
+	if err == nil {
+		t.Fatal("缺 external_user_id 应直接失败（04 §3.1：只带 Authorization 必然 401）")
+	}
+}
+
+// 额度换算：金额 = quota / quota_per_unit（04 §3.1）。
+func TestNewAPIFetchAccountNormalizesQuota(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "Veloera-User", ExternalUserID: "42", QuotaPerUnit: 500000,
+	}
+	acc, err := ad.FetchAccount(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1000000 / 500000 = 2 美元
+	if acc.BalanceUSD != 2 {
+		t.Errorf("余额 = %v，期望 2（1000000/500000）", acc.BalanceUSD)
+	}
+	if acc.UsedUSD != 0.5 {
+		t.Errorf("已用 = %v，期望 0.5", acc.UsedUSD)
+	}
+}
+
+// ⚠️ 缺 quota_per_unit 必须**报错而非猜**：猜 500000 而实际是 1
+// 会让余额差 50 万倍，直接导致"有钱判没钱"。
+func TestNewAPIFetchAccountRefusesToGuessQuotaPerUnit(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "Veloera-User", ExternalUserID: "42",
+		// QuotaPerUnit 故意为 0
+	}
+	if _, err := ad.FetchAccount(context.Background(), s); err == nil {
+		t.Fatal("缺 quota_per_unit 应报错而不是用默认值猜（差 50 万倍会让余额判断完全错）")
+	}
+}
+
+func TestNewAPIFetchKeys(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "Veloera-User", ExternalUserID: "42", QuotaPerUnit: 500000,
+	}
+	keys, err := ad.FetchKeys(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("Key 数 = %d，期望 2", len(keys))
+	}
+	k := keys[0]
+	if k.RemainQuotaUSD != 1 { // 500000/500000
+		t.Errorf("剩余额度 = %v，期望 1", k.RemainQuotaUSD)
+	}
+	if k.GroupRef != "vip" {
+		t.Errorf("分组 = %q", k.GroupRef)
+	}
+	// expired_time = -1 表示永不过期，不该被当成 1969 年
+	if k.ExpiredAt != nil {
+		t.Errorf("expired_time=-1 应表示永不过期，得到 %v", k.ExpiredAt)
+	}
+	if len(k.ModelLimits) != 2 {
+		t.Errorf("模型权限 = %v，期望 2 项", k.ModelLimits)
+	}
+	if k.RequestCount != 123 {
+		t.Errorf("请求数 = %d", k.RequestCount)
+	}
+	// model_limits_enabled=false 时那串值是历史残留，不得当权限用 ——
+	// 否则会错误缩小候选集
+	if len(keys[1].ModelLimits) != 0 {
+		t.Errorf("model_limits_enabled=false 时不该采纳 model_limits，得到 %v",
+			keys[1].ModelLimits)
+	}
+	// 明文不得出现在 KeyRef 里（FR-094）
+	if k.KeyRef == "" {
+		t.Error("KeyRef 应有脱敏引用值")
+	}
+}
+
+func TestNewAPIFetchGroupsAndPricing(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "Veloera-User", ExternalUserID: "42", QuotaPerUnit: 500000,
+	}
+
+	groups, err := ad.FetchGroups(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("分组数 = %d，期望 2", len(groups))
+	}
+	byRef := map[string]Group{}
+	for _, g := range groups {
+		byRef[g.GroupRef] = g
+	}
+	if byRef["vip"].RateMultiplier != 0.8 {
+		t.Errorf("vip 倍率 = %v，期望 0.8", byRef["vip"].RateMultiplier)
+	}
+	if len(byRef["vip"].AvailableModels) != 2 {
+		t.Errorf("可用模型 = %v，期望 2 个", byRef["vip"].AvailableModels)
+	}
+
+	pr, err := ad.FetchPricing(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gpt4 *ModelPrice
+	for i := range pr.Models {
+		if pr.Models[i].ModelName == "gpt-4" {
+			gpt4 = &pr.Models[i]
+		}
+	}
+	if gpt4 == nil {
+		t.Fatal("未取到 gpt-4 价格")
+	}
+	if gpt4.InputPrice != 15 {
+		t.Errorf("输入价 = %v，期望 15", gpt4.InputPrice)
+	}
+	// completion_ratio 是相对 model_ratio 的倍数：15 × 3 = 45
+	if gpt4.OutputPrice != 45 {
+		t.Errorf("输出价 = %v，期望 45（15×3）", gpt4.OutputPrice)
+	}
+	if gpt4.BillingUnit != "per_1m_token" {
+		t.Errorf("计费单位 = %q", gpt4.BillingUnit)
+	}
+	// NewAPI 声明 pricing=supported，故不该标 degraded
+	if pr.Meta.Degraded {
+		t.Error("NewAPI 的 pricing 声明 supported，不该标 Degraded")
+	}
+}
+
+func TestNewAPIModelCatalog(t *testing.T) {
+	srv := newAPISite(t)
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "Veloera-User", ExternalUserID: "42", QuotaPerUnit: 500000,
+	}
+	cat, err := ad.FetchModelCatalog(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat) != 2 {
+		t.Fatalf("目录条数 = %d，期望 2", len(cat))
+	}
+}
+
+// ── Sub2API 适配器 ──
+
+func sub2apiSite(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"id":"u-1","email":"a@b.c"}}`))
+		case "/api/v1/keys":
+			_, _ = w.Write([]byte(`{"code":0,"data":[
+				{"id":"k-1","group_id":"g-1","quota":12.5,"quota_used":2.5,
+				 "current_concurrency":3,"rate_limit_1d":100,"usage_1d":20,
+				 "window_1d_start":"2026-08-28T00:00:00Z"}]}`))
+		case "/api/v1/groups/available":
+			_, _ = w.Write([]byte(`{"code":0,"data":[
+				{"id":"g-1","rate_multiplier":0.5,"rpm_limit":60,
+				 "subscription_type":"monthly","platform":"openai",
+				 "is_exclusive":false,"peak_rate_enabled":true,
+				 "peak_rate_multiplier":1.5,"peak_start":"18:00","peak_end":"23:00",
+				 "available_models":["gpt-4","claude-3"]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+	keys, err := ad.FetchKeys(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("Key 数 = %d", len(keys))
+	}
+	k := keys[0]
+	// Sub2API 额度已是 USD 浮点，**不需换算**（04 §3.4 额度单位表）
+	if k.RemainQuotaUSD != 12.5 {
+		t.Errorf("剩余 = %v，期望 12.5（USD 浮点直接用）", k.RemainQuotaUSD)
+	}
+	if k.RateLimit.Concurrency != 3 {
+		t.Errorf("并发 = %d", k.RateLimit.Concurrency)
+	}
+	w, ok := k.RateLimit.Windows["1d"]
+	if !ok {
+		t.Fatal("缺 1d 窗口用量")
+	}
+	if w.LimitUSD != 100 || w.UsageUSD != 20 {
+		t.Errorf("1d 窗口 = %+v", w)
+	}
+}
+
+func TestSub2APIFetchGroups(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+	groups, err := ad.FetchGroups(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := groups[0]
+	if g.RateMultiplier != 0.5 || g.RPMLimit != 60 {
+		t.Errorf("倍率/RPM = %v/%d", g.RateMultiplier, g.RPMLimit)
+	}
+	if len(g.AvailableModels) != 2 {
+		t.Errorf("可用模型 = %v", g.AvailableModels)
+	}
+	// 高峰倍率采到但只进 payload（ISSUE-005 §3.1），此处验证确实采到了
+	if !g.PeakEnabled || g.PeakMultiplier != 1.5 {
+		t.Errorf("高峰字段未采到: enabled=%v mult=%v", g.PeakEnabled, g.PeakMultiplier)
+	}
+}
+
+// Sub2API 声明 pricing=degraded：必须返回数据 + nil，并标明缺什么。
+func TestSub2APIPricingIsDegradedNotUnsupported(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+
+	pr, err := ad.FetchPricing(context.Background(), s)
+	if err != nil {
+		t.Fatalf("degraded 能力应返回 nil error（04 §3.4bis）: %v", err)
+	}
+	if !pr.Meta.Degraded {
+		t.Error("应标 Meta.Degraded=true")
+	}
+	if len(pr.Meta.MissingFields) == 0 {
+		t.Error("应用 MissingFields 说明缺哪些字段（供 inventory 的待补录计数）")
+	}
+	if len(pr.GroupRatios) == 0 {
+		t.Error("degraded 不等于没数据：分组倍率仍应采到")
+	}
+}
+
+// FetchAccount 拿不到余额时必须标 degraded，**不得谎报 0 余额** ——
+// 那会让 selector 把渠道判成耗尽。
+func TestSub2APIAccountDoesNotFakeZeroBalance(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	s := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+	acc, err := ad.FetchAccount(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acc.Meta.Degraded {
+		t.Error("Sub2API 的 /auth/me 不给余额，必须标 Degraded 而非静默留 0")
+	}
+	found := false
+	for _, f := range acc.Meta.MissingFields {
+		if f == "balance_usd" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MissingFields 应含 balance_usd，得到 %v", acc.Meta.MissingFields)
+	}
+}
+
+// Refresh 必须接住轮换后的 refresh_token —— 旧的已被作废（04 §5.2）。
+func TestSub2APIRefreshCapturesRotatedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/refresh" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"access_token":"new-a",
+			"refresh_token":"new-r","expires_in":86400}}`))
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	got, err := ad.Refresh(context.Background(), Credential{
+		Family: FamilySub2API, BaseURL: srv.URL, RefreshToken: "old-r",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != "new-a" {
+		t.Errorf("access_token = %q", got.AccessToken)
+	}
+	if got.RefreshToken != "new-r" {
+		t.Fatalf("refresh_token = %q，必须接住轮换后的值（旧的已被作废，"+
+			"不更新会让下次刷新必然失败）", got.RefreshToken)
+	}
+	if got.TokenExpiresAt.Before(time.Now().Add(23 * time.Hour)) {
+		t.Errorf("到期时间未按 expires_in 设置: %v", got.TokenExpiresAt)
+	}
+}
+
+// 响应没给 expires_in 时应按 24h 兜底，而不是留零值
+// （零值会让 NeedsRefresh 永远返 false，令牌到期后静默 401）。
+func TestSub2APIRefreshDefaultsExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"access_token":"a","refresh_token":"r"}}`))
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	got, err := ad.Refresh(context.Background(), Credential{
+		Family: FamilySub2API, BaseURL: srv.URL, RefreshToken: "old",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TokenExpiresAt.IsZero() {
+		t.Fatal("缺 expires_in 时应按 24h 兜底——留零值会让 NeedsRefresh 恒 false")
+	}
+}
+
+func TestSub2APIRefreshWithoutTokenNeedsRelogin(t *testing.T) {
+	ad := NewSub2APIAdapter(NewClient(0))
+	_, err := ad.Refresh(context.Background(), Credential{Family: FamilySub2API})
+	if !errors.Is(err, ErrNeedsRelogin) {
+		t.Fatalf("无 refresh_token 应返回 ErrNeedsRelogin，得到 %v", err)
+	}
+}
+
+// ── ASXS 适配器 ──
+
+func TestASXSBalanceHandlesStringNumber(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/me/balance":
+			// ⚠️ balanceUsd 是**字符串**（04 §3.3 实测）
+			_, _ = w.Write([]byte(`{"data":{"balanceUsd":"90.50","usedMicros":1500000}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewASXSAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	acc, err := ad.FetchAccount(context.Background(),
+		Session{Family: FamilyASXS, BaseURL: srv.URL, Token: "jwt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.BalanceUSD != 90.50 {
+		t.Fatalf("余额 = %v，期望 90.5 —— balanceUsd 是字符串，"+
+			"用 float64 断言会静默得到 0，把有钱的渠道判成耗尽", acc.BalanceUSD)
+	}
+	// usedMicros 按 1e6 换算（04 §3.3）
+	if acc.UsedUSD != 1.5 {
+		t.Errorf("已用 = %v，期望 1.5（1500000/1e6）", acc.UsedUSD)
+	}
+}
+
+// 余额字段全缺时必须报错，不能静默返回 0 余额。
+func TestASXSBalanceRefusesToFakeZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"unrelated":1}}`))
+	}))
+	defer srv.Close()
+
+	ad := NewASXSAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	if _, err := ad.FetchAccount(context.Background(),
+		Session{Family: FamilyASXS, BaseURL: srv.URL, Token: "jwt"}); err == nil {
+		t.Fatal("余额字段全缺应报错，不能静默返回 0（那会被判成余额耗尽）")
+	}
+}
+
+// ASXS 无 refresh 路径，无账密时必须要求人工重登（04 §5.3）。
+func TestASXSRefreshRequiresCredentials(t *testing.T) {
+	ad := NewASXSAdapter(NewClient(0))
+	_, err := ad.Refresh(context.Background(), Credential{Family: FamilyASXS})
+	if !errors.Is(err, ErrNeedsRelogin) {
+		t.Fatalf("无账密应返回 ErrNeedsRelogin，得到 %v", err)
+	}
+}
+
+func TestASXSReloginSets7DayExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/manage/auth/login" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"token":"fresh-jwt"}}`))
+	}))
+	defer srv.Close()
+
+	ad := NewASXSAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	got, err := ad.Refresh(context.Background(), Credential{
+		Family: FamilyASXS, BaseURL: srv.URL,
+		Username: "u", Password: "p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != "fresh-jwt" {
+		t.Errorf("token = %q", got.AccessToken)
+	}
+	// 04 §3.3 实测：ASXS 的 JWT 固定 168 小时
+	wantMin := time.Now().Add(167 * time.Hour)
+	if got.TokenExpiresAt.Before(wantMin) {
+		t.Errorf("到期时间 = %v，期望约 7 天后", got.TokenExpiresAt)
+	}
+}
+
+// ── 限速 ──
+
+// 同 host 的连续请求必须被限速隔开（04 §6：避免触发风控）。
+func TestClientRateLimitsPerHost(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(80 * time.Millisecond)
+	c.HC = srv.Client()
+	s := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "t"}
+
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if _, _, err := c.getJSONAuth(context.Background(), s, "/x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 3 次请求至少间隔 2 个 interval
+	if el := time.Since(start); el < 160*time.Millisecond {
+		t.Errorf("3 次请求耗时 %v，期望 ≥160ms（限速未生效会触发上游风控）", el)
+	}
+	if hits != 3 {
+		t.Errorf("实际请求 %d 次", hits)
+	}
+}
+
+// 401 必须可被识别，供调用方触发续期或人工重登。
+func TestUnauthorizedIsDistinguishable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := NewClient(0)
+	c.HC = srv.Client()
+	_, _, err := c.getJSONAuth(context.Background(),
+		Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "t"}, "/x")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("401 应返回 ErrUnauthorized，得到 %v", err)
+	}
+}
