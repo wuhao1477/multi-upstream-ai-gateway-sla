@@ -1,0 +1,284 @@
+package collector
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// ItemStatus 是 sync 逐项结果（09 §5.0bis 的五态）。
+type ItemStatus string
+
+const (
+	StatusOK          ItemStatus = "ok"
+	StatusPartial     ItemStatus = "partial" // 仅 keys 可能：部分 Key 失败
+	StatusFailed      ItemStatus = "failed"
+	StatusUnsupported ItemStatus = "unsupported"
+	StatusSkipped     ItemStatus = "skipped" // 被限流跳过
+)
+
+// SyncItem 是一项采集的结果。
+type SyncItem struct {
+	Capability Capability `json:"capability"`
+	Status     ItemStatus `json:"status"`
+	ElapsedMs  int64      `json:"elapsed_ms"`
+	Rows       int        `json:"rows,omitempty"`
+	Failed     int        `json:"failed,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	Note       string     `json:"note,omitempty"`
+}
+
+// SyncResult 是一次 sync 的完整结果（09 §5.0bis 的响应结构）。
+type SyncResult struct {
+	ChannelID  int64      `json:"channel_id"`
+	SiteFamily Family     `json:"site_family"`
+	StartedAt  time.Time  `json:"started_at"`
+	ElapsedMs  int64      `json:"elapsed_ms"`
+	Items      []SyncItem `json:"items"`
+}
+
+// Sink 是采集结果的落库出口。
+//
+// 抽成接口让 sync 编排可脱库单测 —— 编排逻辑（顺序、事务边界、部分失败语义）
+// 是本模块最容易出错的部分，不该只能靠集成测试验证。
+type Sink interface {
+	// SaveAccount 写余额信号与账号快照。
+	SaveAccount(ctx context.Context, channelID int64, a Account) error
+	// SaveGroups 写分组与分组可用模型（单事务）。
+	SaveGroups(ctx context.Context, channelID int64, gs []Group) (int, error)
+	// SaveKey 写一把 Key 的用量（每把一个事务）。
+	// 返回 ErrKeyNotRegistered 表示上游有、库中无 —— 计入异常项而非失败。
+	SaveKey(ctx context.Context, channelID int64, k Key) error
+	// SavePricing 写价格版本。
+	SavePricing(ctx context.Context, channelID int64, p Pricing) (int, error)
+	// SaveCatalog 写模型目录（upsert，first_seen_at 不覆盖）。
+	SaveCatalog(ctx context.Context, channelID int64, cs []CatalogModel) (int, error)
+}
+
+// ErrKeyNotRegistered：采到一把库中未登记的 Key。
+//
+// **不是失败**（02 §1.3bis）：采集不自动创建 Key（secret 是明文凭证，
+// 上游只回掩码，凭空插一行会让它永远不可用），故计入 inventory 异常项
+// 提示运维补登记。
+var ErrKeyNotRegistered = errors.New("collector: 上游存在但库中未登记的 Key")
+
+// Syncer 执行一次渠道的全量采集编排。
+type Syncer struct {
+	Adapter Adapter
+	Sink    Sink
+	// Auth 用于在采集前确保凭证新鲜（不变式 S-1 在此生效）。
+	Auth *Authenticator
+	// Refresher 是站型特定的续期实现（NewAPI 传 nil：不变式 N-1 禁止刷新）。
+	Refresher Refresher
+}
+
+// Sync 按 09 §5.0bis 的**冻结顺序**执行，逐项独立提交。
+//
+// 顺序（有依赖，不可交换）：
+//
+//	① Authenticate      失败即整体中止，不写任何表
+//	② FetchAccount      产出 external_user_id，NewAPI 后续请求头部必需
+//	③ FetchGroups       **必须先于 ④**（Key 的外键要分组行先存在）
+//	④ FetchKeys
+//	⑤ FetchPricing
+//	⑥ FetchModelCatalog
+//
+// 事务边界：**逐项独立提交，不做跨项大事务**。理由（09 §5.0bis）——
+// 一次 sync 可能写数百行，单事务会长时间持锁；且"价格采到了但目录超时"
+// 没有理由把价格也丢掉：采集是幂等补齐动作，不是要么全有要么全无的账务操作。
+func (s *Syncer) Sync(ctx context.Context, cred Credential) (*SyncResult, error) {
+	res := &SyncResult{
+		ChannelID: cred.ChannelID, SiteFamily: cred.Family,
+		StartedAt: time.Now(),
+	}
+	defer func() { res.ElapsedMs = time.Since(res.StartedAt).Milliseconds() }()
+
+	caps := s.Adapter.Capabilities()
+
+	// ── ① 凭证新鲜 + 鉴权。失败即整体中止：连不上或认不过，谈不上采集 ──
+	if s.Auth != nil && s.Refresher != nil {
+		fresh, err := s.Auth.EnsureFresh(ctx, cred, s.Refresher, time.Now())
+		if err != nil {
+			return res, fmt.Errorf("凭证续期失败: %w", err)
+		}
+		cred = fresh
+	}
+	sess, err := s.Adapter.Authenticate(ctx, cred)
+	if err != nil {
+		return res, fmt.Errorf("鉴权失败: %w", err)
+	}
+
+	// ── ② 账号 ──
+	s.run(ctx, res, caps, CapAccount, func() (int, int, string, error) {
+		a, err := s.Adapter.FetchAccount(ctx, sess)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		// ⚠️ 账号级的 external_user_id 要回填进会话：NewAPI 系后续请求
+		// 必须带用户 ID 头（04 §3.1），Detect 阶段拿不到它。
+		if a.UserID != "" && sess.ExternalUserID == "" {
+			sess.ExternalUserID = a.UserID
+		}
+		if err := s.Sink.SaveAccount(ctx, cred.ChannelID, a); err != nil {
+			return 0, 0, "", err
+		}
+		return 1, 0, degradedNote(a.Meta), nil
+	})
+
+	// ── ③ 分组（必须先于 ④）──
+	s.run(ctx, res, caps, CapGroups, func() (int, int, string, error) {
+		gs, err := s.Adapter.FetchGroups(ctx, sess)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		n, err := s.Sink.SaveGroups(ctx, cred.ChannelID, gs)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		var note string
+		if len(gs) > 0 {
+			note = degradedNote(gs[0].Meta)
+		}
+		return n, 0, note, nil
+	})
+
+	// ── ④ Key：**每把一个事务**，单把失败不影响其它（09 §5.0bis）──
+	s.run(ctx, res, caps, CapKeys, func() (int, int, string, error) {
+		ks, err := s.Adapter.FetchKeys(ctx, sess)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		var ok, failed, unregistered int
+		var firstErr error
+		for _, k := range ks {
+			err := s.Sink.SaveKey(ctx, cred.ChannelID, k)
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrKeyNotRegistered):
+				// 上游有、库中无 → 异常项而非失败（02 §1.3bis）
+				unregistered++
+			default:
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		note := ""
+		if unregistered > 0 {
+			note = fmt.Sprintf("%d 把 Key 上游存在但库中未登记，需补登记（计入异常项）",
+				unregistered)
+		}
+		if failed > 0 {
+			return ok, failed, note, fmt.Errorf("部分 Key 写入失败: %w", firstErr)
+		}
+		return ok, 0, note, nil
+	})
+
+	// ── ⑤ 价格 ──
+	s.run(ctx, res, caps, CapPricing, func() (int, int, string, error) {
+		p, err := s.Adapter.FetchPricing(ctx, sess)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		n, err := s.Sink.SavePricing(ctx, cred.ChannelID, p)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		return n, 0, degradedNote(p.Meta), nil
+	})
+
+	// ── ⑥ 目录 ──
+	s.run(ctx, res, caps, CapModelCatalog, func() (int, int, string, error) {
+		cs, err := s.Adapter.FetchModelCatalog(ctx, sess)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		n, err := s.Sink.SaveCatalog(ctx, cred.ChannelID, cs)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		var note string
+		if len(cs) > 0 {
+			note = degradedNote(cs[0].Meta)
+		}
+		return n, 0, note, nil
+	})
+
+	// ── 订阅：P4，但**必须出现在 items 里** ──
+	// AC-38 要求"不支持的项返回明确的不支持而非静默留空"，
+	// 且须与 Capabilities() 声明一致。
+	res.Items = append(res.Items, SyncItem{
+		Capability: CapSubscriptionQuotas,
+		Status:     StatusUnsupported,
+		Note:       "订阅制属交付阶段 P4（ISSUE-005 §2）",
+	})
+
+	return res, nil
+}
+
+// run 执行一项采集并记录结果。
+//
+// 声明 unsupported 的项**不执行**，直接记 unsupported —— 既省一次无谓请求，
+// 也保证 items 里必然出现该项（AC-38）。
+func (s *Syncer) run(
+	_ context.Context, res *SyncResult, caps CapabilityMap, cap Capability,
+	fn func() (rows int, failed int, note string, err error),
+) {
+	if caps[cap] == Unsupported {
+		res.Items = append(res.Items, SyncItem{
+			Capability: cap, Status: StatusUnsupported,
+			Note: "该站型不支持此能力（04 §3.4）",
+		})
+		return
+	}
+
+	start := time.Now()
+	rows, failed, note, err := fn()
+	item := SyncItem{
+		Capability: cap,
+		ElapsedMs:  time.Since(start).Milliseconds(),
+		Rows:       rows, Failed: failed, Note: note,
+	}
+	switch {
+	case err != nil && failed > 0:
+		// 部分成功（只有 keys 会到这里）
+		item.Status = StatusPartial
+		item.Error = err.Error()
+	case err != nil:
+		item.Status = StatusFailed
+		item.Error = err.Error()
+		// ⚠️ degraded 能力返回 ErrUnsupported 是**实现 bug**，不是正常状态
+		// （04 §3.4bis）。显式点出来，避免它被当成"这个站不支持"而忽略。
+		if errors.Is(err, ErrUnsupported) && caps[cap] == Degraded {
+			item.Note = "⚠️ 声明 degraded 却返回 ErrUnsupported —— " +
+				"违反 04 §3.4bis，属实现缺陷"
+		}
+	default:
+		item.Status = StatusOK
+	}
+	res.Items = append(res.Items, item)
+}
+
+// degradedNote 把 Degraded/MissingFields 转成人可读的说明。
+func degradedNote(m SourceMeta) string {
+	if !m.Degraded {
+		return ""
+	}
+	if len(m.MissingFields) == 0 {
+		return "该站型此项为 degraded（部分字段缺失）"
+	}
+	return fmt.Sprintf("degraded：缺 %v，需人工补录（FR-011）", m.MissingFields)
+}
+
+// HasFailure 报告是否有任何一项失败，供调用方决定 HTTP 状态码。
+func (r *SyncResult) HasFailure() bool {
+	for _, it := range r.Items {
+		if it.Status == StatusFailed || it.Status == StatusPartial {
+			return true
+		}
+	}
+	return false
+}

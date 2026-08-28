@@ -275,14 +275,20 @@ CREATE TABLE channel_model_catalog (
   PRIMARY KEY (channel_id, model_name)
 );
 
--- upstream_keys 补 6 列（FR-122/125/127）
+-- upstream_keys 补 7 列（FR-122/125/127）
 ALTER TABLE upstream_keys
   ADD COLUMN channel_group_id BIGINT REFERENCES channel_groups(id),  -- Key 归属分组（FR-123）
   ADD COLUMN remain_quota_usd nonneg_usd,     -- 剩余额度（归一美元，FR-125）
   ADD COLUMN used_quota_usd   nonneg_usd,     -- 已用额度（FR-125）
   ADD COLUMN rpm_limit        INTEGER,        -- 上游 Key 级 RPM（FR-127；**P1 只存不判**）
   ADD COLUMN concurrency_limit INTEGER,       -- 上游 Key 级并发（FR-127；同上）
-  ADD COLUMN quota_synced_at  TIMESTAMPTZ;    -- 最近同步时刻（陈旧判定，FR-128）
+  ADD COLUMN quota_synced_at  TIMESTAMPTZ,    -- 最近同步时刻（陈旧判定，FR-128）
+  -- external_ref：上游侧的 Key 标识（第 46 轮补，实现时发现缺）。
+  -- 采集只能拿到上游的 key id/name（脱敏引用），**拿不到明文 secret**，
+  -- 故无法用 secret 反查库中是哪一行 —— 没有这一列，"把采到的用量写回对应
+  -- Key"就无从落地，而那正是 FR-125 的核心。
+  -- 唯一性作用域是**账号**而非渠道：同一渠道下不同账号在上游各有独立的 id 空间。
+  ADD COLUMN external_ref    TEXT;
 ```
 
 **索引**
@@ -291,6 +297,8 @@ ALTER TABLE upstream_keys
 CREATE INDEX idx_chgroups_channel ON channel_groups(channel_id);
 CREATE INDEX idx_catalog_channel  ON channel_model_catalog(channel_id, last_seen_at DESC);
 CREATE INDEX idx_keys_group       ON upstream_keys(channel_group_id);
+CREATE UNIQUE INDEX idx_keys_external_ref
+  ON upstream_keys (account_id, external_ref) WHERE external_ref IS NOT NULL;
 ```
 
 #### 1.3bis 三张表的写入语义（**P1 必需**，第 45 轮补）
