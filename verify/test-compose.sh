@@ -17,26 +17,52 @@ echo "── 1/5 起栈 ──"
 # Caddy 用自签证书，故 curl 加 -k
 CURL=(curl -sk --max-time 5)
 
+# ⚠️ 判据必须是**真的拿到 200**，不能只看 curl 退出码：
+#    重定向、404 文本、空体都会让 curl 退 0，于是"就绪"通过而下一步炸在
+#    JSON 解析上（本轮就这样，报了个看不出病因的 Expecting value）。
 ready=false
 for _ in $(seq 1 90); do
-  if "${CURL[@]}" https://localhost/healthz >/dev/null 2>&1; then ready=true; break; fi
+  if [ "$("${CURL[@]}" -o /dev/null -w '%{http_code}' https://localhost/healthz 2>/dev/null)" = "200" ]; then
+    ready=true; break
+  fi
   sleep 2
 done
-$ready || { echo "❌ 90 次重试后 /healthz 仍不可达"; "${COMPOSE[@]}" logs --tail=40; exit 1; }
+$ready || {
+  echo "❌ 90 次重试后 /healthz 仍未返回 200"
+  echo "── 最后一次响应 ──"
+  "${CURL[@]}" -i https://localhost/healthz 2>&1 | head -20 || true
+  echo "── caddy 日志 ──"; "${COMPOSE[@]}" logs --tail=25 caddy
+  echo "── core 日志 ──"; "${COMPOSE[@]}" logs --tail=15 sla-core-a sla-core-b
+  exit 1; }
 echo "   ✅ 栈已就绪"
 
 echo "── 2/5 /healthz 内容正确 ──"
-BODY=$("${CURL[@]}" https://localhost/healthz)
-echo "$BODY" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-assert d['status']=='ok', d
-assert d['db']=='ok', d
-assert d['config_snapshot']=='loaded', d
+# 状态码与响应体分开取：先断言 200 再解析 JSON。
+# 直接 json.load 会在非 JSON 响应（重定向空体、404 文本）上抛栈，
+# 报"Expecting value: line 2 column 1"这种看不出病因的错。
+HCODE=$("${CURL[@]}" -o /tmp/healthz.json -w "%{http_code}" https://localhost/healthz)
+if [ "$HCODE" != "200" ]; then
+  echo "❌ /healthz 返回 $HCODE，期望 200"
+  echo "   响应体："; head -c 500 /tmp/healthz.json; echo
+  "${COMPOSE[@]}" logs --tail=30 caddy
+  exit 1
+fi
+python3 - <<'PYEOF'
+import json, sys
+raw = open('/tmp/healthz.json').read()
+try:
+    d = json.loads(raw)
+except Exception as e:
+    print(f"❌ /healthz 响应不是 JSON: {e}")
+    print("   原始响应:", repr(raw[:300]))
+    sys.exit(1)
+assert d['status'] == 'ok', d
+assert d['db'] == 'ok', d
+assert d['config_snapshot'] == 'loaded', d
 # 06 §6 纪律：响应须声明本端点不代表上游可用性
 assert d.get('note'), '缺少 note 声明（06 §6 健康语义分层）'
 print('   ✅', d['status'], '| db', d['db'], '| snapshot', d['config_snapshot'])
-"
+PYEOF
 
 echo "── 3/5 选主：迁移只执行一遍，落败者等待而非跳过 ──"
 # ⚠️ 这一步抓到过真 bug：首版落败者 return nil 直接去灌种子，而抢到锁的
