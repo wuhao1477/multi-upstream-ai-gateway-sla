@@ -293,6 +293,46 @@ CREATE INDEX idx_catalog_channel  ON channel_model_catalog(channel_id, last_seen
 CREATE INDEX idx_keys_group       ON upstream_keys(channel_group_id);
 ```
 
+#### 1.3bis 三张表的写入语义（**P1 必需**，第 45 轮补）
+
+> ⚠️ **此前"采不到即删行"只是砍掉 `available` 列的理由，不是实现规则** —— 先删后插还是 diff？什么事务包住？两次 sync 并发会不会互相删？`first_seen_at`/`last_seen_at` 的 upsert 也只有一句括号说明。开发无从下笔（开发视角审查第 45 轮）。
+
+**`group_models`：按分组全量替换，单事务**
+
+```sql
+-- 在 sync 的 ③ 分组事务内，逐个 channel_group_id 执行
+BEGIN;
+DELETE FROM group_models WHERE channel_group_id = :gid;
+INSERT INTO group_models (channel_group_id, model_name, fetched_at)
+SELECT :gid, unnest(:model_names::text[]), :fetched_at;
+COMMIT;
+```
+
+- **全量替换而非 diff**：分组可用模型是**上游的完整声明**，diff 需要额外判断"这次没返回"是"下架了"还是"接口抽风"——而全量替换配合"采集失败则整项 `failed`、不进事务"已经表达了正确语义：**要么用这次的完整快照，要么保留上一次的**。
+- **并发安全**：③ 已被 `sync` 的渠道级 advisory lock 串行化（[09 §5.0bis](./09-admin-api.md)），同渠道不会有两个 sync 同时删同一分组。
+- **空结果的处理**：若上游明确返回"该分组零个可用模型"，则删完不插——这是合法状态。但**若采集报错，整项 `failed`、事务不提交**，旧行保留。
+
+**`channel_model_catalog`：upsert，`first_seen_at` 只在插入时写**
+
+```sql
+INSERT INTO channel_model_catalog
+       (channel_id, model_name, input_price, output_price, first_seen_at, last_seen_at)
+VALUES (:cid, :name, :in_price, :out_price, :now, :now)
+ON CONFLICT (channel_id, model_name) DO UPDATE
+   SET input_price   = EXCLUDED.input_price,
+       output_price  = EXCLUDED.output_price,
+       last_seen_at  = EXCLUDED.last_seen_at;
+       -- ⚠️ **不更新 first_seen_at** —— 它记录"首次见到"，被覆盖就永久丢失
+```
+
+- **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断——`last_seen_at` 停止前进**本身就是下架信号**。
+- **下架判据**：`last_seen_at` 连续 `catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）轮采集未前进 → 视为下架，触发 P3 告警（AC-40）。用"轮数"而非"时长"是因为采集周期可配，轮数对周期变化免疫。
+
+**`upstream_keys` 的用量列：只更新、不插入**
+
+- Key 行由 `/admin/keys` 人工登记（我们持有的凭证不可能从上游"发现"），采集只 `UPDATE` 用量列 + `channel_group_id` + `quota_synced_at`。
+- **采集到一把库里没有的 Key**（运营在上游侧新建但没登记）：**不自动插入**，记 `collector_snapshots(scope_type='key')` 并在 `inventory` 的异常项计数里 +1 提示运维补登记。理由：`upstream_keys.secret` 是明文凭证，上游列表接口通常只回前缀或掩码，**凭空插一行没有 secret 的 Key 会让它永远不可用**且污染资产台账。
+
 **几处刻意的取舍**
 
 | 决定 | 理由 |
@@ -2738,6 +2778,23 @@ CREATE TABLE balance_signals (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+#### 7.1 `collector_snapshots.payload` 的逐 scope_type 结构（**P1 必需**，第 45 轮补）
+
+> ⚠️ **此前只写了"归一后数值元数据"** —— 而 P1 的 [`GET /admin/keys/{id}/usage`](./09-admin-api.md) 被定义为"读该 payload 的时序"，[04 §4](./04-collector-adapter.md) 也要求把 Key 用量历史与分组的高峰倍率等字段写进 payload。**写入侧与读取侧都没有可实现的契约**（开发视角审查第 45 轮）。
+>
+> **总则**：payload 只存**归一后的数值与枚举**（金额一律 `usd_amount` 数值、时间一律 ISO8601 字符串），**不存上游返回正文**（FR-112）。键名一律 snake_case。**未采到的字段一律省略该键**，不写 `null` —— 便于区分"没采到"与"采到的值是 0"。
+
+| `scope_type` | `scope_id` 填什么 | payload 必备键 | 可选键 |
+| --- | --- | --- | --- |
+| `key` | `upstream_keys.id`（十进制字符串） | `remain_quota_usd`、`used_quota_usd` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
+| `group` | `channel_groups.group_ref` | `rate_multiplier` | `peak_enabled`、`peak_start`、`peak_end`、`peak_rate_multiplier`、`is_exclusive`、`platform`、`subscription_type`、`rpm_limit` —— **这几项 P1 只进 payload、不落结构化列**（[§1.3](#13-上游分组与模型目录交付阶段-p1fr-123127) 的取舍表），P2/P3 需要时按本表回填 |
+| `account` | `upstream_accounts.id` | `balance_usd` | `used_usd`、`external_user_id`、`quota_per_unit`（NewAPI 的额度换算基数，逐站不同、**不可写死**） |
+| `pricing` | `models.canonical_name` 或上游原始模型名 | `input_price`、`output_price` | `cache_price`、`billing_unit`、`group_ratio`、`completion_ratio` |
+| `subscription` | ⏭ P4 | — | 订阅制整体推迟，P1~P3 不写该 scope |
+
+- **`GET /admin/keys/{id}/usage` 的读取契约**：按 `scope_type='key' AND scope_id=<id>` 取，按 `fetched_at` 升序返回 `{fetched_at, remain_quota_usd, used_quota_usd, request_count?}` 序列。缺键的点位**跳过该字段**而不是填 0（填 0 会在曲线上造出假的"额度归零"）。
+- **为何 `scope_id` 用 TEXT 存数字 id**：该列是跨 scope 复用的通用标识（`group` 用的是字符串 `group_ref`），故统一 TEXT；读取侧自行转换。
 
 **索引**
 

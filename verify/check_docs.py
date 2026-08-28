@@ -321,6 +321,8 @@ PG_BUILTIN = {
     "count", "coalesce", "greatest", "least", "now", "date_trunc", "floor", "ceil",
     "max", "min", "sum", "avg", "abs", "nullif", "percentile_disc", "length",
     "to_char", "extract", "gen_random_uuid", "concat", "round", "sqrt",
+    # 第 45 轮补：数组展开与哈希，均为 PG 内置
+    "unnest", "hashtext", "array_agg", "cardinality",
 }
 DEFINED_FN = set(re.findall(r"CREATE (?:OR REPLACE )?FUNCTION (\w+)", sql))
 for f, body in ALLDEV.items():

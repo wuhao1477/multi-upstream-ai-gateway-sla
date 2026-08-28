@@ -208,6 +208,9 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `collector_price_interval_h` | 6 | | 价格采集周期（小时） |
 | `collector_balance_interval_min` | 5 | | 余额采集周期（分钟） |
 | `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
+| `collector_catalog_interval_h` | 12 | | 渠道模型目录采集周期（小时，FR-126）。比价格稀疏——目录变动频率远低于价格 |
+| `catalog_missing_rounds` | 3 | | 模型连续 N 轮未出现即判下架并告警（FR-126/AC-40）。⚠️ **用轮数而非时长**：采集周期本身可配，轮数对周期变化免疫。**缺此键会静默取 0 → 每轮都判下架**（第 45 轮补，AC-40 早已声称"可配、默认 3"却从未登记） |
+| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128）。间隔内再调返回 429 且不打上游（[§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)） |
 | **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
 | `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
 | `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
@@ -241,8 +244,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | 端点 | 作用 | 阶段 |
 | --- | --- | --- |
 | `GET /admin/channels`、`POST /admin/channels`、`PATCH /admin/channels/{id}` | 渠道 CRUD。此前只能经 `/admin/bindings` 间接建渠道，无独立管理面 | **P1** |
-| `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / 异常项计数（FR-128 展示面、FR-129 并入） | **P1** |
-| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）：按站型依次跑 `FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`，返回**逐项结果与耗时**；该站型不支持的项返回 `unsupported` 而非静默留空（与 AC-28 同口径）。⚠️ 须限流（同渠道最小间隔，[04 §6](./04-collector-adapter.md)），防手点触发上游风控 | **P1** |
+| `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / **异常项计数**（FR-128 展示面、FR-129 并入）。<br>**异常项的构成（第 45 轮定义——它被三处引用却从未定义）**：① 数据陈旧（`fetched_at` 超对应 `collector_*_interval` 的 2 倍）；② `Degraded` 结果的 `MissingFields` 待人工补录（[04 §3.4bis](./04-collector-adapter.md)）；③ 上游存在但库中未登记的 Key（[02 §1.3bis](./02-data-model.md)）；④ 疑似下架模型（`catalog_missing_rounds` 已达阈值）；⑤ 凭证状态非 `valid`（`collector_credentials.status`）；⑥ Key 状态非 `active` 或已过期。**逐类给出计数与可下钻的列表**，不合并为一个总数——否则运维看到"异常 7"却不知道该修什么 | **P1** |
+| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现 | **P1** |
 | `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
 | `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；可设 `channel_group_id` | **P1** |
 | `POST /admin/keys/{id}/rotate`、`POST /admin/keys/{id}/disable` | Key 轮换与停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
@@ -250,6 +253,64 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
+
+### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
+
+> ⚠️ **此前只有一句"依次跑五个 Fetch、返回逐项结果"** —— 顺序依据、事务边界、第 3 项失败时前 2 项是否回滚、响应长什么样、并发点两次会怎样，**全部未定义**。这是 P1 最核心的端点，开发第一天就会卡在这里（开发视角审查第 45 轮）。
+
+**执行顺序（有依赖，不可交换）**：
+
+```text
+① Authenticate            —— 失败即整体中止（后续全部依赖会话句柄）
+② FetchAccount            —— 产出 external_user_id，NewAPI 系后续请求的头部必需
+③ FetchGroups             —— 必须先于 ④：Key 要挂 channel_group_id，分组行得先存在
+④ FetchKeys               —— 写 upstream_keys 的用量列 + channel_group_id
+⑤ FetchPricing            —— 写 price_versions（不可覆盖版本）
+⑥ FetchModelCatalog       —— 写 channel_model_catalog
+```
+
+- **①② 是硬前置**，失败则整体返回 `502` 并**不写任何表**（连不上或认不过，谈不上采集）。
+- **③ 必须先于 ④**：`upstream_keys.channel_group_id` 是外键指向 `channel_groups`，反序会拿不到 id。
+- **⑤⑥ 相互独立**，可并发；但为限流简单起见 P1 串行执行。
+
+**事务边界：逐项独立提交，不做跨项大事务**：
+
+| 项 | 事务粒度 | 失败影响 |
+| --- | --- | --- |
+| ③ 分组 | 一个事务（含 `group_models` 全量替换，见 [02 §1.3bis](./02-data-model.md)） | 只该项标 `failed`，④ 仍可跑（Key 的 `channel_group_id` 留空并记 warning） |
+| ④ Key | **每把 Key 一个事务** | 单把 Key 失败不影响其它 Key |
+| ⑤ 价格 | 一个事务（每个模型一条 `price_versions` INSERT） | 只该项 `failed` |
+| ⑥ 目录 | 一个事务（upsert 全量，见 [02 §1.3bis](./02-data-model.md)） | 只该项 `failed` |
+
+- **为何不用一个大事务**：一次 sync 可能写数百行（200+ 目录模型 + 数十把 Key），单事务会长时间持锁；且"价格采到了但目录超时"时**没有理由把价格也丢掉**——采集是幂等的补齐动作，不是要么全有要么全无的账务操作。
+- **每项都在自己事务里写一条 `collector_snapshots`**（[02 §7.1](./02-data-model.md) 的 payload 结构），保证"这次采到什么"与业务表同生共死。
+
+**响应结构**（`200` 表示"编排完成"，逐项成败看 `items`）：
+
+```json
+{
+  "channel_id": 7, "site_family": "newapi", "started_at": "…", "elapsed_ms": 4210,
+  "items": [
+    {"capability":"account","status":"ok","elapsed_ms":210,"rows":1},
+    {"capability":"groups","status":"ok","elapsed_ms":180,"rows":3},
+    {"capability":"keys","status":"partial","elapsed_ms":900,"rows":3,
+     "failed":1,"error":"key 12: 401 unauthorized"},
+    {"capability":"pricing","status":"ok","elapsed_ms":760,"rows":214},
+    {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214},
+    {"capability":"subscription_quotas","status":"unsupported"}
+  ]
+}
+```
+
+- `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（被限流跳过）。
+- **`unsupported` 必须出现在 `items` 里**，不能省略该项——AC-38 要求"不支持的项返回明确的不支持而非静默留空"，且须与 `Capabilities()` 声明一致。
+- **`degraded` 能力的 status 取值**：见 [04 §3.4bis](./04-collector-adapter.md) —— 采到部分即 `ok` 并在 `note` 说明缺哪些字段，采不到即 `failed`；**`degraded` 是能力声明，不是运行时状态**。
+
+**限流与并发**：
+
+- **同渠道最小间隔** `sync_min_interval_s`（默认 60，`config_params`）：间隔内再次调用返回 **429** 且 `items` 全为 `skipped`，不打上游。
+- **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。
+- 单项内的请求间隔仍受 `collector_request_interval_ms` 约束（[04 §6](./04-collector-adapter.md)）。
 
 ### 5.1 其余端点（P2~P3）
 

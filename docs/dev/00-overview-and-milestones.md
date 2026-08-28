@@ -149,11 +149,23 @@
 
 ### 5.3 第一周任务顺序
 
-1. 落 DDL、M0 固定种子、`system-probe` 内置凭证
-2. 写事务集成测试：`adjust` / `dispatch` / `dispatch_next` / probe dispatch
-3. 实现 probe dispatch —— 优先覆盖首日窗口创建、session cap、预算失败回滚
-4. 接入 steward 定时触发与配置读取
-5. 恢复结算测试，确认 `single_hop_est_usd` 真正参与崩溃恢复成本汇总
+> ⚠️ **按交付阶段分开列**（第 45 轮修正）：原文只有一份清单，内容却是 probe dispatch / `adjust` 事务 / 恢复结算——**那些全属 P2/P3**。当前阶段是 **P1**（[PRD §2.1.0](../PRD.md)），照原文走会直接跑错方向。
+
+**当前阶段 P1（上游采集与管理）的第一周**：
+
+1. **落 DDL 与 M0 种子**：全部迁移 + P1 的 3 张新表与 `upstream_keys` 6 列（[02 §1.3](./02-data-model.md)）；`config_params` 72 键种子（[09 §4bis](./09-admin-api.md)）
+2. **`Detect()` + `Authenticate()` 三家族**：先打通站型探测与登录态，这是后面全部 Fetch 的前置（[04 §2/§5](./04-collector-adapter.md) 三套凭证状态机）
+3. **`FetchGroups` → `FetchKeys` 两项落库**：顺序不可换（Key 的 `channel_group_id` 依赖分组行先存在，[09 §5.0bis](./09-admin-api.md)）；`group_models` 走全量替换事务（[02 §1.3bis](./02-data-model.md)）
+4. **`sync` 编排 + 渠道级 advisory lock**：五项串行、逐项独立事务、逐项结果响应（[09 §5.0bis](./09-admin-api.md)）。**先把编排骨架和限流做对，再补 `FetchPricing`/`FetchModelCatalog`**——后两者行数最多、最容易掩盖编排缺陷
+5. **管理端点与脱敏断言**：`/admin/channels|accounts|keys` CRUD + `inventory`；CI 加断言"响应与日志中不出现完整 secret"（复用 M0 的 `sk-` 前缀守卫，扩到新端点）
+
+**⏭ P2/P3 的第一周（届时再用，勿在 P1 执行）**：
+
+1. `system-probe` 内置凭证与入站鉴权（P2）
+2. 事务集成测试：`adjust` / `dispatch` / `dispatch_next` / probe dispatch（P2/P3）
+3. probe dispatch —— 首日窗口创建、session cap、预算失败回滚（P3）
+4. steward 定时触发与配置读取（P3）
+5. 恢复结算测试，确认 `single_hop_est_usd` 参与崩溃恢复成本汇总（P2）
 
 ---
 

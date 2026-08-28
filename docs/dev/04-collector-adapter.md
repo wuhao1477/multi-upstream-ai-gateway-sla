@@ -69,6 +69,11 @@ type SourceMeta struct {
 	FetchedAt  time.Time     // 查询时间
 	ValidUntil time.Time     // 过期时间；人工录入默认 FetchedAt+7d（FR-011）
 	Stale      bool          // 是否已过期（**内存态判定**，不落库；库侧查 collector_snapshots_v 视图）→ 下游按"越旧越保守"降级
+	// ── Degraded 能力的实际结果（§3.4bis，第 45 轮补）──
+	// 声明 degraded 的能力照常返回数据与 nil error，用这两个字段说明"缺了什么"，
+	// 供 sync 的 item.note 与 inventory 的"待人工补录"计数使用（FR-011）。
+	Degraded      bool     // 本次结果是否不完整
+	MissingFields []string // 缺失的字段名，如 ["input_price","output_price"]
 }
 
 // ── 接口 ──
@@ -385,6 +390,26 @@ type SubscriptionQuota struct {
 | 额度单位 | `quota/quota_per_unit` | USD 浮点 | `micros/1e6` |
 | 共享额度归集键 | Key 独立 | `(user,group)` | `(user,plan)` |
 | 超额计费 | N/A | **无超额**（用尽即阻断） | 有 `renewAllowed`/多订阅 |
+
+### 3.4bis `Degraded` 的运行时行为（**P1 必需**，第 45 轮补）
+
+> ⚠️ **此前 `Degraded` 只有一行定义**（"部分可采 / 需人工补全 / 数据陈旧"），**没说方法该返回什么**。而 [AC-28](./14-acceptance-matrix.md)/[AC-38](./14-acceptance-matrix.md) 都要求"`Capabilities()` 声明必须与实际返回一致"——`degraded` 既不是 `supported` 也不是 `ErrUnsupported`，照原文**无法判定通过与否**（开发视角审查第 45 轮）。
+
+**约定：`Degraded` 是能力声明，不是运行时状态。** 声明 `degraded` 的能力，其 fetch 方法**照常返回数据与 `nil` 错误**，但：
+
+| 情形 | 返回 | `sync` 的 item status |
+| --- | --- | --- |
+| 采到了部分字段 | 数据 + `nil`；`SourceMeta` 记 `Degraded: true` 与 `MissingFields []string` | `ok`，并在 `note` 列出缺哪些字段 |
+| 一个字段都没采到 | 空切片/零值 + `nil`（**不是** `ErrUnsupported`） | `ok`，`rows=0`，`note` 说明"该站型无独立端点" |
+| 请求本身失败（网络/401/5xx） | `nil` + 真实 error | `failed` |
+| 该站型**根本没有这个对象** | `ErrUnsupported` | `unsupported` |
+
+- **判定口径（供 AC-28/38 执行）**：`Capabilities()` 声明 `degraded` ⟺ 该方法**不得**返回 `ErrUnsupported`。声明 `unsupported` ⟺ 必须返回 `ErrUnsupported`。声明 `supported` ⟺ 不得返回 `ErrUnsupported` 且必备字段齐全。
+- **三处 `degraded` 的具体含义**：
+  - NewAPI `pricing`：无（它是 `supported`，`/api/pricing` 公开且完整）。
+  - Sub2API `pricing`：倍率与分组耦合在 `/api/v1/groups/available`，**无独立模型价格表** → 目录里 `input_price`/`output_price` 可能为空，`MissingFields=["input_price","output_price"]`。
+  - ASXS `pricing` / `model_catalog`：模型与价格并入套餐 `products`，**非独立目录端点** → 只能取到套餐维度的模型名，逐模型单价缺失。
+- **`MissingFields` 的用途**：`inventory` 的异常项计数把它计入"待人工补录"（FR-011：采不到即人工录入 + 标来源 + 7 天有效期），而不是当成故障。
 
 ---
 
