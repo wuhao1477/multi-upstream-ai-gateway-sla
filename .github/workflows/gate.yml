@@ -60,20 +60,38 @@ jobs:
           fi
           echo "✅ ddl-extracted.sql 与文档同步"
 
-  # ── M0 起启用：Go 构建与测试（[10 §3](docs/dev/10-project-structure.md) 的门禁清单）──
-  # 现在仓库无 go.mod，作业会直接失败，故先注释保留骨架，避免 M0 重新摸索。
-  # build:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-go@v5          # 亦为 JS action；Go 工具链本身与 Node 无关
-  #       with:
-  #         go-version-file: go.mod          # 跟随 go.mod 声明，不锁死 patch（10 开放点1）
-  #     - run: make build                    # 编译 cmd/sla-core、cmd/collector
-  #     - run: make test                     # 含 SSE 扫描器判定用例与 outbox 重放幂等性
-  #     - run: make lint                     # golangci-lint
-  #     - run: make migrate                  # 对一次性 PG 应用 migrations/
-  #     # 以下三道是硬约束的机器守卫，不可省（[10 §3](docs/dev/10-project-structure.md)）：
-  #     - run: ./verify/assert-no-body-columns.sh   # FR-112：账本表禁 body/messages/prompt/headers 列
-  #     - run: ./verify/assert-no-secret-leak.sh    # 日志与抓包不得出现 sk- 前缀（15 O3）
-  #     - run: ./verify/assert-billing-unit.sh      # per_1m_token 单价3.0×1000token 必须=0.003 而非3000
+  # ── Go 构建与测试（#1 骨架落地后启用；[10 §3](docs/dev/10-project-structure.md) 门禁清单）──
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 跟随 go.mod 声明，不锁死 patch（10 开放点 1）
+          go-version-file: go.mod
+          cache: true
+
+      - name: 格式检查
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: 构建
+        run: make build
+
+      - name: 单测
+        run: make test
+
+      # 配置键清单是从 09 §4bis 生成的：文档改了没重新生成 → 运行时静默取零值
+      # （catalog_missing_rounds=0 会让每轮采集都判模型下架）。故校验生成物同步。
+      - name: 配置键清单与文档同步
+        run: make gen-check
+
+      # ── 三道硬约束守卫随对应功能接入（[10 §3](docs/dev/10-project-structure.md)）──
+      # FR-112 不可存列断言：随 #2 迁移落地（现在无 migrations/ 可扫）
+      # sk- 前缀脱敏断言：随 #9 Key 管理端点落地（现在无端点会打印凭证）
+      # billing_unit 缩放断言：随 #7 价格采集落地（现在无成本计算代码）
+      # ⚠️ 三者都在对应 issue 的完成标准里，勿让 issue 关闭时漏掉本文件的启用。
