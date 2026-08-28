@@ -1,3 +1,16 @@
 .DS_Store
 .codegraph/
 .codebase-memory/
+
+# 构建产物
+/bin/
+
+# 本地环境与凭证（deploy/.env 含上游 key 与 ADMIN_TOKEN，绝不入库）
+deploy/.env
+*.env
+!deploy/.env.example
+
+# Go
+*.test
+*.out
+coverage.*
