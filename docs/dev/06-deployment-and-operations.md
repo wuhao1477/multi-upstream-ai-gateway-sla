@@ -156,17 +156,29 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 
 > ⚠️ **2026-07-26 裁决澄清**：此前本清单混入了上游相关项，与 [00](./00-overview-and-milestones.md) 的「M0 只做骨架与入站侧」冲突，开发无从判断 M0 到底要交付什么。**以下清单已按 00 对齐**——上游透传、35 字段 diff、mock 场景集全部移入 M1。
 
-**M0 门禁（必须全绿才算退出）**：
+> ⚠️ **2026-07-27 再拆分（[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md) 交付切分后）**：本清单原本假定 M0 之后直接进 M1（网关），故把**别名种子、`system-probe`、AC-33 入站鉴权**一并列为 M0 门禁。但交付顺序已改为 M0 → **P1（采集与管理）** → P2（网关），而这三项**服务的都是 P2**：别名映射路由策略、`system-probe` 是探测凭证、AC-33 是 `/v1/*` 的入站鉴权 —— **P1 没有 `/v1/*`、不做路由**（ISSUE-005 §2 与 D7）。
+>
+> 若不拆分，P1 会被卡在自己用不到的前置上。故按"谁需要谁负责"分成两段。
+
+**M0 门禁（P1 开工前必须全绿）**：
 
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
-- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。
-- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110）；全部候选不可用时返回明确错误、不旁路（AC-27）。
-- [ ] 加载 M0 固定种子（1 model + 3 别名 + 策略 + `sla_targets`）并经 `GET /admin/config` 回显一致。
+- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。**须反向确认管理面在容器网络内可用**，否则"外部 404"可能只是服务挂了而非未代理。
+- [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110/AC-27）。⚠️ **M0/P1 阶段打 `/healthz`**（`/v1/*` 属 P2），P2 起改打 `/v1/chat/completions` 并**重跑 AC-27**（[14 AC-27](./14-acceptance-matrix.md)）。
+- [ ] 迁移与 `config_params` 种子幂等；**运维改过的值不被重启抹回**。
+- [ ] 双实例并发冷启动**只有一个执行迁移**（PG 咨询锁选主，§2.2）。
+- [ ] `GET /admin/config` 可回显全部配置项；关键项强制二次确认；表外键 400。
+- [ ] **`admin_token` 不落 `config_params`**（[09 §4bis](./09-admin-api.md)：避免自己改自己 —— 落表等于管理 API 能改自己的鉴权令牌）。
+- [ ] CI：Go 构建/vet/单测 + **DDL 在临时 PG 真跑** + 迁移与文档一致 + FR-112 不可存列断言。
+- [ ] `pg_dump`/restore 演练脚本就位。
+
+**⏭ P2 开工前才需要的（原列在 M0，2026-07-27 移出）**：
+
+- [ ] 加载固定种子（1 model + 3 别名 + 策略 + `sla_targets`）并经 `GET /admin/config` 回显一致。
 - [ ] 种子校验断言：**`is_committed=true` 的策略必须有对应 `sla_targets` 行**（禁止空承诺）。
 - [ ] `system-probe` 内置凭证已创建，且 `/v1/*` 用它鉴权**必被拒**、`/admin/clients` 吊销它**返回 403**。
-- [ ] AC-27 与 **AC-33 的 M0 子集**通过（401/403/429、RPM 跨实例、重启不清零、`rpm_limit IS NULL` 不限速、凭证脱敏、匿名 401 落库）。
-- [ ] CI：Go 构建 + **DDL 在临时 PG 真跑通过**（`verify/ddl-check.sh`）+ 别名策略加载 + 不可存列断言 + 凭证脱敏断言。
-- [ ] `pg_dump`/restore 演练脚本就位。
+- [ ] **AC-33 的 M0 子集**通过（401/403/429、RPM 跨实例、重启不清零、`rpm_limit IS NULL` 不限速、凭证脱敏、匿名 401 落库）。
+- [ ] CI 追加：别名策略加载 + 凭证脱敏断言（`sk-` 前缀）。
 
 **⚠️ 客户端接入前置（实测确认，不是可选项）**：
 

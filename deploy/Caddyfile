@@ -1,0 +1,70 @@
+# Caddy：TLS + 轮询 LB + 健康探测摘除故障实例（06 §1）
+#
+# ⚠️ 边界纪律（06 §1、09 §1）：**只代理 /v1/* 与 /healthz**。
+#    /admin/* 与 /metrics 一律不代理 —— 二者仅容器网络/本机可达。
+#    这不是"暂时没配"，而是安全边界：管理平面能改调度策略与凭证，
+#    暴露到公网等于把整套控制面交出去。
+#
+#    两层防护缺一不可（09 §1 冻结）：
+#      · 网络边界（本文件）防外部
+#      · ADMIN_TOKEN 防同机其它进程（compose 里还跑着 collector）
+#
+# P1 阶段说明：/v1/* 尚不存在（数据平面属 P2），故经 Caddy 实际只有
+# /healthz 可达。AC-27 在 M0/P1 阶段就是打它（14 AC-27 第 45 轮补充）。
+
+{
+	# 本地/内网部署用自签，不去 Let's Encrypt 申请证书
+	local_certs
+	admin off
+}
+
+:443, :80 {
+	# ── 数据平面（P2 起可用）──
+	@v1 path /v1/*
+	handle @v1 {
+		reverse_proxy sla-core-a:8080 sla-core-b:8080 {
+			lb_policy round_robin
+
+			# 健康探测：失败即摘除该实例，恢复后自动纳入（AC-27）。
+			# 探测 /healthz —— 它只反映实例自身（进程 + PG + 快照），
+			# **不含上游渠道可用性**（06 §6 健康语义分层）：若含，则上游全挂时
+			# 两个实例都会被摘除，客户端拿到 LB 层 502 而不是我们设计的
+			# "明确不可用 + 事件编号 + 建议重试时间"（AC-15）。
+			health_uri /healthz
+			health_interval 2s
+			health_timeout 1s
+			health_status 200
+
+			# 流式响应必须立即下发，不能缓冲（P2 的字节透传硬约束：
+			# 缓冲会破坏 SSE 时序，进而让内容感知 TTFT 失真，03 §3）
+			flush_interval -1
+
+			# 上游实例故障时换一台重试（仅对幂等的 GET 安全；
+			# P2 接入 /v1/* 后需复核：POST 重放会造成重复计费，
+			# 而 FR-119 要求"一次外部调用 = 一次上游调用"）
+			lb_try_duration 5s
+		}
+	}
+
+	# ── 健康探针（LB 就绪判定用，也是 M0/P1 阶段 AC-27 的打点）──
+	handle /healthz {
+		reverse_proxy sla-core-a:8080 sla-core-b:8080 {
+			lb_policy round_robin
+			health_uri /healthz
+			health_interval 2s
+			health_timeout 1s
+			health_status 200
+		}
+	}
+
+	# ── 其余一切拒绝 ──
+	# 显式 404 而非默认转发：默认转发会把 /admin/* 泄出去。
+	handle {
+		respond "not found" 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

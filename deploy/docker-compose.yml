@@ -1,0 +1,81 @@
+# 单机全栈（06 §1）：Caddy LB + 2× sla-core + PG + collector
+#
+# 为何 core 必须 ≥2（06 §1、FR-110）：任一实例宕机不中断服务（AC-27）。
+# 两实例无差别 —— 状态全在 PG，账本主键 UUIDv7 无序列争用（02 §9.3）。
+#
+# ⚠️ 单机部署下 Caddy / 宿主机 / 单 PG 是**共享故障点**，一期不承诺整体
+#    可用性数字（FR-110）。这里承诺的只是"进程级冗余"。
+
+name: sla-gateway
+
+x-core-env: &core-env
+  DATABASE_URL: postgres://sla:${POSTGRES_PASSWORD:-changeme}@postgres:5432/sla?sslmode=disable
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置——管理平面没有它会拒绝全部请求}
+  SLA_ADDR: ":8080"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sla
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: sla
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 不映射端口到宿主机：库只需被容器网络访问。
+    # 需要本地连库排查时用 `docker compose exec postgres psql`。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sla -d sla"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # 两个实例并存时靠 PG 咨询锁选主，只有一个执行迁移（06 §2.2）。
+  # 因此两者都可以无条件跑 bootstrap，不需要额外编排顺序。
+  sla-core-a: &core
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment: *core-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # ⚠️ 不映射 8080 到宿主机：/admin/* 与 /metrics 只能从容器网络访问
+    #    （06 §1 边界）。要访问管理面用
+    #    `docker compose exec sla-core-a curl localhost:8080/admin/config`
+    #    或临时 `docker compose port`。
+    healthcheck:
+      test: ["CMD", "/sla-core", "-version"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  sla-core-b:
+    <<: *core
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on:
+      - sla-core-a
+      - sla-core-b
+    restart: unless-stopped
+
+  # 采集器：异步旁路，任何抖动不阻塞同步决策路径（01 §5）。
+  # 06 开放点 3 已定一期同二进制子命令；这里作为独立服务起，便于单独观察日志。
+  collector:
+    <<: *core
+    command: ["/collector"]
+    healthcheck:
+      disable: true
+
+volumes:
+  pgdata:
+  caddydata:

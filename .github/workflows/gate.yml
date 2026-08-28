@@ -107,6 +107,12 @@ jobs:
       - name: 管理 API 端到端测试（临时 PG + 真 sla-core）
         run: make test-api
 
+      # 全栈冒烟：验 AC-27 的 M0/P1 形态（停一个实例 30 次请求全成功）与
+      # /admin 不可从宿主机达（06 §1 边界）。后者还反向确认管理面在容器网络内
+      # 可用 —— 否则 404 可能只是服务挂了而非"未代理"。
+      - name: compose 全栈冒烟
+        run: make test-compose
+
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
       # 余下两道守卫随对应功能接入：

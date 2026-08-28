@@ -72,6 +72,10 @@ test-integration: ## 起临时 PG 跑迁移与种子的集成测试（需 Docker
 test-api: ## /admin/config 端到端测试（需 Docker）
 	./verify/test-config-api.sh
 
+.PHONY: test-compose
+test-compose: ## compose 全栈冒烟：健康/选主/AC-27/边界（需 Docker）
+	./verify/test-compose.sh
+
 .PHONY: docs-gate
 docs-gate: ## 文档一致性 12 类 + DDL 真跑（需 Docker）
 	./verify/gate.sh
