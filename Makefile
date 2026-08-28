@@ -86,3 +86,7 @@ check: fmt-check vet test gen-check mig-check ## 提交前自检（不含需 Doc
 .PHONY: clean
 clean: ## 清理产物
 	rm -rf $(BINDIR)
+
+.PHONY: test-ui
+test-ui: ## 真 Chrome 验收管理界面（需 Chrome + node + PG）
+	./verify/test-ui.sh

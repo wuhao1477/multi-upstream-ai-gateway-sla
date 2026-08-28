@@ -45,3 +45,16 @@ func (pl *Pool) Ping(ctx context.Context) error { return pl.p.Ping(ctx) }
 
 // Close 关闭连接池。
 func (pl *Pool) Close() { pl.p.Close() }
+
+// pgxConn 是"连接 + 归还"的组合，让 sink 各方法能用 defer 归还。
+type pgxConn struct {
+	Conn    *pgx.Conn
+	release func()
+}
+
+// Close 归还连接。
+func (c *pgxConn) Close() {
+	if c.release != nil {
+		c.release()
+	}
+}

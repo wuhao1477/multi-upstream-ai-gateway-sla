@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
@@ -31,6 +32,22 @@ type Server struct {
 	Token  string // ADMIN_TOKEN；空则拒绝一切请求（不是"放行一切"）
 	Logger *slog.Logger
 
+	// Detect 探测站型（建渠道时可选自动探测，04 §2）。
+	Detect func(ctx context.Context, baseURL string) (collector.DetectResult, error)
+	// Sync 执行一次渠道采集（由 main 注入，避免 admin 依赖具体适配器）。
+	Sync SyncRunner
+	// Snapshot 读当前配置快照（sync 间隔、下架轮数等）。
+	Snapshot func() *config.Snapshot
+	// SaveCredential 持久化采集凭证。注入函数而非 *store.Pool ——
+	// admin 只依赖 DB 接口，不该知道连接池的具体类型。
+	SaveCredential func(ctx context.Context, cred collector.Credential) error
+	// SaveDetected 持久化站型探测结果。
+	// **必须落库**：quota_per_unit 是 NewAPI 系额度归一的必需输入，
+	// 而 FetchAccount 缺它会直接报错（不猜，猜错差 50 万倍）——
+	// 只在响应里回显给人看是不够的。
+	SaveDetected func(ctx context.Context, channelID int64, d collector.DetectResult) error
+
+	guard  *syncGuard
 	tokens *tokenStore
 	// onConfigChange 在 apply 成功后触发内存快照重建（09 §2 末条：
 	// 使新配置对决策路径生效；决策路径本身仍只读快照、不查库）。
@@ -44,6 +61,7 @@ func NewServer(db DB, token string, logger *slog.Logger, onConfigChange func()) 
 	}
 	return &Server{
 		DB: db, Token: token, Logger: logger,
+		guard:          newSyncGuard(),
 		tokens:         newTokenStore(),
 		onConfigChange: onConfigChange,
 	}

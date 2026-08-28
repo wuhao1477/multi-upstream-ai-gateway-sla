@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.ico">
+<title>上游渠道采集与管理 · P1</title>
+<style>
+:root{--bg:#0f1117;--panel:#171a21;--line:#252a35;--fg:#e6e8ee;--dim:#8b93a7;
+      --ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#4c8eda}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",
+     "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+     background:var(--bg);color:var(--fg)}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+       align-items:center;gap:14px;flex-wrap:wrap;background:var(--panel)}
+h1{font-size:16px;margin:0;font-weight:600}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#20242e;
+       color:var(--dim);border:1px solid var(--line)}
+main{padding:20px;max-width:1180px;margin:0 auto}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+        padding:16px;margin-bottom:18px}
+h2{font-size:14px;margin:0 0 12px;font-weight:600;display:flex;
+   align-items:center;gap:8px}
+label{display:block;font-size:12px;color:var(--dim);margin:8px 0 3px}
+input,select{width:100%;padding:7px 9px;background:#0d1017;color:var(--fg);
+             border:1px solid var(--line);border-radius:5px;font:inherit}
+input:focus,select:focus{outline:none;border-color:var(--acc)}
+button{padding:7px 14px;background:var(--acc);color:#fff;border:0;border-radius:5px;
+       font:inherit;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:#20242e;color:var(--fg);border:1px solid var(--line)}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500;font-size:12px}
+tr:last-child td{border-bottom:0}
+code{background:#0d1017;padding:1px 5px;border-radius:3px;font-size:12px}
+.dim{color:var(--dim)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.pill{font-size:11px;padding:1px 7px;border-radius:9px;border:1px solid var(--line)}
+#toast{position:fixed;right:18px;bottom:18px;max-width:420px;padding:11px 14px;
+       border-radius:6px;background:#20242e;border:1px solid var(--line);
+       display:none;white-space:pre-wrap;z-index:9}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
+.stat{background:#0d1017;border:1px solid var(--line);border-radius:6px;padding:10px}
+.stat b{display:block;font-size:19px;font-weight:600}
+.stat span{font-size:11px;color:var(--dim)}
+.empty{color:var(--dim);font-size:13px;padding:10px 0}
+details{margin-top:8px}
+summary{cursor:pointer;font-size:13px}
+.anom{border-left:2px solid var(--warn);padding-left:10px;margin:8px 0}
+.flex{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>上游渠道采集与管理</h1>
+  <span class="badge">交付阶段 P1</span>
+  <span class="badge" id="phase-note">不含请求转发（网关属 P2）</span>
+  <div style="flex:1"></div>
+  <div style="min-width:230px">
+    <label for="token" style="margin:0">管理令牌 ADMIN_TOKEN</label>
+    <input id="token" type="password" placeholder="粘贴令牌后自动记住"
+           autocomplete="off">
+  </div>
+</header>
+
+<main>
+<section>
+  <h2>新增渠道商</h2>
+  <div class="row">
+    <div>
+      <label for="ch-name">渠道名称</label>
+      <input id="ch-name" placeholder="例：某中转站-主账号">
+    </div>
+    <div>
+      <label for="ch-url">站点地址 base_url</label>
+      <input id="ch-url" placeholder="https://api.example.com">
+    </div>
+    <div>
+      <label for="ch-family">站型家族</label>
+      <select id="ch-family">
+        <option value="">自动探测（推荐）</option>
+        <option value="newapi">NewAPI 系</option>
+        <option value="sub2api">Sub2API 系</option>
+        <option value="asxs">ASXS（闭源）</option>
+        <option value="unknown">未知</option>
+      </select>
+    </div>
+  </div>
+  <div style="margin-top:12px" class="flex">
+    <button id="btn-create">创建渠道</button>
+    <button class="ghost" id="btn-reload">刷新列表</button>
+    <span class="dim" style="font-size:12px">
+      自动探测会请求站点的公开端点判定家族（04 §2），失败不影响创建
+    </span>
+  </div>
+</section>
+
+<section>
+  <h2>渠道列表 <span class="dim" id="ch-count"></span></h2>
+  <div id="channels"><div class="empty">填入令牌后点“刷新列表”</div></div>
+</section>
+
+<section id="detail-sec" style="display:none">
+  <h2>渠道详情 <span class="dim" id="detail-name"></span></h2>
+  <div class="stats" id="inv-stats"></div>
+  <div id="inv-anomalies"></div>
+
+  <div class="flex" style="margin-top:14px">
+    <button id="btn-sync">立即采集（sync）</button>
+    <button class="ghost" id="btn-groups">查看分组</button>
+    <button class="ghost" id="btn-catalog">查看模型目录</button>
+    <button class="ghost" id="btn-keys">查看 Key</button>
+  </div>
+  <div id="sync-result"></div>
+  <div id="detail-body"></div>
+</section>
+
+<section>
+  <h2>登记账号与 Key</h2>
+  <div class="row">
+    <div>
+      <label for="acc-channel">渠道 ID</label>
+      <input id="acc-channel" placeholder="从上表取">
+    </div>
+    <div>
+      <label for="acc-uid">上游用户 ID</label>
+      <input id="acc-uid" placeholder="NewAPI 必填（用户 ID 头的值）">
+    </div>
+    <div style="align-self:end">
+      <button id="btn-acc">创建账号</button>
+    </div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="key-account">账号 ID</label>
+      <input id="key-account" placeholder="上一步返回的 id">
+    </div>
+    <div>
+      <label for="key-secret">上游 Key（明文，仅此一次提交）</label>
+      <input id="key-secret" type="password" placeholder="sk-...">
+    </div>
+    <div>
+      <label for="key-ref">上游侧 Key 标识 external_ref</label>
+      <input id="key-ref" placeholder="用于把采到的用量写回这把 Key">
+    </div>
+    <div style="align-self:end">
+      <button id="btn-key">登记 Key</button>
+    </div>
+  </div>
+  <p class="dim" style="font-size:12px;margin:10px 0 0">
+    明文只在提交时接收，列表一律只显示前缀（FR-094）。
+    <code>external_ref</code> 是采集匹配所需：采集只能拿到上游的 key id，
+    拿不到明文，没有它用量写不回对应 Key。
+  </p>
+</section>
+
+<section>
+  <h2>采集凭证 <span class="dim">采集必须先有它</span></h2>
+  <div class="row">
+    <div>
+      <label for="cr-channel">渠道 ID</label>
+      <input id="cr-channel" placeholder="从渠道列表取">
+    </div>
+    <div>
+      <label for="cr-token">访问令牌 / JWT</label>
+      <input id="cr-token" type="password" placeholder="NewAPI 系统令牌 或 JWT">
+    </div>
+    <div>
+      <label for="cr-uid">上游用户 ID（NewAPI 必填）</label>
+      <input id="cr-uid" placeholder="用户 ID 头的值">
+    </div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <div>
+      <label for="cr-refresh">refresh_token（Sub2API 可选）</label>
+      <input id="cr-refresh" type="password" placeholder="用于 24h JWT 自动续期">
+    </div>
+    <div>
+      <label for="cr-user">账号（ASXS 续期必需）</label>
+      <input id="cr-user" placeholder="ASXS 无 refresh 路径，只能账密重登">
+    </div>
+    <div>
+      <label for="cr-pass">密码（ASXS）</label>
+      <input id="cr-pass" type="password">
+    </div>
+    <div style="align-self:end">
+      <button id="btn-cred">登记凭证</button>
+    </div>
+  </div>
+  <div id="cred-list"></div>
+  <p class="dim" style="font-size:12px;margin:10px 0 0">
+    三家族的续期方式不同（04 §5）：NewAPI 长期令牌<b>不可运行时重新生成</b>
+    （会作废正在用的那个）；Sub2API 24h JWT 用 refresh 续期、同账号串行；
+    ASXS 7 天 JWT 无 refresh，只能账密重登。凭证内容一律不回显。
+  </p>
+</section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const tokenEl = $('#token');
+tokenEl.value = localStorage.getItem('adminToken') || '';
+tokenEl.addEventListener('change', () =>
+  localStorage.setItem('adminToken', tokenEl.value.trim()));
+
+let current = null; // 当前选中的渠道
+
+function toast(msg, kind) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  t.style.borderColor = kind === 'bad' ? 'var(--bad)'
+                      : kind === 'ok' ? 'var(--ok)' : 'var(--line)';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = 'none'; }, 6000);
+}
+
+async function api(path, opts = {}) {
+  const tok = tokenEl.value.trim();
+  if (!tok) { toast('请先填入 ADMIN_TOKEN', 'bad'); throw new Error('no token'); }
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Authorization': 'Bearer ' + tok,
+      'Content-Type': 'application/json',
+      ...(opts.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) {
+    const msg = (data && (data.error || data.raw)) || ('HTTP ' + res.status);
+    const e = new Error(msg); e.status = res.status; e.data = data; throw e;
+  }
+  return data;
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ── 渠道列表 ──
+async function loadChannels() {
+  try {
+    const d = await api('/admin/channels');
+    $('#ch-count').textContent = '共 ' + d.count + ' 个';
+    if (!d.count) {
+      $('#channels').innerHTML = '<div class="empty">还没有渠道，用上方表单创建</div>';
+      return;
+    }
+    const rows = d.items.map(c => `<tr>
+      <td><code>${c.id}</code></td>
+      <td>${esc(c.name)}</td>
+      <td><span class="pill">${esc(c.site_family)}</span></td>
+      <td class="dim">${esc(c.base_url)}</td>
+      <td class="${c.status === 'enabled' ? 'ok' : 'warn'}">${esc(c.status)}</td>
+      <td><button class="ghost" data-ch="${c.id}" data-name="${esc(c.name)}"
+            >查看</button></td>
+    </tr>`).join('');
+    $('#channels').innerHTML = `<table><thead><tr>
+      <th>ID</th><th>名称</th><th>站型</th><th>地址</th><th>状态</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+    $('#channels').querySelectorAll('button[data-ch]').forEach(b =>
+      b.addEventListener('click', () => selectChannel(+b.dataset.ch, b.dataset.name)));
+  } catch (e) { toast('加载渠道失败：' + e.message, 'bad'); }
+}
+
+// ── 创建渠道 ──
+$('#btn-create').addEventListener('click', async () => {
+  const name = $('#ch-name').value.trim();
+  const url = $('#ch-url').value.trim();
+  const fam = $('#ch-family').value;
+  if (!name || !url) { toast('渠道名称与站点地址必填', 'bad'); return; }
+  const btn = $('#btn-create'); btn.disabled = true;
+  try {
+    const d = await api('/admin/channels', {
+      method: 'POST',
+      body: JSON.stringify({ name, base_url: url, site_family: fam,
+                             auto_detect: !fam }),
+    });
+    let msg = '渠道已创建：#' + d.id;
+    if (d.detected) {
+      msg += `\n探测到站型 ${d.detected.family}` +
+             (d.detected.version ? ' ' + d.detected.version : '') +
+             (d.detected.quota_per_unit ? `\nquota_per_unit=${d.detected.quota_per_unit}` : '');
+    }
+    if (d.warning) msg += '\n⚠️ ' + d.warning;
+    toast(msg, 'ok');
+    $('#ch-name').value = ''; $('#ch-url').value = '';
+    await loadChannels();
+  } catch (e) { toast('创建失败：' + e.message, 'bad'); }
+  finally { btn.disabled = false; }
+});
+
+$('#btn-reload').addEventListener('click', loadChannels);
+
+// ── 渠道详情 ──
+async function selectChannel(id, name) {
+  current = id;
+  $('#detail-sec').style.display = '';
+  $('#detail-name').textContent = '#' + id + ' ' + name;
+  $('#sync-result').innerHTML = '';
+  $('#detail-body').innerHTML = '';
+  await loadInventory();
+}
+
+async function loadInventory() {
+  try {
+    const d = await api(`/admin/channels/${current}/inventory`);
+    $('#inv-stats').innerHTML = [
+      ['账号', d.accounts], ['Key', d.keys], ['分组', d.groups],
+      ['目录模型', d.catalog_models],
+      ['额度合计', '$' + (d.quota_total_usd || 0).toFixed(2)],
+    ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')
+      + `<div class="stat"><b style="font-size:13px">${
+          d.last_synced_at ? new Date(d.last_synced_at).toLocaleString('zh-CN')
+                           : '从未'
+        }</b><span>最近同步</span></div>`;
+
+    if (!d.anomalies || !d.anomalies.length) {
+      $('#inv-anomalies').innerHTML =
+        '<p class="ok" style="font-size:13px;margin:12px 0 0">✓ 无异常项</p>';
+    } else {
+      $('#inv-anomalies').innerHTML = '<div style="margin-top:12px">' +
+        d.anomalies.map(a => `<div class="anom">
+          <b class="warn">${esc(a.kind)}</b> <span class="dim">× ${a.count}</span>
+          <div class="dim" style="font-size:12px">${esc(a.hint)}</div>
+          ${a.items && a.items.length ? `<details><summary class="dim">明细</summary>
+            <div class="dim" style="font-size:12px">${a.items.map(esc).join('、')}</div>
+          </details>` : ''}
+        </div>`).join('') + '</div>';
+    }
+  } catch (e) { toast('加载总览失败：' + e.message, 'bad'); }
+}
+
+// ── sync ──
+$('#btn-sync').addEventListener('click', async () => {
+  const btn = $('#btn-sync'); btn.disabled = true;
+  btn.textContent = '采集中…';
+  $('#sync-result').innerHTML = '<p class="dim">正在依次采集账号/分组/Key/价格/目录…</p>';
+  try {
+    const d = await api(`/admin/channels/${current}/sync`, { method: 'POST' });
+    renderSync(d);
+    await loadInventory();
+  } catch (e) {
+    // 429/409 也有结构化响应，一并展示
+    if (e.data && e.data.items) renderSync(e.data);
+    else $('#sync-result').innerHTML =
+      `<p class="bad" style="font-size:13px">采集失败：${esc(e.message)}</p>`;
+    toast('采集未成功：' + e.message, 'bad');
+  } finally { btn.disabled = false; btn.textContent = '立即采集（sync）'; }
+});
+
+function renderSync(d) {
+  const cls = s => s === 'ok' ? 'ok' : s === 'unsupported' || s === 'skipped'
+    ? 'dim' : s === 'partial' ? 'warn' : 'bad';
+  const rows = (d.items || []).map(i => `<tr>
+    <td><code>${esc(i.capability || '-')}</code></td>
+    <td class="${cls(i.status)}">${esc(i.status)}</td>
+    <td>${i.rows ?? ''}</td>
+    <td>${i.elapsed_ms != null ? i.elapsed_ms + ' ms' : ''}</td>
+    <td class="dim" style="font-size:12px">${esc(i.note || i.error || '')}</td>
+  </tr>`).join('');
+  $('#sync-result').innerHTML = `<div style="margin-top:12px">
+    <table><thead><tr><th>能力</th><th>状态</th><th>行数</th><th>耗时</th>
+    <th>说明</th></tr></thead><tbody>${rows}</tbody></table>
+    ${d.elapsed_ms != null ? `<p class="dim" style="font-size:12px">
+      总耗时 ${d.elapsed_ms} ms</p>` : ''}</div>`;
+}
+
+// ── 分组 / 目录 / Key ──
+$('#btn-groups').addEventListener('click', async () => {
+  try {
+    const d = await api(`/admin/channel-groups?channel_id=${current}`);
+    if (!d.count) {
+      $('#detail-body').innerHTML =
+        '<div class="empty">还没有分组，先点“立即采集”</div>';
+      return;
+    }
+    const rows = d.items.map(g => `<tr>
+      <td><code>${esc(g.group_ref)}</code></td>
+      <td>${g.rate_multiplier != null ? g.rate_multiplier : '<span class="dim">未知</span>'}</td>
+      <td><button class="ghost" data-g="${g.id}">${g.model_count} 个模型</button></td>
+      <td class="dim">${new Date(g.fetched_at).toLocaleString('zh-CN')}</td>
+    </tr>`).join('');
+    $('#detail-body').innerHTML = `<h2 style="margin-top:16px">分组</h2>
+      <table><thead><tr><th>分组</th><th>倍率</th><th>可用模型</th>
+      <th>采集时间</th></tr></thead><tbody>${rows}</tbody></table>
+      <div id="gm"></div>`;
+    $('#detail-body').querySelectorAll('button[data-g]').forEach(b =>
+      b.addEventListener('click', async () => {
+        const m = await api(`/admin/channel-groups/${b.dataset.g}/models`);
+        $('#gm').innerHTML = `<p class="dim" style="font-size:12px;margin-top:10px">
+          分组 ${b.dataset.g} 可用模型（${m.count}）：${m.models.map(esc).join('、') || '无'}</p>`;
+      }));
+  } catch (e) { toast('加载分组失败：' + e.message, 'bad'); }
+});
+
+$('#btn-catalog').addEventListener('click', async () => {
+  try {
+    const d = await api(`/admin/channels/${current}/catalog?limit=50`);
+    if (!d.total) {
+      $('#detail-body').innerHTML =
+        '<div class="empty">目录为空，先点“立即采集”</div>';
+      return;
+    }
+    const rows = d.items.map(m => `<tr>
+      <td><code>${esc(m.model_name)}</code></td>
+      <td>${m.input_price ?? '<span class="dim">—</span>'}</td>
+      <td>${m.output_price ?? '<span class="dim">—</span>'}</td>
+      <td class="${m.stale ? 'warn' : 'dim'}">${m.stale ? '疑似下架' : '在架'}</td>
+    </tr>`).join('');
+    $('#detail-body').innerHTML = `<h2 style="margin-top:16px">模型目录
+      <span class="dim">共 ${d.total}，显示前 ${d.items.length}</span></h2>
+      <table><thead><tr><th>模型</th><th>输入价</th><th>输出价</th>
+      <th>状态</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="dim" style="font-size:12px">目录是“上游有什么”，
+      与“已登记为可路由模型”是两层：目录不需要 token 上界（02 §1.3）</p>`;
+  } catch (e) { toast('加载目录失败：' + e.message, 'bad'); }
+});
+
+$('#btn-keys').addEventListener('click', async () => {
+  try {
+    const d = await api(`/admin/keys?channel_id=${current}`);
+    if (!d.count) {
+      $('#detail-body').innerHTML =
+        '<div class="empty">还没有 Key，用下方表单登记</div>';
+      return;
+    }
+    const rows = d.items.map(k => `<tr>
+      <td><code>${k.id}</code></td>
+      <td><code>${esc(k.secret_prefix)}</code></td>
+      <td class="dim">${esc(k.external_ref || '—')}</td>
+      <td>${k.remain_quota_usd != null ? '$' + k.remain_quota_usd.toFixed(4)
+            : '<span class="dim">未采集</span>'}</td>
+      <td class="${k.status === 'active' ? 'ok' : 'warn'}">${esc(k.status)}</td>
+      <td>
+        <button class="ghost" data-usage="${k.id}">用量</button>
+        <button class="ghost" data-rot="${k.id}">轮换</button>
+        <button class="ghost" data-dis="${k.id}">停用</button>
+      </td>
+    </tr>`).join('');
+    $('#detail-body').innerHTML = `<h2 style="margin-top:16px">Key</h2>
+      <table><thead><tr><th>ID</th><th>前缀</th><th>上游标识</th>
+      <th>剩余额度</th><th>状态</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <div id="ku"></div>
+      <p class="dim" style="font-size:12px">
+      只显示前缀，完整凭证永不回显（FR-094）</p>`;
+
+    const body = $('#detail-body');
+    body.querySelectorAll('button[data-usage]').forEach(b =>
+      b.addEventListener('click', async () => {
+        const u = await api(`/admin/keys/${b.dataset.usage}/usage`);
+        $('#ku').innerHTML = u.count
+          ? `<p class="dim" style="font-size:12px;margin-top:10px">
+             Key ${u.key_id} 用量点位 ${u.count} 个，最近：${
+               JSON.stringify(u.points[u.points.length - 1])}</p>`
+          : `<p class="dim" style="font-size:12px;margin-top:10px">
+             Key ${u.key_id} 暂无用量历史（采集后才有）</p>`;
+      }));
+    body.querySelectorAll('button[data-rot]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('轮换会替换该 Key 的凭证，确定？')) return;
+        const d2 = await api(`/admin/keys/${b.dataset.rot}/rotate`,
+          { method: 'POST', body: '{}' });
+        toast(d2.secret ? '新凭证（只显示一次）：\n' + d2.secret : '已轮换', 'ok');
+        $('#btn-keys').click();
+      }));
+    body.querySelectorAll('button[data-dis]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('停用后该 Key 不再可用，确定？')) return;
+        await api(`/admin/keys/${b.dataset.dis}/disable`, { method: 'POST' });
+        toast('已停用', 'ok');
+        $('#btn-keys').click();
+      }));
+  } catch (e) { toast('加载 Key 失败：' + e.message, 'bad'); }
+});
+
+// ── 账号与 Key 登记 ──
+$('#btn-acc').addEventListener('click', async () => {
+  const ch = +$('#acc-channel').value;
+  if (!ch) { toast('请填渠道 ID', 'bad'); return; }
+  try {
+    const d = await api('/admin/accounts', {
+      method: 'POST',
+      body: JSON.stringify({ channel_id: ch,
+                             external_user_id: $('#acc-uid').value.trim() }),
+    });
+    toast('账号已创建：#' + d.id, 'ok');
+    $('#key-account').value = d.id;
+  } catch (e) { toast('创建账号失败：' + e.message, 'bad'); }
+});
+
+$('#btn-key').addEventListener('click', async () => {
+  const acc = +$('#key-account').value;
+  const secret = $('#key-secret').value.trim();
+  if (!acc || !secret) { toast('账号 ID 与 Key 必填', 'bad'); return; }
+  try {
+    const d = await api('/admin/keys', {
+      method: 'POST',
+      body: JSON.stringify({ account_id: acc, secret,
+                             external_ref: $('#key-ref').value.trim() }),
+    });
+    toast('Key 已登记：#' + d.id + '（明文不回显）', 'ok');
+    $('#key-secret').value = '';
+    if (current) $('#btn-keys').click();
+  } catch (e) { toast('登记 Key 失败：' + e.message, 'bad'); }
+});
+
+// ── 采集凭证 ──
+$('#btn-cred').addEventListener('click', async () => {
+  const ch = +$('#cr-channel').value;
+  if (!ch) { toast('请填渠道 ID', 'bad'); return; }
+  try {
+    const d = await api('/admin/collector/credentials', {
+      method: 'POST',
+      body: JSON.stringify({
+        channel_id: ch,
+        access_token: $('#cr-token').value.trim(),
+        refresh_token: $('#cr-refresh').value.trim(),
+        external_user_id: $('#cr-uid').value.trim(),
+        username: $('#cr-user').value.trim(),
+        password: $('#cr-pass').value,
+      }),
+    });
+    toast('凭证已登记（' + d.cred_type + '）\n' + d.note, 'ok');
+    $('#cr-token').value = ''; $('#cr-refresh').value = ''; $('#cr-pass').value = '';
+    await loadCreds();
+  } catch (e) { toast('登记凭证失败：' + e.message, 'bad'); }
+});
+
+async function loadCreds() {
+  try {
+    const d = await api('/admin/collector/credentials');
+    if (!d.count) { $('#cred-list').innerHTML = ''; return; }
+    const rows = d.items.map(c => `<tr>
+      <td><code>${c.channel_id}</code></td>
+      <td><span class="pill">${esc(c.site_family)}</span></td>
+      <td class="dim">${esc(c.cred_type)}</td>
+      <td class="${c.status === 'valid' ? 'ok' : 'warn'}">${esc(c.status)}</td>
+      <td>${c.has_token ? '有令牌' : ''}${c.has_password ? ' 有账密' : ''}</td>
+      <td class="dim">${c.token_expires_at
+          ? new Date(c.token_expires_at).toLocaleString('zh-CN') : '长期'}</td>
+    </tr>`).join('');
+    $('#cred-list').innerHTML = `<table style="margin-top:12px"><thead><tr>
+      <th>渠道</th><th>站型</th><th>类型</th><th>状态</th><th>已存</th>
+      <th>令牌到期</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) { /* 未配置时静默 */ }
+}
+
+if (tokenEl.value) { loadChannels(); loadCreds(); }
+</script>
+</body>
+</html>

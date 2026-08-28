@@ -113,6 +113,12 @@ jobs:
       - name: compose 全栈冒烟
         run: make test-compose
 
+      # 管理界面的真实浏览器验收：真 Chrome 点击/填表/等 XHR/截图。
+      # 验的是"运维真能在 web 端加渠道商并采集"，而不是"接口返回了正确 JSON"。
+      # ubuntu-latest 自带 Chrome（/usr/bin/google-chrome），故只需装 puppeteer-core。
+      - name: 管理界面浏览器验收（真 Chrome）
+        run: make test-ui
+
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
       # 余下两道守卫随对应功能接入：

@@ -996,6 +996,8 @@ CREATE TABLE balance_signals (
 
 CREATE INDEX idx_cred_channel     ON collector_credentials(channel_id, status);
 
+CREATE UNIQUE INDEX idx_cred_channel_unique ON collector_credentials (channel_id);
+
 CREATE INDEX idx_snap_scope       ON collector_snapshots(channel_id, scope_type, fetched_at DESC);
 
 CREATE INDEX idx_snap_stale       ON collector_snapshots(valid_until) WHERE valid_until IS NOT NULL;

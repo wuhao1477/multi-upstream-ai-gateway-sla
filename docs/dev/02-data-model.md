@@ -2808,6 +2808,10 @@ CREATE TABLE balance_signals (
 
 ```sql
 CREATE INDEX idx_cred_channel     ON collector_credentials(channel_id, status);
+-- 一渠道一份采集凭证（第 46 轮补）：续期是 upsert 语义（refresh 后写回新令牌，
+-- 04 §5），没有唯一约束就只能"先查再插/改" —— 那是 check-then-act，
+-- 而凭证刷新恰恰并发敏感（不变式 S-1）。多账号分别采集属后续阶段。
+CREATE UNIQUE INDEX idx_cred_channel_unique ON collector_credentials (channel_id);
 CREATE INDEX idx_snap_scope       ON collector_snapshots(channel_id, scope_type, fetched_at DESC);
 CREATE INDEX idx_snap_stale       ON collector_snapshots(valid_until) WHERE valid_until IS NOT NULL;
 CREATE INDEX idx_balsig_account   ON balance_signals(account_id);

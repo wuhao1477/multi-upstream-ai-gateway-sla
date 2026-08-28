@@ -20,6 +20,7 @@ import (
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/admin"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/health"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
@@ -113,14 +114,37 @@ func run(addr, dsn string, logger *slog.Logger) error {
 		logger.Warn("ADMIN_TOKEN 未设置，管理平面将拒绝全部请求")
 	}
 
+	// 采集器：三家族适配器 + 落库 sink（09 §5.0bis 的编排在 collector.Syncer）
+	interval := 200 * time.Millisecond
+	if v, err := snap.Load().Int("collector_request_interval_ms"); err == nil && v > 0 {
+		interval = time.Duration(v) * time.Millisecond
+	}
+	hc := collector.NewClient(interval)
+	sink := store.NewCollectorSink(pool)
+	auth := collector.NewAuthenticator(store.NewCredentialStore(pool))
+
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", &health.Handler{
 		DB:          pool,
 		HasSnapshot: func() bool { return snap.Load() != nil },
 	})
-	admin.NewServer(pool, adminToken, logger, rebuild).Routes(mux)
 
-	srv := &http.Server{
+	srv := admin.NewServer(pool, adminToken, logger, rebuild)
+	srv.Snapshot = func() *config.Snapshot { return snap.Load() }
+	srv.Detect = func(ctx context.Context, baseURL string) (collector.DetectResult, error) {
+		return collector.Detect(ctx, hc.HC, baseURL)
+	}
+	srv.Sync = func(ctx context.Context, ch store.Channel) (*collector.SyncResult, error) {
+		return runChannelSync(ctx, pool, hc, sink, auth, ch)
+	}
+	credStore := store.NewCredentialStore(pool)
+	srv.SaveCredential = credStore.Save
+	srv.SaveDetected = credStore.SaveDetected
+	srv.Routes(mux)
+	srv.UpstreamRoutes(mux)
+	srv.WebRoutes(mux)
+
+	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -134,7 +158,7 @@ func run(addr, dsn string, logger *slog.Logger) error {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("sla-core 启动", "addr", addr, "version", version, "phase", "P1")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -146,7 +170,7 @@ func run(addr, dsn string, logger *slog.Logger) error {
 		logger.Info("收到关闭信号，开始优雅关闭")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		return httpSrv.Shutdown(shutdownCtx)
 	}
 }
 

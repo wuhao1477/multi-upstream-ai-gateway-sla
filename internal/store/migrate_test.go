@@ -14,8 +14,11 @@ func TestLoadMigrationsOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 12 {
-		t.Fatalf("迁移文件数 = %d，期望 12", len(ms))
+	// ⚠️ **不写死条数**：新增迁移是常态（013 就是实现期补的），
+	// 写死会让每次加文件都挂一次测试（这个坑在 shell 脚本里已踩过两次）。
+	// 只断言"至少有基线的 12 个"与顺序性 —— 那才是本测试要守的。
+	if len(ms) < 12 {
+		t.Fatalf("迁移文件数 = %d，少于基线 12 个（是否被误删？）", len(ms))
 	}
 	for i := 1; i < len(ms); i++ {
 		if ms[i-1].Name >= ms[i].Name {
