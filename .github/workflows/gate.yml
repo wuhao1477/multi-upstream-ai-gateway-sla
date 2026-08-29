@@ -1,18 +1,20 @@
 name: gate
 
-# 交付门禁：文档一致性 12 类检查 + DDL 在 postgres:16 真跑。
+# 交付门禁：文档一致性 + DDL 在 postgres:16 真跑 + Go 构建/单测/集成/界面验收。
 #
 # 与本地**同一份脚本**（verify/gate.sh）——这是 00 §5 与 README 声称的
 # "CI 与本地共用一份门禁"的落地。此前该说法只是计划：gate.sh 已存在，
 # 但没有任何 workflow 去跑它，于是"DDL 真跑"只在有 Docker 的开发机上偶发进行。
 #
-# 现阶段仓库仍是纯文档（无 go.mod），故只跑文档与 DDL 两道。
-# M0 起 Go 骨架落地后，在下方 build 作业里补 go build / test / lint
-# 与 FR-112 不可存列断言、凭证脱敏断言（[10 §3](docs/dev/10-project-structure.md)）。
+# ⚠️ **2026-08-29 补 `feat/**` 触发**：此前只在 push main 与 PR→main 时跑，
+# 于是一期那条 feat 分支上攒了 17 个提交、门禁一次没跑过 —— 只有 build-arm
+# 在跑（它的触发含 `feat/**`）。这不是"CI 是绿的"，是"CI 没看过"。
+# 真正的代价在开 PR 那一刻：13 道检查第一次同时面对 17 个提交，红了也不知道
+# 是哪一个引入的。分支上就跑，才有"哪一提交弄红的"这个信息。
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
