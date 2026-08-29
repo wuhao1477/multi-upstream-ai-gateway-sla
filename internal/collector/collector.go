@@ -67,6 +67,15 @@ type CapabilityMap map[Capability]SupportLevel
 // 与 Degraded 的区别见 04 §3.4bis：degraded 不返回本错误。
 var ErrUnsupported = errors.New("collector: 该站型不支持此能力")
 
+// ErrPrecondition 标记"一次采集在发出第一个上游请求之前就失败了"。
+//
+// 站型未知、连接池取不到连接、凭证没登记 —— 这三类都是纯本地失败。
+// 单独立哨兵是为了让调用方能区分"没打上游"和"打了上游但失败"：
+// sync 的最小间隔限流意在保护上游，本地失败不该消耗这个窗口，
+// 否则「建渠道 → 采集 → 提示缺凭证 → 登记 → 再采集」这条首跑路径
+// 会被自己的失败挡 60 秒（P1-evidence §4 第 15 项）。
+var ErrPrecondition = errors.New("collector: 采集前置条件不满足（未触达上游）")
+
 // SourceMeta 是每份数据的来源元信息（FR-011/012/116）。
 type SourceMeta struct {
 	// Source: "api" | "manual" | "derived"

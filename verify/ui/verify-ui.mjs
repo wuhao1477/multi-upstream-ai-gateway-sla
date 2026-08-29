@@ -129,6 +129,33 @@ try {
 
   await page.screenshot({ path: `${SHOT}/03-detail.png` });
 
+  // ── 5bis. 缺凭证就点采集：必须报缺凭证，且**不占限流窗口** ──
+  //
+  // 这一步顺序是刻意的。本脚本原先直接按"先登记凭证再采集"的正确顺序走，
+  // 于是 33 项全绿却漏掉了运维第一次用界面的真实路线：先点采集才知道缺什么。
+  // 那次失败在本地就返回、没发出一个上游字节，却照样起算了 60 秒窗口，
+  // 把紧随其后的第一次真采集挡死（P1-evidence §4 第 15 项）。
+  //
+  // 断言分两处：这里认"报的是缺凭证"，第 8 步认"登记完能立刻采成"——
+  // 若窗口重新被本地失败起算，第 8 步会因 429 而红。
+  // 422 带 items，所以表格照渲染，原因文案落在 toast 上（index.html 的 catch 分支）。
+  await page.click('#btn-sync');
+  await page.waitForFunction(
+    () => /采集未成功/.test(document.querySelector('#toast')?.textContent || ''),
+    { timeout: 30000 });
+  const preCredMsg = await page.$eval('#toast', el => el.textContent);
+  check('缺凭证时采集报出缺凭证而非上游故障（§4 缺陷 15）',
+    /未登记采集凭证|前置条件不满足/.test(preCredMsg),
+    preCredMsg.replace(/\s+/g, ' ').slice(0, 90));
+  // 单看文案不足以判定修好了 —— 修复前的 502 也带同样的"未登记采集凭证"。
+  // 真正的区别是它现在按"未打上游"归类：带结构化 items 且标 skipped
+  // （旧路径没有 items，只渲染一行光秃秃的"采集失败"）。
+  const preCredRows = await page.$$eval('#sync-result tbody tr',
+    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  check('前置失败按"未触达上游"归类（items 标 skipped）',
+    preCredRows.some(r => r.includes('skipped')),
+    preCredRows.length ? JSON.stringify(preCredRows[0]) : '无 items（旧 502 路径）');
+
   // ── 6. 界面登记凭证 ──
   await page.type('#cr-channel', String(newChannelId));
   await page.type('#cr-token', 'sk-ui-collector-token');
@@ -169,6 +196,9 @@ try {
   await page.screenshot({ path: `${SHOT}/04-key-registered.png` });
 
   // ── 8. 界面触发采集，验证逐项结果表 ──
+  //
+  // 注意这是本次会话的**第二次**点采集（5bis 缺凭证失败过一次）。
+  // 它能成功本身就是断言：前置失败没有起算最小间隔窗口。
   await page.click('#btn-sync');
   await page.waitForFunction(
     () => document.querySelector('#sync-result table') !== null, { timeout: 90000 });
@@ -265,12 +295,12 @@ try {
     /间隔未到|已有 sync/.test(rateText), rateText.slice(0, 70));
 
   // ── 11. 页面无 JS 错误 ──
-  // 只看真正的脚本错误：429 是本脚本自己触发的限流断言，
-  // favicon 404 是浏览器自动请求 —— 两者都不是页面缺陷
+  // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
+  // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷
   const realErrors = consoleErrors.filter(e =>
-    !/429|favicon/.test(e));
+    !/429|422|favicon/.test(e));
   check('页面无 JavaScript 错误', realErrors.length === 0,
-    realErrors.slice(0, 2).join(' | ') || '无（已排除预期的 429 与 favicon）');
+    realErrors.slice(0, 2).join(' | ') || '无（已排除预期的 429/422 与 favicon）');
 
   writeFileSync((process.env.SHOTS || '/tmp/sla-ui-shots') + '/results.json',
     JSON.stringify(results, null, 2));

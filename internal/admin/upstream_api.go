@@ -204,11 +204,18 @@ func (g *syncGuard) acquire(channelID int64, minInterval time.Duration) error {
 	return nil
 }
 
-func (g *syncGuard) release(channelID int64) {
+// release 解除互斥。armWindow 决定是否顺带起算最小间隔。
+//
+// 互斥无条件解除；窗口**只在这次尝试真的触达了上游时**才起算 ——
+// 最小间隔是给上游挡请求的，本地前置失败（缺凭证、站型未知、取不到连接）
+// 一个字节都没发出去，凭什么让下一次真采集等 60 秒。
+func (g *syncGuard) release(channelID int64, armWindow bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.running, channelID)
-	g.last[channelID] = time.Now()
+	if armWindow {
+		g.last[channelID] = time.Now()
+	}
 }
 
 func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +247,10 @@ func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer s.guard.release(id)
+	// 默认不起算窗口：只有确认打过上游的分支才置 true，
+	// 这样新增的提前 return 分支不会悄悄开始限流（默认值取安全的一侧）。
+	reachedUpstream := false
+	defer func() { s.guard.release(id, reachedUpstream) }()
 
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		ch, err := store.GetChannel(r.Context(), conn, id)
@@ -254,11 +264,21 @@ func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 
 		res, err := s.Sync(ctx, ch)
 		if err != nil {
+			if errors.Is(err, collector.ErrPrecondition) {
+				// 没打上游 → 不起算窗口，且这是**配置问题**而非上游故障：
+				// 返 422 而不是 502，否则运维会去查上游为什么挂了。
+				s.failWith(w, http.StatusUnprocessableEntity, err.Error(),
+					map[string]any{"channel_id": id, "site_family": ch.SiteFamily,
+						"items": []map[string]any{{"status": "skipped"}}})
+				return
+			}
+			reachedUpstream = true
 			// 鉴权/连接失败 → 整体中止（09 §5.0bis ①）
 			s.failWith(w, http.StatusBadGateway, err.Error(),
 				map[string]any{"channel_id": id, "site_family": ch.SiteFamily})
 			return
 		}
+		reachedUpstream = true
 		s.Logger.Info("渠道采集完成", "channel_id", id,
 			"elapsed_ms", res.ElapsedMs, "has_failure", res.HasFailure())
 		s.ok(w, res)

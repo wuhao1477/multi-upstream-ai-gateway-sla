@@ -43,20 +43,22 @@ func runChannelSync(
 	auth *collector.Authenticator,
 	ch store.Channel,
 ) (*collector.SyncResult, error) {
+	// 装配阶段的失败一律裹 ErrPrecondition：到这里为止一个上游字节都没发出，
+	// 调用方据此决定不消耗最小间隔窗口（见 collector.ErrPrecondition）。
 	ad, refresher, err := adapterFor(collector.Family(ch.SiteFamily), hc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w：%w", collector.ErrPrecondition, err)
 	}
 
 	conn, release, err := pool.Acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w：%w", collector.ErrPrecondition, err)
 	}
 	credStore := store.NewCredentialStore(pool)
 	cred, err := credStore.Load(ctx, conn, ch)
 	if err != nil {
 		release()
-		return nil, err
+		return nil, fmt.Errorf("%w：%w", collector.ErrPrecondition, err)
 	}
 	// 额度换算基数逐站读取（04 §2：不写死）。
 	// 取不到时留 0 —— FetchAccount 会因此报错而不是猜（差 50 万倍）。

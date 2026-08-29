@@ -210,7 +210,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
 | `collector_catalog_interval_h` | 12 | | 渠道模型目录采集周期（小时，FR-126）。比价格稀疏——目录变动频率远低于价格 |
 | `catalog_missing_rounds` | 3 | | 模型连续 N 轮未出现即判下架并告警（FR-126/AC-40）。⚠️ **用轮数而非时长**：采集周期本身可配，轮数对周期变化免疫。**缺此键会静默取 0 → 每轮都判下架**（第 45 轮补，AC-40 早已声称"可配、默认 3"却从未登记） |
-| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128）。间隔内再调返回 429 且不打上游（[§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)） |
+| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128）。间隔内再调返回 429 且不打上游；**窗口只由触达过上游的尝试起算**，前置失败返 422 不占窗口（[§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)） |
 | **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
 | `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
 | `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
@@ -302,14 +302,15 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 }
 ```
 
-- `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（被限流跳过）。
+- `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
 - **`unsupported` 必须出现在 `items` 里**，不能省略该项——AC-38 要求"不支持的项返回明确的不支持而非静默留空"，且须与 `Capabilities()` 声明一致。
 - **`degraded` 能力的 status 取值**：见 [04 §3.4bis](./04-collector-adapter.md) —— 采到部分即 `ok` 并在 `note` 说明缺哪些字段，采不到即 `failed`；**`degraded` 是能力声明，不是运行时状态**。
 
 **限流与并发**：
 
 - **同渠道最小间隔** `sync_min_interval_s`（默认 60，`config_params`）：间隔内再次调用返回 **429** 且 `items` 全为 `skipped`，不打上游。
-- **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。
+- ⚠️ **窗口只由"真的触达了上游"的尝试起算**：站型未知、连接池取不到连接、**凭证未登记**都在发出第一个上游请求前失败，此类返回 **422**（配置问题，非上游故障）且 `items` 全为 `skipped`，**不起算窗口**。否则「建渠道 → 采集 → 提示缺凭证 → 登记 → 再采集」这条首跑路径会被自己上一次的失败挡满一个间隔（[P1-evidence §4 第 15 项](../acceptance/P1-evidence.md)）。采集层用 `collector.ErrPrecondition` 显式声明"未触达上游"，**接口层不靠匹配错误文案判断**。
+- **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。互斥与限流是两件事：**前置失败也必须解互斥**，否则一次本地失败会把渠道永久锁死。
 - 单项内的请求间隔仍受 `collector_request_interval_ms` 约束（[04 §6](./04-collector-adapter.md)）。
 
 ### 5.1 其余端点（P2~P3）
