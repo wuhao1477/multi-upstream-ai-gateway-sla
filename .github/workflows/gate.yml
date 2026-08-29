@@ -78,9 +78,17 @@ jobs:
       #
       # ⚠️ pnpm/action-setup 必须排在 setup-node **之前**：setup-node 的
       #    `cache: pnpm` 要调 `pnpm store path` 才能定位缓存目录，pnpm 不在
-      #    PATH 上这一步直接失败。版本不写死，由 package.json 的
-      #    packageManager 字段决定，与 Dockerfile 里的 corepack 同源。
+      #    PATH 上这一步直接失败。版本不写死，由 packageManager 字段决定，
+      #    与 Dockerfile 里的 corepack 同源。
+      #
+      # ⚠️ **必须给 package_json_file**：该 action 默认读**仓库根**的
+      #    package.json，而本仓库根下没有 package.json（前端是 web/ 下的独立
+      #    工程），于是它报 "No pnpm version is specified" 直接失败。
+      #    2026-08-29 首次在 feat 分支跑 gate 才暴露 —— 此前 gate 只在 main
+      #    触发，而这段 pnpm 步骤是随 Vue3 重写在 feat 分支上加的，从没被跑过。
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
 
       - uses: actions/setup-node@v4
         with:
