@@ -595,6 +595,12 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	staleOnly := r.URL.Query().Get("stale") == "true"
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	// unit 按计价口径筛选。没有它的话按次计价那一段实际**不可达**：
+	// ListCatalog 按 billing_unit 字母序分段（per_1m_token < per_call），
+	// 真实渠道实测 1161 条倍率 + 208 条按次，翻页翻到第 24 页才见到第一条按次。
+	// 而"跨段不可直接比大小"的告警要有意义，前提是两段都看得到。
+	// 空值段用 unit=unknown 选（billing_unit IS NULL，015 迁移前的存量）。
+	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
 	limit, offset := parsePaging(r.URL.Query())
 
 	rounds, interval := 3, 12
@@ -614,16 +620,7 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// 名称筛选在应用层做：目录规模是数百行，不值得为它建 trigram 索引
-		filtered := all
-		if q != "" {
-			filtered = filtered[:0]
-			for _, e := range all {
-				if strings.Contains(strings.ToLower(e.ModelName), q) {
-					filtered = append(filtered, e)
-				}
-			}
-		}
+		filtered, units := filterCatalog(all, q, unit)
 		total := len(filtered)
 		if offset > total {
 			offset = total
@@ -638,12 +635,55 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		s.ok(w, map[string]any{
 			"channel_id": id, "total": total, "limit": limit, "offset": offset,
+			"unit": unit, "units": units,
 			"items": page,
 		})
 	})
 }
 
 // ── 辅助 ──
+
+// filterCatalog 按模型名与计价口径筛目录，并返回**筛分段之前**的各口径行数。
+//
+// units 要在分段筛选前算：界面靠它显示"倍率 1161 / 按次 208"这样的分段规模，
+// 筛完再数就只剩当前段，切到某段后其余段的按钮会自己消失，出不去。
+//
+// 不改原切片：调用方（以及未来的缓存层）可能还要用 all，
+// 就地压缩虽然省一次分配，但会把 ListCatalog 的返回值改成筛后结果。
+func filterCatalog(all []store.CatalogEntry, q, unit string) (
+	[]store.CatalogEntry, map[string]int,
+) {
+	// 名称筛选在应用层做：目录规模是数百到一千多行，不值得为它建 trigram 索引
+	filtered := make([]store.CatalogEntry, 0, len(all))
+	for _, e := range all {
+		if q == "" || strings.Contains(strings.ToLower(e.ModelName), q) {
+			filtered = append(filtered, e)
+		}
+	}
+	units := map[string]int{}
+	for _, e := range filtered {
+		units[unitKey(e.BillingUnit)]++
+	}
+	if unit != "" {
+		kept := filtered[:0]
+		for _, e := range filtered {
+			if unitKey(e.BillingUnit) == unit {
+				kept = append(kept, e)
+			}
+		}
+		filtered = kept
+	}
+	return filtered, units
+}
+
+// unitKey 把计价口径归一成筛选用的键。NULL 归到 "unknown" 而不是空串：
+// 空串在 query 里与"未筛选"无从区分，会让 ?unit= 既像选空值段又像不筛。
+func unitKey(u *string) string {
+	if u == nil {
+		return "unknown"
+	}
+	return *u
+}
 
 // 分页上限。真实渠道目录实测最大 1369 个模型，故上限不能太小。
 const (

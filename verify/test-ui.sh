@@ -106,9 +106,15 @@ echo "   ✅ 依赖就绪"
 
 echo "── 5/5 真 Chrome 验收 ──"
 mkdir -p /tmp/sla-ui-shots
+# HUB_FILE：给一份 all-api-hub 导出文件，就额外跑一遍批量导入试运行
+#（只 dry_run，不落库）。默认不跑 —— 那一段会真的去探测备份里的上百个陌生
+# 站点（实测 106 站 24 秒），不该出现在每次例行验收里。
+# 用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/test-ui.sh
+[ -n "${HUB_FILE:-}" ] && echo "   （含 all-api-hub 试运行：$HUB_FILE）"
 cd verify/ui
 BASE="http://127.0.0.1:${PORT}" \
 ADMIN_TOKEN="$TOKEN" \
 MOCK="http://127.0.0.1:${MOCKPORT}" \
 SHOTS=/tmp/sla-ui-shots \
+HUB_FILE="${HUB_FILE:-}" \
   node verify-ui.mjs

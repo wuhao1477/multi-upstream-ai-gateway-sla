@@ -1,0 +1,47 @@
+# 连**远程真实库**的本地运行栈。与 docker-compose.arm.yml 的关键差异：
+#
+# 1) 不起 postgres 容器，DATABASE_URL 指向内网 <internal-db-host>。
+#    那个库里有真实数据（65 渠道 / 2782 catalog / 203 分组），
+#    所以**没有 tmpfs、没有 down -v 能清掉的东西** —— `down` 只停容器，
+#    数据在远端不受影响。反过来说：这个栈里的任何写操作都是对真库的写。
+#
+# 2) 仍然只发布到 127.0.0.1。
+#    远程库的引入不改变管理面的边界：/admin/* 不经 Caddy(06 §1)，
+#    ADMIN_TOKEN 是认证、不是网络隔离，两层都要在。
+#
+# 3) 保留 mock 上游。
+#    真库里的 65 个渠道指向真站点，采集会发真请求；调 UI 样式时用 mock
+#    可以在不打扰真站点的前提下走通 Detect/sync 全路径。
+#
+# ⚠️ 迁移器行为已核对（internal/store/migrate.go:151-158）：已应用的文件
+#    checksum 一致就 continue，不重跑 DDL；不一致则 return error 且不执行。
+#    切库前已逐个比对 15/15 一致，故启动时不会动 schema。
+
+name: sla-remote
+
+x-core-env: &core-env
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 必须指向远程库}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置}
+  SLA_ADDR: ":8080"
+
+services:
+  mock:
+    image: python:3.12-alpine
+    command: ["python3", "/mock_newapi.py", "8099"]
+    environment:
+      MOCK_BIND: "0.0.0.0"
+    volumes:
+      - ./mock_newapi.py:/mock_newapi.py:ro
+
+  sla-core:
+    image: ${SLA_IMAGE:?SLA_IMAGE 必须设置}
+    environment: *core-env
+    ports:
+      # 只绑回环，理由同上第 2 条
+      - "127.0.0.1:${CORE_PORT:-18290}:8080"
+    healthcheck:
+      # distroless 无 shell，只能 exec 形式直接跑二进制
+      test: ["CMD", "/sla-core", "-version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

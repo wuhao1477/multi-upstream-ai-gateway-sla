@@ -3,7 +3,7 @@
 // 用真 Chrome（非 headless shell 的 DOM dump）：点击、填表、等 XHR、截图，
 // 验证的是"运维真能在 web 端加渠道商并采集"，而不是"HTML 里有那些字符串"。
 import puppeteer from 'puppeteer-core';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 
 // 路径由 test-ui.sh 按平台探测后注入（macOS 在 .app 里、CI 在 PATH 上）
 const CHROME = process.env.CHROME ||
@@ -12,6 +12,9 @@ const BASE = process.env.BASE || 'http://127.0.0.1:18090';
 const TOKEN = process.env.ADMIN_TOKEN || 'local-verify-token';
 const MOCK = process.env.MOCK || 'http://127.0.0.1:18099';
 const SHOT = process.env.SHOTS || '/tmp/sla-ui-shots';
+// all-api-hub 备份文件。默认不给 —— 见 12bis：那一段会真去探测备份里的上百个
+// 陌生站点，不该出现在每次例行验收里。
+const HUB_FILE = process.env.HUB_FILE || '';
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -31,6 +34,33 @@ const browser = await puppeteer.launch({
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 1400 });
+
+  // ── 布局改成左右分栏后新增的两个助手 ──
+  //
+  // pane()：表单散在不同分栏里，未激活的分栏是 display:none。
+  // puppeteer 往隐藏元素 type 不会报错，但 focus() 是空操作 —— 按键会落到
+  // 上一个焦点元素上，症状是"填了却没填进去"，且没有任何报错。故先切分栏。
+  const pane = async name => {
+    await page.click(`.nav-item[data-pane="${name}"]`);
+    await page.waitForFunction(
+      n => document.querySelector('#pane-' + n)?.classList.contains('on'),
+      { timeout: 5000 }, name);
+  };
+  // fill()：选中渠道时会把渠道 ID 预填进登记表单（省手抄），
+  // 此时 type() 是**追加**而不是覆盖 —— 会把 "12" 填成 "1212"。先清空。
+  const fill = async (sel, val) => {
+    await page.$eval(sel, el => { el.value = ''; });
+    await page.type(sel, val);
+  };
+  // 取 body 背景的真实 sRGB 亮度：断言"深色模式真的是深的"，
+  // 而不是只断言 class 名变了（那样把 .dark 里的色值写成白色也照样绿）。
+  const bgLuma = () => page.evaluate(() => {
+    const c = document.createElement('canvas').getContext('2d');
+    c.fillStyle = getComputedStyle(document.body).backgroundColor;
+    c.fillRect(0, 0, 1, 1);
+    const [r, g, b] = c.getImageData(0, 0, 1, 1).data;
+    return Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+  });
 
   // 收集控制台错误 —— 页面报 JS 错等于功能不可用，即便 DOM 看着对
   const consoleErrors = [];
@@ -157,9 +187,10 @@ try {
     preCredRows.length ? JSON.stringify(preCredRows[0]) : '无 items（旧 502 路径）');
 
   // ── 6. 界面登记凭证 ──
-  await page.type('#cr-channel', String(newChannelId));
-  await page.type('#cr-token', 'sk-ui-collector-token');
-  await page.type('#cr-uid', '42');
+  await pane('creds');
+  await fill('#cr-channel', String(newChannelId));
+  await fill('#cr-token', 'sk-ui-collector-token');
+  await fill('#cr-uid', '42');
   await page.click('#btn-cred');
   await page.waitForFunction(
     () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
@@ -170,17 +201,25 @@ try {
   check('凭证类型判定为 newapi_access_token',
     /newapi_access_token/.test(credToast));
 
+  // 凭证列表：只报"已存什么"，绝不回显内容
+  const credRow = await page.$$eval('#cred-list tbody tr',
+    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  check('凭证列表已渲染且不含令牌内容',
+    credRow.length >= 1 && !JSON.stringify(credRow).includes('sk-ui-collector-token'),
+    credRow.length ? credRow[0].join(' / ') : '空');
+
   // ── 7. 界面登记账号与 Key，并验证明文不回显 ──
-  await page.type('#acc-channel', String(newChannelId));
-  await page.type('#acc-uid', '42');
+  await pane('register');
+  await fill('#acc-channel', String(newChannelId));
+  await fill('#acc-uid', '42');
   await page.click('#btn-acc');
   await page.waitForFunction(
     () => /账号已创建/.test(document.querySelector('#toast').textContent),
     { timeout: 8000 });
 
   const SECRET = 'sk-ui-secret-should-never-be-echoed-9f3a';
-  await page.type('#key-secret', SECRET);
-  await page.type('#key-ref', '7');
+  await fill('#key-secret', SECRET);
+  await fill('#key-ref', '7');
   await page.click('#btn-key');
   await page.waitForFunction(
     () => /Key 已登记/.test(document.querySelector('#toast').textContent),
@@ -199,6 +238,7 @@ try {
   //
   // 注意这是本次会话的**第二次**点采集（5bis 缺凭证失败过一次）。
   // 它能成功本身就是断言：前置失败没有起算最小间隔窗口。
+  await pane('detail');
   await page.click('#btn-sync');
   await page.waitForFunction(
     () => document.querySelector('#sync-result table') !== null, { timeout: 90000 });
@@ -294,7 +334,151 @@ try {
   check('60s 内重复采集被限流拒绝（09 §5.0bis）',
     /间隔未到|已有 sync/.test(rateText), rateText.slice(0, 70));
 
-  // ── 11. 页面无 JS 错误 ──
+  // ── 11. 左右布局：侧栏与主区必须真的并排，不是上下堆叠 ──
+  const layout = await page.evaluate(() => {
+    const s = document.querySelector('.sidebar').getBoundingClientRect();
+    const m = document.querySelector('.main').getBoundingClientRect();
+    return { sx: s.x, sw: s.width, mx: m.x, sTop: s.y, mTop: m.y,
+             navs: document.querySelectorAll('.nav-item').length };
+  });
+  check('侧栏在主区左侧（真左右布局）',
+    layout.sx < layout.mx && layout.mx >= layout.sw,
+    `侧栏 x=${layout.sx} 宽=${layout.sw}，主区 x=${layout.mx}`);
+  check('侧栏与主区顶部对齐（未折成上下堆叠）',
+    Math.abs(layout.sTop - layout.mTop) < 2,
+    `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
+  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
+
+  // ── 12. 浅色 / 深色双模式 ──
+  //
+  // 断言背景亮度而不是 class 名：只看 classList 的话，把 .dark 里的
+  // 色值写成白的也照样绿。深/浅两次读数必须真的分处两端。
+  await page.click('#theme-sw button[data-theme="dark"]');
+  await sleep(250);
+  const darkLuma = await bgLuma();
+  const darkOn = await page.evaluate(() =>
+    document.documentElement.classList.contains('dark'));
+  check('深色模式生效且背景确为深色', darkOn && darkLuma < 60,
+    `class=dark:${darkOn} 背景亮度=${darkLuma}`);
+  await page.screenshot({ path: `${SHOT}/09-theme-dark.png`, fullPage: true });
+
+  await page.click('#theme-sw button[data-theme="light"]');
+  await sleep(250);
+  const lightLuma = await bgLuma();
+  const lightOff = await page.evaluate(() =>
+    !document.documentElement.classList.contains('dark'));
+  check('浅色模式生效且背景确为浅色', lightOff && lightLuma > 200,
+    `class=dark:${!lightOff} 背景亮度=${lightLuma}`);
+  await page.screenshot({ path: `${SHOT}/10-theme-light.png`, fullPage: true });
+
+  // 主题必须跨刷新记住：运维每次开界面都被打回默认色，等于没做
+  await page.click('#theme-sw button[data-theme="dark"]');
+  await sleep(150);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await sleep(400);
+  const persisted = await page.evaluate(() => ({
+    dark: document.documentElement.classList.contains('dark'),
+    stored: localStorage.getItem('theme'),
+    pressed: document.querySelector('#theme-sw button[aria-pressed="true"]')
+      ?.dataset.theme,
+  }));
+  check('主题选择跨刷新保留且按钮态一致',
+    persisted.dark && persisted.stored === 'dark' && persisted.pressed === 'dark',
+    JSON.stringify(persisted));
+
+  // 批量导入分栏可达（端点已实现，界面上要能找到入口）
+  await pane('import');
+  const impHas = await page.evaluate(() =>
+    !!document.querySelector('#imp-file') && !!document.querySelector('#btn-imp-dry'));
+  check('批量导入分栏可打开且有试运行入口', impHas);
+  await page.screenshot({ path: `${SHOT}/11-import.png` });
+
+  // ── 12bis. 真备份文件走一遍试运行 ──
+  //
+  // 默认跳过：这一段会**真的去探测备份里的上百个陌生站点**（实测 106 站 24 秒）。
+  // 放进默认流程等于每跑一次验收就对第三方站点打一轮请求，既慢又不礼貌。
+  // 要跑就显式给 HUB_FILE。
+  //
+  // 只跑 dry_run：真导入会往库里写上百个渠道，那是运维的决定，不是验收脚本的。
+  if (HUB_FILE) {
+    if (!existsSync(HUB_FILE)) {
+      check('批量导入试运行（真备份文件）', false, `文件不存在：${HUB_FILE}`);
+    } else {
+      // 落库与否从界面自己的计数读，不另开一路 fetch：
+      // 验的是"运维在界面上看到的数没变"，绕过界面去问后端就验不到这一点。
+      const chCount = async () => {
+        await pane('channels');
+        await page.click('#btn-reload');
+        await sleep(400);
+        const t = await page.$eval('#ch-count', el => el.innerText);
+        return Number((t.match(/\d+/) || [NaN])[0]);
+      };
+      const before = await chCount();
+      await pane('import');
+      const input = await page.$('#imp-file');
+      await input.uploadFile(HUB_FILE);
+      await page.click('#btn-imp-dry');
+      // 探测上百个站点，给足超时；文案在 renderImport 里写死为"试运行结果（未落库）"
+      await page.waitForFunction(
+        () => /试运行结果/.test(document.querySelector('#imp-result')?.innerText || ''),
+        { timeout: 300000 });
+
+      const sum = await page.$eval('#imp-result .stats', el =>
+        [...el.querySelectorAll('.stat')].map(s => ({
+          n: Number(s.querySelector('b').innerText),
+          k: s.querySelector('span').innerText,
+        })));
+      const val = k => (sum.find(s => s.k === k) || {}).n;
+      // 条目数从文件本身数出来，不写死 106：写死的话换一份备份就会因为
+      // "不是那 106 条"而失败，而这跟被验的行为毫无关系。
+      // 是 accounts.accounts 而非顶层 accounts —— 外层那个还装着 bookmarks
+      // 等别的东西（见 collector/allapihub.go 的 HubBackup）
+      const accounts = JSON.parse(readFileSync(HUB_FILE, 'utf8'))
+        .accounts?.accounts || [];
+      check('试运行读出备份全部条目', val('备份条目') === accounts.length,
+        `文件里 ${accounts.length} 条，界面显示 ${val('备份条目')} 条`);
+      check('试运行区分可入库与跳过',
+        val('可入库') > 0 && val('跳过') > 0 &&
+        val('可入库') + val('跳过') + val('失败') === val('备份条目'),
+        `可入库=${val('可入库')} 跳过=${val('跳过')} 失败=${val('失败')}`);
+
+      // 站型声明不符必须**报出来而不是静默采信**：站型决定全部字段映射，
+      // 信错一次余额/额度/模型全解析错，且错得没有任何报错。
+      //
+      // 断言"计数与表内标注一一对应"而不是"恰好 2 条"：不符的站数取决于备份内容
+      // （这份实测 2 站：sub2api→newapi、new-api→sub2api），
+      // 而"数出来几条就得在表里标出几条"对任何备份都必须成立。
+      const mism = val('站型声明不符');
+      const mismRows = await page.$$eval('#imp-result tbody tr', trs =>
+        trs.filter(t => /声明 /.test(t.innerText))
+           .map(t => t.innerText.replace(/\s+/g, ' ')));
+      check('站型声明与探测不符的站点逐行标出（不静默采信导出声明）',
+        mismRows.length === mism,
+        `计数=${mism} 表内标出=${mismRows.length}：${mismRows.join(' / ').slice(0, 120)}`);
+      // 计数为 0 时上面那条是空过 —— 说清楚，别让它冒充"验过了"
+      if (!mism) console.log('   ⚠️ 这份备份里没有站型声明不符的站点，该性质本轮未被真正触发');
+
+      // 有人机验证的站不能被当成"可自动采集"混进去。
+      // 断言要落在**表格行**上：分栏末尾那段说明文字里本来就有"人机验证"四个字，
+      // 对整个面板做正则等于自己给自己放行，把行渲染删掉照样绿。
+      const shieldRows = await page.$$eval('#imp-result tbody tr', trs =>
+        trs.filter(t => /人机验证/.test(t.innerText)).length);
+      check('有人机验证的站点逐行标出需人工录入（04 §6）',
+        shieldRows === val('有人机验证'),
+        `计数=${val('有人机验证')} 表内标出=${shieldRows}`);
+      if (!val('有人机验证')) console.log('   ⚠️ 这份备份里没有开人机验证的站点，该性质本轮未被真正触发');
+
+      // 试运行的本分：一行都不许落库
+      const after = await chCount();
+      check('试运行不落库（渠道数不变）',
+        Number.isFinite(before) && after === before,
+        `试运行前 ${before} 个渠道，试运行后 ${after} 个`);
+      await pane('import');
+      await page.screenshot({ path: `${SHOT}/11b-import-dryrun.png`, fullPage: true });
+    }
+  }
+
+  // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
   // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷
   const realErrors = consoleErrors.filter(e =>

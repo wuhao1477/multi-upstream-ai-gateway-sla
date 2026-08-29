@@ -60,7 +60,10 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${CORE_PORT:-18290}:8080"
+      # 绑 127.0.0.1 而不是 0.0.0.0：/admin/* 与 /metrics 不经 Caddy(06 §1)，
+      # 这里直连的是管理面。ADMIN_TOKEN 是认证，不是网络隔离，两层边界都要在。
+      # Chrome 与 curl 都走 127.0.0.1，改这个不影响 test-arm-cloud.sh。
+      - "127.0.0.1:${CORE_PORT:-18290}:8080"
     healthcheck:
       # distroless 无 shell，只能 exec 形式直接跑二进制
       test: ["CMD", "/sla-core", "-version"]
