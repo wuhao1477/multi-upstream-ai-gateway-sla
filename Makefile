@@ -26,19 +26,35 @@ build: web ## 编译 sla-core、collector、migrate（含前端）
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/migrate ./cmd/migrate
 
 .PHONY: test
-test: ## 跑全部单测
-	$(GO) test ./...
+test: ## 跑全部单测（带竞态检测）
+# -race：批量导入是 importConcurrency 个 worker 扇出写同一个 detectStash
+# （internal/admin/import_api.go），主进程还有关停协程。竞态是那种"压测不出、
+# 生产偶发"的错，而全部单测 2 秒、开了 -race 约 4 秒，没有不开的理由。
+	$(GO) test -race ./...
 
 .PHONY: vet
-vet: ## go vet
+vet: ## go vet + rows.Err() 漏检查
 	$(GO) vet ./...
+# 每个 rows.Next() 循环后面都必须查一次 rows.Err()：遍历中途出错时
+# rows.Next() 只返回 false，与"正常读完"无从区分，漏查就会静默返回截断的结果集。
+# go vet 不管这个。13 处里曾经漏过 1 处（listCredentials），加个 grep 别让它回来。
+# 先剔掉注释行再数 —— 否则解释这条规则的注释本身就会被算成一次调用。
+	@bad=$$(for f in $$(grep -rl 'rows.Next()' --include='*.go' ./cmd ./internal); do \
+	  code=$$(grep -v '^[[:space:]]*//' $$f); \
+	  n=$$(echo "$$code" | grep -c 'rows.Next()'); \
+	  e=$$(echo "$$code" | grep -c 'rows.Err()'); \
+	  [ "$$n" != "$$e" ] && echo "  $$f (Next=$$n Err=$$e)"; \
+	done); \
+	if [ -n "$$bad" ]; then echo "以下文件的 rows.Next() 循环缺 rows.Err()："; echo "$$bad"; exit 1; fi
+	@echo "✅ rows.Err() 无遗漏"
 
 .PHONY: lint
 lint: ## golangci-lint（未安装则退回 go vet 并提示）
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 	  golangci-lint run; \
 	else \
-	  echo "golangci-lint 未安装，退回 go vet；CI 会用真 linter"; \
+	  echo "golangci-lint 未安装，退回 go vet。装它：go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2"; \
+	  echo "（CI 用 golangci-lint-action 跑同一版本，本地跳过不代表 CI 会放过）"; \
 	  $(GO) vet ./...; \
 	fi
 

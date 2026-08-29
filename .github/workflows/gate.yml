@@ -96,6 +96,15 @@ jobs:
       - name: go vet
         run: make vet
 
+      # go vet 查不出死代码。首次接入时它就揪出两处从未被调用的实现，
+      # 其中一处是 normalizeFamily —— 与 admin 里活着的 normalizeDeclared
+      # 逐字相同，改了活的那份不会有人想起还有一份副本。
+      # 不配 .golangci.yml：默认规则集已经够用，加配置只是提前定死口径。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.2
+
       - name: 构建
         run: make build
 

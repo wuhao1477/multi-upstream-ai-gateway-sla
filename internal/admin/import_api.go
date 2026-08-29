@@ -301,9 +301,3 @@ func (d *detectStash) load(i int) (collector.DetectResult, bool) {
 	r, ok := d.m[i]
 	return r, ok
 }
-
-func (d *detectStash) reset() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.m = map[int]collector.DetectResult{}
-}

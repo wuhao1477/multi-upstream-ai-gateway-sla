@@ -131,16 +131,5 @@ type HubImportResult struct {
 // normalizeFamily 把 all-api-hub 的 site_type 映射到我们的家族名。
 //
 // 只用于**对照**（判断导出侧是否标错），不用于决定适配器。
-func normalizeFamily(siteType string) Family {
-	switch strings.ToLower(strings.TrimSpace(siteType)) {
-	case "new-api", "newapi", "rix-api":
-		return FamilyNewAPI
-	case "sub2api":
-		return FamilySub2API
-	case "asxs", "ampmanager":
-		return FamilyASXS
-	default:
-		// anyrouter / unknown / 空 —— 导出侧没分类，我们照样能探
-		return FamilyUnknown
-	}
-}
+// 映射在 internal/admin 的 normalizeDeclared —— 唯一调用点所在的包。
+// 这里曾有一份逐字相同、从未被调用的 normalizeFamily。

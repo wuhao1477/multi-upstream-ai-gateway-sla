@@ -867,6 +867,13 @@ SELECT channel_id, site_family, cred_type, status,
 			}
 			out = append(out, i)
 		}
+		// 遍历中途出错（连接断了、服务端流式报错）时 rows.Next() 只是返回 false，
+		// 与"正常读完"无从区分。不查这一下就会返回 200 + 一个**被截断**的列表，
+		// 而 count 看起来还很权威 —— 运维照着少掉的条数排查，查不出任何异常。
+		if err := rows.Err(); err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		// 只报"有没有"，不报内容
 		s.ok(w, map[string]any{"count": len(out), "items": out})
 	})
