@@ -72,12 +72,23 @@ jobs:
           cache: true
 
       # 管理界面是独立的 Vite 工程（web/），产物由 go:embed 打进二进制，
-      # 所以 make build 依赖它 —— node 必须在 build 之前就位。
+      # 所以 make build 依赖它 —— node 与 pnpm 必须在 build 之前就位。
+      #
+      # ⚠️ pnpm/action-setup 必须排在 setup-node **之前**：setup-node 的
+      #    `cache: pnpm` 要调 `pnpm store path` 才能定位缓存目录，pnpm 不在
+      #    PATH 上这一步直接失败。版本不写死，由 package.json 的
+      #    packageManager 字段决定，与 Dockerfile 里的 corepack 同源。
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          # 两个前端工程各有自己的 lockfile：web/ 是管理界面，
+          # verify/ui/ 是浏览器验收工具链。
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            verify/ui/pnpm-lock.yaml
 
       - name: 格式检查
         run: make fmt-check

@@ -17,7 +17,8 @@ coverage.*
 
 # 浏览器验收的依赖与产物
 verify/ui/node_modules/
-verify/ui/package-lock.json
+# 注意：pnpm-lock.yaml **要**进版本库。验收脚本用 `pnpm install --frozen-lockfile`，
+# 没有 lockfile 时它直接报 ERR_PNPM_NO_LOCKFILE 退出，clone 下来一步都跑不动。
 
 # Python
 __pycache__/

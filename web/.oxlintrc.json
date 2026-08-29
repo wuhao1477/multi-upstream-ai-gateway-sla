@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "vue", "import"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "ignorePatterns": ["dist", "node_modules"],
+  "rules": {
+    "no-console": "error",
+    "eqeqeq": ["error", "always"],
+    "no-var": "error",
+    "import/no-duplicates": "error",
+    "vue/require-typed-ref": "error",
+    "vue/prefer-import-from-vue": "error",
+    "vue/no-side-effects-in-computed-properties": "error",
+
+    // 样式表是靠副作用生效的，main.ts 里 `import './styles/app.css'` 没有值可赋。
+    // 只放行 css，其余无赋值 import 仍然报错。
+    "import/no-unassigned-import": ["error", { "allow": ["**/*.css"] }],
+
+    // 关掉：本仓唯一一处 sort() 作用在 Object.entries() 新建的数组上
+    // （stores/catalog.ts），改不改都不影响任何人。规则分不出"新数组"与
+    // "共享数组"，留着只会逼出无意义的 toSorted()。真出现共享数组排序时，
+    // 该由 review 抓，而不是让这条规则天天误报。
+    "unicorn/no-array-sort": "off"
+  },
+  "overrides": [
+    {
+      "files": ["vite.config.ts", "scripts/**"],
+      "env": { "browser": false, "node": true },
+      "rules": { "no-console": "off" }
+    }
+  ]
+}

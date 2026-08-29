@@ -187,8 +187,14 @@ try {
   await page.screenshot({ path: `${SHOT}/03c-per-call-seg.png`, fullPage: true });
 
   // 切回全部：分段是视图状态，切换必须可逆，否则运维以为目录只剩 208 行
+  //
+  // 等条件而不是等固定时长：真库这条「全部」查询实测 0.64～1.6 秒（1369 行、
+  // 冷热差一倍），原先固定 sleep(700) 正好卡在这个区间上 —— 慢的那次读到的
+  // 还是切换前的按次行，于是报一个并不存在的"分段不可逆"。
   await page.click('#detail-body button[data-unit=""]');
-  await sleep(700);
+  await page.waitForFunction(
+    () => document.querySelector('#detail-body tbody tr')?.innerText.includes('×倍率'),
+    { timeout: 10000 }).catch(() => {});
   const backCells = await cells();
   check('切回「全部」后回到倍率段首页（分段切换可逆）',
     backCells.includes('×倍率'), backCells.slice(0, 60).replace(/\s+/g, ' '));

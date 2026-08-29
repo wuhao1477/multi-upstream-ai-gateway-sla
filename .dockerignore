@@ -5,7 +5,7 @@
 .github
 bin
 verify/ui/node_modules
-verify/ui/package-lock.json
+verify/ui/pnpm-lock.yaml
 
 # 前端依赖与产物都由镜像内的 web 阶段自己生成。
 # 排除 node_modules 是为了体积与缓存；排除 webdist 里的产物是为了**正确性** ——

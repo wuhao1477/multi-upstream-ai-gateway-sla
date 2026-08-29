@@ -54,9 +54,9 @@ echo "── 1/6 编前端（web/ → internal/admin/webdist，供 go:embed）�
 # **每次都重编**，不做"产物已存在就跳过"的优化。
 # 理由：这是验收脚本。复用一份可能与当前源码不一致的产物，等于让"43 项全绿"
 # 变成对旧代码的验收，而这种不一致完全静默 —— 恰恰是验收最该防的那类错误。
-# 代价可接受：npm ci 只在缺 node_modules 时跑，之后 build 含类型检查约两秒。
-[ -d web/node_modules ] || (cd web && npm ci --silent --no-audit --no-fund)
-(cd web && npm run build >/tmp/sla-ui-web.log 2>&1) || {
+# 代价可接受：装依赖只在缺 node_modules 时跑，之后 build 含 lint 与类型检查约两秒。
+[ -d web/node_modules ] || (cd web && pnpm install --frozen-lockfile --silent)
+(cd web && pnpm run build >/tmp/sla-ui-web.log 2>&1) || {
   echo "❌ 前端构建失败"; tail -30 /tmp/sla-ui-web.log; exit 1; }
 [ -f internal/admin/webdist/index.html ] || {
   echo "❌ 前端产物缺失：internal/admin/webdist/index.html"; exit 1; }
@@ -117,7 +117,7 @@ $ready || { echo "❌ sla-core 未就绪"; tail -20 /tmp/sla-ui-core.log; exit 1
 echo "   ✅ sla-core 就绪"
 
 echo "── 5/6 装浏览器验收依赖 ──"
-(cd verify/ui && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
+(cd verify/ui && pnpm install --frozen-lockfile --silent >/dev/null 2>&1)
 echo "   ✅ 依赖就绪"
 
 echo "── 6/6 真 Chrome 验收 ──"

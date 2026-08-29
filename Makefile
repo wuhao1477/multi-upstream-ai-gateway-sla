@@ -13,8 +13,8 @@ help: ## 列出可用目标
 
 .PHONY: web
 web: ## 编前端（web/ → internal/admin/webdist，供 go:embed）
-	@[ -d web/node_modules ] || (cd web && npm ci --no-audit --no-fund)
-	cd web && npm run build
+	@[ -d web/node_modules ] || (cd web && pnpm install --frozen-lockfile)
+	cd web && pnpm run build
 
 .PHONY: build
 # 依赖 web：管理界面由 go:embed 打进二进制，跳过前端只会编出一个

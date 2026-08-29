@@ -205,7 +205,7 @@ echo "   ✅ collector 二进制在 arm64 上执行正常"
 
 # ── 7/8 浏览器依赖 ──
 echo "── 7/8 装浏览器验收依赖 ──"
-(cd verify/ui && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
+(cd verify/ui && pnpm install --frozen-lockfile --silent >/dev/null 2>&1)
 echo "   ✅ 依赖就绪"
 
 # ── 8/8 真 Chrome 验收 ──

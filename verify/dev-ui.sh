@@ -7,13 +7,13 @@
 #
 # 端口与 test-ui.sh **故意错开**，两者可同时跑（一边自动验收一边手点）。
 #
-# 需要：Docker 或本地 postgres@16，以及 node（编 web/ 前端；不需要 Chrome ——
-# 你用自己的浏览器点）。
+# 需要：Docker 或本地 postgres@16，以及 node + pnpm（编 web/ 前端；不需要
+# Chrome —— 你用自己的浏览器点）。
 #
 # 想边改前端边看效果的话，别用这个脚本的 :18290 —— 那是编好的静态产物，
-# 改一行要重跑。用 `cd web && npm run dev`（默认 :5173，带热更新），
+# 改一行要重跑。用 `cd web && pnpm dev`（默认 :5173，带热更新），
 # 它的 /admin/* 请求会代理到 SLA_DEV_BACKEND（默认 127.0.0.1:8080）；
-# 想指到本脚本起的这套就 SLA_DEV_BACKEND=http://127.0.0.1:18290 npm run dev。
+# 想指到本脚本起的这套就 SLA_DEV_BACKEND=http://127.0.0.1:18290 pnpm dev。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -43,9 +43,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "── 1/4 编前端（web/ → internal/admin/webdist，供 go:embed）──"
-command -v npm >/dev/null || { echo "❌ 未找到 npm（编前端需要）"; exit 1; }
-[ -d web/node_modules ] || (cd web && npm ci --silent --no-audit --no-fund)
-(cd web && npm run build >/tmp/sla-dev-web.log 2>&1) || {
+command -v pnpm >/dev/null || { echo "❌ 未找到 pnpm（编前端需要，可用 corepack enable pnpm）"; exit 1; }
+[ -d web/node_modules ] || (cd web && pnpm install --frozen-lockfile --silent)
+(cd web && pnpm run build >/tmp/sla-dev-web.log 2>&1) || {
   echo "❌ 前端构建失败"; tail -30 /tmp/sla-dev-web.log; exit 1; }
 echo "   ✅ 前端产物就绪"
 

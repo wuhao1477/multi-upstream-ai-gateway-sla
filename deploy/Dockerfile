@@ -21,15 +21,26 @@
 # 跑它们既慢又容易撞上缺少对应架构 binding 的坑。构建机原生跑、产物照样通用。
 FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web
 WORKDIR /src/web
-# 先只拷清单：依赖没变时 npm ci 这一层直接命中缓存
-COPY web/package.json web/package-lock.json ./
-# npm ci 而非 npm install：严格按 lockfile 装，构建结果可复现。
-# lockfileVersion 3 记录了各平台的原生 binding 变体，跨平台 ci 是安全的。
-RUN npm ci
+
+# pnpm 由 corepack 按 package.json 的 packageManager 字段拉取 —— 版本由仓库
+# 说了算，不取决于镜像里预装的是哪个 pnpm，本地与 CI 与这里三处一致。
+# DOWNLOAD_PROMPT=0：corepack 首次下载会交互确认，非 TTY 下会直接卡死。
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable pnpm
+
+# 先只拷清单：依赖没变时装依赖这一层直接命中缓存。
+# pnpm-workspace.yaml 必须一起拷 —— pnpm 11 起 overrides 落在这个文件里，
+# 少拷它就会装成 vue 3.5.x（peer 范围 ^3.5.11 不含预发布版）。
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+# --frozen-lockfile 是 pnpm 的 npm ci：lockfile 与清单不一致就报错退出，
+# 而不是就地改写 lockfile。CI 环境下本就是默认值，这里显式写出来是因为
+# docker build 不被识别为 CI。
+RUN pnpm install --frozen-lockfile
+
 COPY web/ ./
-# build 脚本里带 vue-tsc：类型错会让 docker build 直接失败，
+# build 脚本里带 oxlint + vue-tsc：lint 或类型错会让 docker build 直接失败，
 # 而不是产出一个"能跑但类型是错的"镜像。
-RUN npm run build
+RUN pnpm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 WORKDIR /src

@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "description": "P1 管理界面的真实浏览器验收（真 Chrome：点击/填表/等 XHR/截图）",
+  "packageManager": "pnpm@11.24.0",
   "scripts": { "verify": "node verify-ui.mjs" },
-  "dependencies": { "puppeteer-core": "^25.9.0" }
+  "dependencies": { "puppeteer-core": "25.9.0" }
 }
