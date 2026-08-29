@@ -6,7 +6,7 @@
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 48 项（见 §5） |
+| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 49 项（见 §5） |
 | 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）**<br>⚠️ 这一行是 **2026-08-28 那轮**的结论，其中浏览器验收部分**已被 §5 取代**（当轮上游是 `mock_newapi.py`，换真上游后发现其中两条断言是空的）。 |
 
 ---
@@ -80,7 +80,7 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 | AC-37~40 全绿 | ✅ 见 §1 |
 | #1~#11 全部关闭 | ✅ 12 个 issue 全关（#13 EPIC 收尾） |
 | 证据留档 | ✅ 本文件 + 截图 `/tmp/sla-ui-shots/`（8 张 + `results.json`，含 fullPage）+ 覆盖率报告 `/tmp/p1-coverage.json` |
-| 门禁全绿 | ✅ CI 12 步：文档 12 类 + DDL 真跑 + 迁移一致 + 迁移集成 + 管理 API + compose 冒烟 + **浏览器验收** |
+| 门禁全绿 | ✅ 15 步（gate 3 + build 12）：文档 12 类 + DDL 真跑 + 迁移一致 + 迁移集成 + 管理 API + compose 冒烟 + **浏览器验收** + 前端双版本。另有独立 `build-arm.yml`。**但这个"全绿"到 2026-08-29 才真正成立** —— 见 §5.6 |
 | 全渠道 sync 覆盖率报告 | ✅ 见 §2.1 |
 
 ### 2.1 全渠道覆盖率报告（65 个真实站点）
@@ -186,9 +186,10 @@ Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok
 | 套件 | 结果 | 上游 / 数据源 |
 | --- | --- | --- |
 | `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
-| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **48/48** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **49/49** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
 | `verify-remote.mjs`（内网真库只读） | **31/31** | SLA_DB @ <internal-db-host>（PG 17.5） |
-| 合计 | **93 项** | —— |
+| `test-ui.sh` 第 7 步：Key 明文不进 core 日志 | **✅** | 退出标准③ 的"日志"那一端，2026-08-29 补 |
+| 合计 | **94 项** | —— |
 
 选中站点的实测事实（全部由上游返回，无一处写死）：站型
 `newapi 0.6.0-rc.11`、`quota_per_unit=500000`、目录 1369 个模型（倍率 1161 +
@@ -212,7 +213,7 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 ### 5.4 遗留
 
-- 这 48 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
+- 这 49 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
   （fork 触发的 `pull_request` 与构建日志都会漏）。无 `HUB_FILE` 时
   `verify/test-ui.sh` 降级只跑 SPA 14 项，并打印跳过了哪些。**全量结论只能来自
   本地跑**，见 [CLAUDE.md §1 的后果表](../../CLAUDE.md)。
@@ -221,6 +222,32 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
   `TestNewAPIFetchKeysPagedEnvelope` 覆盖真站点的 `data.items` 分页信封（此前
   `unwrapDataList` 的 items/records 两个分支**零覆盖**，而我在写探活脚本时正好
   亲自踩到）。其余形态断言的处置未做。
+
+### 5.5 复验里又修掉的两处脚本自身缺陷（都是偶发绿，不是应用错）
+
+和 §4 末尾那 4 处同一性质 —— **断言碰巧成立**，换台机器或换一轮数据就翻。
+
+| 位置 | 原写法为什么偶发 | 改法 |
+| --- | --- | --- |
+| `verify-remote.mjs` 4 处 | 睡固定时长再断言。真库那个分组有 1354 个模型，请求 236ms 就回来了，但把上千个模型名拼进一个文本节点再排版实测飘在 500ms~3000ms+ | 改 `waitForFunction` 等条件。修完连跑 3 次 31/31，第 4 次在 8 路 CPU 满载下仍 31/31 |
+| `verify-ui.mjs:302` | 点 `button[data-g]` 的**第一个**。那一轮第一个是真上游自己配的 `auto` 分组，0 个模型，于是后续断言无从成立；分组顺序每轮都变 | 先统计各分组模型数，新增一条「至少一个分组解析出了可用模型」（全空仍然红），再点第一个非空的 |
+
+**睡固定时长两头都错**：慢机上假红，快机上把真慢藏掉。
+
+### 5.6 「门禁全绿」此前是未经检验的（2026-08-29 修）
+
+`gate.yml` 的触发器只有 `branches: [main]`，而一期 17 个提交全在特性分支上 ——
+**门禁一次都没在这些提交上跑过**，§2 那行"全绿"当时的依据只是本机 `make lint test`。
+
+把触发器放开到 `feat/**` 后，头两次云端运行就红了，且两条都是门禁自身的缺陷：
+
+| 运行 | 报错 | 根因 |
+| --- | --- | --- |
+| 1 | `Error: No pnpm version is specified` | `pnpm/action-setup` 默认读**仓库根**的 `package.json` 取 `packageManager`，而本仓库的在 `web/`。补 `package_json_file: web/package.json` |
+| 2 | golangci-lint exit 3 | v1.62.2 用 go1.23 构建，装不下 `go.mod` 的 1.25.1；v1 线没有 go1.25 的构建。升 `@v9` + v2.13.2（模块路径含 `/v2`），本机确认 0 issues |
+
+第 3、4 次运行 `gate` 与 `build-arm` 双绿。**这正是放开触发器要换来的东西** ——
+本机绿和云上绿不是一回事，而"不跑"从来不等于"能过"。
 
 ---
 

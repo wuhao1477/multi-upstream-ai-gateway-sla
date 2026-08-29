@@ -99,7 +99,7 @@ SPA_ONLY=""
 if [ -z "${HUB_FILE:-}" ]; then
   SPA_ONLY=1
   echo "   ⚠️ 未给 HUB_FILE —— 降级为**只跑 SPA 免密验收**"
-  echo "      跳过的是功能与数据那 48 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
+  echo "      跳过的是功能与数据那 49 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
   echo "      分组 / 目录 / Key / 限流 / 批量导入试运行）——它们要真上游凭证。"
   echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
   echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
@@ -153,12 +153,17 @@ BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
 if [ -n "$SPA_ONLY" ]; then
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（14 项）。功能与数据那 48 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密验收（14 项）。功能与数据那 49 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="
   exit 0
 fi
+
+# 这把假 Key 的明文由这里给,verify-ui.mjs 读同一个值 —— 它断言 DOM 里没有,
+# 下面第 7 步断言 core 日志里也没有。两处必须是同一个字面量,否则日志那条会
+# 变成"grep 一个谁都不会写进日志的字符串",永远绿。
+UI_KEY_SECRET='sk-ui-secret-should-never-be-echoed-9f3a'
 
 BASE="http://127.0.0.1:${PORT}" \
 ADMIN_TOKEN="$TOKEN" \
@@ -169,6 +174,34 @@ UP_QPU="$UP_QPU" \
 UP_MODELS="$UP_MODELS" \
 UP_PER_CALL="$UP_PER_CALL" \
 UP_KEYREF="$UP_KEYREF" \
+UI_KEY_SECRET="$UI_KEY_SECRET" \
 SHOTS=/tmp/sla-ui-shots \
 HUB_FILE="$HUB_FILE" \
   node verify-ui.mjs
+
+# ── 7/7 Key 明文不得进日志（P1 退出标准③）──
+#
+# 退出标准③ 的原文是"Key 明文在**响应/日志/抓包**中一处都不出现"。
+# verify-ui.mjs 覆盖了响应那一端（整份 DOM grep）；抓包那一端等价于响应体
+# （容器网内是明文 HTTP，包体就是响应体）；**日志那一端此前没有任何断言** ——
+# 2026-08-29 评估分支完成度时发现，补在这里。
+#
+# 为什么放在 shell 而不是 mjs：日志是 sla-core 的 stdout，只有起进程的这一侧
+# 看得到；浏览器里取不到。
+#
+# 注意此刻 cwd 是 verify/ui（上面 cd 过去跑 node），但下面只用绝对路径，
+# 不需要 cd 回去 —— 脚本里没有 $ROOT 这个变量，写 cd "$ROOT" 会在 set -u 下直接中止。
+echo "── 7/7 Key 明文不进日志 ──"
+if grep -qF "$UI_KEY_SECRET" /tmp/sla-ui-core.log; then
+  echo "❌ core 日志里出现了 Key 明文 —— 违反 FR-094 与 P1 退出标准③"
+  echo "   命中行（已截断，不打完整明文）："
+  grep -nF "$UI_KEY_SECRET" /tmp/sla-ui-core.log | head -3 | cut -c1-60
+  exit 1
+fi
+# 反向自检：这个 grep 必须真的能在该文件里找到东西，否则"没找到明文"可能只是
+# 因为日志是空的、或路径写错了 —— 那样这条断言永远绿，等于没有。
+if [ ! -s /tmp/sla-ui-core.log ]; then
+  echo "❌ /tmp/sla-ui-core.log 是空的 —— 上面那条「日志无明文」是空断言"
+  exit 1
+fi
+echo "   ✅ core 日志无 Key 明文（日志 $(wc -l < /tmp/sla-ui-core.log | tr -d ' ') 行，非空）"

@@ -242,7 +242,11 @@ try {
   // 这把 Key 是**假的**,而且必须是假的 —— CLAUDE.md §1 允许的唯一例外:
   // 被造的东西本身就是测试输入。这里要验的是"明文不回显",拿真 Key 试等于
   // 把真凭证写进 DOM 快照和 CI 日志,失败时反而漏得更彻底。
-  const SECRET = 'sk-ui-secret-should-never-be-echoed-9f3a';
+  //
+  // 由 test-ui.sh 用 UI_KEY_SECRET 传进来:P1 退出标准③ 要求明文在"响应/
+  // 日志/抓包"里一处都不出现,而日志那一端只有 shell 侧看得到
+  // (/tmp/sla-ui-core.log)。两边各写一份字面量必然哪天漂掉,故只留一处来源。
+  const SECRET = process.env.UI_KEY_SECRET || 'sk-ui-secret-should-never-be-echoed-9f3a';
   await fill('#key-secret', SECRET);
   // external_ref 必须是上游 /api/token 里真实存在的 id：SaveKey 只 UPDATE
   // 不 INSERT,对不上就只计"未登记"异常项 —— keys 项仍报 ok,额度列却永远空。
@@ -294,8 +298,32 @@ try {
   // 真上游的分组数由人家怎么配决定,不写死。至少一个,否则采集没拿到东西。
   check('分组列表已渲染', groupRows >= 1, `${groupRows} 个分组`);
 
-  // 点开某分组的可用模型（FR-124："这把 Key 能用哪些模型"）
-  await page.click('#detail-body button[data-g]');
+  // 点开某分组的可用模型（FR-124："这把 Key 能用哪些模型"）。
+  //
+  // ⚠️ **必须挑非空分组，不能点第一个**。真站点常有空分组（实测redacted-channel-03的
+  // `auto` 就是 0 个模型，那是上游的真实配置而非采集失败），而分组顺序由上游
+  // 返回决定、逐轮会变。原先直接 click 第一个 button[data-g]，于是这条断言
+  // 按上游那一轮的排序随机红 —— 2026-08-29 实测同一天两轮：一轮点到「测试」
+  // (163 个) 绿，一轮点到 `auto` (0 个) 红，而功能两轮都是好的。
+  //
+  // 但"全部分组都空"仍须红：那才是采集真没拿到东西。故先数一遍。
+  const groupCounts = await page.$$eval('#detail-body button[data-g]',
+    bs => bs.map(b => ({
+      name: b.dataset.name,
+      n: Number(/^(\d+)/.exec(b.innerText.trim())?.[1] ?? 0),
+    })));
+  const nonEmpty = groupCounts.filter(g => g.n > 0);
+  check('至少一个分组解析出了可用模型（否则是采集没拿到）',
+    nonEmpty.length >= 1,
+    `${nonEmpty.length}/${groupCounts.length} 个分组非空` +
+    (nonEmpty[0] ? `，最大 ${Math.max(...nonEmpty.map(g => g.n))} 个模型` : ''));
+
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#detail-body button[data-g]')]
+      .find(x => Number(/^(\d+)/.exec(x.innerText.trim())?.[1] ?? 0) > 0)
+      ?? document.querySelector('#detail-body button[data-g]');
+    b.click();
+  });
   await page.waitForFunction(
     () => /可用模型/.test(document.querySelector('#gm')?.textContent || ''),
     { timeout: 8000 });
