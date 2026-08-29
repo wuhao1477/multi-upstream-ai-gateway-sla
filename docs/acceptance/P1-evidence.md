@@ -6,7 +6,7 @@
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 49 项（见 §5） |
+| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 51 项（见 §5） |
 | 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）**<br>⚠️ 这一行是 **2026-08-28 那轮**的结论，其中浏览器验收部分**已被 §5 取代**（当轮上游是 `mock_newapi.py`，换真上游后发现其中两条断言是空的）。 |
 
 ---
@@ -186,10 +186,10 @@ Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok
 | 套件 | 结果 | 上游 / 数据源 |
 | --- | --- | --- |
 | `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
-| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **49/49** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **51/51** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
 | `verify-remote.mjs`（内网真库只读） | **31/31** | SLA_DB @ <internal-db-host>（PG 17.5） |
 | `test-ui.sh` 第 7 步：Key 明文不进 core 日志 | **✅** | 退出标准③ 的"日志"那一端，2026-08-29 补 |
-| 合计 | **94 项** | —— |
+| 合计 | **96 项** | —— |
 
 选中站点的实测事实（全部由上游返回，无一处写死）：站型
 `newapi 0.6.0-rc.11`、`quota_per_unit=500000`、目录 1369 个模型（倍率 1161 +
@@ -213,7 +213,7 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 ### 5.4 遗留
 
-- 这 49 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
+- 这 51 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
   （fork 触发的 `pull_request` 与构建日志都会漏）。无 `HUB_FILE` 时
   `verify/test-ui.sh` 降级只跑 SPA 14 项，并打印跳过了哪些。**全量结论只能来自
   本地跑**，见 [CLAUDE.md §1 的后果表](../../CLAUDE.md)。
@@ -248,6 +248,26 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 第 3、4 次运行 `gate` 与 `build-arm` 双绿。**这正是放开触发器要换来的东西** ——
 本机绿和云上绿不是一回事，而"不跑"从来不等于"能过"。
+
+### 5.7 FR-127 的展示端此前根本没有（2026-08-30 补）
+
+FR-127 的文字是「采集并存储上游施加的 Key 级 RPM 与并发上限。**P1 只做登记与展示**」。
+盘查时发现：迁移 002 有 `rpm_limit`/`concurrency_limit` 两列、`sink.go:197-204` 写它们、
+`channels.go:200` 的 SQL 选它们、`types.ts:63` 声明它们 —— **只有界面没有这一列**。
+从库到 API 全通，最后一跳断了，"展示"这半个要求一直是空的。
+
+补 `KeysView.vue` 的「上游限流」列，并加两条断言：
+
+| 断言 | 为什么这么写 |
+| --- | --- |
+| 上游限流列已渲染（每行都有内容） | 光有 `<th>` 不算，得逐行有单元格 |
+| 限流列与 API 字段一致（有值显数字、无值显 —，不是写死） | **不能断言"有数字"** —— 实测 newapi 的 `/api/token` 不给 Key 级 RPM/并发，真站点这一列就是「—」。断言有数字就只能靠 mock 才绿，正是 CLAUDE.md §1 禁的那种绿。故改为拉 `/admin/keys` 的原始字段，按 API 有无值分别校验 DOM |
+
+第二条已验证会红：把无值时的 `—` 换成写死的 `60 rpm`，它当场 `50/51`
+（`API=[[null,null]] DOM=60 rpm`），改回后 51/51。**没红过的断言不算断言。**
+
+功能项 49 → 51。sub2api 会给并发（`sub2api.go:183`），下次选到 sub2api 站点时
+这一列就会出数字 —— 那条分支目前未经真实站点确认，同 §3.1 的处置。
 
 ---
 

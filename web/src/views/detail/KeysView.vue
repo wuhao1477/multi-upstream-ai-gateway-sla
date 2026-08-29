@@ -88,6 +88,11 @@ async function disable(k: Key): Promise<void> {
             <th>前缀</th>
             <th>上游标识</th>
             <th>剩余额度</th>
+            <!-- FR-127：P1 只登记与展示，判闸属 P3（FR-028/029/032）。
+                 采到才有值 —— 实测 newapi 的 /api/token 不给 Key 级 RPM，
+                 sub2api 给并发（sub2api.go:183）。所以"—"是真实信息：
+                 该站型没暴露，不是我们没采。 -->
+            <th>上游限流</th>
             <th>状态</th>
             <th></th>
           </tr>
@@ -107,6 +112,20 @@ async function disable(k: Key): Promise<void> {
               >
               <span v-else class="dim">未采集</span>
             </td>
+            <td :data-rl="k.id">
+              <template v-if="k.rpm_limit !== undefined">{{ k.rpm_limit }} rpm</template>
+              <template v-if="k.rpm_limit !== undefined && k.concurrency_limit !== undefined">
+                /
+              </template>
+              <template v-if="k.concurrency_limit !== undefined"
+                >{{ k.concurrency_limit }} 并发</template
+              >
+              <span
+                v-if="k.rpm_limit === undefined && k.concurrency_limit === undefined"
+                class="dim"
+                >—</span
+              >
+            </td>
             <td>
               <span class="badge" :class="k.status === 'active' ? 'ok' : 'warn'">{{
                 k.status
@@ -124,6 +143,9 @@ async function disable(k: Key): Promise<void> {
     <div id="ku">
       <p class="note" v-if="usage !== ''">{{ usage }}</p>
     </div>
-    <p class="note">只显示前缀，完整凭证永不回显（FR-094）</p>
+    <p class="note">
+      只显示前缀，完整凭证永不回显（FR-094）。「上游限流」是上游施加的 Key 级上限，P1
+      只登记展示、不判闸
+    </p>
   </template>
 </template>

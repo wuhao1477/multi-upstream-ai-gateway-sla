@@ -399,6 +399,26 @@ try {
   const hasQuota = keyCells.some(c => c[3].startsWith('$'));
   check('Key 剩余额度已归一为美元显示', hasQuota,
     keyCells.map(c => c[3]).join(' '));
+  // FR-127「登记与展示」的展示端。这里**只能断言列存在且值取自 API**，不能
+  // 断言"有数字"—— 实测 newapi 的 /api/token 不给 Key 级 RPM/并发，真站点就是
+  // 「—」。若哪天改成断言有数字，就得靠 mock 才能绿，那正是 CLAUDE.md §1 禁的。
+  const rlCells = await page.$$eval('#detail-body tbody tr td[data-rl]',
+    ts => ts.map(t => t.textContent.trim()));
+  check('Key 上游限流列已渲染（FR-127 展示端）',
+    rlCells.length === keyCells.length && rlCells.every(t => t.length > 0),
+    `${rlCells.length}/${keyCells.length} 行：${rlCells.join(' | ')}`);
+  const rlFromAPI = await page.evaluate(async cid => {
+    const t = document.querySelector('#token').value;
+    const r = await fetch(`/admin/keys?channel_id=${cid}`,
+      { headers: { Authorization: `Bearer ${t}` } });
+    const d = await r.json();
+    return (d.items ?? []).map(k => [k.rpm_limit ?? null, k.concurrency_limit ?? null]);
+  }, newChannelId);
+  const apiSaysNone = rlFromAPI.every(([r, c]) => r === null && c === null);
+  check('限流列与 API 字段一致（有值显数字、无值显 —，不是写死）',
+    apiSaysNone ? rlCells.every(t => t === '—')
+      : rlCells.some(t => /\d/.test(t)),
+    `API=${JSON.stringify(rlFromAPI)} DOM=${rlCells.join('|')}`);
 
   await page.screenshot({ path: `${SHOT}/08-keys.png`, fullPage: true });
 

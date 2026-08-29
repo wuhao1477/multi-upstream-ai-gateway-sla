@@ -99,7 +99,7 @@ SPA_ONLY=""
 if [ -z "${HUB_FILE:-}" ]; then
   SPA_ONLY=1
   echo "   ⚠️ 未给 HUB_FILE —— 降级为**只跑 SPA 免密验收**"
-  echo "      跳过的是功能与数据那 49 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
+  echo "      跳过的是功能与数据那 51 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
   echo "      分组 / 目录 / Key / 限流 / 批量导入试运行）——它们要真上游凭证。"
   echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
   echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
@@ -153,7 +153,7 @@ BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
 if [ -n "$SPA_ONLY" ]; then
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（14 项）。功能与数据那 49 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密验收（14 项）。功能与数据那 51 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="

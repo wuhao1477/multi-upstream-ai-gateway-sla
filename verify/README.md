@@ -4,7 +4,7 @@
 
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
-| `test-ui.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 49 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
+| `test-ui.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 51 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
 | `dev-ui.sh` | 起常驻栈供**人工**点验，打印真上游地址与凭证 | 同上，`HUB_FILE` 必填 |
 | `test-arm-cloud.sh` | 把云端 arm64 镜像拉回本地真机验收 | gh、docker、`HUB_FILE` |
 | `ui/verify-remote.mjs` | 连内网真库的只读验收 31 项 | 到得了 <internal-db-host> |
@@ -13,7 +13,7 @@
 
 上游一律**真站点**，由 `pick-upstream.mjs` 从 all-api-hub 导出里现场探活挑选，
 不写死 URL（[CLAUDE.md §1](../CLAUDE.md)）。真上游令牌**不进 GitHub secrets**，
-所以要凭证的 49 项与真库 31 项**只在本地跑**，CI 只跑免密部分。
+所以要凭证的 51 项与真库 31 项**只在本地跑**，CI 只跑免密部分。
 
 ## 二、造流/造观测点的两个夹具
 
