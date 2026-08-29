@@ -110,10 +110,19 @@ jobs:
       # 其中一处是 normalizeFamily —— 与 admin 里活着的 normalizeDeclared
       # 逐字相同，改了活的那份不会有人想起还有一份副本。
       # 不配 .golangci.yml：默认规则集已经够用，加配置只是提前定死口径。
+      #
+      # ⚠️ **版本必须跟得上 go.mod**：golangci-lint 只支持**不高于自身构建
+      #    版本**的 Go。原先 pin 的 v1.62.2 是用 go1.23 构建的，而 go.mod
+      #    是 1.25.1，于是它直接拒绝启动：
+      #      can't load config: the Go language version (go1.23) used to build
+      #      golangci-lint is lower than the targeted Go version (1.25.1)
+      #    这不是告警而是 exit 3。2026-08-29 首次在 feat 分支跑 gate 才暴露。
+      #    v2 起才有 go1.25 构建的版本，故一并升 action 到 v9（v6 不识别 v2）。
+      #    升级后本机用 v2.13.2 实跑默认规则集：0 issues，无需加 .golangci.yml。
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.62.2
+          version: v2.13.2
 
       - name: 构建
         run: make build

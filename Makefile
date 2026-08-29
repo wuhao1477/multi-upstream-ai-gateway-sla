@@ -53,7 +53,8 @@ lint: ## golangci-lint（未安装则退回 go vet 并提示）
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 	  golangci-lint run; \
 	else \
-	  echo "golangci-lint 未安装，退回 go vet。装它：go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2"; \
+	  echo "golangci-lint 未安装，退回 go vet。装它（v2 起才支持 go1.25，注意路径含 /v2）："; \
+	  echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2"; \
 	  echo "（CI 用 golangci-lint-action 跑同一版本，本地跳过不代表 CI 会放过）"; \
 	  $(GO) vet ./...; \
 	fi
