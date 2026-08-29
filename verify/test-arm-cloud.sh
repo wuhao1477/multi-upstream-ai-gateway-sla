@@ -18,6 +18,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export LC_ALL=C LANG=C
 
+# ⚠️ CLICOLOR_FORCE=1（某些 shell 配置会全局设它）会让 gh 即使输出到**管道**
+#    也注入 ANSI 色码，于是 JSON 解析当场失败，报
+#    "Invalid numeric literal at line 1, column 2" —— 看着像 gh 没返回 JSON，
+#    实际是返回了带色的 JSON。NO_COLOR / GH_NO_COLOR 都压不住它（实测），
+#    只能 unset。下面统一用 gh 内置 --jq 取值，顺带不依赖外部 jq。
+unset CLICOLOR_FORCE
+
 WORKFLOW=build-arm.yml
 PORT="${CORE_PORT:-18290}"
 TOKEN="arm-verify-$$"
@@ -72,30 +79,30 @@ git diff --quiet && git diff --cached --quiet || {
   echo "⚠️  工作区有未提交改动 —— 云端构建的是 $SHA7，本地代码与之不同。"
   echo "    验收对象仍是云端产物（这是本脚本的目的），但别据此断言未提交的改动。"; }
 
+# 用 gh 内置 --jq 直出制表符分隔的三元组，避免二次解析
 find_run() {
   gh run list --workflow "$WORKFLOW" --commit "$SHA" --limit 1 \
-    --json databaseId,status,conclusion,url 2>/dev/null
+    --json databaseId,status,conclusion,url \
+    --jq '.[0] | [.databaseId, .status, (.conclusion // "-"), .url] | @tsv' 2>/dev/null
 }
-RUN_JSON=$(find_run)
-[ "$(echo "$RUN_JSON" | jq 'length')" != "0" ] || {
+RUN_TSV=$(find_run)
+[ -n "$RUN_TSV" ] || {
   echo "❌ 没有找到 commit $SHA7 对应的 $WORKFLOW 运行记录。"
   echo "   先推送分支触发云端构建：git push -u origin \$(git branch --show-current)"
   echo "   （刻意不本地兜底构建：那样验收就与'云端 arm 构建'无关了）"
   exit 1; }
 
-RUN_ID=$(echo "$RUN_JSON" | jq -r '.[0].databaseId')
-echo "   run #$RUN_ID  $(echo "$RUN_JSON" | jq -r '.[0].url')"
+IFS=$'\t' read -r RUN_ID ST CONC RUN_URL <<<"$RUN_TSV"
+echo "   run #$RUN_ID  $RUN_URL"
 
 # 云端还在跑就等（最多 20 分钟）。等待是必要的：刚 push 完立刻验收是常态。
 for _ in $(seq 1 120); do
-  ST=$(echo "$RUN_JSON" | jq -r '.[0].status')
   [ "$ST" = "completed" ] && break
   printf '\r   云端状态 %s，等待中…' "$ST"
   sleep 10
-  RUN_JSON=$(find_run)
+  IFS=$'\t' read -r RUN_ID ST CONC RUN_URL <<<"$(find_run)"
 done
 echo ""
-CONC=$(echo "$RUN_JSON" | jq -r '.[0].conclusion')
 [ "$CONC" = "success" ] || {
   echo "❌ 云端构建未成功（conclusion=$CONC）。看日志：gh run view $RUN_ID --log-failed"
   exit 1; }
