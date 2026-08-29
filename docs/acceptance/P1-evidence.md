@@ -6,8 +6,8 @@
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `make test-ui` 一键起 PG + mock + sla-core + Chrome；CI 第 12 步同一脚本，在 GitHub Linux runner 上独立跑通。全渠道覆盖率报告：`verify/coverage_report.py` |
-| 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）** |
+| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 48 项（见 §5） |
+| 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）**<br>⚠️ 这一行是 **2026-08-28 那轮**的结论，其中浏览器验收部分**已被 §5 取代**（当轮上游是 `mock_newapi.py`，换真上游后发现其中两条断言是空的）。 |
 
 ---
 
@@ -158,6 +158,69 @@ Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok
 > 已把这条真实路线补进验收脚本（**先点采集再登记凭证**，33 → 35 项），并新增 `make dev-ui` 起常驻栈供人工点验 —— 原先只有 `test-ui.sh`，它跑完 `trap EXIT` 就把库和进程一并拆掉，人接不上手。补断言时留意到一点：只断言"报了缺凭证"是**空断言**，修复前的 502 也是这句话；真正区分新旧的是它现在带结构化 `items` 并标 `skipped`（归入"未打上游"），故两条都断言。
 
 另修 4 处**测试脚本自身**的缺陷（我的断言错，不是应用错），其中最能说明问题的一处：脚本化跑第一次就失败 —— 它等 `#channels table`，而干净库是空状态；我的手工验证之所以过，是因为库里残留着先前手点建的渠道。**空库才是"运维第一次打开界面"的真实情形。**
+
+---
+
+## 5. 换真上游后的复验（2026-08-29）——取代首部表格里的「浏览器验收 35/35」
+
+处理方式照本仓库自己的先例 [07 §3 → §3bis](../dev/07-axonhub-runtime-probes.md)：
+**不改写上面任何一节**，在这里记新测量并写明取代了什么。依据
+[CLAUDE.md §1](../../CLAUDE.md) —— 那轮的上游是 `verify/mock_newapi.py`（已删），
+而 mock 是照实现者对协议的理解写出来的，**所以它永远不会推翻那个理解**。
+
+### 5.1 为什么必须重跑，而不是把数字改一改
+
+把 mock 换成 `verify/pick-upstream.mjs` 探活选出的真站点后，**当场发现 35/35
+里有两条断言是空的 —— 它们当时是绿的**：
+
+| 断言 | mock 时代为什么绿 | 真上游下的实情 |
+| --- | --- | --- |
+| account 采集成功 | `#acc-uid` 写死 `42`。`SaveAccount` 先按 `external_user_id` 匹配账号行，匹配不上就退回"该渠道只有一个账号便用它" | 一直走的是兜底分支，**匹配逻辑本身从未被验证**。改填真 uid 后才走正路 |
+| Key 剩余额度已归一为美元 | `#key-ref` 写死 `7`，上游没有这个 token id。`SaveKey` 只 UPDATE 不 INSERT，对不上只计一条"未登记"异常项（`sync.go:160`），`keys` 项照旧报 `ok` | 额度列**永远是空的**，这条真的会红。改填真 token id 后读出 `$1.0000` |
+
+这两条走的是和 §3「ASXS 真实响应形态从未确认」同一个机制：**缺口挂在那儿，
+而验收一直是绿的**。所以问题不是数字过时，是那轮的浏览器证据部分失效。
+
+### 5.2 新测量（本机实跑，非推断）
+
+| 套件 | 结果 | 上游 / 数据源 |
+| --- | --- | --- |
+| `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **48/48** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-remote.mjs`（内网真库只读） | **31/31** | SLA_DB @ <internal-db-host>（PG 17.5） |
+| 合计 | **93 项** | —— |
+
+选中站点的实测事实（全部由上游返回，无一处写死）：站型
+`newapi 0.6.0-rc.11`、`quota_per_unit=500000`、目录 1369 个模型（倍率 1161 +
+按次 208）、真实分组名「通用大模型」含 445 个模型、真 token id `5630` 额度
+`$1.0000`。
+
+选站条件是硬门槛，四条全过才用：`/api/status` 给正数 `quota_per_unit` 且未开
+turnstile、`/api/pricing` **同时**有倍率与按次两种口径、凭证过
+`/api/user/self`（用户 ID 头名逐个试探）、`/api/token` 至少有一把真 token。
+其中"两种口径"这条最挑：**实测 14 个真站点里只有 5 个两种都有** —— 而删掉的
+mock 是故意两种混排的，这正是它掩盖掉的现实。
+
+### 5.3 首部表格里哪些结论仍然有效
+
+- **AC-37/38/39/40、退出标准（§2）、全渠道覆盖率（§2.1）**：仍有效，不经 mock 上游。
+- **「浏览器验收 35/35」**：由 §5.2 取代。
+- **§4 的 15 个缺陷：一条都不用改。mock 给的绿可疑，mock 给的红不可疑。**
+  mock 能藏 bug，但它抓到的 bug 在我们自己代码里，与"协议长什么样"无关 ——
+  第 9 项（形态过时导致自我印证）恰恰是靠真库覆盖率翻出来的，第 15 项
+  （先点采集再登记凭证）是人工点验翻出来的。
+
+### 5.4 遗留
+
+- 这 48 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
+  （fork 触发的 `pull_request` 与构建日志都会漏）。无 `HUB_FILE` 时
+  `verify/test-ui.sh` 降级只跑 SPA 14 项，并打印跳过了哪些。**全量结论只能来自
+  本地跑**，见 [CLAUDE.md §1 的后果表](../../CLAUDE.md)。
+- `internal/collector/adapters_test.go` 里还有 6 处**形态类**断言（`len(keys)==2`、
+  `GroupRef=="vip"` 这类）只能证明夹具与解析器互相自洽。本轮已补
+  `TestNewAPIFetchKeysPagedEnvelope` 覆盖真站点的 `data.items` 分页信封（此前
+  `unwrapDataList` 的 items/records 两个分支**零覆盖**，而我在写探活脚本时正好
+  亲自踩到）。其余形态断言的处置未做。
 
 ---
 
