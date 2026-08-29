@@ -15,6 +15,7 @@
 用法：python3 verify/mock_newapi.py [port]
 """
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -134,6 +135,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18099
-    print(f"mock NewAPI 站点监听 :{port}（用户 ID 头 = {USER_ID_HEADER}）",
+    # 绑定地址可配：本机验收绑回环（mock 不对外暴露），跑在容器里必须绑 0.0.0.0。
+    #
+    # ⚠️ 别指望 host.docker.internal 兜住这件事：绑在回环上的 socket 会直接拒绝
+    #    来自容器网络的连接，症状是 sla-core 侧 connection refused 而 mock 日志
+    #    一行都没有 —— 看起来像"采集器没发请求"，实际是内核没让它进来。
+    bind = os.environ.get("MOCK_BIND", "127.0.0.1")
+    print(f"mock NewAPI 站点监听 {bind}:{port}（用户 ID 头 = {USER_ID_HEADER}）",
           file=sys.stderr)
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    HTTPServer((bind, port), Handler).serve_forever()

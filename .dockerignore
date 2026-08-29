@@ -1,0 +1,19 @@
+# 构建上下文瘦身。没有这个文件时 `COPY . .` 会把 node_modules/.git/bin 一并
+# 送进镜像层 —— 不只是慢：这些目录任何变动都会让 COPY 层缓存失效，
+# 于是"只改了验收脚本"也要重编一遍全部三个二进制。
+.git
+.github
+bin
+verify/ui/node_modules
+verify/ui/package-lock.json
+
+# 文档与验收产物对构建无贡献
+docs
+*.md
+!README.md
+
+# 本地产物 / 临时文件
+*.tar
+*.tar.gz
+/tmp
+.DS_Store
