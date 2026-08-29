@@ -217,6 +217,66 @@ func TestNewAPIFetchAccountRefusesToGuessQuotaPerUnit(t *testing.T) {
 	}
 }
 
+// TestNewAPIFetchKeysPagedEnvelope 覆盖 /api/token 的**分页**信封。
+//
+// ⚠️ 这条是 2026-08-29 补的，补的原因值得记下来：上面 newAPISite 的夹具给的是
+// 裸数组 `{"data":[...]}`，于是 unwrapDataList 的 items / records 两个分支
+// **零覆盖** —— 而真站点(实测 upstream-a.invalid)给的恰恰是 `data.items`：
+//
+//	{"data":{"page":1,"page_size":10,"total":1,"items":[{...}]}}
+//
+// 我写 verify/pick-upstream.mjs 时只认了 records，于是在一个明明有 token 的
+// 站上报"账号下没有任何 token"。采集器侧本来是对的(items 在前)，但这份**测试**
+// 从没证明过它对 —— 夹具照裸数组写，分页分支就一直没人验。
+//
+// 这条不违反 CLAUDE.md §1：形态取自真站点实测，不是照我对协议的想象编的。
+// 造的是"分页 vs 裸数组"这个**输入变体**，真站点一次只给一种，没法按需切换。
+func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"items", `{"data":{"page":1,"page_size":10,"total":1,"items":[
+			{"id":7,"remain_quota":500000,"group":"vip","expired_time":-1}]}}`},
+		{"records", `{"data":{"total":1,"records":[
+			{"id":7,"remain_quota":500000,"group":"vip","expired_time":-1}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					if r.URL.Path != "/api/token" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(tc.body))
+				}))
+			defer srv.Close()
+
+			ad := NewNewAPIAdapter(NewClient(0))
+			ad.C.HC = srv.Client()
+			keys, err := ad.FetchKeys(context.Background(), Session{
+				Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+				UserIDHeader: "New-API-User", ExternalUserID: "42",
+				QuotaPerUnit: 500000,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 分页信封没被拆开的话这里会是 0 把 —— 正是 picker 犯的那个错
+			if len(keys) != 1 {
+				t.Fatalf("Key 数 = %d，期望 1（分页信封未被拆开？）", len(keys))
+			}
+			if keys[0].KeyRef != "7" {
+				t.Errorf("KeyRef = %q，期望 \"7\"", keys[0].KeyRef)
+			}
+			if keys[0].RemainQuotaUSD != 1 {
+				t.Errorf("剩余额度 = %v，期望 1", keys[0].RemainQuotaUSD)
+			}
+		})
+	}
+}
+
 func TestNewAPIFetchKeys(t *testing.T) {
 	srv := newAPISite(t)
 	defer srv.Close()

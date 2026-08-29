@@ -7,7 +7,8 @@
 
 这条不是风格偏好。**mock 是照实现者对协议的理解写出来的,所以它永远不会
 推翻那个理解。** 曾经的 `verify/mock_newapi.py` 返回什么形态,取决于我读
-`docs/dev/04` §3.1 读出了什么;真站点返回别的,79 项全绿也发现不了。
+`docs/dev/04` §3.1 读出了什么;真站点返回别的,全套验收(现为 14+48+31 = 93 项)
+全绿也发现不了。
 [`docs/acceptance/P1-evidence.md`](docs/acceptance/P1-evidence.md) §3 里
 "ASXS 真实响应形态从未确认"就是这个坑的
 现成例子 —— 它一直挂在那儿,而验收一直是绿的。
@@ -34,6 +35,23 @@
   由 `test-integration` / `test-api` / `test-ui` 打真库覆盖。
   给它加 sqlmock 只会得到"测试 mock 是否返回了我让它返回的东西"。
 - **浏览器**:用真 Chrome(puppeteer-core 连本机 Chrome),不用 jsdom。
+- **Go 单测的 `httptest` 假上游**:本条同样管它们(全仓 14 处,集中在
+  `internal/collector/adapters_test.go`、`detect_test.go`、`newapi_pricing_test.go`)。
+  单测要快要离线,所以 `httptest` 本身不禁 —— 禁的是**用它举证"协议长什么样"**。
+  两类要分清:
+  - **行为类**(占多数,属例外):余额取不到、数字以字符串返回、缺
+    `quota_per_unit`、401 可区分、token 轮换、限流器计数……这些输入真站点
+    不肯按需产出,造是对的。
+  - **形态类**(不属例外):`len(keys)==2`、`GroupRef=="vip"` 这种断言只能证明
+    夹具与解析器互相自洽。形态的举证责任归 `verify/pick-upstream.mjs` 的真站点
+    校验;夹具里的形态**必须标注实测来源**,不能照文档或照想象写。
+
+  写新夹具前先问:**这个形态我实测过吗?** 没实测过就先去打真站点。这坑本仓库
+  踩过两次:`adapters_test.go` 的 `/api/pricing` 夹具原先照 `04 §3.1`(已过时)
+  的 dict 形态写,单测全绿而真站点一个价格都采不到(注释还在,2026-08 已修);
+  我写 picker 时照想象只认 `data.records`,真站点给的是 `data.items`,于是在
+  明明有 token 的站上报"没有任何 token"。后者补了
+  `TestNewAPIFetchKeysPagedEnvelope`(2026-08-29),形态取自实测。
 
 **唯一例外**是那些"被测对象本身就是假的"的场景 —— 这时假的那一端**就是**
 被测输入,不是被测依赖。判据只有一条:**真依赖能不能按需产出这个输入。**

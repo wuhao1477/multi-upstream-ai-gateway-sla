@@ -160,7 +160,7 @@ echo "   config 架构：$CFG_ARCH   容器内 -version：$GOT_VER   本地 HEAD
 echo "   ✅ 镜像来自 HEAD 的云端 arm64 构建"
 
 # ── 5/8 起栈 ──
-echo "── 5/8 起 compose 栈（PG + mock + 2×core + collector）──"
+echo "── 5/8 起 compose 栈（PG + 2×core + collector）──"
 export ADMIN_TOKEN="$TOKEN"
 cleanup   # 清掉上一轮可能的残留，再起
 "${COMPOSE[@]}" up -d >/dev/null 2>&1 || {

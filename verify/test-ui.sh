@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # P1 管理界面的真实浏览器验收（#9/#10/#12 的可执行判定）。
 #
-# 起真 PG + 真 sla-core + mock 上游，再用**真 Chrome** 点击/填表/截图。
+# 起真 PG + 真 sla-core + **真上游**（探活选站，CLAUDE.md §1），再用真 Chrome 点。
 # 与 test-config-api.sh（curl 打接口）的区别：这里验的是"运维真能在 web 端
 # 加渠道商并采集"，而不是"接口返回了正确 JSON"。
 #
@@ -90,13 +90,23 @@ echo "   ✅ PG 就绪"
 echo "── 3/6 选一个真上游（CLAUDE.md §1：不用假上游）──"
 # 从导出里现场探活挑一个能用的真站点。不写死 URL —— 站点会挂、会限流、
 # 会换证书,写死等于把"它一定可用"这个假设又搬回来。
-[ -n "${HUB_FILE:-}" ] || {
-  echo "❌ 需要 HUB_FILE 指向 all-api-hub 导出文件"
-  echo "   用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/test-ui.sh"
-  echo "   （验收对真上游跑,凭证从导出里取；见 CLAUDE.md §1）"
-  exit 1; }
-UPJSON=$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs) || {
-  echo "❌ 没挑到可用的真上游（上面列了每个候选的失败原因）"; exit 1; }
+#
+# ⚠️ HUB_FILE 缺失时**不报错退出**，而是降级成"只跑免密的 SPA 那 14 项"。
+#    这是 CI 唯一能跑的形态：真上游令牌不进 GitHub secrets（CLAUDE.md §1 的
+#    CI 表），所以云上拿不到凭证。降级必须**吵**——把跳过了什么、为什么跳过
+#    打出来，否则"CI 绿了"会被读成"功能验过了"，那正是本规则要防的假绿。
+SPA_ONLY=""
+if [ -z "${HUB_FILE:-}" ]; then
+  SPA_ONLY=1
+  echo "   ⚠️ 未给 HUB_FILE —— 降级为**只跑 SPA 免密验收**"
+  echo "      跳过的是功能与数据那 48 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
+  echo "      分组 / 目录 / Key / 限流 / 批量导入试运行）——它们要真上游凭证。"
+  echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
+  echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
+elif ! UPJSON=$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs); then
+  echo "❌ 没挑到可用的真上游（上面列了每个候选的失败原因）"; exit 1
+fi
+if [ -z "$SPA_ONLY" ]; then
 UP_URL=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).url))')
 UP_TOKEN=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).token))')
 UP_UID=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).uid))')
@@ -104,6 +114,7 @@ UP_QPU=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+
 UP_MODELS=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).models)))')
 UP_PER_CALL=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).perCallModels)))')
 UP_KEYREF=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).keyRef))')
+fi
 
 echo "── 4/6 起 sla-core ──"
 go build -o bin/sla-core ./cmd/sla-core
@@ -132,10 +143,22 @@ echo "── 6/6 真 Chrome 验收 ──"
 mkdir -p /tmp/sla-ui-shots
 # 批量导入试运行同样用同一份导出（只 dry_run,不落库）。它会真的去探测备份里的
 # 上百个陌生站点（实测 106 站 24 秒）—— 慢,但那是真实结果。
-echo "   （真上游：$UP_URL / 批量导入试运行：$HUB_FILE）"
+if [ -z "$SPA_ONLY" ]; then
+  echo "   （真上游：$UP_URL / 批量导入试运行：$HUB_FILE）"
+fi
 cd verify/ui
 
 BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
+
+if [ -n "$SPA_ONLY" ]; then
+  echo ""
+  echo "=========================================================="
+  echo "⚠️  只跑了 SPA 免密验收（14 项）。功能与数据那 48 项**未验**。"
+  echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
+  echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
+  echo "=========================================================="
+  exit 0
+fi
 
 BASE="http://127.0.0.1:${PORT}" \
 ADMIN_TOKEN="$TOKEN" \
