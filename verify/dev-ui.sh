@@ -7,7 +7,13 @@
 #
 # 端口与 test-ui.sh **故意错开**，两者可同时跑（一边自动验收一边手点）。
 #
-# 需要：Docker 或本地 postgres@16。不需要 Chrome/node（你用自己的浏览器）。
+# 需要：Docker 或本地 postgres@16，以及 node（编 web/ 前端；不需要 Chrome ——
+# 你用自己的浏览器点）。
+#
+# 想边改前端边看效果的话，别用这个脚本的 :18290 —— 那是编好的静态产物，
+# 改一行要重跑。用 `cd web && npm run dev`（默认 :5173，带热更新），
+# 它的 /admin/* 请求会代理到 SLA_DEV_BACKEND（默认 127.0.0.1:8080）；
+# 想指到本脚本起的这套就 SLA_DEV_BACKEND=http://127.0.0.1:18290 npm run dev。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,7 +42,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "── 1/3 起 PostgreSQL ──"
+echo "── 1/4 编前端（web/ → internal/admin/webdist，供 go:embed）──"
+command -v npm >/dev/null || { echo "❌ 未找到 npm（编前端需要）"; exit 1; }
+[ -d web/node_modules ] || (cd web && npm ci --silent --no-audit --no-fund)
+(cd web && npm run build >/tmp/sla-dev-web.log 2>&1) || {
+  echo "❌ 前端构建失败"; tail -30 /tmp/sla-dev-web.log; exit 1; }
+echo "   ✅ 前端产物就绪"
+
+echo "── 2/4 起 PostgreSQL ──"
 if docker info >/dev/null 2>&1; then
   USE_DOCKER=1
   docker rm -f sladevpg >/dev/null 2>&1 || true
@@ -63,7 +76,7 @@ else
 fi
 echo "   ✅ PG 就绪（:${PGPORT}）"
 
-echo "── 2/3 起 mock 上游（NewAPI 系）──"
+echo "── 3/4 起 mock 上游（NewAPI 系）──"
 python3 verify/mock_newapi.py "$MOCKPORT" >/tmp/sla-dev-mock.log 2>&1 &
 MOCK_PID=$!
 for _ in $(seq 1 20); do
@@ -74,7 +87,7 @@ curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null || {
   echo "❌ mock 上游未就绪"; cat /tmp/sla-dev-mock.log; exit 1; }
 echo "   ✅ mock 就绪（:${MOCKPORT}）"
 
-echo "── 3/3 起 sla-core ──"
+echo "── 4/4 起 sla-core ──"
 go build -o bin/sla-core ./cmd/sla-core
 DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" \
   >/tmp/sla-dev-core.log 2>&1 &

@@ -11,8 +11,16 @@ help: ## 列出可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: web
+web: ## 编前端（web/ → internal/admin/webdist，供 go:embed）
+	@[ -d web/node_modules ] || (cd web && npm ci --no-audit --no-fund)
+	cd web && npm run build
+
 .PHONY: build
-build: ## 编译 sla-core、collector、migrate
+# 依赖 web：管理界面由 go:embed 打进二进制，跳过前端只会编出一个
+# /admin/ui 返回 500「前端产物缺失」的二进制 —— 而 go build 本身照旧成功
+# （webdist/ 里有占位文件，模式匹配得到），失败点被推迟到运行时。
+build: web ## 编译 sla-core、collector、migrate（含前端）
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/sla-core ./cmd/sla-core
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/collector ./cmd/collector
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/migrate ./cmd/migrate

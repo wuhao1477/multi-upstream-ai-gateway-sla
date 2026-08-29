@@ -1,0 +1,578 @@
+/* 全局元素与骨架布局。组件私有样式放各自 .vue 的 <style scoped>，
+   这里只留三类：元素默认样式（body/input/table 之类无法 scoped 的）、
+   跨组件复用的原子类（.btn/.badge/.card…，验收脚本按 class 选元素）、
+   以及响应式断点。 */
+@import './tokens.css';
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font:
+    14px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: var(--primary);
+}
+
+/* ── 左右布局 ──
+   grid 而非 flex：侧栏定宽、主区 minmax(0,1fr)。少了 minmax(0,…) 的话，
+   主区里的宽表格会把网格列顶宽（min-width:auto 默认按内容算），
+   侧栏被挤出视口 —— 65 个渠道的表格立刻能触发。 */
+.shell {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  min-height: 100vh;
+}
+.sidebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--sidebar-border);
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 14px;
+}
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-lg);
+  flex: none;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 15px;
+}
+.brand-t {
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.25;
+}
+.brand-s {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.nav-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  padding: 10px 8px 4px;
+  letter-spacing: 0.02em;
+}
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+}
+.nav-item:hover {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+.nav-item.active {
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 20%, transparent);
+}
+.nav-ic {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+}
+.nav-item.active .nav-ic {
+  background: color-mix(in oklab, var(--primary) 20%, transparent);
+}
+.nav-ic svg {
+  width: 15px;
+  height: 15px;
+}
+.nav-item.active::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 22px;
+  background: var(--primary);
+  border-radius: 9px 0 0 9px;
+}
+.nav-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.side-foot {
+  margin-top: auto;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+  padding: 10px;
+}
+.side-foot-l {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 7px;
+}
+.theme-sw {
+  display: flex;
+  gap: 3px;
+  background: var(--background);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.theme-sw button {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 5px 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.theme-sw button svg {
+  width: 15px;
+  height: 15px;
+}
+.theme-sw button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+/* ── 顶栏 + 主区 ── */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  background: color-mix(in oklab, var(--background) 80%, transparent);
+  backdrop-filter: blur(8px);
+}
+.topbar h1 {
+  font-size: 15px;
+  margin: 0;
+  font-weight: 600;
+}
+.topbar .sub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.spacer {
+  flex: 1;
+}
+.content {
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 1240px;
+  width: 100%;
+}
+/* .pane 保留 display:none + .on 覆盖的写法：验收脚本靠 #pane-detail.on
+   判断"详情面板已打开"。路由只渲染当前面板，但它的根元素照旧带 .pane.on。 */
+.pane {
+  display: none;
+  flex-direction: column;
+  gap: 18px;
+}
+.pane.on {
+  display: flex;
+}
+
+/* ── Card：bg-card rounded-xl border shadow-sm，gap-6 py-6 px-6 ── */
+.card {
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 20px 22px;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+.card-h {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.card-t {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+.card-d {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0 0 14px;
+}
+.card-d:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Button：h-9 rounded-md px-4 text-sm font-medium，focus ring 3px ── */
+button {
+  font-family: inherit;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  transition:
+    background-color 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+.btn:hover {
+  background: color-mix(in oklab, var(--primary) 90%, transparent);
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.outline {
+  background: var(--background);
+  color: var(--foreground);
+  border-color: var(--border);
+}
+.btn.outline:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.btn.ghost {
+  background: none;
+  color: var(--foreground);
+  border-color: transparent;
+}
+.btn.ghost:hover {
+  background: var(--accent);
+}
+.btn.sm {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+.btn.danger {
+  background: var(--destructive);
+  color: #fff;
+}
+
+/* ── Input / Select：h-9 rounded-md border bg-transparent shadow-xs ── */
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0 0 5px;
+}
+input,
+select {
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--foreground);
+  background: transparent;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+}
+.dark input,
+.dark select {
+  background: color-mix(in oklab, var(--input) 30%, transparent);
+}
+select {
+  appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 15px;
+}
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+input::placeholder {
+  color: var(--muted-foreground);
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+.flex {
+  display: flex;
+  gap: 9px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.endcap {
+  align-self: end;
+}
+
+/* ── Table：w-full text-sm / th h-10 px-2 / td p-2 / row hover:bg-muted/50 ── */
+.tw {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th,
+td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+th {
+  height: 40px;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+  white-space: nowrap;
+}
+tbody tr:hover {
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+}
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* ── Badge：rounded-md border px-2 py-0.5 text-xs font-medium ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  white-space: nowrap;
+}
+.badge.ok {
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 30%, transparent);
+  background: color-mix(in oklab, var(--success) 12%, transparent);
+}
+.badge.warn {
+  color: var(--warning);
+  border-color: color-mix(in oklab, var(--warning) 30%, transparent);
+  background: color-mix(in oklab, var(--warning) 12%, transparent);
+}
+.badge.bad {
+  color: var(--destructive);
+  border-color: color-mix(in oklab, var(--destructive) 30%, transparent);
+  background: color-mix(in oklab, var(--destructive) 12%, transparent);
+}
+.badge.acc {
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 25%, transparent);
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+}
+.dim {
+  color: var(--muted-foreground);
+}
+.ok {
+  color: var(--success);
+}
+.warn {
+  color: var(--warning);
+}
+.bad {
+  color: var(--destructive);
+}
+.note {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 11px 0 0;
+  line-height: 1.6;
+}
+.empty {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  padding: 22px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+}
+
+/* 统计卡：dashboard 的 stat card 观感（大数字 + 小标签） */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 12px;
+}
+.stat {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+}
+.stat b {
+  display: block;
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.stat span {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.anom {
+  border-left: 3px solid var(--warning);
+  padding: 2px 0 2px 11px;
+  margin: 10px 0;
+}
+details {
+  margin-top: 7px;
+}
+summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.sec-t {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 18px 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* #toast 这里**不写 display:none**（旧版写了）：显示与否交给 v-show，
+   而 v-show 只能改行内 display，压不住同元素上的 display:none 规则。 */
+#toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  max-width: 430px;
+  z-index: 50;
+  padding: 12px 15px;
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  font-size: 13px;
+  box-shadow: 0 8px 26px -6px rgb(0 0 0 / 0.28);
+}
+
+/* 侧栏在窄屏折成顶部横排（参考仓库同样是 lg 断点切换导航形态）。
+   position:static 必须一并改：sticky + height:100vh 折行后会占满整屏。 */
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--sidebar-border);
+  }
+  .brand {
+    padding: 0 10px 0 0;
+  }
+  .nav-label {
+    display: none;
+  }
+  .nav-item {
+    width: auto;
+  }
+  .nav-item.active::after {
+    display: none;
+  }
+  .side-foot {
+    margin: 0 0 0 auto;
+    border-style: solid;
+  }
+  .side-foot-l {
+    display: none;
+  }
+}

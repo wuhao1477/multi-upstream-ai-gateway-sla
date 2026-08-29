@@ -28,13 +28,11 @@ jobs:
       # check_docs.py / extract_ddl.py 只用标准库（glob/os/re/sys），
       # ddl-check.sh 用 docker run 起临时 postgres:16。
       #
-      # 📌 关于 Node：本项目技术栈是 **Go**，门禁脚本是 shell + python3，
-      #    **构建链路完全不经 Node**。唯一的 Node 来源是 `actions/checkout`
-      #    这个官方 action —— GitHub 的 JS action 跑在 runner 自带的 Node 上，
-      #    与被测项目的技术栈无关（Go 项目用官方 action 同样是标准做法）。
-      #    若要彻底无 Node，可把 checkout 换成手写 `git clone`，但那要自行
-      #    处理 token、depth、ref 与 PR merge commit，得不偿失。
-      #    Node 20 弃用告警是 GitHub 侧的迁移节奏，待其发 v5 再升即可。
+      # 📌 关于 Node：**本作业**（文档一致性 + DDL）不经 Node，脚本是 shell + python3。
+      #    但整体构建链路已经用上 Node —— 管理界面是 web/ 下的独立 Vite 工程
+      #    （TS + Vue3），产物由 go:embed 打进二进制，见下方 build 作业的
+      #    setup-node 步骤与 deploy/Dockerfile 的 web 阶段。
+      #    运行时仍然无 Node：镜像是 distroless，里面只有 Go 二进制与静态资源。
       - name: 环境自检
         run: |
           python3 --version
@@ -72,6 +70,14 @@ jobs:
           # 跟随 go.mod 声明，不锁死 patch（10 开放点 1）
           go-version-file: go.mod
           cache: true
+
+      # 管理界面是独立的 Vite 工程（web/），产物由 go:embed 打进二进制，
+      # 所以 make build 依赖它 —— node 必须在 build 之前就位。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: 格式检查
         run: make fmt-check
@@ -116,8 +122,15 @@ jobs:
       # 管理界面的真实浏览器验收：真 Chrome 点击/填表/等 XHR/截图。
       # 验的是"运维真能在 web 端加渠道商并采集"，而不是"接口返回了正确 JSON"。
       # ubuntu-latest 自带 Chrome（/usr/bin/google-chrome），故只需装 puppeteer-core。
+      # test-ui.sh 自己会先编前端再 go build（顺序反了会把空目录编进二进制）。
       - name: 管理界面浏览器验收（真 Chrome）
         run: make test-ui
+
+      # 同一份前端源码在 Vue 3.6 预发布版与 3.5 稳定版下都要能类型检查 + 构建。
+      # 这是"为 3.6 提前适配"的可检验含义：只钉 3.6.0-rc.6 证明不了正式版
+      # 发布前后不需要改代码，也证明不了出问题时能退回稳定版。
+      - name: 前端双版本兼容（Vue 3.6-rc 与 3.5 稳定版）
+        run: bash web/scripts/check-vue-versions.sh
 
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。

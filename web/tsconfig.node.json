@@ -1,0 +1,23 @@
+{
+  // 只给构建脚本用：这里才允许 node: 内置模块和 process。
+  // 故意不用 project references（composite + noEmit 组合限制多），
+  // 两份配置各自独立、各跑一次检查，编辑器按文件归属自动选对配置。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts"]
+}

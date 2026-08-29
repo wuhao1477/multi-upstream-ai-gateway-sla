@@ -219,6 +219,11 @@ rm -rf "$SHOTS"; mkdir -p "$SHOTS"
 # 但主 shell 的 cwd 不能变，否则后续任何相对路径（含 trap 里的）都会失效。
 (
   cd "$ROOT/verify/ui"
+  # 先跑 SPA 那份：它顺带验了前端产物**真的被打进了这个 arm64 镜像** ——
+  # 镜像里的 web 阶段跑在 BUILDPLATFORM 上（产物与架构无关），
+  # 但"跨架构 COPY 有没有落到位"只有真取一次带 hash 的资源才知道。
+  BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
+
   BASE="http://127.0.0.1:${PORT}" \
   ADMIN_TOKEN="$TOKEN" \
   MOCK="http://mock:8099" \

@@ -5,7 +5,11 @@
 # 与 test-config-api.sh（curl 打接口）的区别：这里验的是"运维真能在 web 端
 # 加渠道商并采集"，而不是"接口返回了正确 JSON"。
 #
-# 需要：Chrome、node、以及 Docker 或本地 postgres@16。
+# 需要：Chrome、node（含 npm，用于编 web/ 前端）、以及 Docker 或本地 postgres@16。
+#
+# 前端是独立的 Vite 工程（web/），产物由 go:embed 打进二进制 —— 所以本脚本
+# 必须先编前端再 go build，顺序反了就会把只有占位文件的空目录编进二进制，
+# 症状是 /admin/ui 返回 500「前端产物缺失」。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,7 +50,19 @@ trap cleanup EXIT
 echo "   使用 Chrome: $CHROME"
 command -v node >/dev/null || { echo "❌ 未找到 node"; exit 1; }
 
-echo "── 1/5 起 PostgreSQL ──"
+echo "── 1/6 编前端（web/ → internal/admin/webdist，供 go:embed）──"
+# **每次都重编**，不做"产物已存在就跳过"的优化。
+# 理由：这是验收脚本。复用一份可能与当前源码不一致的产物，等于让"43 项全绿"
+# 变成对旧代码的验收，而这种不一致完全静默 —— 恰恰是验收最该防的那类错误。
+# 代价可接受：npm ci 只在缺 node_modules 时跑，之后 build 含类型检查约两秒。
+[ -d web/node_modules ] || (cd web && npm ci --silent --no-audit --no-fund)
+(cd web && npm run build >/tmp/sla-ui-web.log 2>&1) || {
+  echo "❌ 前端构建失败"; tail -30 /tmp/sla-ui-web.log; exit 1; }
+[ -f internal/admin/webdist/index.html ] || {
+  echo "❌ 前端产物缺失：internal/admin/webdist/index.html"; exit 1; }
+echo "   ✅ 前端产物就绪"
+
+echo "── 2/6 起 PostgreSQL ──"
 if docker info >/dev/null 2>&1; then
   USE_DOCKER=1
   docker rm -f slauipg >/dev/null 2>&1 || true
@@ -73,7 +89,7 @@ else
 fi
 echo "   ✅ PG 就绪"
 
-echo "── 2/5 起 mock 上游（NewAPI 系）──"
+echo "── 3/6 起 mock 上游（NewAPI 系）──"
 python3 verify/mock_newapi.py "$MOCKPORT" >/tmp/sla-ui-mock.log 2>&1 &
 MOCK_PID=$!
 for _ in $(seq 1 20); do
@@ -84,7 +100,7 @@ curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null || {
   echo "❌ mock 上游未就绪"; cat /tmp/sla-ui-mock.log; exit 1; }
 echo "   ✅ mock 就绪"
 
-echo "── 3/5 起 sla-core ──"
+echo "── 4/6 起 sla-core ──"
 go build -o bin/sla-core ./cmd/sla-core
 DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" \
   >/tmp/sla-ui-core.log 2>&1 &
@@ -100,11 +116,14 @@ done
 $ready || { echo "❌ sla-core 未就绪"; tail -20 /tmp/sla-ui-core.log; exit 1; }
 echo "   ✅ sla-core 就绪"
 
-echo "── 4/5 装浏览器验收依赖 ──"
+echo "── 5/6 装浏览器验收依赖 ──"
 (cd verify/ui && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
 echo "   ✅ 依赖就绪"
 
-echo "── 5/5 真 Chrome 验收 ──"
+echo "── 6/6 真 Chrome 验收 ──"
+# 两份脚本分工：verify-ui.mjs 验功能与数据，verify-spa.mjs 验前端工程化后
+# 新增的那几条性质（history 路由刷新、900px 断点、静态资源缓存与占位文件不可取）。
+# 后者先跑：它不写库、几秒钟出结果，路由挂了的话功能验收全都白跑。
 mkdir -p /tmp/sla-ui-shots
 # HUB_FILE：给一份 all-api-hub 导出文件，就额外跑一遍批量导入试运行
 #（只 dry_run，不落库）。默认不跑 —— 那一段会真的去探测备份里的上百个陌生
@@ -112,6 +131,9 @@ mkdir -p /tmp/sla-ui-shots
 # 用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/test-ui.sh
 [ -n "${HUB_FILE:-}" ] && echo "   （含 all-api-hub 试运行：$HUB_FILE）"
 cd verify/ui
+
+BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
+
 BASE="http://127.0.0.1:${PORT}" \
 ADMIN_TOKEN="$TOKEN" \
 MOCK="http://127.0.0.1:${MOCKPORT}" \
