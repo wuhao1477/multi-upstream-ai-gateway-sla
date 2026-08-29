@@ -133,7 +133,11 @@ try {
   await page.waitForFunction(
     () => document.querySelector('#pane-detail')?.classList.contains('on'),
     { timeout: 5000 });
-  await sleep(1500);
+  // 等条件而非睡固定时长（同下方 FR-124 那条的教训）：总览是 fetch 回来才渲染的
+  await page.waitForFunction(
+    () => /账号|Key|分组|目录/.test(document.querySelector('#inv-stats')?.innerText ?? ''),
+    { timeout: 20000 },
+  ).catch(() => {});
 
   const stats = await page.$eval('#inv-stats', el => el.innerText.replace(/\s+/g, ' '));
   check('真实渠道资产总览已渲染', /账号|Key|分组|目录/.test(stats), stats.slice(0, 160));
@@ -264,7 +268,11 @@ try {
     { timeout: 5000 });
   await sleep(1200);
   await page.click('#btn-keys');
-  await sleep(1500);
+  // 等表体真出行，别睡（同 FR-124 那条）
+  await page.waitForFunction(
+    () => document.querySelectorAll('#detail-body tbody tr').length >= 1,
+    { timeout: 20000 },
+  ).catch(() => {});
   const keyText = await page.$eval('#detail-body', el => el.innerText);
   const keyRows = await page.$$eval('#detail-body tbody tr', trs => trs.length)
     .catch(() => 0);
@@ -292,7 +300,11 @@ try {
     { timeout: 5000 });
   await sleep(1200);
   await page.click('#btn-groups');
-  await sleep(1800);
+  // 等分组行真出来（真库这个渠道有 6 个分组），别睡固定时长
+  await page.waitForFunction(
+    () => document.querySelectorAll('#detail-body tbody tr').length >= 5,
+    { timeout: 20000 },
+  ).catch(() => {});
   const grpRows = await page.$$eval('#detail-body tbody tr',
     trs => trs.map(tr => tr.innerText.replace(/\s+/g, ' ').trim()));
   check(`渠道 #${MIXED_CH} 分组列表已渲染`, grpRows.length >= 5,
@@ -312,7 +324,16 @@ try {
     return b.dataset.name;
   });
   if (opened) {
-    await sleep(1500);
+    // ⚠️ 这里**必须等条件，不能睡固定时长**。真库这个分组有 1354 个模型，
+    // 请求 236ms 就回来了，但把上千个模型名拼进一个文本节点再排版，实测耗时
+    // 在 500ms~3000ms+ 之间飘（取决于当时机器负载）。原先睡 1500ms 就读，
+    // 于是这条断言按机器快慢随机红 —— 实测三轮里红了两轮，而功能是好的。
+    // 这类"睡一会儿再断言"的写法在慢的那一端必然假红，在快的那一端又掩盖
+    // 真慢；等条件才两头都对。
+    await page.waitForFunction(
+      () => (document.querySelector('#gm')?.innerText ?? '').length > 20,
+      { timeout: 20000 },
+    ).catch(() => {});
     const gmText = await page.$eval('#gm', el => el.innerText).catch(() => '');
     check('分组可用模型可展开且标出上游分组名（FR-124）',
       gmText.length > 20 && /分组/.test(gmText),
