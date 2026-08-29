@@ -5,7 +5,7 @@
 | 阶段 | **P1：多上游渠道采集与管理**（[PRD §2.1.0](../PRD.md)、[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
-| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ mock NewAPI 上游（`verify/mock_newapi.py`，字段形态照真实站点实测构造）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
+| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
 | 可复现 | `make test-ui` 一键起 PG + mock + sla-core + Chrome；CI 第 12 步同一脚本，在 GitHub Linux runner 上独立跑通。全渠道覆盖率报告：`verify/coverage_report.py` |
 | 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）** |
 

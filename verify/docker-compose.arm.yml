@@ -14,11 +14,11 @@
 #    /admin/ui。故这里不起 caddy，直接发布 core 端口。
 #    ⚠️ 这是验收专用的边界放宽，不要把这段抄回 deploy/。
 #
-# 3) 多一个 mock 上游，且必须 MOCK_BIND=0.0.0.0。
-#    Detect/采集是**服务端**行为（浏览器只是往 #ch-url 里填地址），
-#    所以 mock 要在容器网络里可达。mock_newapi.py 默认绑回环 ——
-#    绑回环的 socket 会直接拒绝来自容器网络的连接，症状是 sla-core 侧
-#    connection refused 而 mock 日志一行都没有，看着像"采集器没发请求"。
+# 3) 没有 mock 上游服务。
+#    Detect/采集是**服务端**行为（浏览器只是往 #ch-url 里填地址），所以上游
+#    要在容器网络里可达 —— 真上游走公网，本来就可达，不需要额外服务。
+#    CLAUDE.md §1：验收只对真实依赖。上游由 verify/pick-upstream.mjs 从
+#    HUB_FILE 里探活选出，容器需要能出公网。
 
 name: sla-arm-verify
 
@@ -43,15 +43,6 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-
-  mock:
-    image: python:3.12-alpine
-    # 只用标准库（json/os/sys/http.server），故无需 pip install
-    command: ["python3", "/mock_newapi.py", "8099"]
-    environment:
-      MOCK_BIND: "0.0.0.0"
-    volumes:
-      - ./mock_newapi.py:/mock_newapi.py:ro
 
   sla-core-a: &core
     image: ${SLA_IMAGE:?SLA_IMAGE 必须指向云端下载并 load 进来的 arm64 镜像}

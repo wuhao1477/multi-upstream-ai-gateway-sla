@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 起一套**常驻**的本地栈供人工点验管理界面（PG + sla-core + mock 上游）。
+# 起一套**常驻**的本地栈供人工点验管理界面（PG + sla-core，上游用真站点）。
 #
 # 与 test-ui.sh 的区别：那个脚本 trap EXIT 会把三个进程连数据目录一起拆掉，
 # 跑完什么都不剩 —— 它是给 CI 判定用的。这里起完就停在前台等你，
@@ -18,20 +18,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PORT="${PORT:-18290}"
-MOCKPORT="${MOCKPORT:-18299}"
 PGPORT="${PGPORT:-55442}"
+# 真上游来源（CLAUDE.md §1）。手点也要对真站点点 —— 对着 mock 点出来的
+# 「好使」证明不了任何事。
+HUB_FILE="${HUB_FILE:-}"
+if [ -z "$HUB_FILE" ] || [ ! -f "$HUB_FILE" ]; then
+  echo "需要 HUB_FILE 指向 all-api-hub 导出 JSON（真上游来源，CLAUDE.md §1 禁止 mock）"
+  echo "用法：HUB_FILE=/path/to/all-api-hub-backup.json $0"
+  exit 2
+fi
 # 固定令牌而非 $$：你要把它粘到界面里，每次都变就没法照着文档点。
 # 这是本地一次性栈，Ctrl-C 后数据库即销毁，不涉及任何真实凭证。
 TOKEN="${ADMIN_TOKEN:-dev-ui-token}"
 PGDATA=/tmp/sla-dev-pg
 export LC_ALL=C LANG=C
 
-CORE_PID=""; MOCK_PID=""; USE_DOCKER=""
+CORE_PID=""; USE_DOCKER=""
 cleanup() {
   echo ""
   echo "── 清理 ──"
   [ -n "$CORE_PID" ] && kill "$CORE_PID" 2>/dev/null || true
-  [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
   if [ -n "$USE_DOCKER" ]; then
     docker rm -f sladevpg >/dev/null 2>&1 || true
   else
@@ -76,16 +82,14 @@ else
 fi
 echo "   ✅ PG 就绪（:${PGPORT}）"
 
-echo "── 3/4 起 mock 上游（NewAPI 系）──"
-python3 verify/mock_newapi.py "$MOCKPORT" >/tmp/sla-dev-mock.log 2>&1 &
-MOCK_PID=$!
-for _ in $(seq 1 20); do
-  curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null || {
-  echo "❌ mock 上游未就绪"; cat /tmp/sla-dev-mock.log; exit 1; }
-echo "   ✅ mock 就绪（:${MOCKPORT}）"
+echo "── 3/4 探活选真上游（CLAUDE.md §1：不许 mock）──"
+UPJSON="$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs)"
+rd() { printf '%s' "$UPJSON" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
+  process.stdout.write(String(JSON.parse(s)["'"$1"'"])))'; }
+UP_NAME="$(rd name)"; UP_URL="$(rd url)"
+UP_TOKEN="$(rd token)"; UP_UID="$(rd uid)"; UP_KEYREF="$(rd keyRef)"
+echo "   ✅ 选中 ${UP_NAME}"
 
 echo "── 4/4 起 sla-core ──"
 go build -o bin/sla-core ./cmd/sla-core
@@ -108,7 +112,10 @@ cat <<EOF
 ══════════════════════════════════════════════════════════
   管理界面   http://127.0.0.1:${PORT}/admin/ui
   管理令牌   ${TOKEN}          ← 粘到页面顶部「管理令牌」
-  mock 上游  http://127.0.0.1:${MOCKPORT}     ← 建渠道时填这个 base_url
+  真上游     ${UP_URL}     ← 建渠道时填这个 base_url（${UP_NAME}）
+  访问令牌   ${UP_TOKEN}
+  用户 ID    ${UP_UID}          ← 登记凭证时填这两个，是真的
+  Key 标识   ${UP_KEYREF}          ← external_ref，上游真实 token id
 
   手动验证路线（对应 P1-evidence §4 的缺陷 9~15）：
    1. 不填令牌就点「加载渠道」→ 应明确拒绝，而不是转圈或空列表
@@ -117,16 +124,17 @@ cat <<EOF
    3. 此时列表应主动报「尚未登记采集凭证」——渠道建好≠能采
       先别登记，直接点一次「立即采集」→ 应报缺凭证（422），
       且**不占限流窗口**：登记完能立刻采，不用等 60 秒（缺陷 15）
-   4. 登记凭证（访问令牌随便填），再点「立即采集」
+   4. 登记凭证（用上面打印的真令牌与用户 ID），再点「立即采集」
    5. 看采集结果表：subscription_quotas 应显式标 unsupported，
       而不是静默跳过或报 ok
-   6. 展开「分组可用模型」→ 标题应是上游分组名（default/vip/svip），
+   6. 展开「分组可用模型」→ 标题应是上游分组名（人家自己起的名字），
       不是内部 id「分组 2」
-   7. 看模型目录：kling-video-pro 应标「/次」且排在所有「×倍率」行**之后**；
-      若它插在 claude-4-sonnet(6) 前面就是跨口径比价的老 bug
+   7. 看模型目录：点「按次」分段 → 该段每行都应标「/次」且不混入「×倍率」。
+      两种口径的数值区间重叠（"$3.5/次" 与 "倍率 3.5"），所以必须先分段
+      再比价；跨口径排在一起就是老 bug
    8. 60 秒内再点一次「立即采集」→ 应被限流拒绝并说还需等多少秒
 
-  日志  core=/tmp/sla-dev-core.log  mock=/tmp/sla-dev-mock.log
+  日志  core=/tmp/sla-dev-core.log
   Ctrl-C 拆除（数据库一并销毁）
 ══════════════════════════════════════════════════════════
 

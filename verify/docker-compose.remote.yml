@@ -9,9 +9,9 @@
 #    远程库的引入不改变管理面的边界：/admin/* 不经 Caddy(06 §1)，
 #    ADMIN_TOKEN 是认证、不是网络隔离，两层都要在。
 #
-# 3) 保留 mock 上游。
-#    真库里的 65 个渠道指向真站点，采集会发真请求；调 UI 样式时用 mock
-#    可以在不打扰真站点的前提下走通 Detect/sync 全路径。
+# 3) 没有 mock 上游（CLAUDE.md §1）。
+#    真库里的 65 个渠道指向真站点，采集就该发真请求。这个栈跑的是只读验收
+#    （verify/ui/verify-remote.mjs），本来不点 Detect/sync。
 #
 # ⚠️ 迁移器行为已核对（internal/store/migrate.go:151-158）：已应用的文件
 #    checksum 一致就 continue，不重跑 DDL；不一致则 return error 且不执行。
@@ -25,14 +25,6 @@ x-core-env: &core-env
   SLA_ADDR: ":8080"
 
 services:
-  mock:
-    image: python:3.12-alpine
-    command: ["python3", "/mock_newapi.py", "8099"]
-    environment:
-      MOCK_BIND: "0.0.0.0"
-    volumes:
-      - ./mock_newapi.py:/mock_newapi.py:ro
-
   sla-core:
     image: ${SLA_IMAGE:?SLA_IMAGE 必须设置}
     environment: *core-env

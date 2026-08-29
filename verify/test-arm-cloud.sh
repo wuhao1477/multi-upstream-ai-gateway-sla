@@ -26,6 +26,15 @@ export LC_ALL=C LANG=C
 #    只能 unset。下面统一用 gh 内置 --jq 取值，顺带不依赖外部 jq。
 unset CLICOLOR_FORCE
 
+# 真上游从这份导出里探活选取（CLAUDE.md §1：不许 mock）。必填 ——
+# 没有它就没有可采集的上游，第 8 步的 Detect/采集全都验不了。
+HUB_FILE="${HUB_FILE:-}"
+if [ -z "$HUB_FILE" ] || [ ! -f "$HUB_FILE" ]; then
+  echo "需要 HUB_FILE 指向 all-api-hub 导出 JSON（真上游来源，CLAUDE.md §1 禁止 mock）"
+  echo "用法：HUB_FILE=/path/to/all-api-hub-backup.json $0"
+  exit 2
+fi
+
 WORKFLOW=build-arm.yml
 PORT="${CORE_PORT:-18290}"
 TOKEN="arm-verify-$$"
@@ -209,10 +218,21 @@ echo "── 7/8 装浏览器验收依赖 ──"
 echo "   ✅ 依赖就绪"
 
 # ── 8/8 真 Chrome 验收 ──
-# MOCK 必须用容器内可解析的地址：它被填进 #ch-url，随后由**服务端**去
-# Detect/采集。填 127.0.0.1 会让 sla-core 去连自己容器的回环 → 必然失败。
+# 上游地址被填进 #ch-url，随后由**服务端**去 Detect/采集 —— 所以它必须在
+# **容器**里可达。真上游走公网，容器只要能出网就行（这点比原先的 mock 简单：
+# 不再需要 MOCK_BIND=0.0.0.0 那类容器网络的绑定讲究）。
 # BASE 反之必须是宿主机地址：Chrome 跑在宿主机上。
-echo "── 8/8 真 Chrome 验收（BASE=宿主机 / MOCK=容器网络）──"
+echo "── 8/8 真 Chrome 验收（BASE=宿主机 / 上游=公网真站点）──"
+
+# 探活选站：与 test-ui.sh 同一份脚本，保证两条验收路径选站口径一致。
+UPJSON="$(HUB_FILE="$HUB_FILE" node "$ROOT/verify/pick-upstream.mjs")"
+rd() { printf '%s' "$UPJSON" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
+  process.stdout.write(String(JSON.parse(s)["'"$1"'"])))'; }
+UP_URL="$(rd url)";   UP_TOKEN="$(rd token)"
+UP_UID="$(rd uid)";   UP_QPU="$(rd quotaPerUnit)"
+UP_MODELS="$(rd models)"; UP_PER_CALL="$(rd perCallModels)"
+UP_KEYREF="$(rd keyRef)"
 SHOTS=/tmp/sla-arm-shots
 rm -rf "$SHOTS"; mkdir -p "$SHOTS"
 # 子 shell 里 cd：verify-ui.mjs 要在自己目录跑（node_modules 在那），
@@ -226,7 +246,14 @@ rm -rf "$SHOTS"; mkdir -p "$SHOTS"
 
   BASE="http://127.0.0.1:${PORT}" \
   ADMIN_TOKEN="$TOKEN" \
-  MOCK="http://mock:8099" \
+  UP_URL="$UP_URL" \
+  UP_TOKEN="$UP_TOKEN" \
+  UP_UID="$UP_UID" \
+  UP_QPU="$UP_QPU" \
+  UP_MODELS="$UP_MODELS" \
+  UP_PER_CALL="$UP_PER_CALL" \
+  UP_KEYREF="$UP_KEYREF" \
+  HUB_FILE="$HUB_FILE" \
   SHOTS="$SHOTS" \
     node verify-ui.mjs
 )

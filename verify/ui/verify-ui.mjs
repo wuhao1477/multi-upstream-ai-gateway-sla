@@ -10,11 +10,25 @@ const CHROME = process.env.CHROME ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const BASE = process.env.BASE || 'http://127.0.0.1:18090';
 const TOKEN = process.env.ADMIN_TOKEN || 'local-verify-token';
-const MOCK = process.env.MOCK || 'http://127.0.0.1:18099';
 const SHOT = process.env.SHOTS || '/tmp/sla-ui-shots';
-// all-api-hub 备份文件。默认不给 —— 见 12bis：那一段会真去探测备份里的上百个
-// 陌生站点，不该出现在每次例行验收里。
+// all-api-hub 备份文件。批量导入试运行用它,同时它也是上游凭证的来源。
 const HUB_FILE = process.env.HUB_FILE || '';
+
+// 真上游。由 test-ui.sh 跑 verify/pick-upstream.mjs 现场探活后注入 ——
+// 验收不构造假上游(CLAUDE.md §1),所以这些值每次都可能不同,
+// 断言必须写成"形态与关系"而不是具体数字。
+const UP_URL = process.env.UP_URL || '';
+const UP_TOKEN = process.env.UP_TOKEN || '';
+const UP_UID = process.env.UP_UID || '';
+const UP_QPU = Number(process.env.UP_QPU || 0);
+const UP_MODELS = Number(process.env.UP_MODELS || 0);
+const UP_PER_CALL = Number(process.env.UP_PER_CALL || 0);
+const UP_KEYREF = process.env.UP_KEYREF || '';
+if (!UP_URL || !UP_TOKEN || !UP_UID || !UP_KEYREF) {
+  console.error('缺 UP_URL / UP_TOKEN / UP_UID / UP_KEYREF —— 请通过 verify/test-ui.sh 运行');
+  console.error('（它会先跑 pick-upstream.mjs 从 HUB_FILE 里挑一个真上游）');
+  process.exit(2);
+}
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -111,18 +125,21 @@ try {
   // ── 4. 在界面上真实创建一个渠道商 ──
   const uniq = 'UI验收-' + Date.now().toString().slice(-6);
   await page.type('#ch-name', uniq);
-  await page.type('#ch-url', MOCK);
+  await page.type('#ch-url', UP_URL);
   // 站型留空 = 自动探测
   await page.click('#btn-create');
   await page.waitForFunction(
     () => /渠道已创建/.test(document.querySelector('#toast').textContent),
-    { timeout: 15000 });
+    { timeout: 30000 });
   const createToast = await page.$eval('#toast', el => el.textContent);
   check('界面创建渠道成功', /渠道已创建/.test(createToast),
     createToast.replace(/\n/g, ' | ').slice(0, 100));
   check('创建时自动探测出站型 newapi', /newapi/.test(createToast));
-  check('探测读到 quota_per_unit（未写死）',
-    /quota_per_unit=500000/.test(createToast));
+  // 断言"读到了上游此刻真实声明的那个值",不是断言某个固定数字 ——
+  // quota_per_unit 逐站不同,写死等于把 mock 的常量搬进真上游验收。
+  const qpuHit = new RegExp(`quota_per_unit=${UP_QPU}\\b`).test(createToast);
+  check('探测读到上游真实声明的 quota_per_unit（未写死）',
+    qpuHit && UP_QPU > 0, `上游声明 ${UP_QPU}，界面回显${qpuHit ? '一致' : '不一致'}`);
 
   await page.screenshot({ path: `${SHOT}/02-created.png` });
 
@@ -189,8 +206,9 @@ try {
   // ── 6. 界面登记凭证 ──
   await pane('creds');
   await fill('#cr-channel', String(newChannelId));
-  await fill('#cr-token', 'sk-ui-collector-token');
-  await fill('#cr-uid', '42');
+  // 真凭证:后面第 8 步的四能力采集要靠它去真上游取数据。
+  await fill('#cr-token', UP_TOKEN);
+  await fill('#cr-uid', UP_UID);
   await page.click('#btn-cred');
   await page.waitForFunction(
     () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
@@ -204,22 +222,31 @@ try {
   // 凭证列表：只报"已存什么"，绝不回显内容
   const credRow = await page.$$eval('#cred-list tbody tr',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  // 用真令牌验这条比用假令牌更有意义:泄露了就是泄露了真东西。
   check('凭证列表已渲染且不含令牌内容',
-    credRow.length >= 1 && !JSON.stringify(credRow).includes('sk-ui-collector-token'),
+    credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
     credRow.length ? credRow[0].join(' / ') : '空');
 
   // ── 7. 界面登记账号与 Key，并验证明文不回显 ──
   await pane('register');
   await fill('#acc-channel', String(newChannelId));
-  await fill('#acc-uid', '42');
+  // 必须填**真的**上游用户 ID：SaveAccount 先按 external_user_id 匹配账号行，
+  // 匹配不上才退回"该渠道只有一个账号就用它"。填个假 uid 一样能过，
+  // 但过的是兜底分支 —— 匹配逻辑本身就没被验到。
+  await fill('#acc-uid', UP_UID);
   await page.click('#btn-acc');
   await page.waitForFunction(
     () => /账号已创建/.test(document.querySelector('#toast').textContent),
     { timeout: 8000 });
 
+  // 这把 Key 是**假的**,而且必须是假的 —— CLAUDE.md §1 允许的唯一例外:
+  // 被造的东西本身就是测试输入。这里要验的是"明文不回显",拿真 Key 试等于
+  // 把真凭证写进 DOM 快照和 CI 日志,失败时反而漏得更彻底。
   const SECRET = 'sk-ui-secret-should-never-be-echoed-9f3a';
   await fill('#key-secret', SECRET);
-  await fill('#key-ref', '7');
+  // external_ref 必须是上游 /api/token 里真实存在的 id：SaveKey 只 UPDATE
+  // 不 INSERT,对不上就只计"未登记"异常项 —— keys 项仍报 ok,额度列却永远空。
+  await fill('#key-ref', UP_KEYREF);
   await page.click('#btn-key');
   await page.waitForFunction(
     () => /Key 已登记/.test(document.querySelector('#toast').textContent),
@@ -264,7 +291,8 @@ try {
     () => /可用模型/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
   const groupRows = await page.$$eval('#detail-body tbody tr', rs => rs.length);
-  check('分组列表已渲染', groupRows === 3, `${groupRows} 个分组（期望 3）`);
+  // 真上游的分组数由人家怎么配决定,不写死。至少一个,否则采集没拿到东西。
+  check('分组列表已渲染', groupRows >= 1, `${groupRows} 个分组`);
 
   // 点开某分组的可用模型（FR-124："这把 Key 能用哪些模型"）
   await page.click('#detail-body button[data-g]');
@@ -272,10 +300,15 @@ try {
     () => /可用模型/.test(document.querySelector('#gm')?.textContent || ''),
     { timeout: 8000 });
   const gmText = await page.$eval('#gm', el => el.textContent);
-  check('分组可用模型可查（FR-124）', /gpt-5\.5/.test(gmText),
+  // 不找某个具体模型名 —— 真上游的目录随人家上下架而变。验"可用模型(n)"
+  // 里的 n 为正,即这个分组真的解析出了模型清单。
+  const gmCount = Number(/可用模型\s*[（(](\d+)[）)]/.exec(gmText)?.[1] ?? 0);
+  check('分组可用模型可查（FR-124）', gmCount > 0,
     gmText.replace(/\s+/g, ' ').slice(0, 80));
-  // 标题必须给**上游分组名**：内部 id 逐次采集会变，"分组 2"对不上上游的 vip
-  check('分组可用模型标出上游分组名', /分组\s*(default|vip|svip)/.test(gmText),
+  // 标题必须给**上游分组名**：内部 id 逐次采集会变，"分组 2"对不上上游的 vip。
+  // 组名由上游定,只断言"分组"后面跟了个非空且不是纯数字的名字。
+  check('分组可用模型标出上游分组名',
+    /分组\s+\S+/.test(gmText) && !/分组\s+\d+\s/.test(gmText),
     gmText.replace(/\s+/g, ' ').slice(0, 40));
 
   await page.screenshot({ path: `${SHOT}/06-groups.png` });
@@ -286,26 +319,40 @@ try {
     { timeout: 8000 });
   const catCells = await page.$$eval('#detail-body tbody tr',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('模型目录已渲染', catCells.length === 9, `${catCells.length} 个模型（期望 9）`);
+  // 首页最多 50 行(CAT_PAGE),上游有 1000+ 模型时不可能等于总数 ——
+  // 断言"渲染了一整页,且不超过上游实际模型数",不写死某个数字。
+  check('模型目录已渲染',
+    catCells.length > 0 && catCells.length <= Math.min(50, UP_MODELS),
+    `${catCells.length} 行 / 上游共 ${UP_MODELS} 个模型`);
 
-  // 价格必须与口径同格显示：真实站点 15% 的模型按次计价，其绝对美元价
-  // 与倍率的数值区间**重叠**，光看数字分不出 "$3.5/次" 和 "倍率 3.5"。
-  const kling = catCells.find(c => c[0] === 'kling-video-pro');
-  check('按次计价模型标出 /次（FR-124）',
-    !!kling && kling[1].includes('/次'), kling ? kling[1] : '未找到该模型');
-  const gpt4o = catCells.find(c => c[0] === 'gpt-4o');
+  // 价格必须与口径同格显示：按次模型的绝对美元价与倍率的数值区间**重叠**,
+  // 光看数字分不出 "$3.5/次" 和 "倍率 3.5"。
+  // 按模型名找具体某个模型是行不通的 —— 真上游的目录随人家上下架而变。
+  // 改成按**口径标记**找:上游声明了按次模型,界面就必须有行标着 /次。
+  const ratioRows = catCells.filter(c => c[1].includes('×倍率'));
   check('倍率模型标出 ×倍率',
-    !!gpt4o && gpt4o[1].includes('×倍率'), gpt4o ? gpt4o[1] : '未找到该模型');
+    ratioRows.length > 0, `${ratioRows.length} 行标了 ×倍率`);
 
-  // 排序必须**先分段再比价**：kling 的 3.5 落在倍率区间 0.5~30 之内，
-  // 若跨口径按价格排它会插到 claude-4-sonnet(6) 之前，读者据此选型
-  // 会把 $3.5/次 的视频模型当成"比 opus 便宜"。分段后它必须在末尾。
-  const klingIdx = catCells.findIndex(c => c[0] === 'kling-video-pro');
-  const ratioIdx = catCells.map((c, i) => c[1].includes('×倍率') ? i : -1)
-    .filter(i => i >= 0);
-  check('目录按口径分段排序（按次段整体在倍率段之后）',
-    klingIdx > Math.max(...ratioIdx),
-    `按次行 #${klingIdx}，倍率行 #${ratioIdx.join(',')}`);
+  // 排序必须**先分段再比价**。模型多的站首页 50 行往往全是倍率段(实测redacted-channel-03
+  // 1369 个模型里 208 个按次),所以改用分段按钮切到按次段验 ——
+  // 与真库那份(verify-remote.mjs)同路。
+  await page.click('#detail-body button[data-unit="per_call"]');
+  await page.waitForFunction(
+    () => document.querySelector('#detail-body tbody tr')?.innerText.includes('/次'),
+    { timeout: 15000 }).catch(() => {});
+  const callSeg = await page.$$eval('#detail-body tbody tr',
+    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  check('按次计价模型标出 /次（FR-124）',
+    callSeg.length > 0 && callSeg.every(c => c[1].includes('/次')),
+    `按次段 ${callSeg.length} 行（上游声明 ${UP_PER_CALL} 个按次模型）`);
+  check('按次分段内不混入倍率行',
+    !callSeg.some(c => c[1].includes('×倍率')),
+    callSeg.some(c => c[1].includes('×倍率')) ? '混入了 ×倍率' : '该段只有按次');
+  // 切回全部,后面的断言依赖默认视图
+  await page.click('#detail-body button[data-unit=""]');
+  await page.waitForFunction(
+    () => document.querySelector('#detail-body tbody tr')?.innerText.includes('×倍率'),
+    { timeout: 15000 }).catch(() => {});
   await page.screenshot({ path: `${SHOT}/07-catalog.png` });
 
   await page.click('#btn-keys');

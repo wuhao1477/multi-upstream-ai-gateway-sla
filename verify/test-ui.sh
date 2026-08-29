@@ -25,16 +25,14 @@ if [ -z "$CHROME" ]; then
 fi
 export CHROME
 PORT=18190
-MOCKPORT=18199
 PGPORT=55441
 TOKEN="ui-verify-$$"
 PGDATA=/tmp/sla-ui-pg
 export LC_ALL=C LANG=C
 
-CORE_PID=""; MOCK_PID=""; USE_DOCKER=""
+CORE_PID=""; USE_DOCKER=""
 cleanup() {
   [ -n "$CORE_PID" ] && kill "$CORE_PID" 2>/dev/null || true
-  [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
   if [ -n "$USE_DOCKER" ]; then
     docker rm -f slauipg >/dev/null 2>&1 || true
   else
@@ -89,16 +87,23 @@ else
 fi
 echo "   ✅ PG 就绪"
 
-echo "── 3/6 起 mock 上游（NewAPI 系）──"
-python3 verify/mock_newapi.py "$MOCKPORT" >/tmp/sla-ui-mock.log 2>&1 &
-MOCK_PID=$!
-for _ in $(seq 1 20); do
-  curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-curl -sf "http://127.0.0.1:${MOCKPORT}/api/status" >/dev/null || {
-  echo "❌ mock 上游未就绪"; cat /tmp/sla-ui-mock.log; exit 1; }
-echo "   ✅ mock 就绪"
+echo "── 3/6 选一个真上游（CLAUDE.md §1：不用假上游）──"
+# 从导出里现场探活挑一个能用的真站点。不写死 URL —— 站点会挂、会限流、
+# 会换证书,写死等于把"它一定可用"这个假设又搬回来。
+[ -n "${HUB_FILE:-}" ] || {
+  echo "❌ 需要 HUB_FILE 指向 all-api-hub 导出文件"
+  echo "   用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/test-ui.sh"
+  echo "   （验收对真上游跑,凭证从导出里取；见 CLAUDE.md §1）"
+  exit 1; }
+UPJSON=$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs) || {
+  echo "❌ 没挑到可用的真上游（上面列了每个候选的失败原因）"; exit 1; }
+UP_URL=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).url))')
+UP_TOKEN=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).token))')
+UP_UID=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).uid))')
+UP_QPU=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).quotaPerUnit)))')
+UP_MODELS=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).models)))')
+UP_PER_CALL=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).perCallModels)))')
+UP_KEYREF=$(printf '%s' "$UPJSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).keyRef))')
 
 echo "── 4/6 起 sla-core ──"
 go build -o bin/sla-core ./cmd/sla-core
@@ -125,18 +130,22 @@ echo "── 6/6 真 Chrome 验收 ──"
 # 新增的那几条性质（history 路由刷新、900px 断点、静态资源缓存与占位文件不可取）。
 # 后者先跑：它不写库、几秒钟出结果，路由挂了的话功能验收全都白跑。
 mkdir -p /tmp/sla-ui-shots
-# HUB_FILE：给一份 all-api-hub 导出文件，就额外跑一遍批量导入试运行
-#（只 dry_run，不落库）。默认不跑 —— 那一段会真的去探测备份里的上百个陌生
-# 站点（实测 106 站 24 秒），不该出现在每次例行验收里。
-# 用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/test-ui.sh
-[ -n "${HUB_FILE:-}" ] && echo "   （含 all-api-hub 试运行：$HUB_FILE）"
+# 批量导入试运行同样用同一份导出（只 dry_run,不落库）。它会真的去探测备份里的
+# 上百个陌生站点（实测 106 站 24 秒）—— 慢,但那是真实结果。
+echo "   （真上游：$UP_URL / 批量导入试运行：$HUB_FILE）"
 cd verify/ui
 
 BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
 
 BASE="http://127.0.0.1:${PORT}" \
 ADMIN_TOKEN="$TOKEN" \
-MOCK="http://127.0.0.1:${MOCKPORT}" \
+UP_URL="$UP_URL" \
+UP_TOKEN="$UP_TOKEN" \
+UP_UID="$UP_UID" \
+UP_QPU="$UP_QPU" \
+UP_MODELS="$UP_MODELS" \
+UP_PER_CALL="$UP_PER_CALL" \
+UP_KEYREF="$UP_KEYREF" \
 SHOTS=/tmp/sla-ui-shots \
-HUB_FILE="${HUB_FILE:-}" \
+HUB_FILE="$HUB_FILE" \
   node verify-ui.mjs
