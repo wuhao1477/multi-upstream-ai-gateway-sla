@@ -201,7 +201,7 @@ wire_api = "responses"
 
 - [ ] **Codex 实机 spike**（[15 T1](./15-scope-and-preflight.md)）：临时最小透传脚本 + 真实 Codex CLI + 真实上游抓包。timebox 2~3 天；**必答**「Codex 请求的模型名从哪来」（决定 `/v1/models` 合成会不会 404 打不通）与「35 字段是否零丢失」。跑不通则记录阻塞，**不拖 M0**。
 
-**移入 M1**：上游直连打通与 35 字段 diff、`verify/mock_upstream.py` 场景集接入 CI（[14 §1bis](./14-acceptance-matrix.md) 已冻结 12 个场景与 diff 规范）。
+**移入 M1**：上游直连打通与 35 字段 diff、`verify/mock_upstream.py` 的 **SSE 流夹具**场景集接入 CI（[14 §1bis](./14-acceptance-matrix.md) 已冻结 12 个场景与 diff 规范）。这一项**能**进 CI：它造的是本机 Python 起的流，不需要任何真凭证 —— 与"要令牌所以只能本地跑"的那三项（[14 §0bis](./14-acceptance-matrix.md)）不同。
 
 ---
 

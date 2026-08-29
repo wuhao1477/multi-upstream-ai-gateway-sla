@@ -425,7 +425,7 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 
 ## 10. 实现待办（M1）
 
-1. SSE 扫描器 + `ShouldCommit`/`HasTTFTOutput` **双判定**，用 `verify/mock_upstream.py` 场景做夹具；**须新增 tool-only、refusal-only、reasoning-summary-only、空终态四类场景**，每类分别断言两个布尔值（[11 §3](./11-decision-full-selfbuilt.md)）。
+1. SSE 扫描器 + `ShouldCommit`/`HasTTFTOutput` **双判定**，用 `verify/mock_upstream.py` 的 SSE 流场景做夹具（造流不造站点，[CLAUDE.md §1](../../CLAUDE.md) 例外表第二行）；**须新增 tool-only、refusal-only、reasoning-summary-only、空终态四类场景**，每类分别断言两个布尔值（[11 §3](./11-decision-full-selfbuilt.md)）。
 2. 字节透传管道 + tee 旁路观察，验证 35 字段与 reasoning item **零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 的真实上游基线）。
 3. 取消传播与连接池轮换的集成测试。
 4. `Probe()` 的协议能力探测 + 落库。

@@ -15,10 +15,25 @@
 
 | 环境 | 用途 | 说明 |
 | --- | --- | --- |
-| **MOCK** | 可重复、零成本、CI 常跑 | `verify/mock_upstream.py` 场景集（role-only / 空 SSE / 慢首帧 / 心跳 / 500 / abort），[11 §3](./11-decision-full-selfbuilt.md) |
-| **REAL** | 真实上游，里程碑验收时手动跑 | NewAPI/Sub2API 中转站真实 `sk-` key（[07 §3bis](./07-axonhub-runtime-probes.md) 已有基线） |
+| **MOCK** | ⚠️ **只指"造 SSE 流"，不指"造站点"**（[CLAUDE.md §1](../../CLAUDE.md) 例外表第二行）。真站点不肯按需在指定时刻断流，故流是被测输入；上游本身仍必须是真站点 | `verify/mock_upstream.py` 场景集（role-only / 空 SSE / 慢首帧 / 心跳 / 500 / abort），[11 §3](./11-decision-full-selfbuilt.md) |
+| **REAL** | **默认环境**（2026-08-29 起，[CLAUDE.md §1](../../CLAUDE.md)）。此前写作"里程碑验收时手动跑" | 由 `verify/pick-upstream.mjs` 从 `HUB_FILE` 探活选站，不写死站点。真上游令牌**不进 GitHub secrets**，故要凭证的项只在本地跑（§0bis） |
 | **FIXTURE** | 构造数据 + 单元/集成测试 | 账本、台账、价格版本等纯数据逻辑 |
 | **LOAD** | 压测 | 100～1000 QPS（FR-114） |
+
+### 0bis. 哪些 REAL 项在 CI 里跑不了（2026-08-29）
+
+真上游令牌**不进 GitHub secrets** —— 那是别人家站点的真凭证，放进 CI 等于摊给
+每个能看 workflow 日志的人，以及每个能往仓库推分支的人。收益只是让三项验收
+在云上也绿，不值。于是：
+
+| 验收 | CI | 原因 |
+| --- | --- | --- |
+| detect / pricing / model_catalog | ✅ | `/api/status` 与 `/api/pricing` 免密 |
+| account / keys / groups | ❌ 只在本地 | 要 `Authorization` + 用户 ID 头 |
+| 真库只读验收（31 项） | ❌ 只在本地 | runner 到不了内网 <internal-db-host> |
+
+跑不了的在本地跑，结论写进 PR/提交说明。**不要因为 CI 跑不了就换回 mock** ——
+那样得到的绿是假的，真实覆盖仍然为零（[CLAUDE.md §1](../../CLAUDE.md)）。
 
 ---
 
@@ -125,7 +140,7 @@
 | AC-13 | 请求含不可重复的外部写入 | FIXTURE | 该请求**不被分配测活**、**不并发重试**（参数 6 默认全局禁并发重试） |
 | AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。③**伪造 `X-Data-Class: public` 请求头不得改变求值结果**（属性只认 `gateway_clients` 行）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
 | AC-18 | 单租户流量突增（容量隔离） | FIXTURE | **前置：测试 binding 必须登记 `rpm_limit`/`concurrency_limit`** —— 未登记时保留层直接放行（[05 §4.3](./05-scheduling-and-operations.md)），本条无从验证。<br> 单租户突增时**不占用接管保留容量**；受限流量按配置规则处理（排队/拒绝），其他租户不受影响 |
-| **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（mock 上游、90% 流式），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
+| **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（**本机流发生器**、90% 流式；6 万次请求打真站点等于攻击，见 [PRD AC-36](../PRD.md)），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
 | **AC-34** | **1000 并发用户高强度持续使用**（程序自身抗压） | **LOAD** | 按 §2bis 冻结模型：① 1000 并发稳态 30 分钟，决策开销 **P99 ≤50ms**、错误率 <0.01%；② 内存不持续增长、结束后 goroutine/连接回落基线 ±10%、无 OOM/FD 耗尽；③ **另须完成上限探测并记录容量拐点** |
 
 ### 缓存切换损失预测（**一期**，FR-056）
@@ -170,7 +185,8 @@
 | artifact | 两路的完整事件序列 JSONL + diff 报告存 CI 产物，**失败时必须能看到具体是哪个字段** |
 | 跑几个站 | **两个基线站都跑**（[15 §1bis](./15-scope-and-preflight.md)），两站都通过才算过 |
 
-**mock 场景集**（`verify/mock_upstream.py` 须覆盖，当前只有 Chat 场景）：
+**SSE 流夹具场景集**（`verify/mock_upstream.py` 须覆盖，当前只有 Chat 场景）。
+⚠️ 造的是**流**：上游站点本身仍必须是真的（[CLAUDE.md §1](../../CLAUDE.md)）：
 
 | 场景 | 协议 | 断言 |
 | --- | --- | --- |

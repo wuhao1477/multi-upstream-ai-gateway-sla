@@ -17,7 +17,7 @@
 ```
 multi-upstream-ai-gateway-sla/
 ├── docs/                      # 现有文档(需求/选型/dev),不动
-├── verify/                    # mock 上游场景集(转为透传层测试夹具)
+├── verify/                    # 验收脚本;上游走真站点(CLAUDE.md §1),仅 SSE 流夹具是造的
 ├── go.mod                     # module: github.com/wuhao1477/multi-upstream-ai-gateway-sla
 ├── go.sum
 ├── Makefile                   # build/test/lint/migrate 入口

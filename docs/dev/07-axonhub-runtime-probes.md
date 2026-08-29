@@ -1,7 +1,14 @@
 # 07 AxonHub 运行时实测（部署开放点收口 · 2026-07-23）
 
 | 项目 | 内容 |
-| > ⚠️ **历史记录（2026-07-25 标注）**：本篇实测已用于支撑 [11 架构转向决策](./11-decision-full-selfbuilt.md)——一期**移除 AxonHub、改为自研直连**。§3bis 的真实上游 Responses 基线（35 字段、reasoning item、`prompt_cache_key`）**转为自研透传层要 100% 保真的目标**（见 [03 §10](./03-upstream-layer.md)）。**本篇不再指导部署**；部署见 [06](./06-deployment-and-operations.md)。
+| > 📌 **2026-08-29 补注**：本篇 §3 → §3bis 的翻案，是 [CLAUDE.md §1](../../CLAUDE.md)
+> 「禁止 mock」那条规则的**原始证据**，比规则本身早一个月。§3 用 mock 推断出
+> 「标准字段够用、无需自研转换」，§3bis 换真上游实测发现 AxonHub 丢弃 80% 顶层
+> 字段 —— 原因写在 §4 结论里：**mock 响应本身就不含这些字段，所以 mock 永远暴露
+> 不了字段丢失**。本篇的 mock 提及全部保留：它们是"当时用了什么方法"的史实，
+> 改写会让这段翻案读不通。
+>
+> ⚠️ **历史记录（2026-07-25 标注）**：本篇实测已用于支撑 [11 架构转向决策](./11-decision-full-selfbuilt.md)——一期**移除 AxonHub、改为自研直连**。§3bis 的真实上游 Responses 基线（35 字段、reasoning item、`prompt_cache_key`）**转为自研透传层要 100% 保真的目标**（见 [03 §10](./03-upstream-layer.md)）。**本篇不再指导部署**；部署见 [06](./06-deployment-and-operations.md)。
 
 --- | --- |
 | 状态 | ✅ 已实测收口（三项经验性开放点） |
