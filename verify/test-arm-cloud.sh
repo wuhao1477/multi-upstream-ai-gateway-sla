@@ -15,7 +15,8 @@
 #
 # 需要：gh（已登录，repo scope 足够）、docker（arm64 宿主）、node、Chrome。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 export LC_ALL=C LANG=C
 
 # ⚠️ CLICOLOR_FORCE=1（某些 shell 配置会全局设它）会让 gh 即使输出到**管道**
@@ -29,11 +30,15 @@ WORKFLOW=build-arm.yml
 PORT="${CORE_PORT:-18290}"
 TOKEN="arm-verify-$$"
 WORKDIR=/tmp/sla-arm-verify
-COMPOSE=(docker compose -f verify/docker-compose.arm.yml)
+# ⚠️ compose 文件必须用**绝对路径**：最后一步要在 verify/ui 里跑 node，
+#    相对路径在那之后就解析不到了，而 cleanup 里的失败被 `|| true` 吞掉 →
+#    trap 静默失效，每跑一轮泄漏整栈 5 个容器（含占着 18290 端口的那个），
+#    下一轮起栈直接端口冲突。抓到过一次，别改回相对路径。
+COMPOSE=(docker compose -f "$ROOT/verify/docker-compose.arm.yml")
 
 cleanup() {
-  # down -v 而非 stop：postgres 用的是 tmpfs，但网络与容器要收干净，
-  # 否则下一轮 compose up 会撞上同名容器。
+  # down -v 而非 stop：postgres 用 tmpfs 不留数据，但容器与网络要收干净，
+  # 否则下一轮 compose up 撞同名容器。
   SLA_IMAGE="${SLA_IMAGE:-none}" ADMIN_TOKEN="$TOKEN" \
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -210,12 +215,16 @@ echo "   ✅ 依赖就绪"
 echo "── 8/8 真 Chrome 验收（BASE=宿主机 / MOCK=容器网络）──"
 SHOTS=/tmp/sla-arm-shots
 rm -rf "$SHOTS"; mkdir -p "$SHOTS"
-cd verify/ui
-BASE="http://127.0.0.1:${PORT}" \
-ADMIN_TOKEN="$TOKEN" \
-MOCK="http://mock:8099" \
-SHOTS="$SHOTS" \
-  node verify-ui.mjs
+# 子 shell 里 cd：verify-ui.mjs 要在自己目录跑（node_modules 在那），
+# 但主 shell 的 cwd 不能变，否则后续任何相对路径（含 trap 里的）都会失效。
+(
+  cd "$ROOT/verify/ui"
+  BASE="http://127.0.0.1:${PORT}" \
+  ADMIN_TOKEN="$TOKEN" \
+  MOCK="http://mock:8099" \
+  SHOTS="$SHOTS" \
+    node verify-ui.mjs
+)
 
 echo ""
 echo "✅ 云端 arm64 产物本地验收通过"
