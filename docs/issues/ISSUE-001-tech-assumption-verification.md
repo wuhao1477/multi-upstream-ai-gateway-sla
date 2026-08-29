@@ -48,11 +48,22 @@
 
 6 项中 **3 项源码确认成立（1/2/4/5 共 4 项为成立，其中 5 附带一个已知配额缺口）**，**1 项风险证实（3 首字定义）**，**1 项待备选启用时验证（6）**。最关键结论：假设 3 证实了选型文档的担忧——**AxonHub 记录的首字时间不可直接作为用户可见 TTFT**，外部 SLA 核心必须自算。这不影响选型成立（自研核心本就承担 TTFT 判定），但必须写入自研核心的实现要求。
 
-## Docker 运行时验证方案（harness 已就绪，已实跑）
+## Docker 运行时验证方案（已实跑；**harness 于 2026-08-29 删除**）
 
-已构建可一键运行的验证 harness：[`verify/`](../../verify/README.md)（compose + stdlib mock 上游 + 自动 setup + 6 假设探测 + 自清理）。**2026-07-23 已在本机 Docker 实跑**（OrbStack v29.4.0，镜像 `looplj/axonhub:v1.0.0-beta5`），实跑中据 beta5 的实际 GraphQL schema 对 setup/探测脚本做了适配（详见下方"beta5 schema 适配"），跑完自清理无残留。
+> 🗑 **harness 脚本已删**：`verify/docker-compose.verify.yml`、`verify/setup.py`、
+> `verify/run_tests.sh`、`verify/cleanup.sh` 于 2026-08-29 删除。它们拉起 AxonHub
+> 并**把渠道指向一个假上游**，而 AxonHub 已被 [11 转向决策](../dev/11-decision-full-selfbuilt.md)
+> 移出架构 —— 留着是一套指向已删依赖的死脚本，且是仓库里最后一处"造站点"
+> （[CLAUDE.md §1](../../CLAUDE.md)）。
+>
+> **本节以下内容一律作为史实保留**：六假设的结论是转向的直接依据，删掉方法就
+> 读不懂结论怎么来的。要看脚本原文：`git log -- verify/setup.py`。
+> 其中 `mock_upstream.py` **未删**，已更名 `verify/sse_stream_fixture.py` 并转为
+> 自研透传层的 SSE 流夹具（造流不造站点，属 §1 例外）。
 
-harness 组成与用法见 [verify/README.md](../../verify/README.md)，要点：
+已构建可一键运行的验证 harness：[`verify/`](../../verify/README.md)（compose + stdlib 假上游 + 自动 setup + 6 假设探测 + 自清理）。**2026-07-23 已在本机 Docker 实跑**（OrbStack v29.4.0，镜像 `looplj/axonhub:v1.0.0-beta5`），实跑中据 beta5 的实际 GraphQL schema 对 setup/探测脚本做了适配（详见下方"beta5 schema 适配"），跑完自清理无残留。
+
+harness 组成与用法见下（脚本已删，此处为当时的用法记录）：
 
 1. `docker compose -f verify/docker-compose.verify.yml up -d` —— AxonHub(`v1.0.0-beta5`，SQLite，免 Postgres) + Python mock 上游（role-only 首帧 / 空 SSE / 慢首帧 / 心跳 / 500）。
 2. `python3 verify/setup.py` —— 按 `ed6119a1` 的 GraphQL schema 自动初始化、建渠道A/B、建 Key、锁单渠道 profile。

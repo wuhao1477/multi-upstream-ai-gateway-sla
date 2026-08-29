@@ -57,18 +57,27 @@
 被测输入,不是被测依赖。判据只有一条:**真依赖能不能按需产出这个输入。**
 不能,才轮到造。写这种用例要在注释里说明为什么它不违反本条。
 
-已认定属于例外的三处(改动前先读这里,别再重新论证一遍):
+已认定属于例外的五处(改动前先读这里,别再重新论证一遍):
 
 | 位置 | 造的东西 | 为什么真依赖给不了 |
 |---|---|---|
 | `verify/ui/verify-ui.mjs` 的 `SECRET` | 一把假 Key 明文 | 要验的是"明文不回显"。拿真 Key 试等于把真凭证写进 DOM 快照与 CI 日志,失败时漏得更彻底 |
-| `verify/mock_upstream.py` | 病态 SSE 流(role-only 首帧 / 空 SSE / 慢首帧 / 心跳 / 500 / abort) | 真站点不会按你的要求在指定时刻断流。见 [`verify/README.md`](verify/README.md) 与 [03 §10](docs/dev/03-upstream-layer.md),用于 AC-31 首字判定与 AC-32 取消传播 |
+| `verify/sse_stream_fixture.py` | 病态 SSE 流(role-only 首帧 / 空 SSE / 慢首帧 / 心跳 / 500 / abort) | 真站点不会按你的要求在指定时刻断流。见 [`verify/README.md`](verify/README.md) 与 [03 §10](docs/dev/03-upstream-layer.md),用于 AC-31 首字判定与 AC-32 取消传播 |
 | 畸形上游响应的韧性用例 | 坏字段 / 坏 JSON | 同理:真站点不肯按需返回坏数据 |
 | AC-36 压测的流发生器 | 1000 QPS × 60s 的流 | 6 万次请求打别人家站点等于攻击,会被封号且真花钱。且被测对象是**自研核心的吞吐**,上游只是流的来源。见 [PRD AC-36](docs/PRD.md) |
+| `verify/probe_codex_wire.py` | 一台只记录不干活的服务端 | 被测对象是**真实 Codex CLI 发出的字节**。真上游收得下请求,但不会把收到的原始请求给你看 —— 要观测客户端发什么,就得有个东西收下并记下来 |
 
-注意第二、三处造的都是**流与字节**,不是**站点**。"站点 A 存在且 quota_per_unit
-是 500000"这类事实,永远只能由真站点提供 —— 这是 `mock_newapi.py` 被删的原因,
-也是它与 `mock_upstream.py` 的分界。
+注意这些造的都是**流、字节、或一个观测点**,没有一处造**站点**。"站点 A 存在
+且 quota_per_unit 是 500000"这类事实,永远只能由真站点提供 —— 这是
+`mock_newapi.py` 被删的原因,也是它与 `sse_stream_fixture.py` 的分界。
+
+**名字也算规则的一部分。** 2026-08-29 把 `mock_upstream.py` 改名
+`sse_stream_fixture.py`、把 14 的 `MOCK` 标签改名 `STREAM`、把场景名 `mock-*`
+改成 `fx-*`:旧名让人读成"假上游",于是每处引用都得跟一句"这个不算 mock",
+而那句话迟早会漏掉一处。同轮删掉了 ISSUE-001 的 AxonHub harness
+(`docker-compose.verify.yml` / `setup.py` / `run_tests.sh` / `cleanup.sh`) ——
+它把渠道指向假上游,而 AxonHub 早已被 [11](docs/dev/11-decision-full-selfbuilt.md)
+移出架构,那是仓库里最后一处"造站点"。结论仍在 ISSUE-001,脚本在 git 历史里。
 
 ### 后果:哪些验收在 CI 里跑不了
 

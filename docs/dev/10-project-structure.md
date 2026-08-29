@@ -108,7 +108,7 @@ multi-upstream-ai-gateway-sla/
 | 目标 | 内容 |
 | --- | --- |
 | `make build` | 编译 `cmd/sla-core`、`cmd/collector` 为静态二进制 |
-| `make test` | 单测；含 SSE 扫描器判定用例（MOCK 场景集）与 outbox 重放幂等性用例 |
+| `make test` | 单测；含 SSE 扫描器判定用例（STREAM 场景集）与 outbox 重放幂等性用例 |
 | `make lint` | `golangci-lint` |
 | `make migrate` | 应用 `migrations/`；本地/CI 用一次性 PG |
 | **CI 门禁** | 构建 + 测试 + lint + **`verify/gate.sh`**（文档一致性 6 类检查 + DDL 真跑，见 [02 §9.1bis](./02-data-model.md)）+ **DDL 真跑**（`verify/ddl-check.sh`：抽取 02 的全部 DDL 在 postgres:16 上执行 + 匿名 401 聚合回归；M0 后扩为 `migrations/` + 建分区 + `sqlc generate`，[02 §9.1bis](./02-data-model.md)）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)） |
@@ -132,7 +132,7 @@ multi-upstream-ai-gateway-sla/
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
 | bootstrap 选主（避免双 core 重复迁移） | `internal/bootstrap` advisory lock；建议加双 core 并发冷启动的集成测试 |
 
-**移入 M1**（此前误列在本表）：上游直连打通与 Responses 保真 diff（`internal/upstream`）、`verify/mock_upstream.py` 场景集接入 CI。
+**移入 M1**（此前误列在本表）：上游直连打通与 Responses 保真 diff（`internal/upstream`）、`verify/sse_stream_fixture.py` 场景集接入 CI。
 **M0 期间并行但非门禁**：Codex 实机 spike（[15 T1](./15-scope-and-preflight.md)）。
 
 ---

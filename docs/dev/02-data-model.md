@@ -2202,7 +2202,7 @@ CREATE TABLE attempt_usage (
 ) PARTITION BY RANGE (request_created_at);
 ```
 
-> **不存正文**：`decision_snapshot` / `cost_items` / `error_message` 均为元数据 JSON / 文本，不含 messages / prompt 正文 / 请求头体（FR-112）。失败/取消请求 `attempt_usage` 可为空（假设4：mock-500 usageLogs 为空，符合预期）。
+> **不存正文**：`decision_snapshot` / `cost_items` / `error_message` 均为元数据 JSON / 文本，不含 messages / prompt 正文 / 请求头体（FR-112）。失败/取消请求 `attempt_usage` 可为空（假设4 实测：`fx-500` 场景下 usageLogs 为空，符合预期）。
 
 ### 4.4 连续会话前缀首字（FR-050/051）
 

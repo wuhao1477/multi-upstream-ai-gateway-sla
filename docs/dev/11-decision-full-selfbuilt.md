@@ -94,7 +94,7 @@
 | [README](../../README.md) | 9 | 架构一句话与状态表更新 |
 | [PRD](../PRD.md) | 6 | 仅提及处更新（FR/AC 不变） |
 | 04 / 05 / 08 / 09 | 各 1~5 | 零星引用修正 |
-| `verify/` | — | 六假设 harness 转为历史；其 **SSE 流夹具脚本复用**于自研透传层测试（`mock_upstream.py`，造流不造站点 —— [CLAUDE.md §1](../../CLAUDE.md)） |
+| `verify/` | — | 六假设 harness 转为历史；其 **SSE 流夹具脚本复用**于自研透传层测试（`sse_stream_fixture.py`，造流不造站点 —— [CLAUDE.md §1](../../CLAUDE.md)） |
 
 ---
 

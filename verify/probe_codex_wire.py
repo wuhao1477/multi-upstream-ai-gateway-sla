@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """T1 spike 的必答项之一：Codex 请求的模型名到底从哪来？
 
-起一个 mock 上游，把真实 Codex CLI 指向它，记录：
+⚠️ 这里起的是一台**记录用的服务端**，被测对象是**真实 Codex CLI 发出的字节**。
+按 CLAUDE.md §1 的例外判据（真依赖能不能按需产出这个输入）：要观测客户端发什么，
+就必须有个东西收下它并记下来 —— 真上游收得下，但不会把收到的原始请求给你。
+所以假的那一端**就是被测输入的观测点**，不是被测依赖。
+
+起一个只记录不干活的服务端，把真实 Codex CLI 指向它，记录：
   Q1 它是否调用 GET /v1/models
   Q2 它在 POST 体里填的 model 是什么
   Q3 它是否发 If-None-Match（关系到 x-models-etag 能否自生成）
@@ -109,7 +114,7 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     srv = HTTPServer(("127.0.0.1", PORT), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    sys.stderr.write(f"mock listening on :{PORT}\n")
+    sys.stderr.write(f"recorder listening on :{PORT}\n")
     try:
         threading.Event().wait(float(sys.argv[1]) if len(sys.argv) > 1 else 120)
     finally:

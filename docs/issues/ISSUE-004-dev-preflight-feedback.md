@@ -137,7 +137,7 @@
 **推荐方案**：T1 保留在 **M0 期间执行**，但定位为**独立 spike**（一个临时最小透传脚本 + 真实 Codex CLI + 真实上游抓包，不依赖 M0 骨架代码）：
 
 - **不作 M0 验收门禁**（M0 门禁以 00 为准，不含上游项）；产出回填 [13 §1](../dev/13-research-reassessment.md)。
-- 06 §7 清单同步：上游透传/35 字段 diff/mock 场景集移到 M1 段落，T1 单独标注"M0 期间 spike，非门禁"。
+- 06 §7 清单同步：上游透传/35 字段 diff/流夹具场景集移到 M1 段落，T1 单独标注"M0 期间 spike，非门禁"。
 
 **影响面**：00 M0 边界注、06 §7、15 T1 加一句定位说明。
 
@@ -187,7 +187,7 @@ FR-063 五维含"用户"，`probe_budget_windows.scope_kind` 有 `'user'`，但�
 | C1 | [14 验收矩阵](../dev/14-acceptance-matrix.md) | AC-09/AC-10 仍在"⏭ 二期（主动测活）"标题下，与同文件 §1 总览（M4/一期）自相矛盾；AC-07 的"⏭ 二期（缓存进阶）"标题同类 | 两个小节标题改为"一期（M4/M2）"，正文移入对应里程碑段 |
 | C2 | [14 验收矩阵](../dev/14-acceptance-matrix.md) AC-18 行 | 行内仍写"（容量隔离，**一期无主动测活**）"，与 07-26 调整冲突（§2bis 末尾已改） | 措辞同步为"须同时开启主动测活" |
 | C3 | [15 §4](../dev/15-scope-and-preflight.md) | 文档影响表仍写"05 §2 测活体系一期不实现（S1）"——S1 已改双轨都做 | 删该句，改为"§2 双轨均一期" |
-| C4 | [06 §7](../dev/06-deployment-and-operations.md) | M0 清单含上游直连/35 字段 diff/Codex 实机/mock 接入——与 00 的 M0 边界冲突 | 按 A6 决议拆分：spike 单列，其余移 M1 |
+| C4 | [06 §7](../dev/06-deployment-and-operations.md) | M0 清单含上游直连/35 字段 diff/Codex 实机/流夹具接入——与 00 的 M0 边界冲突 | 按 A6 决议拆分：spike 单列，其余移 M1 |
 | C5 | [PRD](../PRD.md) | 正文已含 FR-120/121、AC-33~36 与 07-25/26 两轮分期重写，但版本停在 v1.3、§14 无对应变更记录、头部日期仍 07-23——违反 PRD 自己的变更规则 | 升 **v1.4**：补变更记录（含本 ISSUE 的 A 类决议），更新日期与"本次变更" |
 | C6 | [02 §4.2](../dev/02-data-model.md) | `attempts` 表残留 AxonHub/beta5 时代注释与列语义（`gateway_status`"beta5 execution.status 原样"、`gateway_reported_ttft_ms`、usage 列注释"beta5 usageLogs.*"）——[11 §4](../dev/11-decision-full-selfbuilt.md) 声明的清理未做完 | 注释改为自研语义；两列确认去留（建议保留列、改名注释为"上游若回传仅存证"） |
 

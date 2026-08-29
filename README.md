@@ -62,7 +62,7 @@
 - [15 一期范围与开工前确认清单](docs/dev/15-scope-and-preflight.md) —— 一期/二期范围（**订阅制移入二期**）+ 开工前必须确认的隐患清单
 
 ### 运行时验证与交付门禁
-- [verify/ — mock 上游场景集](verify/README.md)（AxonHub 六假设部分转历史；mock 场景转为自研透传层测试夹具）
+- [verify/ — 验收入口导航](verify/README.md)（P1 现役套件；SSE 流夹具场景集；AxonHub harness 已删，结论转历史）
 - `verify/gate.sh` —— **交付门禁**（CI 与本地**同一份脚本**）：`check_docs.py` 12 类文档一致性检查 + `ddl-check.sh` 在 postgres:16 上真跑全部 DDL。CI 入口 [`.github/workflows/gate.yml`](.github/workflows/gate.yml)：push/PR 到 main 自动跑，另校验 `ddl-extracted.sql` 未与 02 脱节
 - `verify/probe_codex_wire.py` —— Codex 线上行为实测：**证实它发的模型名来自自身 config.toml、与 `/v1/models` 无关**（据此确定 A2 的合成方案安全，接入前须改 Codex 的 `model` 为我方别名）
 

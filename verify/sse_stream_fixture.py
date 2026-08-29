@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """
-Mock upstream for AxonHub ISSUE-001 verification.
-Pure Python stdlib (no pip deps). Emits OpenAI-compatible /v1/chat/completions
-responses with controllable behaviour selected by the request's "model" field.
+SSE 流夹具:按需产出**病态 SSE 流**,用于 AC-30/31/32 的首字判定与取消传播。
+
+⚠️ 它造的是**流与字节**,不是**站点**。CLAUDE.md §1 禁止造假上游,例外判据是
+"真依赖能不能按需产出这个输入" —— 真站点不会按你的要求在指定时刻断流、
+在首帧只发 role、或发完心跳再发内容,所以这里的流**就是被测输入**,不是被
+测依赖。"站点 A 存在且 quota_per_unit 是 500000"那类事实永远只能由真站点
+提供,那由 verify/pick-upstream.mjs 负责。
+
+2026-08-29 更名(原 mock_upstream.py):旧名让人读成"假上游",于是每处引用都
+得跟一句"这个不算 mock"。名字本身是那个误读的来源。
+
+纯 stdlib,无 pip 依赖。返回 OpenAI 兼容的 /v1/chat/completions,行为由请求
+体里的 "model" 选择。场景名同时由 mock-* 改为 fx-*(fixture):它们是**线上
+协议里的模型名**,现在改代价只有 14 §1bis 那张场景表 —— 透传层是 M1/M2 才建,
+此刻没有任何代码消费它们;等判定用例写出来就贵了。
 
 Scenarios (choose via model name):
-  mock-normal        : normal streaming — role-only first delta, then content
-  mock-empty-sse     : streaming that only sends a role delta + [DONE], no content
-  mock-slow-first    : waits N seconds before the FIRST event (tests first-event timeout)
-  mock-heartbeat     : sends SSE comment heartbeats then content (tests non-content first bytes)
-  mock-500           : returns HTTP 500 immediately (tests failover)
-  mock-normal-2      : same as normal, different id — use as the "second" channel
-  mock-abort         : sends role + partial content, then abruptly drops the TCP
+  fx-normal        : normal streaming — role-only first delta, then content
+  fx-empty-sse     : streaming that only sends a role delta + [DONE], no content
+  fx-slow-first    : waits N seconds before the FIRST event (tests first-event timeout)
+  fx-heartbeat     : sends SSE comment heartbeats then content (tests non-content first bytes)
+  fx-500           : returns HTTP 500 immediately (tests failover)
+  fx-normal-2      : same as normal, different id — use as the "second" channel
+  fx-abort         : sends role + partial content, then abruptly drops the TCP
                        connection with NO finish and NO [DONE] (upstream mid-stream abort)
 
-Run: python3 mock_upstream.py [port]   (default 8091)
+Run: python3 sse_stream_fixture.py [port]   (default 8091)
 """
 import json
 import sys
@@ -64,25 +76,27 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(body or b"{}")
         except Exception:
             req = {}
-        model = req.get("model", "mock-normal")
-        cid = "chatcmpl-mock-" + model
+        model = req.get("model", "fx-normal")
+        # model 本身已带 fx- 前缀，别再拼一次(改名前是 "chatcmpl-mock-" + "mock-normal"，
+        # 一直是 chatcmpl-mock-mock-normal —— 没人消费这个 id，所以没人发现)
+        cid = "chatcmpl-" + model
 
         # Per-channel behaviour override via the upstream Authorization header
         # (AxonHub forwards each channel's credential apiKey). A channel whose
-        # credential contains "slow" behaves like mock-slow-first regardless of
+        # credential contains "slow" behaves like fx-slow-first regardless of
         # the requested model — used to build the internal-failover test
         # (assumption #2 path B): slow channel A first-event-times-out, AxonHub
         # fails over to fast channel B.
         auth = self.headers.get("Authorization", "")
         if "slow" in auth:
-            model = "mock-slow-first"
-            cid = "chatcmpl-mock-slow-channel"
+            model = "fx-slow-first"
+            cid = "chatcmpl-fx-slow-channel"
 
-        if model == "mock-500":
+        if model == "fx-500":
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": {"message": "mock upstream 500"}}).encode())
+            self.wfile.write(json.dumps({"error": {"message": "fixture upstream 500"}}).encode())
             return
 
         # streaming SSE
@@ -92,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            if model == "mock-slow-first":
+            if model == "fx-slow-first":
                 time.sleep(SLOW_SECONDS)
                 self.wfile.write(sse(chunk(cid, model, {"role": "assistant"})))
                 self.wfile.write(sse(chunk(cid, model, {"content": "late"})))
@@ -101,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 return
 
-            if model == "mock-abort":
+            if model == "fx-abort":
                 # upstream sends role + a bit of content, then abruptly drops the
                 # connection mid-stream: no finish_reason, no [DONE], no usage.
                 self.wfile.write(sse(chunk(cid, model, {"role": "assistant"})))
@@ -117,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
 
-            if model == "mock-heartbeat":
+            if model == "fx-heartbeat":
                 # SSE comment heartbeats carry no JSON content
                 for _ in range(3):
                     self.wfile.write(b": heartbeat\n\n")
@@ -137,7 +151,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(0.5)  # measurable gap between role delta and first content
 
-            if model == "mock-empty-sse":
+            if model == "fx-empty-sse":
                 # no content at all, straight to finish
                 self.wfile.write(sse(chunk(cid, model, {}, finish="stop")))
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -159,5 +173,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"mock upstream listening on :{PORT}", flush=True)
+    print(f"SSE stream fixture listening on :{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

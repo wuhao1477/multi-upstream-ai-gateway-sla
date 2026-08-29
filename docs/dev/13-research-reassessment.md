@@ -114,7 +114,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 
 | 维度 | 参考价值 |
 | --- | --- |
-| 取消传播 | [假设6 补验](../issues/ISSUE-001-tech-assumption-verification.md)实测证明其 mid-stream 取消**能传播到上游止损**（mock 侧立即 EPIPE）——AC-32 的可行性证据与实现参考 |
+| 取消传播 | [假设6 补验](../issues/ISSUE-001-tech-assumption-verification.md)实测证明其 mid-stream 取消**能传播到上游止损**（夹具侧立即 EPIPE）——AC-32 的可行性证据与实现参考 |
 | 延迟提交 | `deferredWriter.Commit()` 的提交时机控制，与我们"首字前可切换、提交后不可切换"（FR-078）同构 |
 | 反面教材 | 其 Codex 400 body-rewrite 隐藏重试**只留一条审计记录**——我们自研**不做隐藏重试**，一次外部调用严格对应一次上游调用 |
 
