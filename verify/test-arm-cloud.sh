@@ -85,14 +85,20 @@ find_run() {
     --json databaseId,status,conclusion,url \
     --jq '.[0] | [.databaseId, .status, (.conclusion // "-"), .url] | @tsv' 2>/dev/null
 }
-RUN_TSV=$(find_run)
-[ -n "$RUN_TSV" ] || {
-  echo "❌ 没有找到 commit $SHA7 对应的 $WORKFLOW 运行记录。"
-  echo "   先推送分支触发云端构建：git push -u origin \$(git branch --show-current)"
-  echo "   （刻意不本地兜底构建：那样验收就与'云端 arm 构建'无关了）"
-  exit 1; }
+IFS=$'\t' read -r RUN_ID ST CONC RUN_URL <<<"$(find_run)"
 
-IFS=$'\t' read -r RUN_ID ST CONC RUN_URL <<<"$RUN_TSV"
+# ⚠️ 必须校验 RUN_ID 是数字，不能只判输出串非空：无匹配 run 时 gh 返回空数组，
+#    `.[0]` 求值得 null，`@tsv` 把 null 渲染成**空字段**，于是拿到 "\t\t-\t"
+#    —— 非空串，判空会通过，脚本会带着空 RUN_ID 进入等待循环，把
+#    "没有这次构建" 显示成 "云端状态 ，等待中…" 转 20 分钟。
+case "$RUN_ID" in
+  ''|*[!0-9]*)
+    echo "❌ 没有找到 commit $SHA7 对应的 $WORKFLOW 运行记录。"
+    echo "   先推送当前分支触发云端构建："
+    echo "     git push -u origin $(git branch --show-current)"
+    echo "   （刻意不本地兜底构建：那样验收就与「云端 arm 构建」无关了）"
+    exit 1;;
+esac
 echo "   run #$RUN_ID  $RUN_URL"
 
 # 云端还在跑就等（最多 20 分钟）。等待是必要的：刚 push 完立刻验收是常态。
