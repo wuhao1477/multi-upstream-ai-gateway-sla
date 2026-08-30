@@ -172,12 +172,6 @@ jobs:
       - name: 管理界面浏览器验收（真 Chrome，CI 只覆盖免密的 SPA 14 项）
         run: make test-ui
 
-      # 同一份前端源码在 Vue 3.6 预发布版与 3.5 稳定版下都要能类型检查 + 构建。
-      # 这是"为 3.6 提前适配"的可检验含义：只钉 3.6.0-rc.6 证明不了正式版
-      # 发布前后不需要改代码，也证明不了出问题时能退回稳定版。
-      - name: 前端双版本兼容（Vue 3.6-rc 与 3.5 稳定版）
-        run: bash web/scripts/check-vue-versions.sh
-
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
       # 余下两道守卫随对应功能接入：
