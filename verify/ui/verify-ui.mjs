@@ -114,7 +114,9 @@ try {
       return el && (el.querySelector('table') || /还没有渠道/.test(el.textContent));
     },
     { timeout: 8000 });
-  const chCount = await page.$$eval('#channels tbody tr', rs => rs.length);
+  // 用 tr[data-ch-row] 而不是 tbody tr：编辑/停用展开时 tbody 里会多一个
+  // sub-row（那是表单，不是渠道），不区分的话渠道数会多算。
+  const chCount = await page.$$eval('#channels tr[data-ch-row]', rs => rs.length);
   const emptyState = await page.$eval('#channels',
     el => /还没有渠道/.test(el.textContent));
   check('渠道列表可加载（空库显示空状态）', chCount > 0 || emptyState,
@@ -146,13 +148,13 @@ try {
   // 列表里能看到刚建的渠道
   await page.click('#btn-reload');
   await sleep(800);
-  const names = await page.$$eval('#channels tbody tr td:nth-child(2)',
+  const names = await page.$$eval('#channels tr[data-ch-row] td:nth-child(2)',
     ts => ts.map(t => t.textContent.trim()));
   check('新渠道出现在列表中', names.includes(uniq), names.slice(-3).join(', '));
 
   check('创建后列表至少有 1 行', names.length >= 1, `${names.length} 行`);
   const newRowIdx = names.indexOf(uniq);
-  const newChannelId = await page.$$eval('#channels tbody tr td:first-child',
+  const newChannelId = await page.$$eval('#channels tr[data-ch-row] td:first-child',
     (ts, i) => ts[i].textContent.trim(), newRowIdx);
 
   // ── 5. 点开详情，看资产总览与异常项 ──
@@ -590,6 +592,91 @@ try {
       await page.screenshot({ path: `${SHOT}/11b-import-dryrun.png`, fullPage: true });
     }
   }
+
+  // ── 12bis. 渠道编辑与停用（PATCH /admin/channels/{id} 的界面入口）──
+  //
+  // 放在最后：编辑/停用会往 tbody 里插展开行，而前面若干断言按行数与行序取值。
+  // 这里每步做完都收起展开行，最后一步把渠道恢复成 enabled。
+  //
+  // 每条都从**列表回显**读，不从 toast 读 —— toast 是我们自己写的文案，
+  // 读它只能证明前端说了句话；列表是 patch 后重新 GET 回来的，读它才证明库里真变了。
+  await pane('channels');
+  await page.click('#btn-reload');
+  await sleep(600);
+
+  const renamed = `${uniq}-改名`;
+  await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
+  await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
+  await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
+  await page.type('#ch-edit-name', renamed);
+  await page.click('#btn-ch-save');
+  await page.waitForFunction(
+    (id, want) => document.querySelector(`[data-ch-name="${id}"]`)?.textContent.trim() === want,
+    { timeout: 8000 }, newChannelId, renamed).catch(() => {});
+  const nameAfter = await page.$eval(`[data-ch-name="${newChannelId}"]`,
+    el => el.textContent.trim());
+  check('改渠道名后列表回显新名字（PATCH 落库）', nameAfter === renamed,
+    `期望 ${renamed}，实际 ${nameAfter}`);
+
+  // 停用：原因必填。先试空原因 —— 应被拦住且状态不变，否则"必填"是句空话。
+  await page.click(`#channels button[data-ch-disable="${newChannelId}"]`);
+  await page.waitForSelector('#ch-dis-reason', { timeout: 5000 });
+  await page.click('#btn-ch-disable-ok');
+  await sleep(800);
+  const statusAfterEmpty = await page.$eval(`[data-ch-status="${newChannelId}"]`,
+    el => el.textContent.trim());
+  check('停用不填原因被拦下且状态未变（FR-095）',
+    /enabled/.test(statusAfterEmpty), `状态=${statusAfterEmpty}`);
+
+  const reason = '验收脚本停用测试-站点余额耗尽';
+  await page.type('#ch-dis-reason', reason);
+  await page.click('#btn-ch-disable-ok');
+  await page.waitForFunction(
+    id => /disabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    { timeout: 8000 }, newChannelId).catch(() => {});
+  const statusAfter = await page.$eval(`[data-ch-status="${newChannelId}"]`,
+    el => el.textContent.trim());
+  check('停用后列表状态变为 disabled', /disabled/.test(statusAfter), statusAfter);
+  // 原因必须显示出来 —— 停用是要人来解除的，看不到原因就无从判断能不能解
+  const reasonShown = await page.$eval(`[data-ch-reason="${newChannelId}"]`,
+    el => el.textContent.trim()).catch(() => '');
+  check('停用原因在列表里可见（不是只写进了库）', reasonShown === reason,
+    `期望 ${reason}，实际 ${reasonShown || '（没有这个元素）'}`);
+
+  // **停用态下改名，原因不能被抹掉。** 这是 store.UpdateChannel 的三分支里最容易
+  // 写错的一支：原先 disabled_reason 是无条件赋值，于是只带 name 的 PATCH 会把
+  // 原因清成 NULL —— 留下一个"已停用但没人知道为什么"的渠道，而库里没有 CHECK
+  // 拦这个状态。改成随 status 变更才动之后，这条断言守着它。
+  const renamed2 = `${uniq}-停用中改名`;
+  await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
+  await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
+  await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
+  await page.type('#ch-edit-name', renamed2);
+  await page.click('#btn-ch-save');
+  await page.waitForFunction(
+    (id, want) => document.querySelector(`[data-ch-name="${id}"]`)?.textContent.trim() === want,
+    { timeout: 8000 }, newChannelId, renamed2).catch(() => {});
+  const reasonKept = await page.$eval(`[data-ch-reason="${newChannelId}"]`,
+    el => el.textContent.trim()).catch(() => '');
+  const stillDisabled = await page.$eval(`[data-ch-status="${newChannelId}"]`,
+    el => el.textContent.trim());
+  check('停用态下只改名，停用原因与状态都不受影响',
+    reasonKept === reason && /disabled/.test(stillDisabled),
+    `原因=${reasonKept || '（被抹掉了）'} 状态=${stillDisabled}`);
+
+  await page.click(`#channels button[data-ch-enable="${newChannelId}"]`);
+  await page.waitForFunction(
+    id => /enabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    { timeout: 8000 }, newChannelId).catch(() => {});
+  const backOn = await page.$eval(`[data-ch-status="${newChannelId}"]`,
+    el => el.textContent.trim());
+  // 启用后原因必须一并清掉：留着上次的原因，界面上就是"已启用"却带着停用理由
+  const reasonGone = await page.$$eval(`[data-ch-reason="${newChannelId}"]`,
+    els => els.length === 0);
+  check('启用后状态恢复且停用原因被清空', /enabled/.test(backOn) && reasonGone,
+    `状态=${backOn}，原因元素${reasonGone ? '已消失' : '仍在'}`);
+
+  await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });
 
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是

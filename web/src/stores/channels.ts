@@ -5,7 +5,6 @@ import { ApiError } from '@/api/client'
 import type { Channel, InventoryResp, SyncItem, SyncResult } from '@/api/types'
 import { useToastStore } from './toast'
 
-/** 同步的失败响应体也可能带 items（429/409/422），此时照样渲染结果表。 */
 /**
  * 从失败响应体里取 items。按形态取而不认类型，因为四种失败体带的字段各不相同：
  *  - 429/409 限流或已在跑：带 items（单项 status='skipped'）
@@ -86,6 +85,21 @@ export const useChannelsStore = defineStore('channels', () => {
     }
   }
 
+  /**
+   * 改渠道（改名/换地址/停用/启用）。成功后重拉列表 —— 不本地改 list.value，
+   * 那样界面显示的是我们以为写进去的东西，而不是库里真有的东西。
+   */
+  async function patch(id: number, input: adminApi.PatchChannelInput): Promise<boolean> {
+    try {
+      await adminApi.patchChannel(id, input)
+      await load()
+      return true
+    } catch (e) {
+      toast.fail('修改渠道失败', e)
+      return false
+    }
+  }
+
   /** 选中一个渠道：清掉上一个渠道的采集结果，再拉总览。 */
   async function select(id: number, name: string): Promise<void> {
     currentID.value = id
@@ -150,6 +164,7 @@ export const useChannelsStore = defineStore('channels', () => {
     syncing,
     load,
     create,
+    patch,
     select,
     sync,
   }

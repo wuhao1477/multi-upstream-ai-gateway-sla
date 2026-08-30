@@ -369,6 +369,24 @@ input::placeholder {
 }
 .endcap {
   align-self: end;
+  display: flex;
+  gap: 8px;
+}
+/* 行内操作按钮组。渠道行有查看/编辑/停用三个，挤在一格里要能换行 */
+.acts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* 编辑/停用展开的那一行。底色区分开，否则看不出它属于上面哪条渠道 */
+.sub-row > td {
+  background: var(--muted);
+}
+.row-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  align-items: end;
 }
 
 /* ── Table：w-full text-sm / th h-10 px-2 / td p-2 / row hover:bg-muted/50 ── */

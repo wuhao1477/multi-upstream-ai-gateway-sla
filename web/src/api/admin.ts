@@ -37,6 +37,27 @@ export function createChannel(input: CreateChannelInput): Promise<CreateChannelR
   return api<CreateChannelResp>('/admin/channels', { method: 'POST', body: input })
 }
 
+/**
+ * 改渠道。省略的字段一律不动（服务端 `COALESCE(NULLIF(...))`）。
+ *
+ * **`site_family` 故意不在这里**：它由 Detect 判定，手改会让整套字段映射错位
+ * （站型决定用哪个适配器、带哪个用户 ID 头、怎么解析分页信封）。要改站型
+ * 就重新探测。
+ *
+ * `status='disabled'` 时 `disabled_reason` 必填（FR-095），服务端会 400。
+ */
+export interface PatchChannelInput {
+  name?: string
+  base_url?: string
+  status?: 'enabled' | 'disabled'
+  disabled_reason?: string
+  disabled_until?: string | null
+}
+
+export function patchChannel(id: number, input: PatchChannelInput): Promise<{ updated: boolean }> {
+  return api<{ updated: boolean }>(`/admin/channels/${id}`, { method: 'PATCH', body: input })
+}
+
 export function channelInventory(id: number): Promise<InventoryResp> {
   return api<InventoryResp>(`/admin/channels/${id}/inventory`)
 }

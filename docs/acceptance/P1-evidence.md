@@ -6,7 +6,7 @@
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 51 项（见 §5） |
+| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 57 项（见 §5） |
 | 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）**<br>⚠️ 这一行是 **2026-08-28 那轮**的结论，其中浏览器验收部分**已被 §5 取代**（当轮上游是 `mock_newapi.py`，换真上游后发现其中两条断言是空的）。 |
 
 ---
@@ -186,10 +186,10 @@ Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok
 | 套件 | 结果 | 上游 / 数据源 |
 | --- | --- | --- |
 | `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
-| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入） | **51/51** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入→改名/停用/启用） | **57/57** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
 | `verify-remote.mjs`（内网真库只读） | **31/31** | SLA_DB @ <internal-db-host>（PG 17.5） |
 | `ui-stack.sh` 末步：Key 明文不进 core 日志 | **✅** | 退出标准③ 的"日志"那一端，2026-08-29 补 |
-| 合计 | **96 项** | —— |
+| 合计 | **102 项** | —— |
 
 选中站点的实测事实（全部由上游返回，无一处写死）：站型
 `newapi 0.6.0-rc.11`、`quota_per_unit=500000`、目录 1369 个模型（倍率 1161 +
@@ -226,7 +226,7 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 ### 5.4 遗留
 
-- 这 51 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
+- 这 57 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
   （fork 触发的 `pull_request` 与构建日志都会漏）。无 `HUB_FILE` 时
   `verify/ui-stack.sh` 降级只跑 SPA 14 项，并打印跳过了哪些。**全量结论只能来自
   本地跑**，见 [CLAUDE.md §1 的后果表](../../CLAUDE.md)。
@@ -325,6 +325,42 @@ overrides"那段注释**留着** —— 它讲的是 peer 范围与两个 Vue �
 `UiField.vue` 的 `for` prop，查过之后是错的 —— 那个 prop 由调用方显式传，
 因为 **id 就是验收契约**（`#ch-name`、`#cr-token`），`useId()` 生成随机 id
 会让 51 条界面断言全部选不中元素。
+
+### 5.10 渠道编辑/停用入口此前不存在（2026-08-30 补）
+
+与 §5.7 的 FR-127 同一类缺口：**`PATCH /admin/channels/{id}` 从库到 API 全通，
+前端零调用**。09 §5 把它列为 P1 端点、`upstream_api.go:142` 实现了 79 行、
+`store.UpdateChannel` 也在，但界面上没有任何入口 —— FR-095「授权人员可立即停用
+渠道…并填写原因和有效期」的渠道那一层一直是空的。
+
+补 `ChannelsView.vue` 的行内「编辑」「停用/启用」，并新增 6 条断言（51 → 57）：
+
+| 断言 | 为什么这么写 |
+| --- | --- |
+| 改名后**列表回显**新名字 | 从列表读而不从 toast 读 —— toast 是我们自己写的文案，读它只证明前端说了句话；列表是 PATCH 后重新 GET 回来的 |
+| 停用不填原因被拦下**且状态未变** | 只断言"报了错"不够，那不排除它一边报错一边把库改了 |
+| 停用后状态变 `disabled` | —— |
+| 停用原因**在列表里可见** | 停用是要人来解除的，只写进库等于解不了 |
+| **停用态下只改名，原因与状态都不受影响** | 见下 |
+| 启用后状态恢复**且原因被清空** | 留着上次的原因，界面上就是"已启用"却带着停用理由 |
+
+倒数第二条揪出一个真缺陷：`UpdateChannel` 原先对 `disabled_reason`/`disabled_until`
+是**无条件赋值**，而其余四列是 `COALESCE(NULLIF(...))`（空则不动）。于是一个只带
+`name` 的 PATCH 会把停用原因清成 NULL —— 留下 `status='disabled'` 而没人知道
+为什么的渠道，**库里没有 CHECK 能拦这个状态**。改成随 `status` 三分支：
+传 `disabled` 用传入值、传 `enabled` 清空、没传则不动。
+
+三条都验证会红：
+- 把 `disabled_reason` 改回无条件赋值 → `56/57`，`原因=（被抹掉了）`
+- 同时移除前后端两处 FR-095 必填校验 → `停用不填原因被拦下且状态未变 — 状态=disabled`
+
+**`site_family` 故意不给改**：它决定用哪个适配器、带哪个用户 ID 头、怎么解析
+分页信封，手改会让整套字段映射错位。要改站型就重新探测。
+
+顺带修一处**验收脚本自身**的隐患：展开编辑/停用会往 `tbody` 里插一个表单行，
+而前面若干断言按 `tbody tr` 数渠道、按 `td:first-child` 取 id。给数据行加
+`data-ch-row` 并把那两处选择器改成 `tr[data-ch-row]` —— 否则展开着一行时
+渠道数会多算一个，取 id 会取到表单里的文本。
 
 ---
 

@@ -156,6 +156,20 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// status 只认两个值。不校验的话非法值会撞 CHECK 约束，变成一句 PG 错误 ——
+	// 调用方读不出"哪个字段不对"。
+	if in.Status != "" && in.Status != "enabled" && in.Status != "disabled" {
+		s.fail(w, http.StatusBadRequest,
+			"status 只能是 enabled 或 disabled，收到："+in.Status)
+		return
+	}
+	// FR-095：停用必须填原因。库里没有 CHECK 拦这个（原因列可空 —— 启用态本就
+	// 该是空），所以这道闸只能在这里。少了它就会出现"已停用但没人知道为什么"
+	// 的渠道，而停用是要人来解除的，没原因等于解不了。
+	if in.Status == "disabled" && strings.TrimSpace(in.DisabledReason) == "" {
+		s.fail(w, http.StatusBadRequest, "停用渠道必须填 disabled_reason（FR-095）")
+		return
+	}
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		err := store.UpdateChannel(r.Context(), conn, store.Channel{
 			ID: id, Name: in.Name, BaseURL: in.BaseURL, SiteFamily: in.SiteFamily,

@@ -90,8 +90,20 @@ UPDATE channels
        site_family = COALESCE(NULLIF($3,''), site_family),
        base_url = COALESCE(NULLIF($4,''), base_url),
        status = COALESCE(NULLIF($5,''), status),
-       disabled_reason = NULLIF($6,''),
-       disabled_until = $7,
+       -- 停用原因/有效期**只随 status 变更而变**，不像上面几列那样"空则不动"：
+       --   传 disabled → 用传入值（FR-095 要求填原因，由处理器强制非空）
+       --   传 enabled  → 清空（留着上次的原因，界面上会显示"已启用"却带着停用理由）
+       --   没传 status → 原样不动
+       -- 原先这两列是无条件赋值，于是"只改个名字"的 PATCH 会把停用原因悄悄抹掉，
+       -- 留下一个 status='disabled' 而没人知道为什么的渠道（库里无 CHECK 拦这个）。
+       disabled_reason = CASE $5
+                           WHEN 'disabled' THEN NULLIF($6,'')
+                           WHEN 'enabled'  THEN NULL
+                           ELSE disabled_reason END,
+       disabled_until  = CASE $5
+                           WHEN 'disabled' THEN $7
+                           WHEN 'enabled'  THEN NULL
+                           ELSE disabled_until END,
        updated_at = now()
  WHERE id = $1`, c.ID, c.Name, c.SiteFamily, c.BaseURL, c.Status,
 		c.DisabledReason, c.DisabledUntil)
