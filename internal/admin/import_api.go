@@ -95,8 +95,9 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			item.DetectedFamily = d.Family
-			// 对照导出声明 —— 不一致时以探测为准，但要报出来
-			if declared := normalizeDeclared(a.SiteType); declared != collector.FamilyUnknown &&
+			// 对照导出声明 —— 不一致时以探测为准，但要报出来。
+			// 别名表在注册表里（每个站型自己声明认领哪些自称）。
+			if declared := collector.FamilyOfAlias(a.SiteType); declared != collector.FamilyUnknown &&
 				declared != d.Family {
 				item.Mismatch = true
 			}
@@ -208,14 +209,21 @@ func (s *Server) importOne(
 	}
 	_ = accID
 
-	// 有凭证就一并登记 —— 否则运维还要逐站手填上百次
+	// 有凭证就一并登记 —— 否则运维还要逐站手填上百次。
+	// cred_type 与必需字段都走注册表的同一处判定（与 saveCredential 同一函数），
+	// 原先这里是第二份按家族分流的 credType 映射：它与凭证登记那份各写一遍，
+	// 少一个家族就静默写空串。
 	if a.HasCredential() && s.SaveCredential != nil {
-		credType := "newapi_access_token"
-		switch d.Family {
-		case collector.FamilySub2API:
-			credType = "sub2api_jwt"
-		case collector.FamilyASXS:
-			credType = "asxs_jwt"
+		reg, ok := collector.Lookup(d.Family)
+		if !ok {
+			return fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
+		}
+		// 导入侧只可能带 token（导出里没有密码），不传账密一路
+		credType, err := reg.CredTypeFor(true, a.UserID() != "", false)
+		if err != nil {
+			// 报出来而不是存一份必然 401 的凭证：那种凭证要等到某次采集
+			// 才暴露，而那时已经分不清是站点挂了还是导入时就缺字段。
+			return fmt.Errorf("导出里的凭证字段不足: %w", err)
 		}
 		if err := s.SaveCredential(ctx, collector.Credential{
 			ChannelID: chID, Family: d.Family, CredType: credType,
@@ -251,19 +259,6 @@ func finishImport(res *collector.HubImportResult) {
 			res.NoCredential++
 		}
 	}
-}
-
-// normalizeDeclared 复用 collector 的映射（仅用于对照）。
-func normalizeDeclared(siteType string) collector.Family {
-	switch strings.ToLower(strings.TrimSpace(siteType)) {
-	case "new-api", "newapi", "rix-api":
-		return collector.FamilyNewAPI
-	case "sub2api":
-		return collector.FamilySub2API
-	case "asxs", "ampmanager":
-		return collector.FamilyASXS
-	}
-	return collector.FamilyUnknown
 }
 
 // shortErr 截短错误信息。

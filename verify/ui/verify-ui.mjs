@@ -122,6 +122,26 @@ try {
   check('渠道列表可加载（空库显示空状态）', chCount > 0 || emptyState,
     emptyState ? '空库空状态' : `${chCount} 行`);
 
+  // 站型下拉必须来自后端注册表（GET /admin/site-families），不是写死的四项。
+  //
+  // 逐项等值比对而不是数个数：数个数的话，把 v-for 删掉再写死四个 option
+  // 照样绿 —— 而"写死"正是这条要防的东西（加站型时那份列表不报错，
+  // 新站型只是在界面上不存在）。
+  const famFromAPI = await page.evaluate(async () => {
+    const t = document.querySelector('#token').value;
+    const r = await fetch('/admin/site-families',
+      { headers: { Authorization: `Bearer ${t}` } });
+    const d = await r.json();
+    return (d.items ?? []).map(f => [f.family, f.display_name]);
+  });
+  // 首项是"自动探测"（value=''），它不属注册表 —— 按 value 非空筛掉。
+  const famInDOM = await page.$$eval('#ch-family option',
+    os => os.filter(o => o.value !== '').map(o => [o.value, o.textContent.trim()]));
+  check('站型下拉逐项等于注册表返回的家族与显示名（不是写死）',
+    famFromAPI.length > 0 &&
+    JSON.stringify(famInDOM) === JSON.stringify(famFromAPI),
+    `注册表=${JSON.stringify(famFromAPI)} 下拉=${JSON.stringify(famInDOM)}`);
+
   await page.screenshot({ path: `${SHOT}/01-list.png` });
 
   // ── 4. 在界面上真实创建一个渠道商 ──

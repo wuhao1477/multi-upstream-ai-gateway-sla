@@ -16,8 +16,19 @@ import type {
   InventoryResp,
   Key,
   ListResp,
+  SiteFamilyInfo,
   SyncResult,
 } from './types'
+
+// ── 站型注册表 ───────────────────────────────────────────────────────────────
+
+/**
+ * 已注册的站型。界面的站型下拉读它而不是写死四个 option ——
+ * 写死的那份在加站型时不会报任何错，新站型只是**在界面上不存在**。
+ */
+export function listSiteFamilies(): Promise<ListResp<SiteFamilyInfo>> {
+  return api<ListResp<SiteFamilyInfo>>('/admin/site-families')
+}
 
 // ── 渠道 ─────────────────────────────────────────────────────────────────────
 

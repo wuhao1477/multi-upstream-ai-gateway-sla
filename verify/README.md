@@ -4,7 +4,7 @@
 
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
-| `ui-stack.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 57 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
+| `ui-stack.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 58 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
 | `ui-stack.sh --keep` | 同一套栈，起完停在前台供**人工**点验，打印真上游地址与凭证 | 同上但不需要 Chrome；`HUB_FILE` 必填（手点的意义就是对真站点点） |
 | `test-arm-cloud.sh` | 把云端 arm64 镜像拉回本地真机验收 | gh、docker、`HUB_FILE` |
 | `ui/verify-remote.mjs` | 连内网真库的只读验收 31 项 | 到得了 <internal-db-host> |
@@ -13,7 +13,7 @@
 
 上游一律**真站点**，由 `pick-upstream.mjs` 从 all-api-hub 导出里现场探活挑选，
 不写死 URL（[CLAUDE.md §1](../CLAUDE.md)）。真上游令牌**不进 GitHub secrets**，
-所以要凭证的 57 项与真库 31 项**只在本地跑**，CI 只跑免密部分。
+所以要凭证的 58 项与真库 31 项**只在本地跑**，CI 只跑免密部分。
 
 `ui-stack.sh` 由原 `test-ui.sh` 与 `dev-ui.sh` 合并（2026-08-30）。
 **人工点验不是自动验收的冗余**：P1-evidence §4 第 15 项（先点采集再登记凭证，

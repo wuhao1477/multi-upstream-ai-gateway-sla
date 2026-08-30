@@ -15,82 +15,10 @@ import (
 // 不限量会让一次探测把内存吃掉。判定只需要头部若干字段，1MB 足够。
 const probeMaxBytes = 1 << 20
 
-// detectStep 是一次探测尝试。顺序即 04 §2 的表，**命中即停**。
-type detectStep struct {
-	family Family
-	path   string
-	// match 判定该响应是否属本家族。传入已解析的 JSON map 与原始字节 ——
-	// ASXS 的判据是 JWT iss，需要看原文。
-	match func(m map[string]any, raw []byte) bool
-	// extract 从命中的响应里取家族特有信息（版本、无盾、额度基数）。
-	extract func(m map[string]any, r *DetectResult)
-}
-
-// detectSteps 按 04 §2 的顺序定义。
+// Detect 按注册表顺序探测站型，命中即停（04 §2）。
 //
-// 顺序不可随意调整：NewAPI 的 /api/status 最通用，放前面能最快分桶；
-// ASXS 的判据最特殊（JWT iss=ampmanager），放最后。
-var detectSteps = []detectStep{
-	{
-		family: FamilyNewAPI,
-		path:   "/api/status",
-		// 命中特征：含 quota_per_unit / turnstile_check / checkin_enabled。
-		// 用"任一存在"而非"全部存在"：二开站点会删字段，但不会全删。
-		match: func(m map[string]any, _ []byte) bool {
-			d := unwrapData(m)
-			for _, k := range []string{"quota_per_unit", "turnstile_check", "checkin_enabled"} {
-				if _, ok := d[k]; ok {
-					return true
-				}
-			}
-			return false
-		},
-		extract: func(m map[string]any, r *DetectResult) {
-			d := unwrapData(m)
-			r.Version = str(d["version"])
-			// turnstile_check=true 表示开盾 → 服务端采集不可行（04 §6）
-			r.NoShield = !boolOf(d["turnstile_check"])
-			// ⚠️ 逐站读取，**不写死**：upstream-d.invalid 是 500000，别家不一定（04 §2）
-			r.QuotaPerUnit = floatOf(d["quota_per_unit"])
-		},
-	},
-	{
-		family: FamilySub2API,
-		path:   "/api/v1/settings/public",
-		// 命中特征：含 site_name / turnstile_enabled，且是 {code,message,data} envelope
-		match: func(m map[string]any, _ []byte) bool {
-			d := unwrapData(m)
-			_, hasSite := d["site_name"]
-			_, hasTurnstile := d["turnstile_enabled"]
-			return hasSite || hasTurnstile
-		},
-		extract: func(m map[string]any, r *DetectResult) {
-			d := unwrapData(m)
-			r.Version = str(d["version"])
-			r.NoShield = !boolOf(d["turnstile_enabled"])
-		},
-	},
-	{
-		family: FamilyASXS,
-		path:   "/api/public/site-config",
-		// 命中特征：200 且 JWT iss 为 ampmanager（04 §2/§3.3）。
-		// 站点可能不在 JSON 里直接写 iss，故也扫原文 —— 这是闭源平台的
-		// 唯一稳定指纹（其命名空间与 NewAPI/Sub2API 零重叠）。
-		match: func(m map[string]any, raw []byte) bool {
-			if strings.Contains(string(raw), "ampmanager") {
-				return true
-			}
-			d := unwrapData(m)
-			return str(d["iss"]) == "ampmanager"
-		},
-		extract: func(m map[string]any, r *DetectResult) {
-			r.Version = str(unwrapData(m)["version"])
-			// ASXS 无 turnstile 概念；不声称无盾，留 false 由运维确认
-		},
-	},
-}
-
-// Detect 按 04 §2 的顺序探测站型，命中即停。
+// 探测步骤本身在 registry.go 的每份 Registration 里（ProbePath/Match/Extract）——
+// 原先这里有一张与之平行的 detectSteps 表，是"加一个站型要改九处"里的第 2 处。
 //
 // 全部公开端点、零成本，可对 ~20 个上游批量跑一次自动分桶（AC-28）。
 // 全未命中返回 FamilyUnknown —— 按 04 §7 走未知家族接入流程，
@@ -103,8 +31,8 @@ func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult,
 	res := DetectResult{Family: FamilyUnknown}
 
 	var lastErr error
-	for _, step := range detectSteps {
-		url := base + step.path
+	for _, reg := range All() {
+		url := base + reg.ProbePath
 		m, raw, err := getJSON(ctx, hc, url)
 		if err != nil {
 			// 单步失败不中断：探测的本意就是"试试是不是这一族"，
@@ -112,13 +40,13 @@ func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult,
 			lastErr = err
 			continue
 		}
-		if !step.match(m, raw) {
+		if !reg.Match(m, raw) {
 			continue
 		}
-		res.Family = step.family
+		res.Family = reg.Family
 		res.Meta = NewAPIMeta(url, time.Now())
-		if step.extract != nil {
-			step.extract(m, &res)
+		if reg.Extract != nil {
+			reg.Extract(m, &res)
 		}
 		return res, nil
 	}

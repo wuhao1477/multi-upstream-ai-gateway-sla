@@ -10,25 +10,25 @@ import (
 
 // adapterFor 按站型选适配器（04 总原则：**必须按站型分流**）。
 //
-// unknown 家族显式拒绝而不是随便挑一个：猜错会让全部字段映射都错，
-// 而错误的余额/额度数据比没有数据更危险（04 §7 要求走未知家族接入流程）。
+// 分流表在 collector 的注册表里，这里只查表 —— 原先这是一个 switch，
+// 是"加站型要改九处"里的第 3 处。
+//
+// Refresher 由**类型断言**推导而非逐家族声明：NewAPI 的适配器根本没有
+// Refresh 方法（不变式 N-1：运行时重新生成令牌会作废正在使用的那个，
+// 04 §5.1），那个"没有"本身就是声明，断言不成立时 r 为 nil 接口 ——
+// 正是 Syncer 期望的"该站型不续期"。写成 switch 就得手工保证两者一致，
+// 而写反了不报错：给 NewAPI 传个非 nil Refresher 会让它每次采集前先把
+// 自己的令牌作废掉。
 func adapterFor(fam collector.Family, hc *collector.Client) (collector.Adapter, collector.Refresher, error) {
-	switch fam {
-	case collector.FamilyNewAPI:
-		// NewAPI 不提供 Refresher —— 不变式 N-1：运行时重新生成令牌会作废
-		// 正在使用的那个（04 §5.1）。故此处**故意传 nil**。
-		return collector.NewNewAPIAdapter(hc), nil, nil
-	case collector.FamilySub2API:
-		ad := collector.NewSub2APIAdapter(hc)
-		return ad, ad, nil
-	case collector.FamilyASXS:
-		ad := collector.NewASXSAdapter(hc)
-		return ad, ad, nil
-	default:
+	reg, ok := collector.Lookup(fam)
+	if !ok {
 		return nil, nil, fmt.Errorf(
 			"渠道站型为 %q，无对应适配器：请先探测站型，"+
 				"未知家族需按 04 §7 新建专属适配器（不猜，猜错会让字段映射全错）", fam)
 	}
+	ad := reg.New(hc)
+	r, _ := ad.(collector.Refresher)
+	return ad, r, nil
 }
 
 // runChannelSync 执行一次渠道采集。

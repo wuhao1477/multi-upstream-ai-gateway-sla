@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import * as adminApi from '@/api/admin'
 import { ApiError } from '@/api/client'
-import type { Channel, InventoryResp, SyncItem, SyncResult } from '@/api/types'
+import type { Channel, InventoryResp, SiteFamilyInfo, SyncItem, SyncResult } from '@/api/types'
 import { useToastStore } from './toast'
 
 /**
@@ -49,6 +49,15 @@ export const useChannelsStore = defineStore('channels', () => {
     )
   })
 
+  /**
+   * 后端注册了哪些站型（新增表单的下拉用它）。
+   *
+   * 与 list 一起加载而不是各自触发：两者都要 token，而 token 是进入界面后
+   * 才有的。加载失败时留空数组 —— 下拉只剩"自动探测"，而自动探测本就是
+   * 推荐路径，建渠道不会因此做不了。
+   */
+  const families = ref<SiteFamilyInfo[]>([])
+
   async function load(): Promise<void> {
     try {
       const d = await adminApi.listChannels()
@@ -56,6 +65,18 @@ export const useChannelsStore = defineStore('channels', () => {
       loaded.value = true
     } catch (e) {
       toast.fail('加载渠道失败', e)
+      // 渠道都拉不到（最常见是没填令牌）时不再打第二个请求：
+      // 它必然同样失败，而后一条 toast 会**盖掉**前一条 —— 运维看到的是
+      // "站型注册表失败"，而真正该看的是"请先填入 ADMIN_TOKEN"。
+      // 验收里那条"无令牌时拒绝拉取数据"就是这么被换掉文案的。
+      return
+    }
+    try {
+      families.value = (await adminApi.listSiteFamilies()).items
+    } catch (e) {
+      // 单独 catch：渠道拉到了而站型表没拿到（如后端版本旧），
+      // 那是真该单独报出来的一种失败，不该让渠道列表也显示成加载失败。
+      toast.fail('加载站型注册表失败（站型下拉只剩自动探测）', e)
     }
   }
 
@@ -153,6 +174,7 @@ export const useChannelsStore = defineStore('channels', () => {
   return {
     list,
     loaded,
+    families,
     filter,
     filtered,
     count,

@@ -141,12 +141,18 @@ async function open(id: number, chName: string): Promise<void> {
           <input id="ch-url" v-model="url" placeholder="https://api.example.com" />
         </UiField>
         <UiField label="站型家族" for="ch-family">
+          <!--
+            选项来自后端注册表（GET /admin/site-families），不写死。
+            写死过一次：加站型时这份列表不会报任何错，新站型只是在界面上
+            不存在，运维只能靠自动探测碰上它。
+            "未知"不在注册表里也不该在这里 —— 它是探测未命中的哨兵，
+            手选它等于建一个必然采不了的渠道（04 §7）。
+          -->
           <select id="ch-family" v-model="family">
             <option value="">自动探测（推荐）</option>
-            <option value="newapi">NewAPI 系</option>
-            <option value="sub2api">Sub2API 系</option>
-            <option value="asxs">ASXS（闭源）</option>
-            <option value="unknown">未知</option>
+            <option v-for="f in channels.families" :key="f.family" :value="f.family">
+              {{ f.display_name }}
+            </option>
           </select>
         </UiField>
         <div class="endcap">

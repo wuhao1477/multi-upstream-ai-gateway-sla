@@ -84,21 +84,23 @@ func (c *Client) wait(ctx context.Context, host string) error {
 	}
 }
 
-// authHeaders 按站型构造鉴权头。
+// authHeaders 构造鉴权头。
 //
-// NewAPI 的关键点（04 §3.1）：**必须同时带用户 ID 头**，只带 Authorization
-// 会 401。头名因二开而异，由 Authenticate 阶段 fan-out 确定。
+// **这里没有逐家族分流，是刻意的。** 三家族的差别只有"要不要带用户 ID 头"，
+// 而那由会话里有没有头名决定 —— 头名只有 NewAPI 的 Authenticate 会 fan-out
+// 试探出来并写进凭证（04 §3.1：只带 Authorization 会 401，且二开站改了头名）。
+// 原先这里是一个 switch，它表达的是**零个变化点**：三个 case 里两个逐字相同，
+// 第三个多的那两行本身已经被 if 守住了。
+//
+// 这一处曾是"加站型要改九处"里最坏的两处之一：漏加 case 的后果是新站型
+// 一个头都不带 → 401，而编译、单测、Capabilities 声明全是绿的。
+// 删掉分流之后，新站型默认就拿到 Bearer + 有则带用户 ID 头 —— 漏不掉。
 func authHeaders(s Session) http.Header {
 	h := http.Header{}
-	switch s.Family {
-	case FamilyNewAPI:
-		// 实测 `Authorization: <token>` 与 `Bearer <token>` 均可，用后者更通用
-		h.Set("Authorization", "Bearer "+s.Token)
-		if s.UserIDHeader != "" && s.ExternalUserID != "" {
-			h.Set(s.UserIDHeader, s.ExternalUserID)
-		}
-	case FamilySub2API, FamilyASXS:
-		h.Set("Authorization", "Bearer "+s.Token)
+	// 实测 `Authorization: <token>` 与 `Bearer <token>` 均可，用后者更通用
+	h.Set("Authorization", "Bearer "+s.Token)
+	if s.UserIDHeader != "" && s.ExternalUserID != "" {
+		h.Set(s.UserIDHeader, s.ExternalUserID)
 	}
 	h.Set("Accept", "application/json")
 	return h

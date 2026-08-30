@@ -9,8 +9,25 @@
 
 // ── 站型与枚举 ───────────────────────────────────────────────────────────────
 
-/** 站点家族。ASXS 一期不纳管，但后端仍可能返回，所以类型里保留。 */
+/**
+ * 站点家族。ASXS 一期不纳管，但后端仍可能返回，所以类型里保留。
+ *
+ * ⚠️ 真相源是后端的站型注册表（internal/collector/registry.go），不是这一行。
+ * 这里只是给编辑器用的当前快照 —— 加站型时它会**落后而不报错**（值从 JSON 来，
+ * TS 管不着）。所以界面的站型下拉不读这个联合类型，读 `/admin/site-families`，
+ * 见 SiteFamilyInfo。
+ */
 export type SiteFamily = 'newapi' | 'sub2api' | 'asxs' | 'unknown'
+
+/** 一个已注册站型（GET /admin/site-families，对着 listSiteFamilies 的 item 写）。 */
+export interface SiteFamilyInfo {
+  family: SiteFamily
+  display_name: string
+  aliases: string[]
+  cred_type: string
+  requires_external_user_id: boolean
+  allows_password: boolean
+}
 
 /** 采集能力项。 */
 export type Capability =

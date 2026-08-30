@@ -32,6 +32,13 @@ if (!Array.isArray(list)) {
 // 用户 ID 头名要试探:二开站点会改名(04 §3.1 的 fan-out 约束)。
 // 顺序按实测命中率排,New-API-User 是上游主线的名字。
 const UID_HEADERS = ['New-API-User', 'Veloera-User', 'Rix-Api-User', 'Api-User'];
+// **刻意只认 NewAPI 系的自称**，不是站型注册表的第二份拷贝（04 §7bis）。
+// 理由：本脚本下面的每一个探测都是 NewAPI 专属的（/api/status 取
+// quota_per_unit、/api/user/self 试头名、/api/token 取 token id）。放开成
+// 全部已注册家族，只会挑中一个 sub2api 站然后在 /api/status 上 404 —— 那不是
+// "支持得更全"，是把"没有可用的 newapi 站"这个真信息换成一个假失败。
+// 也不能改读 /admin/site-families：本脚本在 sla-core 起来**之前**跑
+// （它的输出是建渠道用的入参），那时没有端点可读。
 const FAMILIES = new Set(['new-api', 'newapi', 'rix-api']);
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});

@@ -274,6 +274,8 @@ type SubscriptionQuota struct {
 
 **二开兼容要点**：NewAPI 系即使命中顺序 1，用户 ID 头名仍可能不同，探测阶段不确定，`Detect` 只归族；`UserIDHeader` 由 `Authenticate` 阶段 fan-out 试探（§3.1）。`quota_per_unit` 也逐站从 `/api/status` 读取，**不写死**（upstream-d.invalid 为 500000）。
 
+上表的顺序、端点与命中特征都来自 §7bis 的站型注册表 —— `Detect` 遍历注册表而非另有一张平行的探测表（那张表曾是"加站型要改九处"里的第 2 处）。
+
 ---
 
 ## 3. 三家族实现要点与字段映射
@@ -574,6 +576,46 @@ type SubscriptionQuota struct {
 1. `Detect` 依次比对 `/api/status`、`/api/v1/settings/public`、`/api/public/site-config`，全未命中 → `FamilyUnknown`。
 2. 抓取前端实际调用的接口（`performance.getEntriesByType('resource')` 思路取样），人工确认字段语义后写专属适配器。
 3. 确无接口 → 按 FR-011 人工录入，标注来源、7 天有效期，过期按"订阅数据未知"降级。
+
+### 7bis 站型注册表（**加站型的唯一落点**，第 47 轮）
+
+> 上游站点异构程度高且**会继续增加**：除三家族本身，实测已有魔改站（`veloera`/`rix-api` 是 NewAPI 的二开），还会有全自研平台（ASXS 就是一例）。这一节定义"加一个站型要动哪里"。
+
+**此前散在九处**，每处漏改的后果不同：
+
+| # | 位置 | 漏掉的后果 |
+| --- | --- | --- |
+| 1 | `Family` 常量 | 编译错 —— 会被发现 |
+| 2 | `detectSteps` 探测表 | `Detect` 返回 unknown，站点接不进来 |
+| 3 | `adapterFor` 装配 | 采集报"无对应适配器" |
+| 4 | `authHeaders` 鉴权头 | **静默 401** —— 编译过、单测过，跑起来才发现一个头都没带 |
+| 5 | `NeedsRefresh` 续期阈值 | **静默过期** —— 不报错、不 401，某次采集突然全挂才被发现 |
+| 6 | 凭证必需字段校验 | 落到 default 分支，凭证登记被拒 |
+| 7 | 凭证登记的 `credType` 映射 | `cred_type` 空串进库 |
+| 8 | 导入侧的 `credType` 映射 | 同上，批量导入路径 |
+| 9 | 导入侧的别名表 | 导出声明认不出来，"声明与探测不符"的比对静默失效 |
+
+**收敛后：一份 `Registration` + 一个 `Adapter` 实现。** 判据是**只有逐家族真的不同的东西才进注册表** —— 三家族一致的行为不是变化点而是常量，给它开字段只会让下一个站型以为自己必须填。据此第 4 处**被删掉而不是收进表**：三家族的鉴权头都是 `Bearer <token>` + 有头名则带用户 ID 头，那个 switch 表达的是零个变化点。
+
+| `Registration` 字段 | 取代原来的 | 备注 |
+| --- | --- | --- |
+| `Family` / `DisplayName` | 1 | `DisplayName` 同时是界面站型下拉的显示名（[09 §5.0](./09-admin-api.md) 的 `/admin/site-families`） |
+| `ProbePath` / `Match` / `Extract` | 2 | 切片顺序**就是**探测顺序（§2 的表）；不用各文件 `init()` 自注册——那会让顺序被一次重命名悄悄改掉 |
+| `Aliases` | 9 | ⚠️ **只准填实测见过的自称**（[CLAUDE.md](../../CLAUDE.md) §1）：凭想象加别名会让本该报出来的声明错变成静默采信 |
+| `CredType` / `RequiresUID` / `PasswdCredType` / `CredNote` | 6+7+8 | 校验与选型合成一次 `CredTypeFor()` 调用，两处消费点共用 |
+| `RefreshLead` | 5 | `0` = 永不主动续期（NewAPI 的不变式 N-1，§5.1） |
+| `New` | 3 | **是否支持续期不在注册表里声明** —— 由适配器有没有实现 `Refresher` 决定（类型断言），声明与实现因此不可能不一致 |
+
+**魔改站怎么接**：`veloera`/`rix-api` 改的是用户 ID 头名与分页信封，前者由 `Authenticate` 的 fan-out 试探（§3.1），后者 `unwrapDataList` 两个分支都吃 —— 所以魔改站 = **同一个 `New`，只加 `Aliases`**，不写新适配器。
+
+**全自研站怎么接**：一份注册 + 一个实现 `Adapter` 的文件，ASXS 就是这条路径的活样本（§3.3）。
+
+**"漏一处"的检出**（`registry_test.go`，全是对注册表的静态断言，不新增任何 mock）：
+
+1. **每个 `Family` 常量都注册了** —— 扫源码取常量而非手写清单，因为"忘了加清单"与"忘了加注册"一样静默；`unknown` 反向断言**不得**有注册（有适配器意味着会去猜家族）
+2. **每条注册的必填字段非空** —— `ProbePath`/`Match`/`CredType`/`CredNote`/`New`/`DisplayName`
+3. **`Aliases` 无跨家族重复、且全小写** —— 重复不报错而是让导入侧的声明比对随机偏向注册顺序在前的那个
+4. **`RefreshLead` 与 `Refresher` 实现双向一致** —— `>0` 无实现 = 到期即 401；`==0` 有实现 = 不变式 N-1 被破（每次采集前把自己的令牌作废）
 
 ---
 

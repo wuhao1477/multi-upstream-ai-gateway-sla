@@ -6,7 +6,7 @@
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit` |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
-| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 57 项（见 §5） |
+| 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 58 项（见 §5） |
 | 结论 | **AC-37/38/39/40 全部通过；浏览器验收 35/35；全渠道覆盖率报告已产出（§2.1）**<br>⚠️ 这一行是 **2026-08-28 那轮**的结论，其中浏览器验收部分**已被 §5 取代**（当轮上游是 `mock_newapi.py`，换真上游后发现其中两条断言是空的）。 |
 
 ---
@@ -186,10 +186,10 @@ Sub2API 已随 §2.1 覆盖（13 个真实站点，2 个凭证有效并全项 ok
 | 套件 | 结果 | 上游 / 数据源 |
 | --- | --- | --- |
 | `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
-| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入→改名/停用/启用） | **57/57** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入→改名/停用/启用） | **58/58** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
 | `verify-remote.mjs`（内网真库只读） | **31/31** | SLA_DB @ <internal-db-host>（PG 17.5） |
 | `ui-stack.sh` 末步：Key 明文不进 core 日志 | **✅** | 退出标准③ 的"日志"那一端，2026-08-29 补 |
-| 合计 | **102 项** | —— |
+| 合计 | **103 项** | —— |
 
 选中站点的实测事实（全部由上游返回，无一处写死）：站型
 `newapi 0.6.0-rc.11`、`quota_per_unit=500000`、目录 1369 个模型（倍率 1161 +
@@ -226,7 +226,7 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 ### 5.4 遗留
 
-- 这 57 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
+- 这 58 项**在 CI 里跑不到**：真上游令牌是第三方的真凭证，不进 GitHub secrets
   （fork 触发的 `pull_request` 与构建日志都会漏）。无 `HUB_FILE` 时
   `verify/ui-stack.sh` 降级只跑 SPA 14 项，并打印跳过了哪些。**全量结论只能来自
   本地跑**，见 [CLAUDE.md §1 的后果表](../../CLAUDE.md)。
@@ -361,6 +361,54 @@ overrides"那段注释**留着** —— 它讲的是 peer 范围与两个 Vue �
 而前面若干断言按 `tbody tr` 数渠道、按 `td:first-child` 取 id。给数据行加
 `data-ch-row` 并把那两处选择器改成 `tr[data-ch-row]` —— 否则展开着一行时
 渠道数会多算一个，取 id 会取到表单里的文本。
+
+### 5.11 站型信息散在九处，其中两处漏改是静默的（2026-08-30 收表）
+
+改动本身在 [04 §7bis](../dev/04-collector-adapter.md)，这里只记**验收侧的事实**。
+
+九处里 4（`authHeaders`）与 5（`NeedsRefresh`）是这轮真正要解决的：漏加 case
+不报错、不影响编译、单测全绿，跑起来才 401 或令牌悄悄过期不续。其余七处漏改
+都会以编译错或明确的运行时错误暴露。
+
+**`authHeaders` 是删掉而不是收进注册表的。** 三家族的 case 里两个逐字相同，
+第三个多的两行本身已被 `if s.UserIDHeader != "" && s.ExternalUserID != ""` 守住
+—— 那个 switch 表达的是**零个变化点**。删掉之后新站型默认就拿到
+`Bearer <token>` + 有头名则带用户 ID 头，漏不掉。
+
+**「是否续期」改由类型断言推导**：`adapterFor` 里 `ad.(collector.Refresher)`，
+NewAPI 的适配器根本没有 `Refresh` 方法（不变式 N-1），那个"没有"就是声明。
+`registry_test.go` 第 4 条**双向**钉住它与 `RefreshLead` 一致。
+
+新增断言与它们的红：
+
+| 断言 | 破法 | 得到的红 |
+| --- | --- | --- |
+| 每个 `Family` 常量都注册了 | 加 `FamilyVeloera` 不注册 | `FamilyVeloera("veloera") 没有注册` |
+| 同上，`unknown` 反向 | 给 `unknown` 加一份兜底注册 | `FamilyUnknown 竟有注册 —— …会去猜家族` |
+| 必填字段非空 | 抹掉 sub2api 的 `CredType` 与整个 `Match` | 两条分别报缺 `Match` 与 `CredType` 为空 |
+| 别名无跨家族重复 | 让 sub2api 也认领 `new-api` | `别名 "new-api" 被 newapi 与 sub2api 同时认领` |
+| 别名须全小写 | 写成 `Sub2API` | `不是小写 —— …这条别名永远匹配不上` |
+| `RefreshLead` ↔ `Refresher` | 给 NewAPI 加 `Refresh` 方法 | `RefreshLead=0 …但适配器实现了 Refresher —— 不变式 N-1` |
+| 同上，反方向 | 给 NewAPI 设 `RefreshLead=120s` | `RefreshLead=2m0s 但适配器未实现 Refresher —— …到期即 401` |
+| 站型下拉逐项等于注册表（界面，第 58 条） | 把下拉改回写死四项 | `注册表=[newapi,sub2api,asxs] 下拉=[…,unknown]` |
+
+界面那条是**逐项等值**而不是数个数：数个数的话，删掉 `v-for` 再写死四项照样绿
+—— 而"写死"正是它要防的东西。破法验证时它顺带暴露了我自己引入的一处退化：
+`load()` 里两个请求都失败时，后一条 toast 会盖掉前一条，于是"无令牌时拒绝拉取
+数据"看到的文案从「请先填入 ADMIN_TOKEN」变成「加载站型注册表失败」。
+改成渠道列表失败即 `return`，不再打第二个请求。
+
+**`pick-upstream.mjs` 的 `FAMILIES` 保持写死**，并加注释说明：它下面每个探测都是
+NewAPI 专属的（`/api/status` 取 `quota_per_unit`、`/api/user/self` 试头名、
+`/api/token` 取 token id），放开成全部已注册家族只会挑中一个 sub2api 站然后
+404 —— 那是把"没有可用的 newapi 站"这个真信息换成一个假失败。它也读不到
+`/admin/site-families`：本脚本在 sla-core 起来**之前**跑。
+
+**`FetchSubscriptionQuotas` 没有改成可选接口**（原计划里有这一项）。三个 3 行
+stub 看着像抽象税，但删它要动 [15 §1.2](../dev/15-scope-and-preflight.md)
+「接口保留、一期返回 unsupported」这条已记录的范围决定，以及 AC-28/AC-38 判定
+文本里"声明必须与 `FetchSubscriptionQuotas` 的实际返回一致"。为省 27 行去改两条
+AC 的判据，不值 —— 而 P4 实现订阅时这三个方法本来就要回到接口上。
 
 ---
 

@@ -239,7 +239,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 ### 5.0 P1 端点：上游资产采集与管理（FR-122~128）
 
-> 这 10 个端点构成 P1 的**全部对外面**（管理平面）。P1 **不新增任何 `/v1/*` 端点**。
+> 这 11 个端点构成 P1 的**全部对外面**（管理平面）。P1 **不新增任何 `/v1/*` 端点**。
 
 | 端点 | 作用 | 阶段 |
 | --- | --- | --- |
@@ -253,6 +253,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
+| `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`/`allows_password`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
 

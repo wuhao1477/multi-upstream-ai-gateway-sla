@@ -30,14 +30,11 @@ var (
 	ErrNeedsRelogin = errors.New("collector: 需要重新登录")
 )
 
-// refreshBuffer 是"到期前多久主动刷新"的阈值。
-// Sub2API 的官方前端用 120s（SUB2API_TOKEN_REFRESH_BUFFER_MS，04 §5.2），
-// 这里沿用 —— 太短会在刷新失败时没有重试余量。
-const refreshBuffer = 120 * time.Second
-
-// asxsReloginThreshold：ASXS 的 JWT 有效期 7 天且**无 refresh 路径**，
-// 只能账密重登（04 §5.3）。剩余不足 1 天即重登，频率约每周一次、风控压力小。
-const asxsReloginThreshold = 24 * time.Hour
+// 续期阈值不在这里 —— 它逐家族不同，值与理由都写在各自的
+// Registration.RefreshLead（register_newapi.go / register_sub2api.go /
+// register_asxs.go）。原先这里有 refreshBuffer 与 asxsReloginThreshold 两个
+// 常量，而 NeedsRefresh 里有一个 switch 把它们对上家族 —— 那个 switch 就是
+// "加站型要改九处"里静默失败的那处。
 
 // CredentialStore 是凭证持久化契约。
 //
@@ -127,27 +124,26 @@ type Refresher interface {
 
 // NeedsRefresh 判断凭证是否需要续期。
 //
-// 三家族策略不同（04 §5）：
-//   - NewAPI：长期令牌，**永不主动刷新**（不变式 N-1）。只有 401 才说明
-//     被后台重置了，那时需人工介入。
-//   - Sub2API：到期前 120s 主动刷新。
-//   - ASXS：剩余 < 1 天即重登（无 refresh 路径，只能账密）。
+// 阈值逐家族不同，值与理由都在各自的 Registration.RefreshLead
+// （NewAPI 0 = 永不主动刷新 / Sub2API 120s / ASXS 24h，04 §5）。
+//
+// 这一处曾是"加站型要改九处"里最坏的两处之一：漏加 case 落到 return false，
+// 后果是**令牌到期不续**，而它不报错、不 401（还没到期时一切正常），
+// 只在某次采集突然全挂时才被发现。改读注册表后，漏注册整个站型会被
+// registry_test 的第一条断言拦下，而注册了就必然有 RefreshLead。
 func NeedsRefresh(cred Credential, now time.Time) bool {
-	switch cred.Family {
-	case FamilyNewAPI:
+	reg, ok := Lookup(cred.Family)
+	if !ok || reg.RefreshLead == 0 {
+		// 0 = 永不主动续期（NewAPI 的不变式 N-1：主动刷新会把自己踢下线，
+		// 只有 401 才说明令牌被后台重置，那时需人工介入）。
 		return false
-	case FamilySub2API:
-		if cred.TokenExpiresAt.IsZero() {
-			return false
-		}
-		return now.Add(refreshBuffer).After(cred.TokenExpiresAt)
-	case FamilyASXS:
-		if cred.TokenExpiresAt.IsZero() {
-			return false
-		}
-		return now.Add(asxsReloginThreshold).After(cred.TokenExpiresAt)
 	}
-	return false
+	if cred.TokenExpiresAt.IsZero() {
+		// 没有到期时间就无从判断 —— NewAPI 的长期令牌本就没有
+		// （P1-evidence §4 第 5 项：用 time.Time 扫 NULL 让整族采不成）
+		return false
+	}
+	return now.Add(reg.RefreshLead).After(cred.TokenExpiresAt)
 }
 
 // EnsureFresh 在需要时续期凭证，返回可用的凭证。

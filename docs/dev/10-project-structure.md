@@ -44,6 +44,8 @@ multi-upstream-ai-gateway-sla/
 │   │   └── ssescan.go         # SSE 扫描器 + ShouldCommit/HasTTFTOutput 双判定(03 §3.2)
 │   ├── collector/          ✅ # CollectorAdapter 接口 + 各家族实现(04)
 │   │   ├── collector.go       # 接口(04 §1)
+│   │   ├── registry.go        # 站型注册表:加站型的唯一落点(04 §7bis)
+│   │   ├── register_*.go      # 一家族一份 Registration,与下面的实现一一对应
 │   │   └── newapi.go sub2api.go asxs.go   # 平铺,一家族一文件(不再分子包:
 │   │                          #   三家共用 httpx/auth/detect,分包只会互相 import)
 │   ├── store/              ✅ # PG 访问层、schema 迁移、UUIDv7、快照重建(02)

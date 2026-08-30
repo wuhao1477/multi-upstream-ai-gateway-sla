@@ -50,6 +50,38 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// 分组
 	mux.Handle("GET /admin/channel-groups", h(s.listGroups))
 	mux.Handle("GET /admin/channel-groups/{id}/models", h(s.groupModels))
+	// 站型注册表（04 §2/§7）
+	mux.Handle("GET /admin/site-families", h(s.listSiteFamilies))
+}
+
+// listSiteFamilies 返回已注册的站型（collector 的注册表）。
+//
+// 存在的理由：界面的站型下拉此前是写死的四项。加一个站型时那份写死的列表
+// 不会报任何错 —— 新站型就是**在界面上不存在**，运维只能靠自动探测碰上它。
+// 读注册表之后，加一份 Registration 就同时在后端与界面生效。
+//
+// 不带库查询也不碰凭证，但仍走 requireToken：全部 /admin/* 一个口径，
+// 例外会让"这条为什么不用鉴权"变成每次读代码都要重新判断的问题。
+func (s *Server) listSiteFamilies(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		Family      string   `json:"family"`
+		DisplayName string   `json:"display_name"`
+		Aliases     []string `json:"aliases"`
+		CredType    string   `json:"cred_type"`
+		RequiresUID bool     `json:"requires_external_user_id"`
+		// AllowsPassword 为真表示可用账密登记（无 refresh 路径的站型）。
+		AllowsPassword bool `json:"allows_password"`
+	}
+	out := []item{}
+	for _, reg := range collector.All() {
+		out = append(out, item{
+			Family: string(reg.Family), DisplayName: reg.DisplayName,
+			Aliases: reg.Aliases, CredType: reg.CredType,
+			RequiresUID:    reg.RequiresUID,
+			AllowsPassword: reg.PasswdCredType != "",
+		})
+	}
+	s.ok(w, map[string]any{"count": len(out), "items": out})
 }
 
 // ── 渠道 ──
@@ -788,41 +820,24 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fam := collector.Family(ch.SiteFamily)
-
-		// 逐站型校验必需字段：缺了必然在采集时 401，提前拒绝比事后排查便宜。
-		switch fam {
-		case collector.FamilyNewAPI:
-			if in.AccessToken == "" || in.ExternalUserID == "" {
-				s.fail(w, http.StatusBadRequest,
-					"NewAPI 系需要 access_token 与 external_user_id（用户 ID 头的值）——"+
-						"只带 Authorization 必然 401（04 §3.1）")
-				return
-			}
-		case collector.FamilySub2API:
-			if in.AccessToken == "" {
-				s.fail(w, http.StatusBadRequest, "Sub2API 系需要 access_token（JWT）")
-				return
-			}
-		case collector.FamilyASXS:
-			if in.AccessToken == "" && (in.Username == "" || in.Password == "") {
-				s.fail(w, http.StatusBadRequest,
-					"ASXS 需要 JWT 或账号密码——它无 refresh 路径，"+
-						"续期只能账密重登（04 §5.3）")
-				return
-			}
-		default:
+		reg, ok := collector.Lookup(fam)
+		if !ok {
 			s.fail(w, http.StatusBadRequest,
 				fmt.Sprintf("渠道站型为 %q，无法确定凭证形态：请先探测站型", ch.SiteFamily))
 			return
 		}
-
-		credType := map[collector.Family]string{
-			collector.FamilyNewAPI:  "newapi_access_token",
-			collector.FamilySub2API: "sub2api_jwt",
-			collector.FamilyASXS:    "asxs_jwt",
-		}[fam]
-		if fam == collector.FamilyASXS && in.AccessToken == "" {
-			credType = "account_password"
+		// 必需字段校验与 cred_type 选型**同一次调用**（collector 的注册表）。
+		// 原先它们是两个各自按家族分流的结构（一个 switch + 一张 map），
+		// 而漏改选型那张 map 的后果是 cred_type 空串进库 —— 校验绿、采集时才炸。
+		// 缺字段提前拒绝：缺了必然在采集时 401，事后从日志里查比现在报贵得多。
+		credType, err := reg.CredTypeFor(
+			in.AccessToken != "",
+			in.ExternalUserID != "",
+			in.Username != "" && in.Password != "",
+		)
+		if err != nil {
+			s.fail(w, http.StatusBadRequest, err.Error())
+			return
 		}
 
 		if s.SaveCredential == nil {
