@@ -114,8 +114,8 @@ clean: ## 清理产物
 
 .PHONY: test-ui
 test-ui: ## 真 Chrome 验收管理界面（需 Chrome + node + PG）
-	./verify/test-ui.sh
+	./verify/ui-stack.sh
 
 .PHONY: dev-ui
 dev-ui: ## 起常驻本地栈供人工点验管理界面（Ctrl-C 拆除）
-	./verify/dev-ui.sh
+	./verify/ui-stack.sh --keep

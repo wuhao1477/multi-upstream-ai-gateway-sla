@@ -4,8 +4,8 @@
 
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
-| `test-ui.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 51 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
-| `dev-ui.sh` | 起常驻栈供**人工**点验，打印真上游地址与凭证 | 同上，`HUB_FILE` 必填 |
+| `ui-stack.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 51 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |
+| `ui-stack.sh --keep` | 同一套栈，起完停在前台供**人工**点验，打印真上游地址与凭证 | 同上但不需要 Chrome；`HUB_FILE` 必填（手点的意义就是对真站点点） |
 | `test-arm-cloud.sh` | 把云端 arm64 镜像拉回本地真机验收 | gh、docker、`HUB_FILE` |
 | `ui/verify-remote.mjs` | 连内网真库的只读验收 31 项 | 到得了 <internal-db-host> |
 | `pick-upstream.mjs` | **探活选真上游**，被上面三个共用 | `HUB_FILE` |
@@ -14,6 +14,14 @@
 上游一律**真站点**，由 `pick-upstream.mjs` 从 all-api-hub 导出里现场探活挑选，
 不写死 URL（[CLAUDE.md §1](../CLAUDE.md)）。真上游令牌**不进 GitHub secrets**，
 所以要凭证的 51 项与真库 31 项**只在本地跑**，CI 只跑免密部分。
+
+`ui-stack.sh` 由原 `test-ui.sh` 与 `dev-ui.sh` 合并（2026-08-30）。
+**人工点验不是自动验收的冗余**：P1-evidence §4 第 15 项（先点采集再登记凭证，
+本地失败也起算 60s 限流窗口）就是手点翻出来的，当时脚本化验收 33 项全绿。
+合并的理由不是省那 47 行重复，而是消掉**分叉** —— 两份脚本解析
+`pick-upstream.mjs` 输出的写法已经岔开（一边 7 行复制粘贴的 `node -e`，
+一边抽了 3 行 `rd()`），这类分叉会继续长。两种模式的端口、容器名、数据目录
+全部错开，可同时跑。
 
 ## 二、造流/造观测点的两个夹具
 

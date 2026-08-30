@@ -5,7 +5,7 @@
 import puppeteer from 'puppeteer-core';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 
-// 路径由 test-ui.sh 按平台探测后注入（macOS 在 .app 里、CI 在 PATH 上）
+// 路径由 ui-stack.sh 按平台探测后注入（macOS 在 .app 里、CI 在 PATH 上）
 const CHROME = process.env.CHROME ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const BASE = process.env.BASE || 'http://127.0.0.1:18090';
@@ -14,7 +14,7 @@ const SHOT = process.env.SHOTS || '/tmp/sla-ui-shots';
 // all-api-hub 备份文件。批量导入试运行用它,同时它也是上游凭证的来源。
 const HUB_FILE = process.env.HUB_FILE || '';
 
-// 真上游。由 test-ui.sh 跑 verify/pick-upstream.mjs 现场探活后注入 ——
+// 真上游。由 ui-stack.sh 跑 verify/pick-upstream.mjs 现场探活后注入 ——
 // 验收不构造假上游(CLAUDE.md §1),所以这些值每次都可能不同,
 // 断言必须写成"形态与关系"而不是具体数字。
 const UP_URL = process.env.UP_URL || '';
@@ -25,7 +25,7 @@ const UP_MODELS = Number(process.env.UP_MODELS || 0);
 const UP_PER_CALL = Number(process.env.UP_PER_CALL || 0);
 const UP_KEYREF = process.env.UP_KEYREF || '';
 if (!UP_URL || !UP_TOKEN || !UP_UID || !UP_KEYREF) {
-  console.error('缺 UP_URL / UP_TOKEN / UP_UID / UP_KEYREF —— 请通过 verify/test-ui.sh 运行');
+  console.error('缺 UP_URL / UP_TOKEN / UP_UID / UP_KEYREF —— 请通过 verify/ui-stack.sh 运行');
   console.error('（它会先跑 pick-upstream.mjs 从 HUB_FILE 里挑一个真上游）');
   process.exit(2);
 }
@@ -243,7 +243,7 @@ try {
   // 被造的东西本身就是测试输入。这里要验的是"明文不回显",拿真 Key 试等于
   // 把真凭证写进 DOM 快照和 CI 日志,失败时反而漏得更彻底。
   //
-  // 由 test-ui.sh 用 UI_KEY_SECRET 传进来:P1 退出标准③ 要求明文在"响应/
+  // 由 ui-stack.sh 用 UI_KEY_SECRET 传进来:P1 退出标准③ 要求明文在"响应/
   // 日志/抓包"里一处都不出现,而日志那一端只有 shell 侧看得到
   // (/tmp/sla-ui-core.log)。两边各写一份字面量必然哪天漂掉,故只留一处来源。
   const SECRET = process.env.UI_KEY_SECRET || 'sk-ui-secret-should-never-be-echoed-9f3a';

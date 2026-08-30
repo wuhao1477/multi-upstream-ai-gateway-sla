@@ -94,7 +94,7 @@
 (`pull_request` 事件下 fork 也能触发)。泄露的后果由站主承担,而收益只是让
 三项验收在云上也绿 —— 不值。
 
-于是 `test-ui.sh` 的 65 项与真库 31 项都是**本地验收**,结论写进 PR/提交说明。
+于是 `ui-stack.sh` 的 65 项与真库 31 项都是**本地验收**,结论写进 PR/提交说明。
 CI 只把免密那部分当回归网。**不要因为 CI 跑不了就换成 mock 让它在 CI 里绿** ——
 那样得到的绿是假的,而真正的覆盖仍然为零。
 
@@ -104,7 +104,7 @@ CI 只把免密那部分当回归网。**不要因为 CI 跑不了就换成 mock
 包管理器统一 **pnpm**,`packageManager` 字段说了算。
 
 改前端用 `cd web && pnpm dev`(:5173 热更新,`/admin/*` 代理到
-`SLA_DEV_BACKEND`);`verify/dev-ui.sh` 起的是静态产物,改一行要重跑。
+`SLA_DEV_BACKEND`);`verify/ui-stack.sh --keep` 起的是静态产物,改一行要重跑。
 
 **`make build` 依赖 `make web`。** 跳过前端不会有编译期报错(`webdist/` 里
 有 `go:embed` 占位文件),失败点会推迟到运行时 `/admin/ui` 返回 500。

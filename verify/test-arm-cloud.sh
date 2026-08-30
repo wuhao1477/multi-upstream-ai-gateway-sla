@@ -2,7 +2,7 @@
 # 云端 arm64 产物的本地真机验收：把 GitHub Actions 构建的镜像拉回本地，
 # 起真 Docker 栈，再用真 Chrome 点管理界面。
 #
-# 本脚本要证明的**不是**"代码能跑"（test-ui.sh 已经证过），而是：
+# 本脚本要证明的**不是**"代码能跑"（ui-stack.sh 已经证过），而是：
 #   1. 云端交叉编译出的 arm64 镜像里，装的确实是 arm64 二进制；
 #   2. 跑起来的容器确实来自当前 HEAD 那次云端构建（版本号比对）；
 #   3. 该镜像在 arm64 上完成迁移选主、健康检查、以及 web 端加渠道商 + 采集。
@@ -224,7 +224,7 @@ echo "   ✅ 依赖就绪"
 # BASE 反之必须是宿主机地址：Chrome 跑在宿主机上。
 echo "── 8/8 真 Chrome 验收（BASE=宿主机 / 上游=公网真站点）──"
 
-# 探活选站：与 test-ui.sh 同一份脚本，保证两条验收路径选站口径一致。
+# 探活选站：与 ui-stack.sh 同一份脚本，保证两条验收路径选站口径一致。
 UPJSON="$(HUB_FILE="$HUB_FILE" node "$ROOT/verify/pick-upstream.mjs")"
 rd() { printf '%s' "$UPJSON" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
