@@ -86,16 +86,15 @@ func TestSub2APIRefreshesBeforeExpiry(t *testing.T) {
 	}
 }
 
-// ASXS 无 refresh 路径，只能账密重登；剩余 <1 天即重登（04 §5.3）。
-func TestASXSReloginThreshold(t *testing.T) {
+// 未注册的家族一律不主动续期，**不能回退到某个默认阈值**。
+//
+// 这是 NeedsRefresh 唯一的兜底分支。给它一个非零默认值会让"漏注册"
+// 变成"按别人的阈值刷别人的端点"，比不刷更糟。
+func TestUnregisteredFamilyNeverRefreshes(t *testing.T) {
 	now := time.Now()
-	fresh := Credential{Family: FamilyASXS, TokenExpiresAt: now.Add(3 * 24 * time.Hour)}
-	if NeedsRefresh(fresh, now) {
-		t.Error("剩余 3 天不应重登")
-	}
-	stale := Credential{Family: FamilyASXS, TokenExpiresAt: now.Add(12 * time.Hour)}
-	if !NeedsRefresh(stale, now) {
-		t.Error("剩余 12 小时应重登（阈值 1 天）")
+	cred := Credential{Family: Family("某个还没注册的站"), TokenExpiresAt: now.Add(time.Second)}
+	if NeedsRefresh(cred, now) {
+		t.Error("未注册的家族不该判定需要续期 —— 没有注册就没有续期端点")
 	}
 }
 

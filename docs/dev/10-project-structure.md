@@ -46,8 +46,10 @@ multi-upstream-ai-gateway-sla/
 │   │   ├── collector.go       # 接口(04 §1)
 │   │   ├── registry.go        # 站型注册表:加站型的唯一落点(04 §7bis)
 │   │   ├── register_*.go      # 一家族一份 Registration,与下面的实现一一对应
-│   │   └── newapi.go sub2api.go asxs.go   # 平铺,一家族一文件(不再分子包:
-│   │                          #   三家共用 httpx/auth/detect,分包只会互相 import)
+│   │   └── newapi.go sub2api.go            # 平铺,一家族一文件(不再分子包:
+│   │                          #   各族共用 httpx/auth/detect,分包只会互相 import)
+│   │                          #   接一个自研站 = 加 register_X.go + X.go 两个文件,
+│   │                          #   本目录其它文件都不用改(04 §7bis)
 │   ├── store/              ✅ # PG 访问层、schema 迁移、UUIDv7、快照重建(02)
 │   ├── admin/              ✅ # 管理平面 /admin/* API + 二次确认(09)
 │   ├── config/             ✅ # config_params 读写、ParamMeta 元数据(09 §4)

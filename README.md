@@ -14,7 +14,7 @@
 | **交付切分（ISSUE-005）** | ✅ **已裁定并落地**：11 条全部采纳。「一期/二期」自此只表**需求范围**，交付进度另立 **P1~P4**；既有 331 处期别标签一字未改 |
 | 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
 | 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
-| 上游采集调研（ISSUE-002） | ✅ 三家族（NewAPI/Sub2API/闭源 ASXS）接口全部打通，4 站实测 + 源码级解析 |
+| 上游采集调研（ISSUE-002） | ✅ 当时的三个家族接口全部打通，4 站实测 + 源码级解析（其中一家自建站已于 2026-08-29 移出支持范围，现役 NewAPI/Sub2API 两族） |
 | AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
 | 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（**107 条 DDL**）；其中**七类做过注入验证**。**CI 已接入**（[gate.yml](.github/workflows/gate.yml)，2026-07-27）——push/PR 到 main 自动跑同一份脚本，本地无需装 Docker |
 
@@ -48,7 +48,7 @@
 - [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、sla-core 模块、上游直连、请求时序
 - [02 数据模型](docs/dev/02-data-model.md) —— PG 单库 schema：逐 Attempt 账本、订阅台账（双倍率）、价格版本、健康冷却、月分区保留
 - [03 上游对接层](docs/dev/03-upstream-layer.md) —— **自研直连**：字节透传 + 旁路观察、Codex 兼容硬约束、取消与超时
-- [04 采集器契约](docs/dev/04-collector-adapter.md) —— CollectorAdapter 接口 + 三家族字段映射 + 凭证生命周期状态机
+- [04 采集器契约](docs/dev/04-collector-adapter.md) —— CollectorAdapter 接口 + 逐家族字段映射 + 凭证生命周期状态机
 - [05 调度与经营策略](docs/dev/05-scheduling-and-operations.md) —— selector 排序/RoutePlan + steward 测活/冷却/订阅倾斜/告警
 - [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、上游直连与选主、版本治理、备份保留、M0 部署清单
 - [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 历史记录；其 Responses round-trip 损耗实测是转向的直接依据

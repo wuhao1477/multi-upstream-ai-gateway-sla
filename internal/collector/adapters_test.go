@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,21 +11,24 @@ import (
 	"time"
 )
 
-// allAdapters 返回三家族适配器，供矩阵型断言复用。
+// allAdapters 返回全部已注册家族的适配器，供矩阵型断言复用。
+//
+// 走注册表而不是手写映射：手写的那份要人跟着加，而"加了家族忘了加进映射"
+// 会让下面两条断言静默漏掉新家族 —— 它们都是 range 这张表。
 func allAdapters(c *Client) map[Family]Adapter {
-	return map[Family]Adapter{
-		FamilyNewAPI:  NewNewAPIAdapter(c),
-		FamilySub2API: NewSub2APIAdapter(c),
-		FamilyASXS:    NewASXSAdapter(c),
+	m := map[Family]Adapter{}
+	for _, r := range All() {
+		m[r.Family] = r.New(c)
 	}
+	return m
 }
 
-// TestCapabilitiesMatchDocMatrix 断言三家族的能力声明与 04 §3.4 矩阵逐格一致。
+// TestCapabilitiesMatchDocMatrix 断言各家族的能力声明与 04 §3.4 矩阵逐格一致。
 //
 // 这是 AC-28 的核心判据（"各自 Capabilities() 与 04 §3.4 矩阵一致"）。
 // 写成表格是刻意的：文档那张表就是表格，逐格对照才能发现漏改。
 func TestCapabilitiesMatchDocMatrix(t *testing.T) {
-	// 04 §3.4 三家族能力矩阵总表
+	// 04 §3.4 能力矩阵总表
 	want := map[Family]CapabilityMap{
 		FamilyNewAPI: {
 			CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
@@ -36,15 +40,18 @@ func TestCapabilitiesMatchDocMatrix(t *testing.T) {
 			CapPricing: Degraded, CapModelCatalog: Supported,
 			CapSubscriptionQuotas: Unsupported,
 		},
-		FamilyASXS: {
-			CapAccount: Supported, CapKeys: Unsupported, CapGroups: Unsupported,
-			CapPricing: Degraded, CapModelCatalog: Degraded,
-			CapSubscriptionQuotas: Unsupported,
-		},
 	}
 	for fam, ad := range allAdapters(nil) {
 		got := ad.Capabilities()
-		exp := want[fam]
+		exp, listed := want[fam]
+		if !listed {
+			// 新家族要同时进 04 §3.4 的矩阵与这张表 —— 少了这句，
+			// 未登记的家族只会撞上下面 len 不等的那条，报的是"项数不符"，
+			// 看不出真正的原因是"这一族根本没进矩阵"。
+			t.Errorf("%s 不在本表里：加家族要同时写进 04 §3.4 的能力矩阵和这张表，"+
+				"否则本断言对它整块空过", fam)
+			continue
+		}
 		if len(got) != len(exp) {
 			t.Errorf("%s 声明 %d 项能力，矩阵有 %d 项", fam, len(got), len(exp))
 		}
@@ -59,7 +66,7 @@ func TestCapabilitiesMatchDocMatrix(t *testing.T) {
 // TestUnsupportedDeclarationsReturnErrUnsupported 是 AC-28/AC-38 的"声明与
 // 实现一致"判定：声明 unsupported 的能力**必须**返回 ErrUnsupported。
 //
-// 04 §1 记录过这个坑：此前 Sub2API/ASXS 声明 supported 而实现返回
+// 04 §1 记录过这个坑：此前有站型声明 supported 而实现返回
 // ErrUnsupported，自相矛盾，AC-28 必挂。
 func TestUnsupportedDeclarationsReturnErrUnsupported(t *testing.T) {
 	ctx := context.Background()
@@ -618,89 +625,37 @@ func TestSub2APIRefreshWithoutTokenNeedsRelogin(t *testing.T) {
 	}
 }
 
-// ── ASXS 适配器 ──
+// ── 取值助手 ──
 
-func TestASXSBalanceHandlesStringNumber(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/me/balance":
-			// ⚠️ balanceUsd 是**字符串**（04 §3.3 实测）
-			_, _ = w.Write([]byte(`{"data":{"balanceUsd":"90.50","usedMicros":1500000}}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
+// TestAsFloatToleratesStringNumbers 钉住"数字以字符串返回也要取到值"。
+//
+// 这条断言原先长在一个适配器测试里（上游把余额返回成 `"90.50"`）。
+// 那个站型已移出支持范围，但**容错本身要留**：上游 JSON 的数字类型不稳定
+// 是实测过的事，而失败模式极坏 —— 用 `v.(float64)` 断言会静默得到 0，
+// 也就是"余额 0"，selector 会把一个有钱的渠道判成耗尽（FR-118）。
+//
+// 直接测 asFloat 而不是经某个适配器：它是纯函数，起个 httptest 只会让这条
+// 断言依赖一个与它无关的适配器还在不在 —— 上一版就是这么随适配器一起没的。
+func TestAsFloatToleratesStringNumbers(t *testing.T) {
+	cases := []struct {
+		in   any
+		want float64
+		ok   bool
+	}{
+		{"90.50", 90.5, true}, // 字符串数字：实测形态
+		{" 12 ", 12, true},    // 带空白
+		{90.5, 90.5, true},
+		{json.Number("7"), 7, true},
+		{int64(3), 3, true},
+		{"abc", 0, false}, // 非数字字符串要报"取不到"，而不是 0
+		{nil, 0, false},
+		{map[string]any{}, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := asFloat(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("asFloat(%#v) = (%v, %v)，期望 (%v, %v)", c.in, got, ok, c.want, c.ok)
 		}
-	}))
-	defer srv.Close()
-
-	ad := NewASXSAdapter(NewClient(0))
-	ad.C.HC = srv.Client()
-	acc, err := ad.FetchAccount(context.Background(),
-		Session{Family: FamilyASXS, BaseURL: srv.URL, Token: "jwt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if acc.BalanceUSD != 90.50 {
-		t.Fatalf("余额 = %v，期望 90.5 —— balanceUsd 是字符串，"+
-			"用 float64 断言会静默得到 0，把有钱的渠道判成耗尽", acc.BalanceUSD)
-	}
-	// usedMicros 按 1e6 换算（04 §3.3）
-	if acc.UsedUSD != 1.5 {
-		t.Errorf("已用 = %v，期望 1.5（1500000/1e6）", acc.UsedUSD)
-	}
-}
-
-// 余额字段全缺时必须报错，不能静默返回 0 余额。
-func TestASXSBalanceRefusesToFakeZero(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":{"unrelated":1}}`))
-	}))
-	defer srv.Close()
-
-	ad := NewASXSAdapter(NewClient(0))
-	ad.C.HC = srv.Client()
-	if _, err := ad.FetchAccount(context.Background(),
-		Session{Family: FamilyASXS, BaseURL: srv.URL, Token: "jwt"}); err == nil {
-		t.Fatal("余额字段全缺应报错，不能静默返回 0（那会被判成余额耗尽）")
-	}
-}
-
-// ASXS 无 refresh 路径，无账密时必须要求人工重登（04 §5.3）。
-func TestASXSRefreshRequiresCredentials(t *testing.T) {
-	ad := NewASXSAdapter(NewClient(0))
-	_, err := ad.Refresh(context.Background(), Credential{Family: FamilyASXS})
-	if !errors.Is(err, ErrNeedsRelogin) {
-		t.Fatalf("无账密应返回 ErrNeedsRelogin，得到 %v", err)
-	}
-}
-
-func TestASXSReloginSets7DayExpiry(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/manage/auth/login" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"token":"fresh-jwt"}}`))
-	}))
-	defer srv.Close()
-
-	ad := NewASXSAdapter(NewClient(0))
-	ad.C.HC = srv.Client()
-	got, err := ad.Refresh(context.Background(), Credential{
-		Family: FamilyASXS, BaseURL: srv.URL,
-		Username: "u", Password: "p",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AccessToken != "fresh-jwt" {
-		t.Errorf("token = %q", got.AccessToken)
-	}
-	// 04 §3.3 实测：ASXS 的 JWT 固定 168 小时
-	wantMin := time.Now().Add(167 * time.Hour)
-	if got.TokenExpiresAt.Before(wantMin) {
-		t.Errorf("到期时间 = %v，期望约 7 天后", got.TokenExpiresAt)
 	}
 }
 

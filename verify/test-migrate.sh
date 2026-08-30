@@ -26,7 +26,7 @@ sleep 2
 
 q() { docker exec "$CT" psql -U postgres -d sla -tAc "$1"; }
 
-echo "── 1/5 首次迁移 ──"
+echo "── 1/6 首次迁移 ──"
 go run ./cmd/migrate -dsn "$DSN"
 
 # 对象数从**迁移文本算出**再逐个比对，不再用 `≥45` 的下界。
@@ -45,7 +45,7 @@ if [ "$WANT_RELS" != "$GOT_RELS" ]; then
 fi
 echo "   ✅ $(echo "$WANT_RELS" | wc -l | tr -d ' ') 个表/视图逐个对上（+ schema_migrations）"
 
-echo "── 2/5 种子：可种子化的键全部灌入 ──"
+echo "── 2/6 种子：可种子化的键全部灌入 ──"
 # 期望值**从生成物算出**而不写死：72 键里 EnvSourced 的不落表
 # （admin_token，09 §4bis 避免自己改自己），故库中应是 72-1=71。
 # 写死数字会在下次新增 EnvSourced 项时又挂一次。
@@ -75,7 +75,7 @@ MISSING=$(q "select coalesce((select param_value#>>'{}' from config_params
   echo "❌ catalog_missing_rounds = $MISSING，期望 $WANT_ROUNDS"; exit 1; }
 echo "   ✅ catalog_missing_rounds = $WANT_ROUNDS（取 0 会让每轮都判模型下架）"
 
-echo "── 3/5 幂等：重复迁移 ──"
+echo "── 3/6 幂等：重复迁移 ──"
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
 KEYS2=$(q "select count(*) from config_params where scope_type='global'")
 [ "$KEYS2" = "$WANT" ] || { echo "❌ 重复迁移后键数变成 $KEYS2，种子不幂等"; exit 1; }
@@ -84,7 +84,7 @@ APPLIED=$(q "select count(*) from schema_migrations")
 [ "$APPLIED" = "$WANT_MIG" ] || { echo "❌ schema_migrations = $APPLIED，期望 $WANT_MIG"; exit 1; }
 echo "   ✅ 重复执行不重复插入（键 $WANT、迁移记录 $WANT_MIG）"
 
-echo "── 4/5 运维改过的值不被重启抹回 ──"
+echo "── 4/6 运维改过的值不被重启抹回 ──"
 q "update config_params set param_value='99'::jsonb
     where param_key='catalog_missing_rounds'" >/dev/null
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
@@ -94,7 +94,7 @@ echo "   ✅ 已有值不被覆盖"
 q "update config_params set param_value='3'::jsonb
     where param_key='catalog_missing_rounds'" >/dev/null
 
-echo "── 5/5 账本母表是分区表（ddl-check 不覆盖这项）──"
+echo "── 5/6 账本母表是分区表（ddl-check 不覆盖这项）──"
 # 016 之前这里断言"3 张 2026-08 子表已挂载"。那三张子表是 02 §9.1 的**示例**
 # DDL（写死月份），016 已删 —— 分区管理属运行期（定时任务或 pg_partman）。
 # 于是这条改断更耐久的那一半：母表确实以 PARTITION BY 建出（relkind='p'）。
@@ -141,6 +141,55 @@ COLS=$(q "select count(*) from information_schema.columns where table_name='upst
                               'rpm_limit','concurrency_limit','quota_synced_at')")
 [ "$COLS" = "6" ] || { echo "❌ upstream_keys 的 P1 列 = $COLS，期望 6"; exit 1; }
 echo "   ✅ P1 三表 + upstream_keys 六列就位"
+
+echo "── 6/6 CHECK 取值与站型注册表一致 ──"
+# 017 收窄了 site_family 与 cred_type 的取值。这里断言"库里的取值范围 == 从注册表
+# 推导出来的"，两个方向都会红：
+#   · 加了一族却没配迁移放宽 → 该族的渠道**建不进来**，而约束冲突报在**写入时**，
+#     不是启动时 —— 也就是新站型接好了、界面上选得到，一按创建才炸。
+#   · 迁移放宽了却没人注册那一族 → 库比代码宽，那个值写进去之后 Lookup 拿不到注册，
+#     采集侧报"无对应适配器"，停在只能靠人去 UPDATE 才能救的状态。
+# 取值从 cmd/registry-dump 取而**不在这里写死**：写死的那份就是第二份家族清单，
+# 而"漏加一族"正是本断言要查的事（同 1/6 不写 `≥45` 下界的理由）。
+REG=$(go run ./cmd/registry-dump)
+[ -n "$REG" ] || { echo "❌ registry-dump 无输出 —— 注册表是空的？"; exit 1; }
+
+# site_family = 已注册家族 + unknown 哨兵（探测未命中，04 §7；它不该有注册，
+# 但**必须是合法取值**，否则 Detect 没认出来的站连渠道都建不了）
+WANT_FAM=$({ echo "$REG" | cut -f1; echo unknown; } | sort -u)
+
+# cred_type = 各注册的 CredType 与 PasswdCredType，另加 account_password ——
+# 它当前无人声明，是刻意留着的"无令牌端点站型只能账密重登"那条通路的库侧一端
+# （017 头部与 04 §5.3）。写在这里而不是让它随注册表浮动，是因为它的存在理由
+# 恰恰是"当前没有任何注册声明它"。
+WANT_CRED=$({ echo "$REG" | cut -f2; echo "$REG" | cut -f3; echo account_password; } \
+  | grep -v '^$' | sort -u)
+
+enum_of() { # enum_of <约束名> —— 从 CHECK 定义里取字面量取值
+  q "select pg_get_constraintdef(oid) from pg_constraint where conname='$1'" \
+    | grep -oE "'[a-z0-9_]+'" | tr -d "'" | sort -u
+}
+
+for c in channels_site_family_check collector_credentials_site_family_check; do
+  GOT_FAM=$(enum_of "$c")
+  [ -n "$GOT_FAM" ] || { echo "❌ 找不到约束 $c（017 没跑？约束改名了？）"; exit 1; }
+  if [ "$GOT_FAM" != "$WANT_FAM" ]; then
+    echo "❌ $c 的取值与注册表不一致"
+    diff <(echo "$WANT_FAM") <(echo "$GOT_FAM") | sed 's/^/   /' || true
+    echo "   （< 注册表推导的  > 库里实际的）加一族要配一条迁移放宽它"
+    exit 1
+  fi
+done
+echo "   ✅ site_family 两处约束 = $(echo "$WANT_FAM" | tr '\n' ' ')"
+
+GOT_CRED=$(enum_of collector_credentials_cred_type_check)
+if [ "$GOT_CRED" != "$WANT_CRED" ]; then
+  echo "❌ collector_credentials_cred_type_check 的取值与注册表不一致"
+  diff <(echo "$WANT_CRED") <(echo "$GOT_CRED") | sed 's/^/   /' || true
+  echo "   （< 注册表推导的  > 库里实际的）"
+  exit 1
+fi
+echo "   ✅ cred_type 约束 = $(echo "$WANT_CRED" | tr '\n' ' ')"
 
 echo
 echo "✅ 迁移集成测试全部通过"

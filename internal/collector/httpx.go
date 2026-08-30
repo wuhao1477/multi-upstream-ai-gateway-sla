@@ -164,9 +164,11 @@ func snippet(b []byte) string {
 
 // asFloat 从任意 JSON 值取浮点。
 //
-// **必须容忍字符串数字**：ASXS 的 balanceUsd 就是字符串（04 §3.3），
-// 而 NewAPI 的 quota 是数字。用 float64 断言会静默得到 0 —— 那意味着
-// "余额 0"，会让 selector 把一个有钱的渠道判成耗尽。
+// **必须容忍字符串数字**：上游 JSON 的数字类型不稳定是实测过的事
+// （NewAPI 的 quota 是数字，而有的站把余额返回成 `"90.50"`）。
+// 用 float64 断言会静默得到 0 —— 那意味着"余额 0"，
+// 会让 selector 把一个有钱的渠道判成耗尽。
+// TestAsFloatToleratesStringNumbers 钉住这条容错。
 func asFloat(v any) (float64, bool) {
 	switch t := v.(type) {
 	case float64:

@@ -228,7 +228,8 @@ func TestSyncUnregisteredKeyIsNotFailure(t *testing.T) {
 // 且须与 Capabilities() 声明一致。
 func TestSyncReportsUnsupportedExplicitly(t *testing.T) {
 	sink := &fakeSink{}
-	// ASXS 形态：keys/groups 不支持
+	// 一种能力不全的站型形态：keys/groups 不支持（自研站常是这样，
+	// 自建面板往往只有余额页，没有令牌/分组管理的 API）
 	ad := &stubAdapter{caps: CapabilityMap{
 		CapAccount: Supported, CapKeys: Unsupported, CapGroups: Unsupported,
 		CapPricing: Degraded, CapModelCatalog: Degraded,

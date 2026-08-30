@@ -139,7 +139,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 | --- | --- | --- |
 | NewAPI | [ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 完全有效 | 说 OpenAI 协议；**2026-07-25 实测**：同一站 `gpt-5.5` 支持 `/v1/responses` 与 `/v1/chat/completions`，但**部分模型仅 Responses**（CC 返回 503）——自研层须按模型探测能力，不能假设两协议都通 |
 | Sub2API | 完全有效 | 同上 |
-| ASXS | 完全有效 | 一期未接执行 |
+| 某闭源自建站（已于 2026-08-29 移出支持范围） | 完全有效 | 一期未接执行 |
 
 **新增实测事实**（[07 §3bis](./07-axonhub-runtime-probes.md)）：真实上游 Responses 响应含 **35 个顶层字段**、`reasoning` item、`prompt_cache_key`/`prompt_cache_retention`、`usage.cached_tokens`——**这就是自研透传层要 100% 保真的目标**。
 

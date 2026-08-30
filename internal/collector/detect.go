@@ -24,6 +24,18 @@ const probeMaxBytes = 1 << 20
 // 全未命中返回 FamilyUnknown —— 按 04 §7 走未知家族接入流程，
 // **不猜、不 fallback 到某个家族**：猜错会让后续所有字段映射都错。
 func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult, error) {
+	return detectWith(ctx, hc, baseURL, All())
+}
+
+// detectWith 是 Detect 的本体，注册表由参数传入。
+//
+// 分出这一层只为一件事：让"探测循环把原始字节交给 Match"可被单测
+// （TestDetectPassesRawBodyToMatch）。现役两族的指纹都在顶层 JSON 字段里、
+// 都不读 raw，若只能经 All() 探测，这条通路就没有任何断言看着它 ——
+// 而它正是自研站接入要靠的那条（registry.go 的 Match 注释）。
+// 用参数而不是在测试里改全局 registrations：改全局会泄漏给同包其它测试，
+// 而那些测试正是靠遍历 All() 来断言"每族都合规"的。
+func detectWith(ctx context.Context, hc *http.Client, baseURL string, regs []*Registration) (DetectResult, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -31,7 +43,7 @@ func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult,
 	res := DetectResult{Family: FamilyUnknown}
 
 	var lastErr error
-	for _, reg := range All() {
+	for _, reg := range regs {
 		url := base + reg.ProbePath
 		m, raw, err := getJSON(ctx, hc, url)
 		if err != nil {
@@ -82,7 +94,9 @@ func getJSON(ctx context.Context, hc *http.Client, url string) (map[string]any, 
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		// 非 JSON（如 HTML 首页）不是错误，只是"不属这一族"的一种表现。
-		// 仍把原文回传 —— ASXS 的 ampmanager 指纹可能出现在非 JSON 响应里。
+		// **仍把原文回传**：自研站的指纹可能压根不在 JSON 里（实测过一例，
+		// 指纹在 JWT 的 iss 声明里）。这里 return nil, nil 会让那种站永远
+		// 探测不到，而现役两族一切正常 —— 故有 TestDetectPassesRawBodyToMatch。
 		return nil, raw, nil
 	}
 	return m, raw, nil

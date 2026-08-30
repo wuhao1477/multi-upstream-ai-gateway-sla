@@ -14,7 +14,7 @@
                                         │                    (NewAPI/Sub2API 中转站, sk- key)
                                         ├── PostgreSQL（账本/台账/价格版本/健康状态，多实例共享）
                                         └── collector (Go, 同二进制子命令)
-                                              └── NewAPI / Sub2API / ASXS 三家族采集器 → 上游站点管理面
+                                              └── 分站型采集器(现役 NewAPI/Sub2API) → 上游站点管理面
 ```
 
 - **sla-core**：同步请求路径 + 决策引擎 + **自研上游透传层** + 账本写入。无本地持久状态，实例无差别（FR-110 多实例）。

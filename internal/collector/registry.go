@@ -29,9 +29,17 @@ type Registration struct {
 	DisplayName string
 
 	// ── 探测（04 §2）──
-	// ProbePath 是判族用的公开端点；Match 判定响应是否属本族
-	// （传原始字节是因为 ASXS 的指纹在 JWT iss，需要看原文）；
+	// ProbePath 是判族用的公开端点；Match 判定响应是否属本族；
 	// Extract 从命中的响应里取家族特有信息（版本、无盾、额度换算基数）。
+	//
+	// Match 同时收到**解析后的 map 与原始字节**。两个参数不是冗余：
+	// 现役两族的指纹都在顶层 JSON 字段里，于是都写 `_ []byte`；
+	// 而自研站的指纹可能压根不在 JSON 里（实测过一例：指纹在 JWT 的 iss
+	// 声明里，响应体本身还不一定是合法 JSON）。留着 raw 的代价是两个下划线，
+	// 换来的是"接一个自研站只加一份 Registration"而不必改这个签名、
+	// 改 detect.go、再回头改另外两族 —— 见 04 §7bis。
+	// detect.go 的 getJSON 在 JSON 解析失败时仍回传 raw，
+	// TestDetectPassesRawBodyToMatch 钉住这条通路。
 	ProbePath string
 	Match     func(m map[string]any, raw []byte) bool
 	Extract   func(m map[string]any, r *DetectResult)
@@ -44,8 +52,15 @@ type Registration struct {
 
 	// ── 凭证形态（09 §5 的凭证登记与导入侧登记共用）──
 	// CredType 是有 access_token 时的凭证类型；RequiresUID 表示还必须有
-	// external_user_id；PasswdCredType 非空表示允许账密（无 refresh 路径的
-	// 站型）。CredNote 是校验失败时附在错误后的"为什么"，省得运维回查文档。
+	// external_user_id；PasswdCredType 非空表示允许账密。
+	// CredNote 是校验失败时附在错误后的"为什么"，省得运维回查文档。
+	//
+	// PasswdCredType **当前无人声明**（现役两族都有令牌路径），留着是因为它是
+	// 自研站最可能落在的那一格：自建面板常只有登录表单、没有令牌端点，
+	// 唯一续期方式就是账密重登。这一格连着 Credential.Username/Password、
+	// CredTypeFor 的 hasPasswd 分支、库侧 cred_type 的 account_password
+	// 取值 —— 四处一起留才是一条通路，删掉任一处都要在接入时重新拉一遍。
+	// 接入清单见 04 §7bis。
 	CredType       string
 	RequiresUID    bool
 	PasswdCredType string
@@ -61,15 +76,16 @@ type Registration struct {
 	New func(*Client) Adapter
 }
 
-// registrations 的顺序**就是探测顺序**（04 §2）：NewAPI 的 /api/status 最通用，
-// 放前面能最快分桶；ASXS 的判据最特殊（JWT iss=ampmanager），放最后。
+// registrations 的顺序**就是探测顺序**（04 §2）：判据越通用的放越前面，
+// 越特殊的放后面。NewAPI 的 /api/status 最通用（二开站也大多留着它），
+// 放第一位能最快分桶。**新加的自研站放最后** —— 它的判据只认自己那一站，
+// 放前面只是让另外两族每次多一跳无谓的探测。
 //
 // 用一个显式切片而不是各文件 init() 自注册：init() 的执行顺序取决于文件名，
 // 那会让探测顺序被一次无关的重命名悄悄改掉。
 var registrations = []*Registration{
 	regNewAPI,
 	regSub2API,
-	regASXS,
 }
 
 var byFamily = func() map[Family]*Registration {

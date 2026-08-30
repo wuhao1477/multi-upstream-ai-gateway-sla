@@ -95,7 +95,9 @@ CREATE TABLE upstream_providers (
 CREATE TABLE channels (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name            TEXT NOT NULL,
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')), -- ISSUE-002 §1 三家族
+  -- 取值范围 = 站型注册表的家族 + unknown 哨兵（04 §7bis）。加一族要配一条迁移
+  -- 放宽它，否则新族的渠道**建不进来**（约束冲突，报在写入时而不是编译时）。
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   base_url        TEXT NOT NULL,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
@@ -372,7 +374,7 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 
 这就是 [§3](#3-计价与账务) 与 [#7](https://github.com/) 一直强调的 `billing_unit` 缩放风险，只不过它先在 P1 的目录表上现形，而不是等到 P3 的成本计算。
 
-- **无价则口径留 NULL**：Sub2API/ASXS 是 degraded 站型、单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
+- **无价则口径留 NULL**：`pricing` 标 degraded 的站型（现役 Sub2API）单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
 - **消费方义务**：读 `input_price` 前必须先读 `billing_unit`，缺失时**不得**假定任何默认口径。
 
 - **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断——`last_seen_at` 停止前进**本身就是下架信号**。
@@ -2303,28 +2305,38 @@ CREATE INDEX idx_req_tenant_level   ON requests(tenant_id, sla_level, created_at
 
 ---
 
-## 5. 订阅台账域（双倍率 + 共享额度 + 三家族真实字段）
+## 5. 订阅台账域（双倍率 + 共享额度）
 
 > ⏭ **本域已移入二期**（[15 §1.2](./15-scope-and-preflight.md)）：**表结构保留**（空表无成本、便于二期直接启用），一期**不写入、不参与调度**。
 
-> FR-033~039。字段以 **ISSUE-002 §3.2 sub2api ent schema** 与 **§3.3 ASXS `/api/me/billing/state`** 真实结构为准。一期**不建模签到额度**（FR-034 已删该句；NewAPI 系接受额度预测偏低）。双倍率（用满/实际，参数14/AC-24）。共享额度按 `(user_id, group_id)` 聚合（FR-035，源码级确证）。可主动重置额度只读登记、不自动触发。
+> ⚠️ **字段形状的来源之一已失效**（2026-08-29）：本域的字段取自 **ISSUE-002 §3.2 sub2api ent schema**
+> 与**一家自建站的 `/api/me/billing/state` 实测**，而后者已移出支持范围（[04 §3.3](./04-collector-adapter.md)）。
+> 现役两族里 Sub2API 有订阅对象、NewAPI 没有，所以**做二期时必须按当时真实纳管的站型重新实测一遍**
+> —— 照现在这个形状直接建表，会得到一批没有数据源的列。表结构本身仍保留（下同）。
+>
+> 下面注释里形如 `usedMicros`、`limitMicros`、`planId`、`dailyReset` 的**字段名保留**（不标站名）：
+> 它们是这些列当初的形状依据，去掉就无从回溯为什么会有这一列。
+> [`migrations/008_subscriptions.sql`](../../migrations/008_subscriptions.sql) 里同样的注释**不改**
+> —— 它已应用过，改一个字符都会让 `migrate.go` 的 checksum 契约拒绝整批迁移（§0.3）。
+>
+> FR-033~039。一期**不建模签到额度**（FR-034 已删该句；NewAPI 系接受额度预测偏低）。双倍率（用满/实际，参数14/AC-24）。共享额度按 `(user_id, group_id)` 聚合（FR-035，源码级确证）。可主动重置额度只读登记、不自动触发。
 
 ### 5.1 订阅计划（可售套餐 / 商品）
 
 ```sql
--- 订阅计划（FR-033）：对应 sub2api subscription_plans + group / ASXS purchase products
+-- 订阅计划（FR-033）：对应 sub2api subscription_plans + group / 自建站的套餐商品表
 CREATE TABLE subscription_plans (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  external_plan_id TEXT,                      -- 上游 planId（ASXS）/ group_id（sub2api）
-  name            TEXT NOT NULL,              -- ASXS planName / sub2api plan.name（如「每日90刀」）
-  -- 固定费用（FR-033）：sub2api plans.price / ASXS products.priceCnyCent，归一为美元
+  external_plan_id TEXT,                      -- 上游 planId / group_id（sub2api）
+  name            TEXT NOT NULL,              -- 上游 planName / sub2api plan.name（如「每日90刀」）
+  -- 固定费用（FR-033）：sub2api plans.price / 自建站的 priceCnyCent，归一为美元
   fixed_fee       nonneg_usd NOT NULL,
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称（FR-018）
-  -- 有效期（FR-033）：sub2api validity_days×unit / ASXS durationDays
+  -- 有效期（FR-033）：sub2api validity_days×unit / 自建站的 durationDays
   validity_days   INTEGER,
-  billing_period  TEXT,                       -- daily/weekly/monthly（ASXS limits.limitType + windowMode=fixed）
-  -- 周期包含额度（FR-033）：ASXS limits.limitMicros / sub2api group.*_limit_usd
+  billing_period  TEXT,                       -- daily/weekly/monthly（上游 limits.limitType + windowMode=fixed）
+  -- 周期包含额度（FR-033）：上游 limits.limitMicros / sub2api group.*_limit_usd
   period_quota    nonneg_usd,
   supported_models JSONB,                     -- 支持模型（FR-033）
   -- 倍率（FR-033）：sub2api group.rate_multiplier + 高峰倍率
@@ -2333,8 +2345,8 @@ CREATE TABLE subscription_plans (
   peak_start      TEXT,                       -- peak_start（时段）
   peak_end        TEXT,
   peak_rate_multiplier NUMERIC(12,6),
-  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / ASXS fixedResetTime）
-  renewal_status  TEXT,                       -- 续订状态（FR-033）：ASXS renewalRule / renewAllowed
+  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / 上游 fixedResetTime）
+  renewal_status  TEXT,                       -- 续订状态（FR-033）：上游 renewalRule / renewAllowed
   -- 超额计费规则（FR-033）：sub2api 无超额概念 → 据实登记 'no_overage_block'（ISSUE-002 §3.2 结论2）
   overage_rule    TEXT NOT NULL DEFAULT 'unknown'
                     CHECK (overage_rule IN ('no_overage_block','metered','unknown')),
@@ -2343,11 +2355,11 @@ CREATE TABLE subscription_plans (
   usable_multiplier NUMERIC(12,6),            -- 用满倍率＝固定费用÷周期额度×分组倍率 → 调度排序
   actual_multiplier NUMERIC(12,6),            -- 实际倍率＝固定费用÷实际消耗×倍率 → 账务报表
 
-  -- ── 额度来源优先级（FR-033、术语§3；ASXS primarySource/secondarySource）──
+  -- ── 额度来源优先级（FR-033、术语§3；上游 primarySource/secondarySource）──
   primary_source  TEXT,                       -- 如 'subscription'
   secondary_source TEXT,                      -- 如 'balance' —— 判断订阅额度是否真会被消耗
 
-  -- ── 可主动重置额度（FR-033；ASXS dailyReset）：只读登记，不自动触发 ──
+  -- ── 可主动重置额度（FR-033；上游 dailyReset）：只读登记，不自动触发 ──
   active_reset_supported BOOLEAN NOT NULL DEFAULT false,
   active_reset_threshold_pct NUMERIC(5,2),    -- usageThresholdPercent（如 90）
   active_reset_daily_limit INTEGER,           -- dailyLimit（如 4 次/日）
@@ -2363,7 +2375,7 @@ CREATE TABLE subscription_plans (
 ### 5.2 已购订阅实例（含日/周/月窗口用量）
 
 ```sql
--- 已购订阅（FR-033/034/036）：对应 sub2api user_subscriptions / ASXS billing/state
+-- 已购订阅（FR-033/034/036）：对应 sub2api user_subscriptions / 自建站的 billing/state
 CREATE TABLE user_subscriptions (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   plan_id         BIGINT NOT NULL REFERENCES subscription_plans(id),
@@ -2371,14 +2383,14 @@ CREATE TABLE user_subscriptions (
   -- 共享额度聚合键（FR-035，源码级确证 UpdateSubscriptionUsage(userID,groupID,cost)）
   ext_user_id     TEXT NOT NULL,              -- sub2api user_id
   group_id        TEXT NOT NULL,              -- sub2api group_id —— 共享额度按 (user_id,group_id) 归集，不按 Key
-  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / ASXS startsAt
+  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / 上游 startsAt
   expires_at      TIMESTAMPTZ,               -- expires_at / expiresAt（到期时间，FR-033）
   status          TEXT NOT NULL CHECK (status IN ('not_effective','active','expired','suspended','data_unknown')),
                                               -- 对齐 PRD §9.3 订阅状态 + sub2api active/expired/suspended
   -- 已用/剩余（FR-034）：区分订阅额度、现金余额、超额付费
-  used_quota      nonneg_usd,                 -- ASXS usedMicros/1e6
-  left_quota      nonneg_usd,                 -- ASXS leftMicros/1e6
-  remaining_days  INTEGER,                    -- ASXS remainingDays（到期紧迫度，FR-037）
+  used_quota      nonneg_usd,                 -- 上游 usedMicros/1e6（micros 类单位在适配器内归一）
+  left_quota      nonneg_usd,                 -- 上游 leftMicros/1e6
+  remaining_days  INTEGER,                    -- 上游 remainingDays（到期紧迫度，FR-037）
   data_source     TEXT NOT NULL,
   fetched_at      TIMESTAMPTZ NOT NULL,
   valid_until     TIMESTAMPTZ,                -- 人工 7 天有效（FR-011）
@@ -2421,7 +2433,7 @@ CREATE INDEX idx_subs_expiry        ON user_subscriptions(expires_at) WHERE stat
 CREATE INDEX idx_qwin_reset         ON subscription_quota_windows(window_resets_at);
 ```
 
-**服务 FR/AC**：FR-011、FR-033/034/035/036/037/038/039、FR-057/058；AC-20/21/22/23/24（双倍率）、AC-28（三家族采集）。
+**服务 FR/AC**：FR-011、FR-033/034/035/036/037/038/039、FR-057/058；AC-20/21/22/23/24（双倍率）、AC-28（逐家族采集）。
 **一期不建模**：签到额度（FR-034 删句；NewAPI 系 `checkin` 不入账，接受额度预测偏低）；超额计费对 sub2api 系登记 `no_overage_block`（ISSUE-002 §3.2 结论2）。
 
 ---
@@ -2764,21 +2776,24 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 > 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证明文（FR-113）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
 
 ```sql
--- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：三家族不同续期机制，明文存储
+-- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')),
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
+  -- cred_type 的取值 = 各 Registration 的 CredType 与 PasswdCredType（04 §7bis）。
+  -- account_password 当前无站型声明，**刻意留着**：它是"无令牌端点、只能账密重登"
+  -- 那条通路的库侧一端（04 §5.3），删了接自研站时要重新加一条迁移。
   cred_type       TEXT NOT NULL CHECK (cred_type IN
-                    ('newapi_access_token','sub2api_jwt','asxs_jwt','account_password')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / ASXS 7d JWT + 账号密码
+                    ('newapi_access_token','sub2api_jwt','account_password')),
+  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / 账密重登站型存账号密码
   access_token    TEXT,
-  refresh_token   TEXT,                         -- 仅 Sub2API（24h JWT + refresh 无密码续期）
-  username        TEXT,                         -- ASXS 须账号密码重登 POST /api/manage/auth/login
+  refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
+  username        TEXT,                         -- 无令牌端点的站型：拿账密重登换新令牌（04 §5.3）
   password        TEXT,                         -- 明文（一期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
-  token_expires_at TIMESTAMPTZ,                 -- Sub2API 24h / ASXS 168h；到期前阈值内续期
+  token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期
   -- 凭证互斥作废风险（ISSUE-002 §4）：NewAPI 重生令牌作废旧、Sub2API 并发刷新互斥
   refresh_lock_key TEXT,                        -- 按账号加互斥锁串行刷新
   status          TEXT NOT NULL DEFAULT 'valid'
@@ -2823,7 +2838,7 @@ CREATE TABLE balance_signals (
   signal_evidence TEXT,                         -- 触发信号原文关键词（元数据，非正文）
   -- 配额状态（FR-118、ISSUE-001 假设5）：**未知默认保守排除**，由我方 selector 执行
   quota_status    TEXT CHECK (quota_status IN ('available','warning','exhausted','unknown')),
-  -- ↑ 由采集器按站型映射（NewAPI/Sub2API/ASXS 各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
+  -- ↑ 由采集器按站型映射（各家族各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
   --   ⚠️ 该保守默认是我方硬要求：任何上游或第三方组件的宽松默认（"未知即保留"）不得覆盖它。
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -2861,7 +2876,7 @@ CREATE INDEX idx_balsig_state     ON balance_signals(balance_state) WHERE balanc
 CREATE INDEX idx_balsig_quota     ON balance_signals(quota_status) WHERE quota_status='unknown'; -- FR-118 保守排除
 ```
 
-**服务 FR/AC**：FR-010/011、FR-020~027、FR-031、FR-113、FR-116、FR-118；AC-28（三家族探测）、AC-29（非标准余额不足识别）。
+**服务 FR/AC**：FR-010/011、FR-020~027、FR-031、FR-113、FR-116、FR-118；AC-28（逐家族探测）、AC-29（非标准余额不足识别）。
 
 ---
 
@@ -3112,11 +3127,11 @@ RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
 | sub2api `user_subscriptions.daily/weekly/monthly_window_start + usage_usd` | `subscription_quota_windows`（三窗口拆行） |
 | sub2api 共享额度按 `(user_id, group_id)` 聚合 | `user_subscriptions(ext_user_id, group_id)` UNIQUE + `idx_subs_shared` |
 | sub2api 无超额概念 | `subscription_plans.overage_rule='no_overage_block'` |
-| ASXS `primarySource/secondarySource` | `subscription_plans.primary_source/secondary_source` |
-| ASXS `dailyReset`（usageThresholdPercent/dailyLimit） | `subscription_plans.active_reset_*`（只读登记，不自动触发） |
-| ASXS `priceCnyCent + durationDays` / sub2api `price + validity_days` | `subscription_plans.fixed_fee + validity_days` → 双倍率输入 |
-| 三家族凭证/续期差异（长期令牌/refresh/账号密码重登） | `collector_credentials.cred_type + refresh_token/username/password` |
-| 三家族额度单位（quota整数 / USD / micros）归一 | 入库前由适配器归一为 `usd_amount`（§0.2） |
+| 自建站 `primarySource/secondarySource` | `subscription_plans.primary_source/secondary_source` |
+| 自建站 `dailyReset`（usageThresholdPercent/dailyLimit） | `subscription_plans.active_reset_*`（只读登记，不自动触发） |
+| 自建站 `priceCnyCent + durationDays` / sub2api `price + validity_days` | `subscription_plans.fixed_fee + validity_days` → 双倍率输入 |
+| 各站型凭证/续期差异（长期令牌/refresh/账号密码重登） | `collector_credentials.cred_type + refresh_token/username/password` |
+| 各站型额度单位（quota 整数 / USD / micros）归一 | 入库前由适配器归一为 `usd_amount`（§0.2） |
 
 ---
 

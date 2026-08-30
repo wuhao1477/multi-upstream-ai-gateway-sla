@@ -5,7 +5,8 @@
 //
 // 一条总原则（04 开头）：上游站点异构程度高，**必须按站型分流**。
 // NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；
-// ASXS 是闭源自建平台，一站一适配器、不可复用、不作探测基准。
+// **全自研站**（闭源面板、自建平台）一站一适配器、不可复用、不作探测基准 ——
+// 接入清单见 04 §7bis「全自研站怎么接」。
 // 任何不支持的字段返回 unsupported，**不静默留空**。
 package collector
 
@@ -33,12 +34,15 @@ const (
 )
 
 // Family 是站型家族。
+//
+// 加一族的落点只有两处：这里一个常量 + 一份 Registration（04 §7bis）。
+// registry_test.go 的第一条断言扫本文件的常量并逐个查注册表，所以
+// "加了常量忘了注册"会红，反之 unknown 有注册也会红。
 type Family string
 
 const (
 	FamilyNewAPI  Family = "newapi"
 	FamilySub2API Family = "sub2api"
-	FamilyASXS    Family = "asxs"
 	FamilyUnknown Family = "unknown"
 )
 
@@ -50,7 +54,7 @@ const (
 	CapKeys    Capability = "keys"
 	CapGroups  Capability = "groups"
 	// CapSubscriptionQuotas ⏭ P4：一期**所有站型**一律 Unsupported
-	// （订阅制整体推迟）。此前 Sub2API/ASXS 声明 supported 而实现返回
+	// （订阅制整体推迟）。此前有站型声明 supported 而实现返回
 	// ErrUnsupported —— 自相矛盾且 AC-28 必挂（04 §1 第 18 轮记录）。
 	CapSubscriptionQuotas Capability = "subscription_quotas"
 	CapPricing            Capability = "pricing"
@@ -124,13 +128,19 @@ type DetectResult struct {
 
 // Credential 是登记的采集凭证（明文，FR-113）。
 type Credential struct {
-	ChannelID    int64
-	Family       Family
-	CredType     string // newapi_access_token | sub2api_jwt | asxs_jwt | account_password
+	ChannelID int64
+	Family    Family
+	// CredType 由 Registration.CredTypeFor 定，取值范围就是各注册的
+	// CredType 与 PasswdCredType（现役：newapi_access_token / sub2api_jwt，
+	// 另留 account_password 一格）。库侧 CHECK 与它同步，见 migrations/017。
+	CredType     string
 	AccessToken  string
 	RefreshToken string
-	Username     string
-	Password     string
+	// Username/Password 服务于**没有令牌端点的站**：唯一续期方式是账密重登。
+	// 全自研站常是这个形态（自建面板往往只有登录表单），所以这条路留着 ——
+	// 见 Registration.PasswdCredType 与 04 §7bis。现役两族都不用。
+	Username string
+	Password string
 	// ExternalUserID 是 NewAPI 的数字用户 ID（New-API-User 头必需）。
 	ExternalUserID string
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。

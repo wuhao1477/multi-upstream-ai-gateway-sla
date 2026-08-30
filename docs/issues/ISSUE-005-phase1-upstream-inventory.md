@@ -64,7 +64,7 @@
 
 ## 2. P1 做什么（最小集）
 
-**做**：三家族采集适配器（`Detect`/`Authenticate`/`FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`）· 渠道/账号/Key 管理 CRUD · 分组与分组可用模型 · Key 用量同步 · 渠道模型目录 · 价格版本（不可覆盖，为 P2 铺路）· 手动刷新 · 资产总览
+**做**：逐家族采集适配器（`Detect`/`Authenticate`/`FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`）· 渠道/账号/Key 管理 CRUD · 分组与分组可用模型 · Key 用量同步 · 渠道模型目录 · 价格版本（不可覆盖，为 P2 铺路）· 手动刷新 · 资产总览
 
 **不做**（全部属 P2 网关）：请求转发 · 账本 · 调度与候选过滤 · SLA/TTFT/接管 · canary/测活 · 入站凭证与配额 · 余额信号自适应识别（依赖真实请求失败信号，P1 无请求路径）· 容量保留判闸
 
@@ -194,7 +194,7 @@ ALTER TABLE upstream_keys
 | 编号 | 场景 | 环境 | 判定方法 |
 | --- | --- | --- | --- |
 | AC-37 | 一个渠道挂 2 账号、每账号 2 把 Key、分属不同分组 | FIXTURE | `GET /admin/channels/{id}/inventory` 返回 2 账号 / 4 Key / 各自分组与倍率；4 把 Key 明文**均不回显**（只见 `secret_prefix`）；库中 4 行 `upstream_keys.channel_group_id` 非空 |
-| AC-38 | 三家族站点各触发一次手动同步（FR-128） | **REAL** | `POST /admin/channels/{id}/sync` 返回逐项结果与耗时；`channel_groups`/`group_models`/`channel_model_catalog` 三表与 `upstream_keys` 用量列均更新；不支持的项返回 `unsupported` 而非留空（承 AC-28 口径） |
+| AC-38 | 每个已注册站型家族的站点各触发一次手动同步（FR-128） | **REAL** | `POST /admin/channels/{id}/sync` 返回逐项结果与耗时；`channel_groups`/`group_models`/`channel_model_catalog` 三表与 `upstream_keys` 用量列均更新；不支持的项返回 `unsupported` 而非留空（承 AC-28 口径） |
 | AC-39 | 渠道目录含 200+ 模型 | FIXTURE | `channel_model_catalog` 200+ 行**无需任何 token 上界**即可入库；`GET /admin/channels/{id}/catalog` 可分页查询并按价格排序；`models` 表**不因此产生任何行** |
 | AC-40 | 上游下架某模型 | FIXTURE | 连续 N 轮采集后该行 `last_seen_at` 停止更新 → 产生 P3 `alert_events(category='model_capability')`（复用已有枚举，不新增） |
 

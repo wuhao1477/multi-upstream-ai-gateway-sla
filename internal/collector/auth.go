@@ -31,9 +31,8 @@ var (
 )
 
 // 续期阈值不在这里 —— 它逐家族不同，值与理由都写在各自的
-// Registration.RefreshLead（register_newapi.go / register_sub2api.go /
-// register_asxs.go）。原先这里有 refreshBuffer 与 asxsReloginThreshold 两个
-// 常量，而 NeedsRefresh 里有一个 switch 把它们对上家族 —— 那个 switch 就是
+// Registration.RefreshLead（register_*.go）。原先这里有两个阈值常量，
+// 而 NeedsRefresh 里有一个 switch 把它们对上家族 —— 那个 switch 就是
 // "加站型要改九处"里静默失败的那处。
 
 // CredentialStore 是凭证持久化契约。
@@ -114,18 +113,24 @@ func (a *Authenticator) remember(cred Credential) {
 }
 
 // Refresher 是站型特定的续期实现。
+//
+// **实现它就等于声明"本族要主动续期"**（cmd/sla-core/sync.go 靠类型断言取，
+// registry_test 双向钉住它与 RefreshLead 一致），所以不要"顺手实现一个"。
+// 两条已知形态：令牌换令牌（Sub2API：POST /api/v1/auth/refresh，会轮换
+// refresh_token，故必须走账号锁）、账密重登（无令牌端点的站型只有这条路，
+// 见 Registration.PasswdCredType 与 04 §7bis）。
+// NewAPI 刻意不实现：长期令牌，不变式 N-1 禁止重新生成。
 type Refresher interface {
 	// Refresh 用当前凭证换取新凭证。
-	// Sub2API：POST /api/v1/auth/refresh，会轮换 refresh_token。
-	// ASXS：POST /api/manage/auth/login，账密重登。
-	// NewAPI：不实现（长期令牌，不变式 N-1 禁止重新生成）。
+	// 已无法自动续期时返回 ErrNeedsRelogin（04 §5 第 4 层），
+	// **不要返回一个空凭证** —— 那会让采集侧带着空令牌去打上游。
 	Refresh(ctx context.Context, cred Credential) (Credential, error)
 }
 
 // NeedsRefresh 判断凭证是否需要续期。
 //
 // 阈值逐家族不同，值与理由都在各自的 Registration.RefreshLead
-// （NewAPI 0 = 永不主动刷新 / Sub2API 120s / ASXS 24h，04 §5）。
+// （现役：NewAPI 0 = 永不主动刷新 / Sub2API 120s，04 §5）。
 //
 // 这一处曾是"加站型要改九处"里最坏的两处之一：漏加 case 落到 return false，
 // 后果是**令牌到期不续**，而它不报错、不 401（还没到期时一切正常），

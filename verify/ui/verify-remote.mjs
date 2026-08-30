@@ -23,6 +23,18 @@ const MIXED_CH = Number(process.env.MIXED_CH || 3);
 const NULL_CH = Number(process.env.NULL_CH || 56);
 // 真库 2 把 Key 都挂在 channel 1 的账号下（upstream_keys 走 account_id 关联，
 // 没有 channel_id 列）。FR-094「只显前缀」必须在有 Key 的渠道上验。
+//
+// ⚠️ 但 channel 1 是**夹具残留**，不是真渠道：名字 `UI验收-397444`（verify-ui.mjs
+// :148 的 `'UI验收-' + Date.now()`），base_url 指向 127.0.0.1:18099 —— 已删除的
+// mock_newapi.py 的端口，2026-08-28 那轮 verify-ui 打真库时留下的。它名下两把 Key
+// 的明文是 verify-ui.mjs 的 SECRET 夹具（`sk-ui-secret…`），不是采来的。
+// 实测真渠道采到的 Key 数为 0（`upstream_keys` join 到 channel<>1：0 行）。
+//
+// 所以下面三条 Key 断言（有行 / 不回显明文 / 前缀截断）**跑在夹具上**。它们仍然
+// 有意义 —— 验的是渲染层不吐明文，与 Key 从哪来无关；但别把它们当作"真采集的 Key
+// 也不回显"的证据。真正在真上游上验这条的是 verify-ui.mjs（那边 SECRET 是刻意的
+// 假 Key，理由见 CLAUDE.md §1 例外表第一行）。
+// 夹具行的处置未决（清掉它会让这三条无靶子），见 docs/acceptance/P1-evidence.md §3.4。
 const KEY_CH = Number(process.env.KEY_CH || 1);
 
 const results = [];
@@ -73,21 +85,32 @@ try {
 
   const rows = await page.$$eval('#channels tbody tr', trs =>
     trs.map(tr => [...tr.querySelectorAll('td')].map(td => td.innerText.trim())));
+  // 65 = 64 个真渠道 + 1 行夹具残留（channel 1，见上面 KEY_CH 处）。
   check('真库 65 个渠道全部渲染', rows.length === 65, `${rows.length} 行`);
 
-  const families = await page.$$eval('#channels tbody tr', trs => {
+  // 站型从**第 3 个单元格**取，且不预设候选名单。
+  //
+  // 上一版拿一张写死的名单（含两个库里并不存在的族）去 innerText.includes()，
+  // 有两处失真：名单外的族数不出来（多一族 → 静默漏掉），而 includes 会把
+  // 渠道名里出现的族名也算进去（"某站-newapi-备用"这种名字会重复计数）。
+  // 现在数的是全部实际取值，断言比对整张分布表 —— 少一族、多一族、名字撞车
+  // 都会红，且红的信息就是库里真实的分布。
+  const families = await page.$$eval('#channels tbody tr[data-ch-row]', trs => {
     const c = {};
     trs.forEach(tr => {
-      const t = tr.innerText;
-      ['newapi', 'sub2api', 'asxs', 'veloera'].forEach(f => {
-        if (t.includes(f)) c[f] = (c[f] || 0) + 1;
-      });
+      const fam = tr.querySelectorAll('td')[2].innerText.trim();
+      c[fam] = (c[fam] || 0) + 1;
     });
     return c;
   });
+  // 序列化前排键：对象的键序是插入序（= 表格行序），不排的话换个排序方式
+  // 就会红，而那与"分布对不对"无关。
+  const canon = o => JSON.stringify(Object.fromEntries(
+    Object.entries(o).sort(([a], [b]) => a.localeCompare(b))));
+  const wantFamilies = { newapi: 52, sub2api: 13 };
   check('站型分布与库一致（52 newapi + 13 sub2api）',
-    families.newapi === 52 && families.sub2api === 13,
-    JSON.stringify(families));
+    canon(families) === canon(wantFamilies),
+    `实际 ${canon(families)}，期望 ${canon(wantFamilies)}`);
 
   // 65 行表格最容易触发的布局事故：宽表把网格列顶宽、侧栏被挤出视口
   const layout = await page.evaluate(() => {

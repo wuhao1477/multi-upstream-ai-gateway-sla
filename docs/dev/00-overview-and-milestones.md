@@ -11,7 +11,7 @@
 
 ## 1. 要建什么（一句话）
 
-**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（Go，多实例）→ 自研上游透传层 → ~20 个上游**；旁路异步跑三家族采集器（NewAPI/Sub2API/ASXS）维护价格/余额/Key 额度（⏭ 订阅台账二期）。调度决策、账本、TTFT 判定全在自研核心；上游对接为**字节级透传**（[11 转向](./11-decision-full-selfbuilt.md)、[03](./03-upstream-layer.md)）。
+**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（Go，多实例）→ 自研上游透传层 → ~20 个上游**；旁路异步跑分站型采集器（现役 NewAPI/Sub2API 两族，架构支持接入自研站，见 [04 §7bis](./04-collector-adapter.md)）维护价格/余额/Key 额度（⏭ 订阅台账二期）。调度决策、账本、TTFT 判定全在自研核心；上游对接为**字节级透传**（[11 转向](./11-decision-full-selfbuilt.md)、[03](./03-upstream-layer.md)）。
 
 ## 2. 硬约束清单（开发期不可违反）
 
@@ -81,10 +81,10 @@
 >
 > **④ 种子校验断言**（CI，M0 门禁）：
 > `is_committed=true` 的策略**必须**有对应 `sla_targets` 行；`is_committed=false` 的**必须没有**。
-| **P1 上游采集与管理**（2026-07-27 新增） | 三家族采集适配器（含 `FetchModelCatalog`）；渠道/账号/Key 管理 CRUD 与轮换停用；分组实体与分组可用模型；Key 用量同步；渠道模型目录；手动刷新与资产总览；价格版本（不可覆盖，为 P2 铺路）。**不含任何请求转发**——不碰 `/v1/*`、不碰账本、不碰调度 | FR-122~128、AC-37~40 | ① **AC-37/38/39/40 全通过**（[14 §2 P1 段](./14-acceptance-matrix.md)）；② 对**全部真实渠道**跑一次全量 sync 并留存覆盖率报告（提前完成 [15 T6](./15-scope-and-preflight.md) 的验证点）；③ Key 明文在响应/日志/抓包中**一处都不出现**（复用 M0 的脱敏断言，扩到新端点）；④ 三家族的 `Capabilities()` 与实际返回一致（声明 supported 而实现返回 `ErrUnsupported` 即不通过） |
+| **P1 上游采集与管理**（2026-07-27 新增） | 各站型家族的采集适配器（含 `FetchModelCatalog`）；渠道/账号/Key 管理 CRUD 与轮换停用；分组实体与分组可用模型；Key 用量同步；渠道模型目录；手动刷新与资产总览；价格版本（不可覆盖，为 P2 铺路）。**不含任何请求转发**——不碰 `/v1/*`、不碰账本、不碰调度 | FR-122~128、AC-37~40 | ① **AC-37/38/39/40 全通过**（[14 §2 P1 段](./14-acceptance-matrix.md)）；② 对**全部真实渠道**跑一次全量 sync 并留存覆盖率报告（提前完成 [15 T6](./15-scope-and-preflight.md) 的验证点）；③ Key 明文在响应/日志/抓包中**一处都不出现**（复用 M0 的脱敏断言，扩到新端点）；④ **每个已注册家族**的 `Capabilities()` 与实际返回一致（声明 supported 而实现返回 `ErrUnsupported` 即不通过）——「每个」由 `All()` 遍历得出，加一族自动纳入 |
 | **M1 上游直连 + 账本 v1** | 自研上游透传层（字节透传 + 旁路观察）；OpenAI CC/Responses；Attempt 账本落 PG（单一真相源） | FR-111/119、AC-26/31/32 | ① REAL：Responses 响应与直连基线逐字段 diff，**35 字段与 reasoning item 零丢失**；② 账本 usage 来自旁路终帧且与上游一致；③ **AC-01/16/26/30/31/32 + AC-35 全通过**（[14 验收矩阵](./14-acceptance-matrix.md) M1 集，共 7 条）；④ **AC-35 崩溃恢复不可跳过**——账本首版必须同时交付 request 级恢复扫描与两阶段关单，否则 K1~K4 全部不可验 |
 | **M2 流式 SLA 核心** | 内容感知 TTFT、动态期限、首字前接管、mid-stream 取消传播、取消口径归并 | 硬约束 4/5/7，AC-30～32 | ① STREAM 场景全绿（role-only/心跳/空 SSE/慢首字/中断/abort，夹具 `verify/sse_stream_fixture.py`）；② **AC-06/07/12/15/25 全通过**（[14](./14-acceptance-matrix.md) M2 集，共 5 条；**AC-07 缓存切换损失预测已于 2026-07-26 拉入一期**）；③ 内容感知 TTFT 在三类元事件场景下**均不出现 ≈0ms** |
-| **M3 元数据采集** | 三家族采集器、价格版本、余额信号识别（**订阅台账/双倍率/倾斜三道闸移入二期**，[15](./15-scope-and-preflight.md)）、**`alert_events` 写入路径**（含 `dedup_key` 同因合并 + 生命周期行锁；2026-07-26 裁决由 M4 提前——AC-19 在本里程碑验收，载体不能晚于验收）、**计费异常检测与对账端点**（FR-016/019：容差默认 5%、`billing_anomaly` P2、`GET /admin/ledger/reconciliation`） | FR-010/011/016/019/020～027、**FR-100~103 落库部分**、AC-28/29 | ① 4 家实测站点采集跑通且 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；② **AC-02/03/04/05/17/19/28/29 全通过**（订阅相关 AC-20~24 移入二期）；③ **AC-19 的 P1 落库延迟 <5s、同因合并为单一持续事件**可复现 |
+| **M3 元数据采集** | 各族采集器、价格版本、余额信号识别（**订阅台账/双倍率/倾斜三道闸移入二期**，[15](./15-scope-and-preflight.md)）、**`alert_events` 写入路径**（含 `dedup_key` 同因合并 + 生命周期行锁；2026-07-26 裁决由 M4 提前——AC-19 在本里程碑验收，载体不能晚于验收）、**计费异常检测与对账端点**（FR-016/019：容差默认 5%、`billing_anomaly` P2、`GET /admin/ledger/reconciliation`） | FR-010/011/016/019/020～027、**FR-100~103 落库部分**、AC-28/29 | ① 各族实测站点采集跑通且 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；② **AC-02/03/04/05/17/19/28/29 全通过**（订阅相关 AC-20~24 移入二期）；③ **AC-19 的 P1 落库延迟 <5s、同因合并为单一持续事件**可复现 |
 | **M4 经营与验收** | 冷却/样本门槛、**渠道验证双轨**（canary FR-121 + **主动测活 FR-060~067/070~075**，均为跨实例原子 claim；[05 §2.1bis](./05-scheduling-and-operations.md) 冻结归属为 M4，M2 不含测活）、容量保留、**经营闭环类告警**（错误预算消耗、容量趋紧、canary 相关；`alert_events` 写入路径已在 M3 就绪）、**最小告警外发 webhook**（P1 单条 POST，失败仅记日志不重试、不阻塞落库，失败计数进 `/metrics`，[06 §5bis](./06-deployment-and-operations.md)）、一期验收矩阵收口、100～1000 QPS 压测 | 参数 5/11/12/16、FR-114、**FR-121**、**FR-103 外发部分** | ① **AC-08/09/10/11/13/14/18/34/36 全通过**（[14](./14-acceptance-matrix.md) M4 集，共 9 条；**AC-09/10 主动测活已于 2026-07-26 拉入一期**），且累计**一期 35 条 AC 全绿**且证据留档（含 P1 的 AC-37~40，它们在 P1 阶段已验收；二期 5 条订阅 AC-20~24 不在本期；**35+5=40** 与 [PRD §2.1.0](../PRD.md) 对齐）；② **AC-08 canary 闭环通过**（新建/冷却期满渠道在无全局故障下完成晋级，硬上限双实例不被突破）；③ LOAD：**1000 并发用户高强度稳态 30 分钟**，决策开销 P99 ≤50ms、错误率 <0.01%、无内存/goroutine/FD 泄漏；④ 完成容量上限探测并记录拐点（[14 §2bis](./14-acceptance-matrix.md)）；⑤ **webhook 失败计数在 `/metrics` 可见**（否则"仅记日志不重试"就是静默失败） |
 
 里程碑串行推进、每个可独立评审；M2 是风险最高的一段（流式接管），其 SSE 流夹具直接复用 verify/ 的构造经验（造流不造站点，[CLAUDE.md §1](../../CLAUDE.md)）。
@@ -97,7 +97,7 @@
 | [01 架构设计](./01-architecture.md) | 组件拓扑、sla-core 模块、上游直连要点、请求时序 | 草案 |
 | [02 数据模型](./02-data-model.md) | PG 单库 schema：资源注册、别名策略、价格版本、逐 Attempt 账本、健康/冷却、采集/余额、告警、保留分区（订阅台账域建表保留、一期不写入） | 草案 |
 | [03 上游对接层](./03-upstream-layer.md) | 自研直连：字节透传 + 旁路观察、Codex 兼容硬约束、头部透传、取消与超时、协议能力探测 | 草案 |
-| [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 三家族（NewAPI/Sub2API/ASXS）字段映射 + 凭证生命周期状态机 | 草案 |
+| [04 采集器契约](./04-collector-adapter.md) | CollectorAdapter 接口 + 站型注册表（现役 NewAPI/Sub2API）字段映射 + 凭证生命周期状态机 + 新站型接入清单（§7bis） | 草案 |
 | [05 调度与经营策略](./05-scheduling-and-operations.md) | selector 候选过滤/排序/RoutePlan + steward 冷却/容量保留/告警/错误预算（⏭ 测活预算与订阅倾斜二期） | 草案 |
 | [06 部署与运维](./06-deployment-and-operations.md) | 单机 Compose 拓扑、上游直连与选主、版本治理、备份保留、可观测、M0 部署清单 | 草案 |
 | [07 AxonHub 运行时实测](./07-axonhub-runtime-probes.md) | ⚠️ **历史记录**：其 Responses round-trip 损耗实测是 [11 转向](./11-decision-full-selfbuilt.md)的直接依据；§3bis 的真实上游基线转为自研透传层的保真目标 | 历史 |
@@ -154,7 +154,7 @@
 **当前阶段 P1（上游采集与管理）的第一周**：
 
 1. **落 DDL 与 M0 种子**：全部迁移 + P1 的 3 张新表与 `upstream_keys` 6 列（[02 §1.3](./02-data-model.md)）；`config_params` 72 键种子（[09 §4bis](./09-admin-api.md)）
-2. **`Detect()` + `Authenticate()` 三家族**：先打通站型探测与登录态，这是后面全部 Fetch 的前置（[04 §2/§5](./04-collector-adapter.md) 三套凭证状态机）
+2. **`Detect()` + `Authenticate()` 逐家族**：先打通站型探测与登录态，这是后面全部 Fetch 的前置（[04 §2/§5](./04-collector-adapter.md) 的凭证状态机，一族一套）
 3. **`FetchGroups` → `FetchKeys` 两项落库**：顺序不可换（Key 的 `channel_group_id` 依赖分组行先存在，[09 §5.0bis](./09-admin-api.md)）；`group_models` 走全量替换事务（[02 §1.3bis](./02-data-model.md)）
 4. **`sync` 编排 + 渠道级 advisory lock**：五项串行、逐项独立事务、逐项结果响应（[09 §5.0bis](./09-admin-api.md)）。**先把编排骨架和限流做对，再补 `FetchPricing`/`FetchModelCatalog`**——后两者行数最多、最容易掩盖编排缺陷
 5. **管理端点与脱敏断言**：`/admin/channels|accounts|keys` CRUD + `inventory`；CI 加断言"响应与日志中不出现完整 secret"（复用 M0 的 `sk-` 前缀守卫，扩到新端点）

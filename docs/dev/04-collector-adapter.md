@@ -4,13 +4,13 @@
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
-| 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 三家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
+| 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 逐家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
 | 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md)、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)、[00 总览](./00-overview-and-milestones.md)、[01 架构](./01-architecture.md) |
 | 覆盖 FR | FR-010/011/012/013/017/018、FR-020～032、FR-116（⏭ FR-033～039 订阅采集移入二期，[15 §1.2](./15-scope-and-preflight.md)） |
 | 覆盖 AC | AC-17、AC-28、AC-29（⏭ AC-20～24 订阅制维持二期） |
 | 里程碑 | M3 元数据采集（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
 
-> **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；ASXS 是闭源自建平台，**一站一适配器，不可复用、不作探测基准**。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
+> **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；**全自研站**（闭源面板、自建平台）**一站一适配器，不可复用、不作探测基准** —— 接入路径见 §7bis「全自研站怎么接」。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
 
 ---
 
@@ -41,8 +41,8 @@ type Family string
 const (
 	FamilyNewAPI  Family = "newapi"
 	FamilySub2API Family = "sub2api"
-	FamilyASXS    Family = "asxs"
 	FamilyUnknown Family = "unknown"
+	// 加一族的落点只有两处：这里一个常量 + 一份 Registration（§7bis）
 )
 
 // Capability 即接口里除 detect/authenticate/capabilities 外的每个 fetch 能力
@@ -54,7 +54,7 @@ const (
 	CapGroups             Capability = "groups"
 	CapSubscriptionQuotas Capability = "subscription_quotas"
 	// ⏭ 一期**所有站型**一律返回 unsupported（订阅制整体移入二期，[15 §1.2](./15-scope-and-preflight.md)）。
-	//    此前 Sub2API/ASXS 的 Capabilities() 标 supported 而 FetchSubscriptionQuotas 又返回
+	//    此前有站型的 Capabilities() 标 supported 而 FetchSubscriptionQuotas 又返回
 	//    ErrUnsupported —— 自相矛盾，且 M3 的 AC-28 要求「能力矩阵与实现一致」，照原文必挂（第 18 轮 [high]）。
 	CapPricing            Capability = "pricing"
 	CapModelCatalog       Capability = "model_catalog"   // FR-126（P1 新增）
@@ -132,7 +132,7 @@ type Session struct {
     Family      Family
     BaseURL     string
     AccessToken string
-    RefreshToken string    // 仅 Sub2API 有；ASXS 无 refresh，到期须账密重登（§5）
+    RefreshToken string    // 仅有 refresh 路径的站型有；无令牌端点的站型到期须账密重登（§5）
     UserID      string     // NewAPI 的数字用户 ID，用于 New-API-User 头
     ExpiresAt   time.Time  // 令牌到期；提前 ExpiryGrace 续期
     Headers     map[string]string // 每次请求都要带的固定头
@@ -169,7 +169,7 @@ type ManualReserve struct {
 }
 ```
 
-**分页、限流与重试（三家族统一约定）**：
+**分页、限流与重试（全家族统一约定）**：
 
 | 项 | 约定 |
 | --- | --- |
@@ -238,7 +238,7 @@ type CatalogModel struct {
 }
 
 type SubscriptionQuota struct {
-	OwnerKey       string    // 共享额度归集键：Sub2API 为 (user,group)，ASXS 为 (user,plan)（FR-035）
+	OwnerKey       string    // 共享额度归集键：Sub2API 为 (user,group)；无 group 概念的站型按 (user,plan)（FR-035）
 	PlanRef        string
 	StartsAt, ExpiresAt time.Time
 	Status         string    // active / expired / suspended
@@ -251,9 +251,13 @@ type SubscriptionQuota struct {
 	FixedFeeUSD    float64   // 固定费用（算用满倍率，FR-057）
 	DurationDays   int       // 有效期天数（算用满倍率）
 	RateMultiplier float64
-	PrimarySource   string   // 额度来源优先级（ASXS primarySource，FR-033/8.5）
+	// ⏭ 下面三个字段（含 FixedFeeUSD/DurationDays）都是 P4 订阅制的形状，
+	//    取自一家**已移出支持范围**的自研站的实测（原 §3.3）。留着是因为 FR-033/036/057
+	//    还引用它们，但**做 P4 时必须按当时真实纳管的站型重新实测** —— 现役两族都没有
+	//    这些概念，照这个形状写会得到一组没有数据源的列（[02 §0.3](./02-data-model.md) 同理）。
+	PrimarySource   string   // 额度来源优先级（订阅先扣还是余额先扣，FR-033/8.5）
 	SecondarySource string
-	ManualResetPolicy *ManualReset // 可主动重置额度（ASXS dailyReset，FR-036 外生变量）
+	ManualResetPolicy *ManualReset // 可主动重置额度（FR-036 的外生变量）
 	Overage        *OverageRule // Sub2API 系恒为 nil（无超额）
 	Meta           SourceMeta
 }
@@ -269,8 +273,9 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- |
 | 1 | `GET /api/status` | 返回含 `quota_per_unit`、`turnstile_check`、`checkin_enabled` | **NewAPI 系** → 复用 `NewApiAdapter` |
 | 2 | `GET /api/v1/settings/public` | 返回含 `site_name`、`turnstile_enabled`、envelope `{code,message,data}` | **Sub2API 系** → 复用 `Sub2ApiAdapter` |
-| 3 | `GET /api/public/site-config` | 200 且 JWT `iss` 为 `ampmanager` | **ASXS 系** → 专属 `AsxsAdapter` |
-| 4 | 全未命中 | —— | **未知家族** → §7 接入流程，新建专属适配器 |
+| 3 | 全未命中 | —— | **未知家族** → §7 接入流程，新建专属适配器 |
+
+> 顺序即注册表切片的顺序：**判据越通用的放越前面**。新加的自研站放最后 —— 它的判据只认自己那一站，放前面只是让另外两族每次多一跳无谓的探测。
 
 **二开兼容要点**：NewAPI 系即使命中顺序 1，用户 ID 头名仍可能不同，探测阶段不确定，`Detect` 只归族；`UserIDHeader` 由 `Authenticate` 阶段 fan-out 试探（§3.1）。`quota_per_unit` 也逐站从 `/api/status` 读取，**不写死**（upstream-d.invalid 为 500000）。
 
@@ -278,7 +283,7 @@ type SubscriptionQuota struct {
 
 ---
 
-## 3. 三家族实现要点与字段映射
+## 3. 现役家族实现要点与字段映射
 
 ### 3.1 NewAPI 系（upstream-d.invalid 已验证）— 无订阅对象
 
@@ -369,53 +374,40 @@ type SubscriptionQuota struct {
 ```
 （价格倍率经 `/api/v1/groups/available.rate_multiplier` 与分组耦合，非独立价格表，标 `degraded`。）
 
-### 3.3 ASXS Codex 系（upstream-f.invalid 已验证）— 订阅数据最完整，专属不可复用
+### 3.3 全自研站（**已无现役样本**，第 48 轮）
 
-| 项 | 结论 |
-| --- | --- |
-| 底层产品 | JWT `iss:"ampmanager"`、`aud:"ampmanager-users"` —— 闭源 AMP Manager，**非任何开源项目** |
-| 命名空间 | `/api/me/*`（用户数据，Bearer JWT）、`/api/public/*`（公开）、`/api/manage/auth/*`（登录）、`/api/auth/*`+`/api/user/*`（API-Key 代理，与仪表盘 JWT 不通用） |
-| 鉴权 | JWT `Authorization: Bearer`，localStorage 键 `token`；**有效期 168 小时（7 天）**，无 cookie |
-| 续期 | ❌ **无任何静默续期**（无 refresh_token、无 refresh claim、`/api/me/refresh` 等全 404、页面加载无 auth 调用）。唯一续法：`POST /api/manage/auth/login` **账号密码重登**换新 7 天 JWT（§5） |
-| 额度单位 | micros（`limitMicros:90000000`=$90）；`金额(USD)=micros/1e6` |
-| 专属性 | ⚠️ **本适配器专属，不可复用、不作探测基准**（命名空间/micros/JWT claim 均与 NewAPI/Sub2API 零重叠） |
+此前这里有一份闭源自建平台的逐字段实测表（专属适配器、micros 额度单位、7 天 JWT 无 refresh）。
+**该站已移出支持范围**（2026-08-29 决定，见 [00 §3bis](./00-overview-and-milestones.md)），
+适配器与注册一并删除，故本节不再有具体站点。
 
-**字段映射（`/api/me/billing/state` —— FR-033 要求字段几乎全覆盖）：**
+**但接入路径保留且已抽象成清单** —— 见 §7bis「全自研站怎么接」。那份清单里的每一条
+都来自这次实测：命名空间与开源项目零重叠、额度单位自成一套、指纹在 JWT claim 里而不在
+JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站的特例，而是"自建面板"这个类别
+的常见形态，所以清单值得留，样本不必留。
 
-| fetch | 端点 | 源字段 | → 字段 / FR |
-| --- | --- | --- | --- |
-| `FetchAccount` | `/api/me/balance`、`/api/me/profile` | `balanceUsd`（字符串）、`limitMicros` | `BalanceUSD`（FR-020） |
-| `FetchSubscriptionQuotas` | `/api/me/billing/state` | `planId`/`planName`、`startsAt`、`expiresAt`、`limits[].limitType`+`windowMode`、`limits[].limitMicros`、`limits[].fixedResetTime`、`status`、`usedMicros`/`leftMicros`、`remainingDays` | `PlanRef/StartsAt/ExpiresAt/Period/WindowMode=fixed/LimitUSD/ResetAt/Status/UsedUSD/LeftUSD`（FR-033～039） |
-| `FetchSubscriptionQuotas`（固定费用） | `/api/me/purchase/products`（16 套餐） | `priceCnyCent`、`durationDays`、`subscriptionPlanName`、`renewAllowed`、`renewalRule` | `FixedFeeUSD`（priceCnyCent 一期 1:1 归一美元）、`DurationDays` —— **双倍率用满倍率的全部输入**（FR-057/058、AC-24） |
+⚠️ **接新的自研站时不要照本节的历史结论写代码** —— 它描述的是另一家站。
+按 §7 的流程重新实测，按 §7bis 的清单落字段。历史探针记录仍在
+[ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 与
+[ISSUE-003](../issues/ISSUE-003-runtime-feedback-requirement-candidates.md)（保留原站名，
+那是当时用了什么方法的史实）。
 
-**两个关键额外字段（原 PRD 未预见，已并入 FR-033）：**
+### 3.4 能力矩阵总表
 
-- `primarySource:"subscription"` / `secondarySource:"balance"` → `PrimarySource/SecondarySource`，即平台**自身**的额度消耗优先级。不读会错判订阅额度是否真被消耗（FR-033、8.5）。
-- `dailyReset`（`usageThresholdPercent:90%`、`dailyLimit:4` 次/日）→ `ManualResetPolicy`，可主动争取的额外额度，是 FR-036 到期未用预测的**外生变量**。
+> 这张表**逐格**被 `adapters_test.go` 的 `TestCapabilitiesMatchDocMatrix` 对照（AC-28 的核心判据）。
+> 加一族要同时改这里与那张表 —— 那条断言对"没进表的家族"会报错而不是空过。
 
-> 实测当下即一个真实"额度浪费"案例：该订阅 2 天后到期、当日 $90 额度 `usedMicros=0` → 可直接作 FR-036/FR-039 验收用例（AC-20/AC-21）。
-
-**Capabilities：**
-```
-{account: supported, keys: unsupported, groups: unsupported, pricing: degraded,
- model_catalog: degraded, subscription_quotas: **unsupported（一期）**}
-```
-（ASXS 无独立 Key/分组管理视图；价格并入套餐 products，标 `degraded`。）
-
-### 3.4 三家族能力矩阵总表
-
-| Capability | NewAPI | Sub2API | ASXS |
-| --- | --- | --- | --- |
-| `account` | supported | supported | supported |
-| `keys` | supported | supported | unsupported |
-| `groups` | supported | supported | unsupported |
-| `subscription_quotas` | **unsupported** | **unsupported（一期）** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
-| `pricing` | supported（公开） | degraded | degraded |
-| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | supported（`/api/v1/groups/available` 带分组模型） | **degraded**（模型并入套餐 products，非独立目录端点） | 
-| 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 | JWT 7d，无 refresh，账密重登 |
-| 额度单位 | `quota/quota_per_unit` | USD 浮点 | `micros/1e6` |
-| 共享额度归集键 | Key 独立 | `(user,group)` | `(user,plan)` |
-| 超额计费 | N/A | **无超额**（用尽即阻断） | 有 `renewAllowed`/多订阅 |
+| Capability | NewAPI | Sub2API |
+| --- | --- | --- |
+| `account` | supported | supported |
+| `keys` | supported | supported |
+| `groups` | supported | supported |
+| `subscription_quotas` | **unsupported** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
+| `pricing` | supported（公开） | degraded |
+| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | supported（`/api/v1/groups/available` 带分组模型） |
+| 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 |
+| 额度单位 | `quota/quota_per_unit` | USD 浮点 |
+| 共享额度归集键 | Key 独立 | `(user,group)` |
+| 超额计费 | N/A | **无超额**（用尽即阻断） |
 
 ### 3.4bis `Degraded` 的运行时行为（**P1 必需**，第 45 轮补）
 
@@ -434,7 +426,7 @@ type SubscriptionQuota struct {
 - **三处 `degraded` 的具体含义**：
   - NewAPI `pricing`：无（它是 `supported`，`/api/pricing` 公开且完整）。
   - Sub2API `pricing`：倍率与分组耦合在 `/api/v1/groups/available`，**无独立模型价格表** → 目录里 `input_price`/`output_price` 可能为空，`MissingFields=["input_price","output_price"]`。
-  - ASXS `pricing` / `model_catalog`：模型与价格并入套餐 `products`，**非独立目录端点** → 只能取到套餐维度的模型名，逐模型单价缺失。
+  - 自研站的 `pricing` / `model_catalog` **多半也是 `degraded`**：自建面板常把模型与价格并入套餐页而没有独立目录端点 → 只能取到套餐维度的模型名，逐模型单价缺失。这一格该填什么由实测定，**不要照抄** —— 但要记得 `degraded` ≠ `unsupported`（判定口径见上一条）。
 - **`MissingFields` 的用途**：`inventory` 的异常项计数把它计入"待人工补录"（FR-011：采不到即人工录入 + 标来源 + 7 天有效期），而不是当成故障。
 
 ---
@@ -492,7 +484,7 @@ type SubscriptionQuota struct {
 - **`decrease` 未确认期间照常使用新价**：保守方向是"按更贵的算"，而低价会让 selector 更倾向选它——
   故未确认的降价**不参与"低价优选"排序**（与 §1.1 序 6 价格陈旧的处置一致），只作保底。
 
-> **ASXS 归集键差异**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。ASXS 无 group 概念，其 `group_id` 列填**套餐标识**（ASXS 按 `(user, plan)` 聚合，见 §3.4）；采集器负责把家族差异映射到统一列。
+> **无 group 概念的站型怎么落归集键**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。而自建面板常没有 group 这层，只有套餐 —— 那种站的 `group_id` 列填**套餐标识**（按 `(user, plan)` 聚合）；采集器负责把家族差异映射到统一列。⏭ 属 P4，做的时候按当时真实纳管的站型重新确认。
 
 > **双倍率落库分工**：`subscription_plan.用满倍率 = 固定费用÷周期额度×分组倍率`（调度排序，FR-057），`subscription_instance.实际倍率 = 固定费用÷实际消耗×倍率`（账务报表，FR-058）。采集器只提供两者的**原料**（`FixedFeeUSD`、`DurationDays`、`LimitUSD`、`UsedUSD`、`RateMultiplier`），倍率计算由 `steward`/账本完成，不在采集器内。
 
@@ -500,7 +492,7 @@ type SubscriptionQuota struct {
 
 ## 5. 凭证生命周期状态机（核心风险区）
 
-三家族**都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分三套状态机，均以 `collector_credential` 持久化为唯一真相。
+**任何家族都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分套状态机（现役两套 + 账密重登一套，§5.3），均以 `collector_credential` 持久化为唯一真相。
 
 **两列的持久化落点**（第 40 轮补：`collector_credentials.user_id_header_name` 与 `refresh_lock_key`
 建好后**零引用** —— §3.1 的 fan-out 结果只写进内存 `Session.UserIDHeader`，进程一重启就得重新试探
@@ -545,16 +537,25 @@ type SubscriptionQuota struct {
 设备绑定: 已确认 Sub2API 未开启 bnd 绑定, 服务端换 IP/UA 续期不被拒（风险解除）。
 ```
 
-### 5.3 ASXS JWT（7d，无 refresh，账密重登）
+### 5.3 账密重登（**无令牌端点的站型**，当前无现役样本）
+
+自建面板常只有登录表单、没有任何令牌端点 —— 那种站唯一的续期方式就是拿账密重新登录。
+这条路径的代码通路留着（`Registration.PasswdCredType` → `Credential.Username/Password` →
+`CredTypeFor` 的 `hasPasswd` 分支 → 库侧 `cred_type='account_password'`），
+现役两族都不走它。形状如下：
 
 ```
-[持有 JWT] --正常采集 (Authorization: Bearer)--> [持有 JWT]
-[持有 JWT] --剩余有效期 < 阈值(建议 <1 天)--> [重登中] --POST /api/manage/auth/login {username,password}--> [持有新 7d JWT]
-[持有 JWT] --401--> [重登中]
+[持有令牌] --正常采集 (Authorization: Bearer)--> [持有令牌]
+[持有令牌] --剩余有效期 < RefreshLead--> [重登中] --POST <该站的登录端点> {username,password}--> [持有新令牌]
+[持有令牌] --401--> [重登中]
 
-特性: 7 天有效期 → 重登频率极低(约每周 1 次), 风控压力小。
-约束: 必须持有账号密码才能续期（闭源平台固有约束, 无 refresh 路径）；账密一期明文存储(FR-113)。
+约束: 必须持有账号密码才能续期（无 refresh 路径的固有约束）；账密一期明文存储(FR-113)。
+阈值: 由 Registration.RefreshLead 定，按该站令牌有效期取 —— 有效期越长阈值可越宽松
+      （曾实测过一家 7 天 JWT 的站，取 <1 天重登，约每周 1 次，风控压力很小）。
 ```
+
+⚠️ **`RefreshLead` 与 `Refresher` 必须同时有** —— `registry_test.go` 第 4 条断言双向钉住：
+只声明阈值不实现 `Refresher` = 判定该续期却没有刷新器，到期一路 401。
 
 ---
 
@@ -564,10 +565,10 @@ type SubscriptionQuota struct {
 | --- | --- | --- |
 | **限速** | 同站点请求强制最小间隔（参考 all-api-hub `minIntervalLimiter`），避免触发风控；查询频率默认见 PRD §11（价格 6h / 余额校对 5～15min / 订阅 1h），可配置 | FR-116、参数10 |
 | **无盾确认** | 接入前必须确认 `turnstile_check:false`（NewAPI）/ `turnstile_enabled:false`（Sub2API）。**开盾站点服务端采集不可行**，须转人工录入。已实测 upstream-d.invalid、molifang 均无盾 | ISSUE-002 §5 |
-| **凭证互斥作废** | 见 §5 三套状态机：NewAPI 令牌只生成一次、Sub2API 按账号串行刷新、ASXS 账密重登 | ISSUE-002 §4 |
+| **凭证互斥作废** | 见 §5 的状态机：NewAPI 令牌只生成一次、Sub2API 按账号串行刷新、无令牌端点的站型账密重登 | ISSUE-002 §4 |
 | **降级一致性** | 任何字段采集失败一律落 FR-011：人工录入 + 数据来源标注 + **7 天有效期** + 过期按"订阅数据未知"降级（订阅状态机进"数据未知"，PRD §9.3）。**不允许用陈旧数据驱动订阅倾斜** | FR-011、AC-28 |
 | **余额信号输入** | 采集器提供"账户/Key 余量是否归零"的判据，供 `steward` 的余额不足信号自适应识别框架（错误文案正则 + 失败信号 + 余量归零）判定资源置"耗尽" | FR-027、AC-29 |
-| **额度归一** | 三家族 `quota/quota_per_unit`、USD 浮点、`micros/1e6` 一律在适配器内归一为数值美元，一期各币种 1:1（币种仅名称） | FR-018、AC-17 |
+| **额度归一** | 各家族的额度单位（NewAPI `quota/quota_per_unit`、Sub2API USD 浮点，自建站还可能是 micros 之类自成一套的单位）**一律在适配器内归一为数值美元**，一期各币种 1:1（币种仅名称）。归一必须在适配器里做完 —— 让单位漏到上层，等于让每个消费方各猜一次换算基数 | FR-018、AC-17 |
 
 ---
 
@@ -579,7 +580,7 @@ type SubscriptionQuota struct {
 
 ### 7bis 站型注册表（**加站型的唯一落点**，第 47 轮）
 
-> 上游站点异构程度高且**会继续增加**：除三家族本身，实测已有魔改站（`veloera`/`rix-api` 是 NewAPI 的二开），还会有全自研平台（ASXS 就是一例）。这一节定义"加一个站型要动哪里"。
+> 上游站点异构程度高且**会继续增加**：除现役两族本身，实测已有魔改站（`veloera`/`rix-api` 是 NewAPI 的二开），也会遇到全自研平台（已实测过一家，虽已移出支持范围，但那类站还会有）。这一节定义"加一个站型要动哪里"。
 
 **此前散在九处**，每处漏改的后果不同：
 
@@ -595,7 +596,7 @@ type SubscriptionQuota struct {
 | 8 | 导入侧的 `credType` 映射 | 同上，批量导入路径 |
 | 9 | 导入侧的别名表 | 导出声明认不出来，"声明与探测不符"的比对静默失效 |
 
-**收敛后：一份 `Registration` + 一个 `Adapter` 实现。** 判据是**只有逐家族真的不同的东西才进注册表** —— 三家族一致的行为不是变化点而是常量，给它开字段只会让下一个站型以为自己必须填。据此第 4 处**被删掉而不是收进表**：三家族的鉴权头都是 `Bearer <token>` + 有头名则带用户 ID 头，那个 switch 表达的是零个变化点。
+**收敛后：一份 `Registration` + 一个 `Adapter` 实现。** 判据是**只有逐家族真的不同的东西才进注册表** —— 各族一致的行为不是变化点而是常量，给它开字段只会让下一个站型以为自己必须填。据此第 4 处**被删掉而不是收进表**：收表当时的三个家族（含后来移出的那一族）鉴权头都是 `Bearer <token>` + 有头名则带用户 ID 头，那个 switch 表达的是零个变化点。
 
 | `Registration` 字段 | 取代原来的 | 备注 |
 | --- | --- | --- |
@@ -606,9 +607,53 @@ type SubscriptionQuota struct {
 | `RefreshLead` | 5 | `0` = 永不主动续期（NewAPI 的不变式 N-1，§5.1） |
 | `New` | 3 | **是否支持续期不在注册表里声明** —— 由适配器有没有实现 `Refresher` 决定（类型断言），声明与实现因此不可能不一致 |
 
-**魔改站怎么接**：`veloera`/`rix-api` 改的是用户 ID 头名与分页信封，前者由 `Authenticate` 的 fan-out 试探（§3.1），后者 `unwrapDataList` 两个分支都吃 —— 所以魔改站 = **同一个 `New`，只加 `Aliases`**，不写新适配器。
+#### 魔改站怎么接
 
-**全自研站怎么接**：一份注册 + 一个实现 `Adapter` 的文件，ASXS 就是这条路径的活样本（§3.3）。
+`veloera`/`rix-api` 改的是用户 ID 头名与分页信封，前者由 `Authenticate` 的 fan-out 试探（§3.1），后者 `unwrapDataList` 两个分支都吃 —— 所以魔改站 = **同一个 `New`，只加 `Aliases`**，不写新适配器。
+
+**先判断是魔改还是自研**：能命中 `/api/status` 或 `/api/v1/settings/public` 的就是魔改（顺着上面走），全未命中才是自研（走下一段）。判错的代价不对称 —— 把魔改站当自研站接会白写一个适配器，而把自研站当魔改站接会让字段映射整片错位，且**不报错**。
+
+#### 全自研站怎么接
+
+**落点只有两个文件**：`register_<族>.go`（一份 `Registration`）+ `<族>.go`（一个实现 `Adapter` 的类型）。
+`registry.go`、`detect.go`、`auth.go`、`httpx.go`、界面、库结构**都不用改** —— 下表逐格说明为什么不用改，
+以及每个决策点该落在哪个字段。
+
+> **刻意不留 stub 适配器。** 一个没有真站点的 `selfhosted.go` 骨架正是
+> [CLAUDE.md §1](../../CLAUDE.md) 那个坑：它编码的是"自研站长什么样"的猜测，
+> 而它永远不会推翻那个猜测。所以留清单不留骨架。
+
+| 决策点 | 落在哪 | 填错时哪道守卫会红 |
+| --- | --- | --- |
+| 判族用哪个公开端点 | `ProbePath` | 空 → `TestRegistrationsComplete`；探测不到不会红，**只会静默归 unknown**（所以要先手工 curl 确认） |
+| 指纹怎么认 | `Match(m, raw)` | 空 → 同上。指纹**不在 JSON 顶层**时读第二个参数 `raw`：解析失败时 `m` 为 nil 而 `raw` 仍有原文（`TestDetectPassesRawBodyToMatch` 钉住这条通路） |
+| 探测顺序 | 切片位置，**放最后** | 不红。判据只认自己一站，放前面只是让另外两族多一跳 |
+| 版本 / 无盾 / 额度换算基数 | `Extract` | 不填不红（都是可选信息），但无盾没确认就接入违反 §6 |
+| 导出数据里的自称 | `Aliases` | 重复或非小写 → `TestAliasesUniqueAcrossFamilies`。⚠️ **只填实测见过的值** |
+| 凭证形态 | `CredType` + `RequiresUID`/`PasswdCredType` + `CredNote` | 任一为空（除两个可选项）→ `TestRegistrationsComplete`。库侧 `cred_type` 的 CHECK 要同步加一条迁移，否则**登记时才报约束冲突** |
+| 只能账密重登 | `PasswdCredType` 非空 | 不红。填了它，界面的账号/密码字段**自动出现**（`SiteFamilyInfo.allows_password` → `CredsView` 的 `allowsPassword`），不用改前端 |
+| 要不要主动续期 | `RefreshLead` + 适配器实现 `Refresher` | 单边 → `TestRefreshLeadMatchesRefresherImplementation`（双向）。`0` = 永不主动续期 |
+| 额度单位（micros 之类） | 适配器内部，**归一为美元后再返回** | 不红。漏了会让上层每个消费方各猜一次换算基数（§6 末行） |
+| 采不到的对象 | `Capabilities()` 里标 `unsupported`，方法返回 `ErrUnsupported` | `TestUnsupportedDeclarationsReturnErrUnsupported`（双向）+ `TestCapabilitiesMatchDocMatrix`（要同时写进 §3.4 那张表，漏了会报"不在本表里"） |
+| 采得到但不全 | 标 `degraded`，返回数据 + `nil` + `SourceMeta.MissingFields` | 同上。⚠️ `degraded` **不得**返回 `ErrUnsupported`（§3.4bis 的判定口径） |
+| `Family` 常量 | `collector.go` 的常量块 | 加了常量忘了注册 → `TestEveryFamilyConstantIsRegistered`（它扫源码，所以不用维护清单） |
+
+**接入前必须先做的两件事**（顺序不能反）：
+
+1. **手工打一遍真站点**，把 `ProbePath` 的响应原文、余额端点的字段名与**类型**（数字还是字符串）记下来。
+   照文档或照想象写夹具是本仓库踩过两次的坑（[CLAUDE.md §1](../../CLAUDE.md)）。
+2. **确认无盾**（§6）。开盾站服务端采集不可行，要走 FR-011 人工录入，不是写适配器。
+
+> **上表的"哪道守卫会红"已逐格实测**（2026-08-30）：真往注册表注入一族 `probe`
+> 假家族，按每格各犯一次错，看点名的守卫是否真的红。六格全按表所述地红，
+> 且每条错误信息都点出后果（不只是"断言失败"）。**其中 `TestCapabilitiesMatchDocMatrix`
+> 在每种注入下都红** —— 注册一族而不写进 §3.4 矩阵是不可能的，它是最硬的一道。
+> `PasswdCredType` 那格另用真 Chrome 验过三轮（声明 → 撤回 → 再看），
+> **前端产物指纹三轮不变**而字段随后端声明出现/消失。测量记录见
+> [P1-evidence §5.14](../acceptance/P1-evidence.md)。
+>
+> 这段验证的必要性就在表本身：**"填错了会被 X 拦下"是个断言，没红过的断言不算断言。**
+> 表写好而守卫其实空转，比没有表更糟 —— 接站的人会照着表省掉自查。
 
 **"漏一处"的检出**（`registry_test.go`，全是对注册表的静态断言，不新增任何 mock）：
 

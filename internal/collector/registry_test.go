@@ -26,11 +26,19 @@ func TestEveryFamilyConstantIsRegistered(t *testing.T) {
 		t.Fatalf("读 collector.go: %v", err)
 	}
 	ms := famConstRE.FindAllStringSubmatch(string(src), -1)
-	if len(ms) < 4 {
-		// 正则失配会让这条断言空过 —— 扫到的常量数少于已知的四个即报，
-		// 否则改了常量的写法就会静默失去整条守卫。
-		t.Fatalf("在 collector.go 里只扫到 %d 个 Family 常量（预期 ≥4）"+
-			"—— 常量写法变了？本断言的正则要跟着改，否则它在空转", len(ms))
+	// 正则失配会让这条断言空过（扫到 0 个常量 → 循环不执行 → 绿），
+	// 所以先钉住"扫到的数量"。
+	//
+	// 下界**由注册表推导**：已注册家族各一个常量，加 unknown 哨兵一个。
+	// 原先写死 4，而删掉一族之后它会红在这里 —— 那次红报的是"常量写法变了"，
+	// 与真实原因无关，于是唯一的修法是把 4 改成 3，也就是**每次加删家族都要
+	// 手改这个数**。手改的数字迟早会被改成"让它变绿的那个值"，那时整条守卫
+	// 就静默失效了（本仓库踩过：test-migrate.sh 的 `-ge 45` 在删了 28 张表
+	// 之后照样绿，见 016 头部）。推导则不需要人动。
+	if want := len(All()) + 1; len(ms) < want {
+		t.Fatalf("在 collector.go 里只扫到 %d 个 Family 常量（预期 ≥%d："+
+			"%d 个已注册家族 + unknown 哨兵）—— 常量写法变了？"+
+			"本断言的正则要跟着改，否则它在空转", len(ms), want, len(All()))
 	}
 	for _, m := range ms {
 		name, val := m[1], Family(m[2])

@@ -10,14 +10,18 @@
 // ── 站型与枚举 ───────────────────────────────────────────────────────────────
 
 /**
- * 站点家族。ASXS 一期不纳管，但后端仍可能返回，所以类型里保留。
+ * 站点家族。
  *
  * ⚠️ 真相源是后端的站型注册表（internal/collector/registry.go），不是这一行。
  * 这里只是给编辑器用的当前快照 —— 加站型时它会**落后而不报错**（值从 JSON 来，
  * TS 管不着）。所以界面的站型下拉不读这个联合类型，读 `/admin/site-families`，
  * 见 SiteFamilyInfo。
+ *
+ * 刻意**不写成 `| (string & {})`**（那样能兼容任何新族）：放宽之后
+ * `family === '某个已删的族'` 也不再是类型错误，而删族时正需要 TS 把残留的
+ * 比较全指出来。宁可加族时来改这一行 —— 那一次改是有人在场的。
  */
-export type SiteFamily = 'newapi' | 'sub2api' | 'asxs' | 'unknown'
+export type SiteFamily = 'newapi' | 'sub2api' | 'unknown'
 
 /** 一个已注册站型（GET /admin/site-families，对着 listSiteFamilies 的 item 写）。 */
 export interface SiteFamilyInfo {
