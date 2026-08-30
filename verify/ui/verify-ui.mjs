@@ -399,9 +399,16 @@ try {
   const hasQuota = keyCells.some(c => c[3].startsWith('$'));
   check('Key 剩余额度已归一为美元显示', hasQuota,
     keyCells.map(c => c[3]).join(' '));
-  // FR-127「登记与展示」的展示端。这里**只能断言列存在且值取自 API**，不能
-  // 断言"有数字"—— 实测 newapi 的 /api/token 不给 Key 级 RPM/并发，真站点就是
-  // 「—」。若哪天改成断言有数字，就得靠 mock 才能绿，那正是 CLAUDE.md §1 禁的。
+  // FR-127「登记与展示」的展示端。**不能断言"有数字"**—— 实测 newapi 的
+  // /api/token 不给 Key 级 RPM/并发，真站点就是「—」。断言有数字就只能靠 mock
+  // 才绿，那正是 CLAUDE.md §1 禁的。
+  // 比对时**剥掉全部空白**：模板里 " / " 分隔符独占一行，Vue 的 whitespace
+  // condense 会把它周围的换行缩掉，渲染出来到底是 "60 rpm / 3 并发" 还是
+  // "60 rpm/3 并发" 取决于编译器行为而非我们的意图。而 newapi 不报 Key 级限流，
+  // 「两个都有」这一支在真站点上跑不到 —— 断言若绑死空格，就会在某个家族
+  // 真的两个都报时才炸，而那时没人记得是空格的事。数字、单位、分隔符、
+  // 有无值这些**真内容**剥空白后一个不少。
+  const squash = s => s.replace(/\s+/g, '');
   const rlCells = await page.$$eval('#detail-body tbody tr td[data-rl]',
     ts => ts.map(t => t.textContent.trim()));
   check('Key 上游限流列已渲染（FR-127 展示端）',
@@ -414,11 +421,22 @@ try {
     const d = await r.json();
     return (d.items ?? []).map(k => [k.rpm_limit ?? null, k.concurrency_limit ?? null]);
   }, newChannelId);
-  const apiSaysNone = rlFromAPI.every(([r, c]) => r === null && c === null);
-  check('限流列与 API 字段一致（有值显数字、无值显 —，不是写死）',
-    apiSaysNone ? rlCells.every(t => t === '—')
-      : rlCells.some(t => /\d/.test(t)),
-    `API=${JSON.stringify(rlFromAPI)} DOM=${rlCells.join('|')}`);
+  // 由 API 字段**构造**期望串再逐行比对，而不是分「有值/无值」两条断言路径 ——
+  // 分路径的那版里，"有值"那支在 newapi 上永不执行（pick-upstream 只选 newapi 系，
+  // 而它不报 Key 级限流），等于一半断言从没跑过。构造式只有一条路径，
+  // 两种数据都覆盖，且更强：无值时不只验"是 —"，验的是"恰好是 API 说的那个"。
+  // 与 KeysView.vue 的模板同构：rpm→"N rpm"、并发→"N 并发"、都有→中间 " / "、
+  // 都无→"—"。DOM 侧已折叠连续空白，所以这里也用单空格拼。
+  const rlWant = rlFromAPI.map(([r, c]) => {
+    const parts = [];
+    if (r !== null) parts.push(`${r} rpm`);
+    if (c !== null) parts.push(`${c} 并发`);
+    return parts.length === 0 ? '—' : parts.join(' / ');
+  });
+  check('限流列逐行等于 API 字段构造出的串（不是写死、也不是错位）',
+    rlCells.length === rlWant.length
+      && rlCells.every((t, i) => squash(t) === squash(rlWant[i])),
+    `期望=${JSON.stringify(rlWant)} 实际=${JSON.stringify(rlCells)}`);
 
   await page.screenshot({ path: `${SHOT}/08-keys.png`, fullPage: true });
 

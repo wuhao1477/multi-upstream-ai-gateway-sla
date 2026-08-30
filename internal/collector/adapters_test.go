@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -730,6 +731,46 @@ func TestClientRateLimitsPerHost(t *testing.T) {
 	}
 	if hits != 3 {
 		t.Errorf("实际请求 %d 次", hits)
+	}
+}
+
+// 限速表不得随"见过多少 host"单调增长。
+//
+// 采集器是长驻进程，65 个渠道跨若干站点，加上跳转/多域名，`last` 只增不减
+// 意味着进程活多久它就多大。过期条目（占位时刻早于 now-MinInterval）再取出来
+// 算 sleep 也必然 ≤0，对限速判定毫无作用。
+//
+// 直接调 wait 而不打 HTTP：要验的是表的收缩，跟传输无关。
+// 这里的 sleep 是**被测语义本身要求的**（条目按墙钟过期），不是"睡一会儿盼着
+// 异步完成"——且慢机器只会让表更小，断言方向上不可能假红。
+func TestRateLimitTableDoesNotGrowUnbounded(t *testing.T) {
+	const interval = 20 * time.Millisecond
+	c := NewClient(interval)
+	ctx := context.Background()
+
+	for i := 0; i < 50; i++ {
+		if err := c.wait(ctx, fmt.Sprintf("host-%d.example", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.mu.Lock()
+	grew := len(c.last)
+	c.mu.Unlock()
+	// 先确认真的装进去了 —— 否则后面的"变小了"可能只是因为一直是空表
+	if grew < 2 {
+		t.Fatalf("50 个 host 只记下 %d 条，这个用例没在测它想测的东西", grew)
+	}
+
+	time.Sleep(interval + 10*time.Millisecond) // 让上面那批全部过期
+	if err := c.wait(ctx, "trigger.example"); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	after := len(c.last)
+	c.mu.Unlock()
+	// 只应剩刚写进去的那条（慢机器上可能更少都不会，因为它刚写；更多则说明没清）
+	if after > 1 {
+		t.Errorf("过期后表里仍有 %d 条（清理前 %d 条），限速表在无界增长", after, grew)
 	}
 }
 

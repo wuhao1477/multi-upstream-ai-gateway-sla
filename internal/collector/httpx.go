@@ -61,6 +61,16 @@ func (c *Client) wait(ctx context.Context, host string) error {
 	}
 	// 提前占位，避免并发请求都读到同一个 prev 而一起放行
 	c.last[host] = now.Add(sleep)
+	// 顺手清掉已无意义的条目：占位时刻早于 now-MinInterval 的条目，
+	// 再取出来算 sleep 也必然 ≤0，留着只是让 map 随"见过多少 host"单调增长。
+	// 扫描代价与**清理后**的规模同阶：清理把 map 压到"最近一个间隔内活跃的 host"
+	// （单渠道同步时通常 1~2 个），所以这个 O(n) 是自限的，不需要按大小设阈值。
+	cutoff := now.Add(-c.MinInterval)
+	for h, t := range c.last {
+		if t.Before(cutoff) {
+			delete(c.last, h)
+		}
+	}
 	c.mu.Unlock()
 
 	if sleep <= 0 {
