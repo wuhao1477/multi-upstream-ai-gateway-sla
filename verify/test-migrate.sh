@@ -29,9 +29,21 @@ q() { docker exec "$CT" psql -U postgres -d sla -tAc "$1"; }
 echo "── 1/5 首次迁移 ──"
 go run ./cmd/migrate -dsn "$DSN"
 
-TABLES=$(q "select count(*) from information_schema.tables where table_schema='public'")
-echo "   public 表/视图数: $TABLES"
-[ "$TABLES" -ge 45 ] || { echo "❌ 对象数偏少（期望 ≥45）"; exit 1; }
+# 对象数从**迁移文本算出**再逐个比对，不再用 `≥45` 的下界。
+# 下界的毛病是每次阶段增删都得手改那个数字，而改它的方向永远是"调到能绿"——
+# 016 删掉 28 张表时它就正好还是绿的（45 之上），等于这条断言当时什么都没验。
+# 逐个比对则两个方向都会红：库里多一张（迁移外的手工 DDL）或少一张都报名字。
+WANT_RELS=$(python3 verify/check_migrations.py --relations)
+GOT_RELS=$(q "select table_name from information_schema.tables
+              where table_schema='public' and table_name<>'schema_migrations'
+              order by table_name")
+if [ "$WANT_RELS" != "$GOT_RELS" ]; then
+  echo "❌ 库里的表/视图与迁移不一致"
+  diff <(echo "$WANT_RELS") <(echo "$GOT_RELS") | sed 's/^/   /' || true
+  echo "   （< 迁移该建的  > 库里实际的）"
+  exit 1
+fi
+echo "   ✅ $(echo "$WANT_RELS" | wc -l | tr -d ' ') 个表/视图逐个对上（+ schema_migrations）"
 
 echo "── 2/5 种子：可种子化的键全部灌入 ──"
 # 期望值**从生成物算出**而不写死：72 键里 EnvSourced 的不落表
@@ -82,13 +94,44 @@ echo "   ✅ 已有值不被覆盖"
 q "update config_params set param_value='3'::jsonb
     where param_key='catalog_missing_rounds'" >/dev/null
 
-echo "── 5/5 分区子表真实存在（ddl-check 不覆盖这项）──"
-PARTS=$(q "select count(*) from pg_class c join pg_inherits i on c.oid=i.inhrelid
-           where c.relname like '%_2026_08'")
-[ "$PARTS" = "3" ] || { echo "❌ 分区子表 = $PARTS，期望 3（requests/attempts/attempt_usage）"; exit 1; }
-echo "   ✅ 3 张分区子表已挂载"
+echo "── 5/5 账本母表是分区表（ddl-check 不覆盖这项）──"
+# 016 之前这里断言"3 张 2026-08 子表已挂载"。那三张子表是 02 §9.1 的**示例**
+# DDL（写死月份），016 已删 —— 分区管理属运行期（定时任务或 pg_partman）。
+# 于是这条改断更耐久的那一半：母表确实以 PARTITION BY 建出（relkind='p'）。
+# 建成普通表会让 P2 上线后无法按月 DETACH+DROP，而那时表里已经有数据了。
+PARTED=$(q "select count(*) from pg_class
+            where relname in ('requests','attempts','attempt_usage') and relkind='p'")
+[ "$PARTED" = "3" ] || { echo "❌ 分区母表 = $PARTED，期望 3（requests/attempts/attempt_usage）"; exit 1; }
+echo "   ✅ 3 张账本母表均为分区表"
 
-# P1 三张新表与 upstream_keys 六列
+# 当前**没有任何分区**，这是 016 的既知后果，写成断言以免它被当成回归。
+# P2 写账本之前必须先落地分区管理，否则第一次 INSERT 报
+# "no partition of relation found for row"。
+PARTS=$(q "select count(*) from pg_inherits i join pg_class p on p.oid=i.inhparent
+           where p.relname in ('requests','attempts','attempt_usage')")
+[ "$PARTS" = "0" ] || {
+  echo "⚠️ 母表已有 $PARTS 个分区 —— 若已落地分区管理，请把 016 的告知与本断言一并更新"
+  exit 1; }
+echo "   ✅ 母表暂无分区（016 既知：P2 写账本前须先落地分区管理）"
+
+# 删分区**没有顺带删掉母表间的外键** —— 016 的头号坑，实测过一次真的会发生。
+# PG 给被引用分区表的每个分区各建一条子约束，`DROP ... CASCADE` 会顺着它把
+# attempt_usage → attempts 那条一起带走，且只打一行 NOTICE。丢了它，P2 写账本时
+# 野 attempt_id 无人拦。016 改用 DETACH+DROP 规避，这条断言盯住它别退回 CASCADE。
+FK=$(q "select count(*) from pg_constraint
+        where conrelid='attempt_usage'::regclass and contype='f'
+          and confrelid='attempts'::regclass")
+[ "$FK" = "1" ] || {
+  echo "❌ attempt_usage → attempts 的外键 = $FK，期望 1"
+  echo "   八成是删分区用了 DROP ... CASCADE（见 016 头部实测记录），改回 DETACH 再 DROP"
+  q "select '   现存外键: '||conname||' → '||confrelid::regclass from pg_constraint
+     where conrelid='attempt_usage'::regclass and contype='f'"
+  exit 1; }
+echo "   ✅ attempt_usage → attempts 外键仍在（删分区未顺带带走它）"
+
+# P1 三张新表与 upstream_keys 六列。
+# 与上面的逐个比对**不重复**：那条只保证"库 == 迁移文本"，两边一起少掉一张表时
+# 它照样绿（比如误删了 013 的建表）。这里点名 P1 真的要用的表，是独立的一道。
 for t in channel_groups group_models channel_model_catalog; do
   n=$(q "select count(*) from information_schema.tables where table_name='$t'")
   [ "$n" = "1" ] || { echo "❌ 缺 P1 表 $t"; exit 1; }

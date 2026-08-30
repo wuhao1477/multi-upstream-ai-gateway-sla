@@ -410,6 +410,110 @@ stub 看着像抽象税，但删它要动 [15 §1.2](../dev/15-scope-and-preflig
 文本里"声明必须与 `FetchSubscriptionQuotas` 的实际返回一致"。为省 27 行去改两条
 AC 的判据，不值 —— 而 P4 实现订阅时这三个方法本来就要回到接口上。
 
+### 5.12 放弃 M0「一次建全」：真库 55 → 27 个对象（2026-08-30）
+
+放弃"先把 02 的 53 张表全建出来、P2/P3/P4 慢慢填"。理由不是省磁盘，是
+**每次读 schema 的人都要先判断哪张表是活的**，而 28 张里一行数据都没有、
+一处代码都不碰。设计一张没删（02 里 DDL、索引、事务骨架原样保留），
+只是不提前 `CREATE`。决定与分组理由写在
+[`migrations/016`](../../migrations/016_drop_unbuilt_phase_tables.sql) 头部。
+
+**28 张而不是 40 张**：保留的 25 张里有 12 张 P1 同样不碰，是刻意的 ——
+6 张是 FR-112「禁正文列」守卫与分区断言的**靶子**（删了靶子守卫就没得守，而
+`TestForbiddenColumnGuardActuallyWorks` 专门反向验过那道守卫不是空转），
+另 6 张由 FK 闭包拉进来（删它们要一并删掉长在保留表上的外键）。
+
+**改 016 而不是改基线 001~012**：`migrate.go:151-158` 的 checksum 契约 ——
+已应用文件 checksum 不一致时 `return error` 且**不执行任何迁移**。真库已应用
+15 个文件，改基线会让那一栈直接起不来，换来的只是新环境省几百毫秒的
+"先 CREATE 再 DROP"。
+
+实测数（真库 SLA_DB @ <internal-db-host>，非推断）：
+
+| 项 | 应用前 | 应用后 |
+| --- | --- | --- |
+| `schema_migrations` | 15 | 16 |
+| public 表/视图 | 55 | **27** |
+| `attempt_usage` 的外键 | `…_fkey→attempts`, `…_fkey1→attempts_2026_08` | `…_fkey→attempts` |
+| channels / catalog / creds / groups / keys | 65 / 2782 / 65 / 203 / 2 | **完全不变** |
+
+删表前逐张数过行数：**28 张合计 0 行**（脚本从 016 现场抽表名，不手抄）。
+
+#### 一个只有真跑才看得见的坑：CASCADE 会带走母表间的外键
+
+原写法是 `DROP TABLE attempts_2026_08 CASCADE`。它**顺带删掉了
+`attempt_usage → attempts` 那条外键**，只打一行 `NOTICE`：
+
+```
+NOTICE:  drop cascades to constraint attempt_usage_attempt_id_request_created_at_fkey
+         on table attempt_usage
+```
+
+原因：PG 给"被引用方是分区表"的外键在**每个分区上各建一条子约束**，于是真库里
+除 `…_fkey → attempts` 还有一条 `…_fkey1 → attempts_2026_08`；CASCADE 顺着子约束
+把父约束一并带走。**读 02 的 DDL 看不出来** —— 那里写的是 `REFERENCES attempts`，
+子约束是 PG 自动派生的。后果是 P2 写账本时野 `attempt_id` 再没人挡，而这事无声。
+
+在一次性 PG 16 上把三种写法各跑一遍（`/tmp/fk_fix_probe.sh`，非推断）：
+
+| 写法 | 结果 |
+| --- | --- |
+| `DROP TABLE` 不带 CASCADE | 报错拒绝：`constraint … depends on table attempts_2026_08` |
+| **`DETACH PARTITION` 再 `DROP`** | 两条外键剩 `…_fkey → attempts`，**原名保留** ✅ |
+| `CASCADE` 后手工 `ADD CONSTRAINT` 补回 | 外键在，但换了名字，且多一次全表校验 |
+
+选 DETACH —— 它也正是 02 §9.1「清理方式」一栏写的退役方式。`test-migrate.sh`
+第 5 步新增一条断言盯住它别退回 CASCADE，破法验证过：把 016 改回
+`DROP … CASCADE`，得到 `❌ attempt_usage → attempts 的外键 = 0，期望 1`。
+
+#### 门禁改法：差集与延期清单**逐字相等**，不是"允许迁移少于文档"
+
+`check_migrations.py` 此前双向严格相等，现在两边不再要求逐张相同。用 `⊆`
+（允许迁移少）会让**漏加迁移**这件事静默 —— 而那正是这个脚本存在的唯一理由。
+改成把差集与穷举的 `DEFERRED_TABLES` 用 `!=` 比，两个方向都会红。另外三处：
+
+- `objects()` 算**净效果**（建完又删的不算存在）。只看 `CREATE` 会得出 28 张表
+  仍然存在，于是 DROP 迁移对门禁完全不可见。
+- 索引闭包**推导**而非手抄：`DROP TABLE` 不点名索引就把它们带走了。手抄 18 个
+  名字会带来一类新错误 —— 抄错时它同时从两边消失，比对照样绿。
+- 两条自检：清单里的表名必须真在 02 里，索引闭包不能为空。
+
+四次破法（每条先破一次拿到红，再还原）：
+
+| 破法 | 得到的红 |
+| --- | --- |
+| 016 里不删 `alert_events`（相当于"实现了却没从清单删"） | `延期清单里的对象迁移其实建了 …: alert_events, idx_alert_open, uq_alert_active` |
+| 从清单里去掉 `data_policies`（相当于"漏加迁移"） | `文档有、迁移无，且不在延期清单里（新环境会缺这些对象，运行时才炸）: data_policies, idx_data_policies_channel` |
+| 清单里把表名抄错成 `data_policys` | 三条红，含 `DEFERRED_TABLES 里这些表名在 02 中不存在` |
+| 让 `indexes_on` 的正则失效 | `延期表的索引闭包推导为空 —— indexes_on 的正则失效了？` |
+
+#### `test-migrate.sh` 的对象数断言此前是空的
+
+原文是 `[ "$TABLES" -ge 45 ]`。016 删掉 28 张表后库里剩 27 个对象 ——
+而这条断言在 55 和 46 上**同样绿**，等于它当时什么都没验。改成从迁移文本算出
+表/视图名再**逐个比对**，两个方向都报名字。破法：往 016 加一条
+`EXECUTE format('DROP TABLE %I …')`（正则看不见 `%I`，所以 `mig-check` 是绿的），
+逐个比对红在 `< balance_signals`。
+
+第 5 步同时改了判据：原先断言"3 张 `2026_08` 子表已挂载"，而那三张正是 016 删的
+（02 §9.1 里它们本就标着"例："）。改断更耐久的那一半 —— 母表确实以
+`PARTITION BY` 建出（`relkind='p'`）。
+
+**给 P2 的人**：母表现在**没有任何分区**，第一次往 `requests` 插行会报
+`no partition of relation found for row`。这不是回归，是本来就欠的那一步
+（02 §9.1「清理方式」一栏依赖的滑动窗口同样以它为前提）。已写成断言
+（`母表暂无分区`），落地分区管理时连同 016 的告知一起更新。
+
+验证：`make check` 全绿（含 `mig-check`）；`check_docs.py` 13 类通过；
+`ddl-check.sh` 109 条 DDL 在 postgres:16 通过（02 未删设计，仍是 54 个对象）；
+`test-migrate.sh` 5 步全绿；真库只读验收 **31/31**（应用 016 之后重跑）。
+
+> ⚠️ 跑真库验收时踩到一次**假的失败**：`:18390` 上还挂着 12 小时前的
+> `sla-remote-sla-core-1` 容器，本地二进制 bind 失败退出，而 `/healthz` 探测从
+> 那个旧容器拿到 200 —— 于是验收打在旧代码上，表现为"令牌无效 + 站型下拉是老的
+> 写死四项"。跑本地栈前先查端口占用，别只探 `/healthz`：它证明的是"有人在听"，
+> 不是"我起的那个在听"。
+
 ---
 
 _验收人：开发。判定依据 [14](../dev/14-acceptance-matrix.md) §3 规则 4：出现"基本正常""大致达标"视为未通过 —— 本文件的每一项都给了具体数值或 diff。_

@@ -53,6 +53,27 @@ CREATE DOMAIN nonneg_usd AS NUMERIC(20,10) CHECK (VALUE >= 0);
 - 枚举一律用 `TEXT + CHECK` 约束（便于扩枚举时不用 `ALTER TYPE`，迁移零锁表）。
 - `data_source` 取值：`auto_collect`（适配器自动采）/ `manual`（人工录入，7 天有效，FR-011）/ `upstream`（上游回传）/ `derived`（自算）。
 
+### 0.3 本篇是全阶段设计，`migrations/` 只建当前阶段用的表（第 47 轮）
+
+**放弃 M0 的「一次建全」**（2026-08-30）。原做法是把本篇 53 张表在 M0 一次
+`CREATE` 完，P2/P3/P4 慢慢往里写。代价是**读 schema 的人得先判断哪张表是活的** ——
+28 张里一行数据都没有、一处代码都不碰，而它们跟 25 张在用的表混在同一个库里。
+
+于是 [`migrations/016_drop_unbuilt_phase_tables.sql`](../../migrations/016_drop_unbuilt_phase_tables.sql)
+把那 28 张删掉（不是改基线 001~012 —— `migrate.go` 的 checksum 契约不允许，
+理由写在 016 头部）。**本篇的设计一张没删**：DDL、索引、事务骨架全部原样保留，
+届时由各阶段自己的迁移 `CREATE`。
+
+于是 §9.1bis 规则 3「以 `migrations/` 为准」现在要读成两句：
+
+- **本篇有、迁移无** → 该表属后续阶段，*设计*仍以本篇为准（P2 建表时照它写）。
+- **两边都有** → 该表已在用，*形态*以迁移为准（列名列类型不一致时改本篇）。
+
+哪 28 张属延期，由 `verify/check_migrations.py` 的 `DEFERRED_TABLES` **穷举声明**，
+`make mig-check` 逐字比对：往本篇加表却忘了写迁移会红（新环境缺表，否则要等到
+运行时才炸），实现了延期表却没从清单删也会红。**这里不重抄那 28 个名字** ——
+抄一遍就是第三份，而三份里总有一份先漂。
+
 ---
 
 ## 1. 资源注册域（账本与台账的外键基座）
@@ -2924,6 +2945,14 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 -- ALTER TABLE requests DETACH PARTITION requests_2026_01; DROP TABLE requests_2026_01;
 ```
 
+> ⚠️ **上面三条是示例，不是迁移。** 012 曾把它们照抄进迁移，016 已删（写死月份的
+> 分区留着不构成任何保护 —— `2026_08` 在 2026-09-01 就出窗口了）。**三张母表保留**
+> 且确实以 `PARTITION BY` 建出（`verify/test-migrate.sh` 第 5 步断言 `relkind='p'`）。
+>
+> **给 P2 的人**：母表现在**没有任何分区**，第一次往 `requests` 插行会报
+> `no partition of relation found for row`。上表「清理方式」一栏依赖的滑动窗口
+> 同样以此为前提。分区管理要在写账本之前落地，这不是回归而是本来就欠的那一步。
+
 ### 9.1bis DDL 可执行性门禁（**必须做，已三次栽在这里**）
 
 > 本文档的 DDL 曾出现三类**光看不出、一跑就炸**的错误：`attempt_usage` 双主键、`is_stale` 用 `now()` 做 stored generated column、`channels` 外键前向引用未创建的 `upstream_providers`。**人眼评审挡不住这类问题。**
@@ -2933,6 +2962,8 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 1. `migrations/` 的完整 DDL **必须在一次性 PostgreSQL 实例上真实执行成功**，才算 schema 基线通过。
 2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 执行一遍 `sqlc generate` → 全部成功才绿。
 3. 本文档的 DDL 与 `migrations/` **以后者为准**；文档变更若涉及 DDL，须同步迁移文件并通过门禁。
+   （第 47 轮起这条分两种情形读 —— 见 [§0.3](#03-本篇是全阶段设计migrations-只建当前阶段用的表第-47-轮)：
+   延期表只有本篇有，那是设计而非漂移。）
 4. 附加断言（[9.2](#92-保留策略配置化) 的 FR-112 守卫同批执行）：账本表禁止出现 `body/messages/prompt/headers` 命名列。
 
 > 建表顺序原则：**被引用的表先建**。当前依赖链为
