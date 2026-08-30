@@ -557,6 +557,54 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 ⚠️ **`RefreshLead` 与 `Refresher` 必须同时有** —— `registry_test.go` 第 4 条断言双向钉住：
 只声明阈值不实现 `Refresher` = 判定该续期却没有刷新器，到期一路 401。
 
+### 5.4 到期时间从哪来（`TokenExpiryFrom`，第 49 轮补，**修一个自锁缺陷**）
+
+上面三套状态机都以"剩余有效期 < `RefreshLead`"为触发条件，却没写**到期时间从哪读**。
+2026-08-30 全量采集实测暴露了后果：
+
+| 实测事实 | 值 |
+| --- | --- |
+| 65 渠道全量 sync 的续期动作 | **0 次** |
+| sub2api 渠道的鉴权结果 | **13/13 全 401** |
+| `collector_credentials.token_expires_at` 非空的行 | **0**（52 newapi + 13 sub2api 全为 NULL） |
+| 同表 `refresh_token` 非空的行 | **0** |
+| 这些 JWT 的 `exp` 声明 | 11 条可读出，**全部早已过期**（2026-03 ×6 / 04 ×1 / 06 ×1 / 07 ×1 / 08 ×2） |
+
+成因是三件事叠起来的：登记路径（`saveCredential`、导入侧）都不写
+`token_expires_at`，hub 导出里也没有这个字段；`NeedsRefresh` 见零值就返 `false`；
+而 401 没有被动恢复。于是 **`RefreshLead` 只在"已经续过一次之后"才生效** ——
+第一次续期永远等不到，这是个自锁。零值不等于"没有到期时间"，只等于"库里没记"。
+
+修法是让家族**自己声明到期时间能不能从令牌里读出来**：
+
+```go
+// Registration
+TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
+```
+
+- Sub2API 填 `jwtExpiry`：base64 解 payload 取 `exp`。**不验签**，读的是我方自己
+  库里已存的令牌，只用来决定"要不要提前刷"，**不能用来做任何授权决定**。
+- NewAPI 留 `nil`：长期令牌本就没有到期时间，且不变式 N-1 禁止重新生成。
+  `RefreshLead == 0` 在 `NeedsRefresh` 里先短路，所以即便令牌长得像 JWT 也不会刷
+  （`TestNewAPIStillNeverRefreshesEvenWithJWTLikeToken` 钉住）。
+- 两头都读不出时 **不猜默认值** —— 猜一个会让系统按凭空的节奏刷自己的令牌。
+  真库里就有 2 条 `cred_type` 写着 `sub2api_jwt` 而内容不是三段 JWT 的凭证。
+- `RefreshLead > 0 ⟺ TokenExpiryFrom != nil` 由 `registry_test.go` 双向钉住，
+  与上面 `Refresher` 那条同理：声明了阈值却没有到期时间来源 = 判定恒 false。
+
+**这个修复不会让那 13 条渠道自己好起来,要说清楚**：判定从 false 变 true 之后,
+`Refresh` 立刻发现 `refresh_token` 为空,返回 `ErrNeedsRelogin`。改善只在于
+**失败从静默变成具名** —— 修复前是"到期不续 → 上游 401 → 鉴权失败",看不出原因;
+修复后是"续期失败：无 refresh_token 可用（需人工重登）",直接指向处置动作。
+真正的恢复要么补 `refresh_token`,要么走 §5.3 的账密重登(这也是 §7bis 把
+`PasswdCredType` 那条通路留着的现实用途,不是备而不用)。
+
+⚠️ 缺 `refresh_token` 这一条**同时标 `ErrPrecondition`**：它在发出任何请求之前
+就返回了,与该哨兵注释里"凭证没登记"是同一类本地失败。不标的后果是上层按上游
+故障处理 —— 返 502 让运维去查别人家站点为什么挂了,还白起算 60s 限流窗口。
+401 那条**不标**（请求已经发出去了）,两条方向都有断言,防的是"给两条都加上"
+这种让前一条变绿的假修法。
+
 ---
 
 ## 6. 通用防护
@@ -605,6 +653,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | `Aliases` | 9 | ⚠️ **只准填实测见过的自称**（[CLAUDE.md](../../CLAUDE.md) §1）：凭想象加别名会让本该报出来的声明错变成静默采信 |
 | `CredType` / `RequiresUID` / `PasswdCredType` / `CredNote` | 6+7+8 | 校验与选型合成一次 `CredTypeFor()` 调用，两处消费点共用 |
 | `RefreshLead` | 5 | `0` = 永不主动续期（NewAPI 的不变式 N-1，§5.1） |
+| `TokenExpiryFrom` | 5 | 从 access_token 自身读到期时间；`nil` = 读不出。**没有它，`RefreshLead` 是个自锁** —— 登记路径不写 `token_expires_at`，判定恒 false（§5.4 的实测） |
 | `New` | 3 | **是否支持续期不在注册表里声明** —— 由适配器有没有实现 `Refresher` 决定（类型断言），声明与实现因此不可能不一致 |
 
 #### 魔改站怎么接
@@ -633,6 +682,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | 凭证形态 | `CredType` + `RequiresUID`/`PasswdCredType` + `CredNote` | 任一为空（除两个可选项）→ `TestRegistrationsComplete`。库侧 `cred_type` 的 CHECK 要同步加一条迁移，否则**登记时才报约束冲突** |
 | 只能账密重登 | `PasswdCredType` 非空 | 不红。填了它，界面的账号/密码字段**自动出现**（`SiteFamilyInfo.allows_password` → `CredsView` 的 `allowsPassword`），不用改前端 |
 | 要不要主动续期 | `RefreshLead` + 适配器实现 `Refresher` | 单边 → `TestRefreshLeadMatchesRefresherImplementation`（双向）。`0` = 永不主动续期 |
+| 到期时间从哪读 | `TokenExpiryFrom` | 单边 → `TestRefreshLeadMatchesTokenExpirySource`（双向）。**留 nil 而阈值非零 = 永不触发**，这是 §5.4 修的那个自锁；读不出时**不许猜默认值** |
 | 额度单位（micros 之类） | 适配器内部，**归一为美元后再返回** | 不红。漏了会让上层每个消费方各猜一次换算基数（§6 末行） |
 | 采不到的对象 | `Capabilities()` 里标 `unsupported`，方法返回 `ErrUnsupported` | `TestUnsupportedDeclarationsReturnErrUnsupported`（双向）+ `TestCapabilitiesMatchDocMatrix`（要同时写进 §3.4 那张表，漏了会报"不在本表里"） |
 | 采得到但不全 | 标 `degraded`，返回数据 + `nil` + `SourceMeta.MissingFields` | 同上。⚠️ `degraded` **不得**返回 `ErrUnsupported`（§3.4bis 的判定口径） |

@@ -73,7 +73,14 @@ func (a *Sub2APIAdapter) Authenticate(ctx context.Context, cred Credential) (Ses
 // **不要直接调它**。
 func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credential, error) {
 	if cred.RefreshToken == "" {
-		return cred, fmt.Errorf("%w: 无 refresh_token 可用", ErrNeedsRelogin)
+		// **同时标 ErrPrecondition**：这一条在发出任何请求之前就返回了，
+		// 与 ErrPrecondition 注释里"凭证没登记"是同一类 —— 登记了但缺
+		// refresh_token 仍是纯本地的配置缺口。不标的后果是上层按"上游故障"
+		// 处理：返 502 让运维去查别人家站点为什么挂了，并且起算 60s 限流窗口
+		// 白等一轮（upstream_api.go 的 422/502 分支注释写了这个理由）。
+		// 下面 401 那条**不标** —— 那时请求已经发出去了。
+		return cred, fmt.Errorf("%w: 无 refresh_token 可用（需人工重登：%w）",
+			ErrPrecondition, ErrNeedsRelogin)
 	}
 	body, _ := json.Marshal(map[string]string{"refresh_token": cred.RefreshToken})
 	url := strings.TrimRight(cred.BaseURL, "/") + "/api/v1/auth/refresh"

@@ -70,6 +70,26 @@ type Registration struct {
 	// **0 = 永不主动续期**，且据此推导该站型不需要 Refresher。
 	RefreshLead time.Duration
 
+	// TokenExpiryFrom 从 access_token 本身读出到期时间，读不出返回 false。
+	//
+	// 为什么必须有它：**登记路径拿不到到期时间。** saveCredential 与导入侧
+	// 构造 Credential 时都不带 TokenExpiresAt —— all-api-hub 导出里只有
+	// access_token（实测：`account_info` 的键只有 access_token/id/quota/
+	// username/today_* 那几个，没有到期时间也没有 refresh_token）。于是库里
+	// token_expires_at 全是 NULL，而 NeedsRefresh 在零值时返回 false ——
+	// RefreshLead 对登记进来的凭证就此形同虚设，令牌到期后只能等某次采集撞
+	// 401，且 401 之后 sync.go 直接中止、没有反应式补救。主动续期变成"只在
+	// 已经续过一次之后才生效"的自锁。
+	//
+	// 2026-08-30 实测确认这条路径不可达：65 渠道全量 sync，续期动作 0 次，
+	// 13 个 sub2api 全 401；而那些 JWT 的 exp 声明分别是 2026-03（8 条）与
+	// 2026-08-27~29（3 条）—— **到期时间一直写在令牌里，只是没人读**。
+	//
+	// nil = 该站型的令牌里读不出到期时间（NewAPI 的长期令牌就是这样，
+	// 它同时 RefreshLead=0，两处一致）。registry_test.go 双向钉住
+	// "RefreshLead>0 ⟺ TokenExpiryFrom 非 nil"：单边会让这一格重新变成死的。
+	TokenExpiryFrom func(accessToken string) (time.Time, bool)
+
 	// New 构造该站型的适配器。**是否支持续期不在这里声明** ——
 	// 由 Adapter 有没有实现 Refresher 决定（cmd/sla-core/sync.go 的类型断言），
 	// 声明与实现因此不可能不一致。

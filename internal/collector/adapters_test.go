@@ -617,11 +617,51 @@ func TestSub2APIRefreshDefaultsExpiry(t *testing.T) {
 	}
 }
 
+// TestSub2APIRefreshWithoutTokenNeedsRelogin 钉住"缺 refresh_token"要同时
+// 满足两个哨兵：需人工重登，且**没触达上游**。
+//
+// 两个都要断言，因为两个各自有一个坏后果、缺哪个都不会被另一个发现:
+//   - 丢 ErrNeedsRelogin → 上层不知道该提示重登；
+//   - 丢 ErrPrecondition → 上层按上游故障处理，返 502 让人去查别人家站点，
+//     还白起算 60s 限流窗口（upstream_api.go 的 422/502 分支、
+//     ErrPrecondition 的注释都写了这个理由）。
+//
+// 真库实测：13 条 sub2api 凭证全都 refresh_token 为空（导出里就没有这个字段），
+// 所以这条不是假想路径 —— 每条 sub2api 凭证到期后都会走到这里。
 func TestSub2APIRefreshWithoutTokenNeedsRelogin(t *testing.T) {
 	ad := NewSub2APIAdapter(NewClient(0))
 	_, err := ad.Refresh(context.Background(), Credential{Family: FamilySub2API})
 	if !errors.Is(err, ErrNeedsRelogin) {
 		t.Fatalf("无 refresh_token 应返回 ErrNeedsRelogin，得到 %v", err)
+	}
+	if !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("无 refresh_token 是纯本地失败，应同时标 ErrPrecondition，得到 %v", err)
+	}
+}
+
+// TestSub2APIRefreshUnauthorizedIsNotPrecondition 是上一条的反向哨兵。
+//
+// 401 那条**已经把请求发出去了**，所以它不能标 ErrPrecondition。没有这条,
+// 「给两条都加上 ErrPrecondition」这种"修法"能让上一条变绿而无人察觉,
+// 后果是真实的上游故障被当成本地配置问题、限流窗口永不起算。
+//
+// httptest 在此属 CLAUDE.md §1 的行为类例外：真站点不肯按需对刷新端点返 401。
+func TestSub2APIRefreshUnauthorizedIsNotPrecondition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	_, err := ad.Refresh(context.Background(), Credential{
+		Family: FamilySub2API, BaseURL: srv.URL, RefreshToken: "expired",
+	})
+	if !errors.Is(err, ErrNeedsRelogin) {
+		t.Fatalf("refresh_token 失效应返回 ErrNeedsRelogin，得到 %v", err)
+	}
+	if errors.Is(err, ErrPrecondition) {
+		t.Fatalf("401 时请求已发出，不该标 ErrPrecondition（会让上游故障被当成本地配置问题）：%v", err)
 	}
 }
 

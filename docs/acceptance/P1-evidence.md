@@ -648,6 +648,73 @@ checksum 逐个一致，故起栈不动 schema；本地 017 文件的 sha256 前
 > 否则同样的空列表下次会以"恒绿"的形式出现（期望 0 时它也是 0）。
 > 这正是把那行从 `check(..., true, decl)` 的纯打印改成真断言才暴露出来的。
 
+### 5.15 主动续期从来没有触发过（**本轮发现的真缺陷**，已修）
+
+上一节那轮全量采集的副产物：**65 渠道续期动作 0 次，13 个 sub2api 全部 401。**
+起初按"站点挂了"记账，查下去发现不是。
+
+#### 事实（真库 + 真令牌，只读）
+
+| 测点 | 值 | 怎么得到 |
+| --- | --- | --- |
+| `collector_credentials.token_expires_at` 非空 | **0 / 65** | `count(*) FILTER (WHERE token_expires_at IS NOT NULL)` |
+| 同表 `refresh_token` 非空 | **0 / 65** | 同上一条 SQL |
+| 同表 `username`+`password` 齐全 | **0 / 65** | 同上 |
+| sub2api 的 access_token 能读出 `exp` | **11 / 13** | 临时程序调 `collector.Lookup(...).TokenExpiryFrom` |
+| 这 11 个 `exp` | 全部已过期（2026-03 ×6 / 04 ×1 / 06 ×1 / 07 ×1 / 08 ×2） | 同上 |
+| 修复前 `NeedsRefresh` 判定 | **13 条全 false** | 零值 `TokenExpiresAt` → 直接 return false |
+| 修复后 `NeedsRefresh` 判定 | **11 true / 2 false** | 那 2 条的 `cred_type` 写着 `sub2api_jwt` 但内容不是三段 JWT |
+
+#### 成因：`RefreshLead` 是个自锁
+
+三件事叠起来才出事，单看每一处都像正常代码：
+
+1. `saveCredential`（`internal/admin/upstream_api.go`）与导入侧
+   （`internal/admin/import_api.go`）构造 `collector.Credential` 时**都不填
+   `TokenExpiresAt`** —— hub 导出里就没有到期时间，也没有 refresh_token。
+2. `NeedsRefresh` 见零值 `return false`。
+3. 401 没有被动恢复：`Sync` 里 `Authenticate` 失败就 `return`。
+
+于是"到期前 120s 刷新"**只在已经刷过一次之后才生效**，而第一次永远等不到。
+零值不等于"没有到期时间"，只等于"库里没记"。
+
+**两端都有测试，中间那段没有**：静态守卫钉住 `RefreshLead ⟺ Refresher`，
+刷新函数的测试自己手工塞一个到期时间进去。没有任何一条测试问过
+"**登记路径产出的那种凭证**能不能做出续期判定"。新增的
+`TestRegisteredCredentialCanStillDecideRefresh` 就是照 `saveCredential` 的产物
+形状构造凭证（只有 access_token、`TokenExpiresAt` 为零），补的正是这一段。
+
+#### 修法与刻意破坏
+
+`Registration.TokenExpiryFrom`（Sub2API 填 `jwtExpiry`，NewAPI 留 `nil`）+
+`NeedsRefresh` 读它 + 双向静态守卫。设计取舍见 [04 §5.4](../dev/04-collector-adapter.md)。
+
+| # | 刻意破坏 | 红在哪 |
+| --- | --- | --- |
+| A | 删掉 `register_sub2api.go` 的 `TokenExpiryFrom` | 2 条（判定测试 + 双向守卫），各自不同 |
+| B | `NeedsRefresh` 里不读令牌 | 1 条：登记态凭证判定恒 false |
+| C | `jwtExpiry` 读不出时编一个 `now+24h` | 6 条具名用例 |
+| D | 缺 refresh_token 时退回只标 `ErrNeedsRelogin` | 分类断言：会被当成上游故障 |
+| E | 给 401 那条也加 `ErrPrecondition`（让 D 变绿的假修法） | 反向哨兵 |
+| F | 两条都只标 `ErrPrecondition`、丢掉 `ErrNeedsRelogin` | 2 条同时红 |
+
+> ⚠️ **破坏 C 第一次是绿的。** 我原先只透过 `NeedsRefresh` 断言，而编出来的到期时间
+> 在*未来*，`NeedsRefresh` 照样返 false —— 断言看不见它。改成直接断言 `jwtExpiry`
+> 的 `ok == false`（两层都测）之后才红。**一处破坏变绿说明的是断言有洞，不是代码没问题。**
+> 同轮我那条"带填充的 base64"对照用例也没通过自己的自检（`{"exp":<10 位>}` 恰好
+> 24 字节，编码后没有 `=`），改成循环补位才造得出 —— 写自检的价值就在这儿。
+
+#### 这个修复**不会**让那 13 条渠道自己好起来
+
+判定从 false 变 true 之后，`Refresh` 立刻发现 `refresh_token` 为空并返回
+`ErrNeedsRelogin`。**改善只在于失败从静默变具名**：修复前是"到期不续 → 上游 401 →
+鉴权失败"，看不出原因；修复后直接说"无 refresh_token 可用（需人工重登）"。
+真正恢复要么补 refresh_token，要么走 [04 §5.3](../dev/04-collector-adapter.md) 的
+账密重登 —— 后者正是 §7bis 把 `PasswdCredType` 通路留着的现实用途。
+
+顺带修了分类：缺 refresh_token 这条在发请求之前就返回，故**同时标
+`ErrPrecondition`**，否则上层返 502（让运维去查别人家站点）并白起算 60s 限流窗口。
+
 ---
 
 _验收人：开发。判定依据 [14](../dev/14-acceptance-matrix.md) §3 规则 4：出现"基本正常""大致达标"视为未通过 —— 本文件的每一项都给了具体数值或 diff。_

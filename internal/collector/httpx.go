@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -231,6 +232,45 @@ func asSlice(v any) []any {
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
+}
+
+// jwtExpiry 读 JWT 的 exp 声明，读不出返回 false。
+//
+// **不验签，只读 claim。** 读的是我方自己库里已存的令牌，用途仅是决定何时
+// 续期 —— 签名的意义是"上游能不能确认这是它签的"，而我方伪造自己的令牌来
+// 骗自己提早续期没有任何收益。真正的判定权在上游：令牌不对它会 401。
+// 反过来说这里**不能**用来做任何授权决定。
+//
+// 读不出就返回 false 让调用方退回"不主动续期"，**不猜默认到期时间**：
+// 真库里就有两条 cred_type 写 sub2api_jwt 而内容不是三段 JWT 的凭证
+// （渠道 30/31），给它们编一个到期时间会让系统按凭空的节奏刷令牌。
+//
+// exp 是 Unix 秒（RFC 7519 §4.1.4 的 NumericDate）。JSON 解出来是 float64，
+// 大整数在 float64 里到 2^53 都是精确的，Unix 秒离那儿还很远。
+func jwtExpiry(accessToken string) (time.Time, bool) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	// JWT 用的是无填充的 base64url（RFC 7515 §2）。有些实现仍带 '='，
+	// 两种都吃：只认一种会让"看着像 JWT 的令牌"静默读不出 exp。
+	seg := parts[1]
+	dec, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(seg, "="))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if err := json.Unmarshal(dec, &claims); err != nil || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	// exp<=0 当读不出：0 会被 time.Unix 解成 1970，于是"早已过期"，
+	// 让每次采集都刷一遍。
+	if *claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(*claims.Exp), 0), true
 }
 
 // dig 按路径逐层取值，任一层缺失即返回 nil。

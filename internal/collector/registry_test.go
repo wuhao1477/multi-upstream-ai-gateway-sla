@@ -139,6 +139,33 @@ func TestRefreshLeadMatchesRefresherImplementation(t *testing.T) {
 	}
 }
 
+// **要主动续期就必须能读出到期时间**，双向。
+//
+// 这一条补的是"声明了续期而续期永远不触发"那个洞：RefreshLead>0 只说明
+// "想在到期前 N 秒刷"，而**登记路径不带到期时间**（saveCredential 与导入侧
+// 都不填，all-api-hub 导出里也没有），于是库里 token_expires_at 是 NULL、
+// NeedsRefresh 直接返回 false —— 续期只在"已经续过一次之后"才生效，自锁。
+//
+// 那个洞实测存在过：2026-08-30 对 65 渠道跑全量 sync，续期动作 0 次、
+// 13 个 sub2api 全 401，而它们的 JWT 里 exp 早已过期。
+// 反向也要红：读得出到期时间却不打算续期，说明有一处忘了填。
+func TestRefreshLeadMatchesTokenExpirySource(t *testing.T) {
+	for _, r := range All() {
+		switch {
+		case r.RefreshLead > 0 && r.TokenExpiryFrom == nil:
+			t.Errorf("%s: RefreshLead=%v 但 TokenExpiryFrom 为 nil —— "+
+				"登记路径不带到期时间（导出里没有），库里就是 NULL，"+
+				"于是 NeedsRefresh 永远 false、这个 RefreshLead 形同虚设，"+
+				"令牌到期后只能等某次采集撞 401（而 401 之后没有反应式补救）",
+				r.Family, r.RefreshLead)
+		case r.RefreshLead == 0 && r.TokenExpiryFrom != nil:
+			t.Errorf("%s: RefreshLead=0（永不主动续期）却给了 TokenExpiryFrom —— "+
+				"要么漏填 RefreshLead，要么这个读取函数是多余的；"+
+				"两种都该在这里停下来看一眼", r.Family)
+		}
+	}
+}
+
 // lower 是不引 strings 的小写化（本文件只需要 ASCII）。
 func lower(s string) string {
 	b := []byte(s)

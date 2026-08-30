@@ -143,12 +143,28 @@ func NeedsRefresh(cred Credential, now time.Time) bool {
 		// 只有 401 才说明令牌被后台重置，那时需人工介入）。
 		return false
 	}
-	if cred.TokenExpiresAt.IsZero() {
-		// 没有到期时间就无从判断 —— NewAPI 的长期令牌本就没有
+	exp := cred.TokenExpiresAt
+	if exp.IsZero() && reg.TokenExpiryFrom != nil {
+		// **登记路径不带到期时间**（saveCredential 与导入侧都不填，导出里也
+		// 没有），所以零值不等于"没有到期时间"，只等于"库里没记"。到期时间
+		// 常常就写在令牌自己里（Sub2API 的 JWT 有 exp 声明），读它。
+		//
+		// 不读的后果实测过：65 渠道全量 sync 续期动作 0 次、13 个 sub2api 全
+		// 401，而它们的 exp 早已过期 —— RefreshLead 只在"已经续过一次之后"
+		// 才生效，那是个自锁。见 Registration.TokenExpiryFrom。
+		if t, ok := reg.TokenExpiryFrom(cred.AccessToken); ok {
+			exp = t
+		}
+	}
+	if exp.IsZero() {
+		// 到这里才是真的无从判断：库里没记，令牌里也读不出
+		//（NewAPI 的长期令牌本就没有到期时间；真库里还有两条 cred_type 写
+		// sub2api_jwt 而内容不是三段 JWT 的凭证）。**不猜默认值** ——
+		// 猜一个会让它按别人的节奏刷自己的令牌。
 		// （P1-evidence §4 第 5 项：用 time.Time 扫 NULL 让整族采不成）
 		return false
 	}
-	return now.Add(reg.RefreshLead).After(cred.TokenExpiresAt)
+	return now.Add(reg.RefreshLead).After(exp)
 }
 
 // EnsureFresh 在需要时续期凭证，返回可用的凭证。

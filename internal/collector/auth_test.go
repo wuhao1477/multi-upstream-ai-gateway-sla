@@ -2,7 +2,11 @@ package collector
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,6 +100,148 @@ func TestUnregisteredFamilyNeverRefreshes(t *testing.T) {
 	if NeedsRefresh(cred, now) {
 		t.Error("未注册的家族不该判定需要续期 —— 没有注册就没有续期端点")
 	}
+}
+
+// **登记进来的凭证也要能判定续期。**
+//
+// 这条补的是上面那几条测不到的那一段：它们每一条都自己填了 TokenExpiresAt，
+// 而**真实的登记路径从不填它** —— saveCredential 与导入侧构造 Credential 时
+// 都没有这个字段（all-api-hub 导出里只有 access_token，没有到期时间也没有
+// refresh_token），于是库里 13 条 sub2api 凭证的 token_expires_at 全是 NULL。
+//
+// 后果是 RefreshLead=120s 对登记进来的凭证是**死的**：NeedsRefresh 在零值时
+// 返回 false，令牌到期后只能等某次采集撞上 401。而 401 之后 sync.go 直接
+// return"鉴权失败"，没有反应式补救 —— 也就是说主动续期只在"已经续过一次
+// 之后"才生效，那是个自锁。
+//
+// 2026-08-30 实测：对 65 个渠道跑全量 sync，core 日志里续期动作 **0 次**，
+// 13 个 sub2api 全部 401。库里那些 JWT 的 exp 声明分别是 2026-03（8 条，
+// 五个月前就过期）与 2026-08-27~29（3 条）—— **到期时间一直写在令牌里，
+// 只是没人读**。
+func TestRegisteredCredentialCanStillDecideRefresh(t *testing.T) {
+	// 形态与 saveCredential / 导入侧构造出来的完全一致：只有 access_token，
+	// 没有 TokenExpiresAt。exp 取一个已过去的时刻，故"需要续期"是正确答案。
+	tok := testJWT(t, map[string]any{
+		"exp":   time.Now().Add(-2 * time.Hour).Unix(),
+		"email": "x@example.com",
+	})
+	cred := Credential{
+		Family: FamilySub2API, ChannelID: 1, CredType: "sub2api_jwt",
+		AccessToken: tok,
+		// TokenExpiresAt 刻意留零值 —— 这正是登记路径的产物
+	}
+	if !NeedsRefresh(cred, time.Now()) {
+		t.Fatal("登记进来的 sub2api 凭证（只有 access_token、无 TokenExpiresAt）" +
+			"判定为不需续期 —— 令牌里的 exp 没人读，于是 RefreshLead=120s 形同虚设，" +
+			"到期后只能等某次采集撞 401，而 401 之后没有反应式补救")
+	}
+	// 对照：exp 还很远时不该刷
+	fresh := cred
+	fresh.AccessToken = testJWT(t, map[string]any{
+		"exp": time.Now().Add(10 * time.Hour).Unix(),
+	})
+	if NeedsRefresh(fresh, time.Now()) {
+		t.Error("exp 还有 10 小时却判定需要续期 —— 会每次采集都刷一遍，" +
+			"而刷新会轮换 refresh_token")
+	}
+}
+
+// NewAPI 的令牌不是 JWT，也没有 exp。它必须继续走"永不主动续期"那条路：
+// 不变式 N-1 —— /api/user/token 是重新生成而非读取，主动刷新会踢掉正在用的令牌。
+func TestNewAPIStillNeverRefreshesEvenWithJWTLikeToken(t *testing.T) {
+	cred := Credential{
+		Family: FamilyNewAPI, ChannelID: 1,
+		// 就算有人把一个已过期的 JWT 当 NewAPI 令牌登记进来
+		AccessToken: testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()}),
+	}
+	if NeedsRefresh(cred, time.Now()) {
+		t.Fatal("NewAPI 判定需要续期 —— 不变式 N-1 被破：" +
+			"RefreshLead=0 必须优先于任何从令牌读出的到期时间")
+	}
+}
+
+// 不是 JWT 的 access_token 不得让判定崩掉或误判。
+//
+// 真库里有两条这样的（渠道 30/31：cred_type 是 sub2api_jwt 而内容不是三段
+// JWT）。读不出 exp 时**只能退回"不主动续期"** —— 猜一个默认到期时间会让
+// 它在那个凭空的时刻到来后去刷一个真实有效期未知的令牌，而那两条连
+// refresh_token 都没有，结果是一个读起来像"凭证坏了"的 fatal。
+//
+// ⚠️ **必须直接断言 jwtExpiry 的 ok，不能只透过 NeedsRefresh 看。**
+// 第一版只有下面那个 NeedsRefresh 循环，于是"读不出时编一个 now+24h"这种
+// 改法**照旧全绿**：编出来的是未来时刻，NeedsRefresh 同样返回 false。
+// 破坏性验证当场撞上了这一点（破坏 C 变绿）。纯函数要直接测纯函数 ——
+// 同 TestAsFloatToleratesStringNumbers 的教训。
+func TestNonJWTTokenFallsBackToNoRefresh(t *testing.T) {
+	bad := []struct{ name, tok string }{
+		{"空串", ""},
+		{"不含点", "not-a-jwt"},
+		{"只有两段", "a.b"},
+		{"四段", "a.b.c.d"},
+		{"payload 不是 base64", "a.!!!不是 base64!!!.c"},
+		{"payload 不是 JSON",
+			"a." + base64.RawURLEncoding.EncodeToString([]byte("{不是 JSON")) + ".c"},
+		{"没有 exp 声明",
+			"a." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"x"}`)) + ".c"},
+		{"exp 是 0",
+			"a." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":0}`)) + ".c"},
+		{"exp 是负数",
+			"a." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":-1}`)) + ".c"},
+		{"exp 是字符串",
+			"a." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":"123"}`)) + ".c"},
+	}
+	for _, c := range bad {
+		// ① 直接测：必须明确报"读不出"，不许返回任何时刻
+		if got, ok := jwtExpiry(c.tok); ok {
+			t.Errorf("%s：jwtExpiry 竟读出了 %v —— 读不出就得返回 false，"+
+				"编一个默认到期会让系统按凭空的节奏刷令牌", c.name, got)
+		}
+		// ② 再测经由 NeedsRefresh 的行为（这一层看不出上面那种编造，故两层都要）
+		cred := Credential{Family: FamilySub2API, ChannelID: 1, AccessToken: c.tok}
+		if NeedsRefresh(cred, time.Now()) {
+			t.Errorf("%s：读不出 exp 却判定需要续期", c.name)
+		}
+	}
+
+	// 正向对照：带填充的 base64url 也要吃下来（有些实现留着 '='）。
+	// 只认无填充会让"看着像 JWT 的令牌"静默读不出 exp。
+	//
+	// 明文长度必须**不是 3 的倍数**才会产生 '=' 填充。这里用循环凑，而不是
+	// 手挑一个长度：第一版直接编 `{"exp":<10位>}` 得到 24 字节（整除 3），
+	// 于是根本没有填充 —— 那条用例就在测另一件事了。下面的自检当场抓到它。
+	want := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+	var payload string
+	for pad := 0; pad < 3; pad++ {
+		raw := `{"exp":` + strconv.FormatInt(want.Unix(), 10) +
+			`,"x":"` + strings.Repeat("y", pad) + `"}`
+		payload = base64.URLEncoding.EncodeToString([]byte(raw))
+		if strings.Contains(payload, "=") {
+			break
+		}
+	}
+	if !strings.Contains(payload, "=") {
+		t.Fatalf("造不出带填充的 payload：%q", payload)
+	}
+	got, ok := jwtExpiry("a." + payload + ".c")
+	if !ok || !got.Equal(want) {
+		t.Errorf("带 '=' 填充的 payload 读不出 exp：got=%v ok=%v，期望 %v", got, ok, want)
+	}
+}
+
+// testJWT 拼一个只有 payload 有意义的三段串。
+//
+// 造的是**一个令牌的字节**，不是站点：被测对象是"我方能不能从自己库里已存的
+// 令牌读出 exp"，而真站点不会按需签发一个"两小时前就过期"的令牌
+// （CLAUDE.md §1 例外判据）。签名段是占位符 —— 这里不验签，只读 claim，
+// 因为读的是我方自己存进去的令牌，用途仅是决定何时续期。
+func testJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("造 JWT payload: %v", err)
+	}
+	return "eyJhbGciOiJIUzI1NiJ9." +
+		base64.RawURLEncoding.EncodeToString(b) + ".sig-not-verified"
 }
 
 // ── 不变式 S-1：同账号刷新必须串行 ──
