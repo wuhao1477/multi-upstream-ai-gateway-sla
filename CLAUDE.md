@@ -7,7 +7,7 @@
 
 这条不是风格偏好。**mock 是照实现者对协议的理解写出来的,所以它永远不会
 推翻那个理解。** 曾经的 `verify/mock_newapi.py` 返回什么形态,取决于我读
-`docs/dev/04` §3.1 读出了什么;真站点返回别的,全套验收(现为 14+58+31 = 103 项,另加一条日志无明文的 shell 断言)
+`docs/dev/04` §3.1 读出了什么;真站点返回别的,全套验收(现为 14+58+32 = 104 项,另加一条日志无明文的 shell 断言)
 全绿也发现不了。
 [`docs/acceptance/P1-evidence.md`](docs/acceptance/P1-evidence.md) §3.1 里那个
 "第三族有包级测试、真实覆盖为零"的缺口就是这个坑的现成例子 —— 它一直挂在那儿,
@@ -88,14 +88,14 @@
 |---|---|---|
 | detect / pricing / model_catalog | ✅ 免密 | `/api/status` 与 `/api/pricing` 公开 |
 | account / keys / groups | ❌ 只在本地 | 要 `Authorization` + 用户 ID 头,而真上游令牌**不进 GitHub secrets**(2026-08-29 决定) |
-| 真库只读验收(31 项) | ❌ | GitHub runner 到不了内网 <internal-db-host> |
+| 真库只读验收(32 项) | ❌ | GitHub runner 到不了内网 <internal-db-host> |
 
 **真上游令牌不进 secrets 是明确决定,不是待办。** 那是别人家站点的真凭证,
 放进 CI 就等于把它摊给每个能看 workflow 日志的人,以及每个能往仓库推分支的人
 (`pull_request` 事件下 fork 也能触发)。泄露的后果由站主承担,而收益只是让
 三项验收在云上也绿 —— 不值。
 
-于是 `ui-stack.sh` 的 71 项与真库 31 项都是**本地验收**,结论写进 PR/提交说明。
+于是 `ui-stack.sh` 的 71 项与真库 32 项都是**本地验收**,结论写进 PR/提交说明。
 CI 只把免密那部分当回归网。**不要因为 CI 跑不了就换成 mock 让它在 CI 里绿** ——
 那样得到的绿是假的,而真正的覆盖仍然为零。
 
