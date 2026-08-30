@@ -15,43 +15,50 @@
 ## 1. 单仓布局
 
 ```
+下表 ✅ = 已存在，⏭ = 该阶段开工时新建。**空占位包不预先创建**
+（2026-08-29：原先七个只含 `doc.go` 的占位包已删 —— 空包不编译出任何东西，
+`go list ./...` 里多七行反而让"哪些模块真做了"读不出来。目录设计仍以本表为准）。
+
+```
 multi-upstream-ai-gateway-sla/
 ├── docs/                      # 现有文档(需求/选型/dev),不动
 ├── verify/                    # 验收脚本;上游走真站点(CLAUDE.md §1),仅 SSE 流夹具是造的
+├── web/                    ✅ # 管理界面 Vue3 工程(源码);产物 embed 进二进制
 ├── go.mod                     # module: github.com/wuhao1477/multi-upstream-ai-gateway-sla
 ├── go.sum
 ├── Makefile                   # build/test/lint/migrate 入口
 ├── cmd/
-│   ├── sla-core/              # 主服务入口(数据平面+管理平面同进程)
-│   │   └── main.go
-│   └── collector/             # 采集器子命令入口(06 已定:一期同二进制子命令)
-│       └── main.go
+│   ├── sla-core/           ✅ # 主服务入口(数据平面+管理平面同进程)
+│   ├── collector/          ✅ # 采集器子命令入口(06 已定:一期同二进制子命令)
+│   └── migrate/            ✅ # 迁移子命令(容器 entrypoint 与本地都用它)
 ├── internal/                  # 全部业务代码(internal 禁外部 import)
-│   ├── protocol/              # 对外 OpenAI CC/Responses 端点、透传、会话标识提取(02 §4.5)
-│   ├── policy/                # 别名→策略解析(FR-062/117)
-│   ├── selector/              # 候选过滤+排序+RoutePlan(05 §1)
-│   ├── executor/              # 流式执行、内容感知首字、期限、取消(03/05 §1.4;AC-31/32)
-│   ├── ledger/                # 逐 Attempt 账本 + outbox 持久化协议(01 §5.1, 02 §9.2bis)
-│   ├── steward/               # 冷却/样本门槛/余额信号/告警/错误预算(05 §3~5)
-│   ├── upstream/              # 自研上游对接层(03):字节透传 + 旁路观察
+│   ├── protocol/           ⏭ # 对外 OpenAI CC/Responses 端点、透传、会话标识提取(02 §4.5)
+│   ├── policy/             ⏭ # 别名→策略解析(FR-062/117)
+│   ├── selector/           ⏭ # 候选过滤+排序+RoutePlan(05 §1)
+│   ├── executor/           ⏭ # 流式执行、内容感知首字、期限、取消(03/05 §1.4;AC-31/32)
+│   ├── ledger/             ⏭ # 逐 Attempt 账本 + outbox 持久化协议(01 §5.1, 02 §9.2bis)
+│   ├── steward/            ⏭ # 冷却/样本门槛/余额信号/告警/错误预算(05 §3~5)
+│   ├── upstream/           ⏭ # 自研上游对接层(03):字节透传 + 旁路观察
 │   │   ├── client.go          # Client 接口(03 §2)
 │   │   ├── passthrough.go     # 字节透传管道 + tee
 │   │   └── ssescan.go         # SSE 扫描器 + ShouldCommit/HasTTFTOutput 双判定(03 §3.2)
-│   ├── collector/             # CollectorAdapter 接口 + newapi/sub2api/asxs/ 实现(04)
+│   ├── collector/          ✅ # CollectorAdapter 接口 + 各家族实现(04)
 │   │   ├── collector.go       # 接口(04 §1)
-│   │   ├── newapi/ sub2api/ asxs/
-│   ├── store/                 # PG 访问层、schema 迁移、UUIDv7、快照重建(02)
-│   ├── admin/                 # 管理平面 /admin/* API + 二次确认(09)
-│   ├── config/                # config_params 读写、ParamMeta 元数据(09 §4)
-│   └── bootstrap/             # 启动选主(PG advisory lock)、迁移与快照初始化(06 §2.2)
+│   │   └── newapi.go sub2api.go asxs.go   # 平铺,一家族一文件(不再分子包:
+│   │                          #   三家共用 httpx/auth/detect,分包只会互相 import)
+│   ├── store/              ✅ # PG 访问层、schema 迁移、UUIDv7、快照重建(02)
+│   ├── admin/              ✅ # 管理平面 /admin/* API + 二次确认(09)
+│   ├── config/             ✅ # config_params 读写、ParamMeta 元数据(09 §4)
+│   ├── health/             ✅ # /healthz(只看实例自身,不看渠道健康,01 §6)
+│   └── bootstrap/          ✅ # 启动选主(PG advisory lock)、迁移与快照初始化(06 §2.2)
 ├── migrations/                # SQL 迁移(sqlc 对齐)
 ├── deploy/
 │   ├── docker-compose.yml     # Caddy + 2×core + PG + collector(06 §1)
 │   ├── Caddyfile
 │   └── .env.example
 └── .github/workflows/
-    └── gate.yml            # 交付门禁：直接调 verify/gate.sh(文档12类+DDL真跑)
-                            # M0 起在此补 go build/test/lint 与 FR-112、脱敏断言
+    ├── gate.yml            # 交付门禁：verify/gate.sh(文档12类+DDL真跑) + go build/test/lint
+    └── build-arm.yml       # arm64 镜像构建(云端真机)
 ```
 
 **包边界原则**：一个 `internal/` 子包对应 [01 §2](./01-architecture.md) 的一个模块，**依赖单向**：`protocol → policy → selector → executor → upstream`；`ledger`/`steward` 读写 `store`；`store` 不反向依赖业务包。

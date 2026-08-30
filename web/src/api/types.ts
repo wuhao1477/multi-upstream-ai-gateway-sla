@@ -41,15 +41,6 @@ export interface Channel {
   updated_at: string
 }
 
-export interface Account {
-  id: number
-  channel_id: number
-  external_user_id?: string
-  balance_group_key?: string
-  status: string
-  created_at: string
-}
-
 export interface Key {
   id: number
   account_id: number
@@ -147,19 +138,6 @@ export interface SyncResult {
   items: SyncItem[]
 }
 
-/**
- * 同步的失败响应体。三种都可能只带一部分字段：
- *  - 429/409 限流或已在跑：带 items（单项 status='skipped'）
- *  - 422 前置条件不满足（配置问题，故意不报 502）：带 site_family + items
- *  - 502 认证/连接失败：**不带** items
- */
-export interface SyncErrorResp {
-  channel_id?: number
-  site_family?: SiteFamily
-  items?: SyncItem[]
-  error?: string
-}
-
 export interface GroupModelsResp {
   group_id: number
   count: number
@@ -218,7 +196,8 @@ export interface CreateChannelResp {
   warning_persist?: string
 }
 
-/** 所有 4xx/5xx 都带这个字段；同步接口另外附带 SyncErrorResp 的字段。 */
+/** 所有 4xx/5xx 都带这个字段；同步接口的失败体另外附带 items 等字段，
+ *  由 stores/channels.ts 的 itemsOf() 按形态取，不另立类型。 */
 export interface ErrorResp {
   error: string
 }

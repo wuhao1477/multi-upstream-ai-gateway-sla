@@ -33,7 +33,19 @@ python3 probe_codex_wire.py            # 起在 :8899，把 Codex 指过来
 `sse_stream_fixture.py` 原名 `mock_upstream.py`，2026-08-29 更名 —— 旧名让人
 读成"假上游"，于是每处引用都得跟一句"这个不算 mock"。名字本身是误读的来源。
 
-## 三、ISSUE-001 的 AxonHub harness（**已删除**）
+## 三、`probe_real_sites.py`（**已删除**，被 `coverage_report.py` 取代）
+
+2026-08-29 删。它只打公开端点做 Detect 探测，而 `coverage_report.py`
+对库中全部渠道跑**六项能力的全量 sync** —— 探测只是其中第一步，
+两者重叠的部分由后者全覆盖，且后者的报告才是 P1 退出标准 ② 要的那份。
+
+它当时测出、且现在只在这里留档的一件事：**NewAPI 系的 `quota_per_unit`
+必须逐站读取，不可写死** —— 真实站点上这个值不止一种，而它是余额换算的分母，
+写死会让部分站的余额差几个数量级。同批探测里另有若干站开着 turnstile 人机验证，
+服务端采集对它们不可行（[04 §6](../docs/dev/04-collector-adapter.md)），
+按 FR-011 转人工录入。
+
+## 四、ISSUE-001 的 AxonHub harness（**已删除**）
 
 `docker-compose.verify.yml`、`setup.py`、`run_tests.sh`、`cleanup.sh`
 已于 2026-08-29 删除。它们拉起 AxonHub `v1.0.0-beta5` 并**把渠道指向假上游**，

@@ -6,6 +6,13 @@ import type { Channel, InventoryResp, SyncItem, SyncResult } from '@/api/types'
 import { useToastStore } from './toast'
 
 /** 同步的失败响应体也可能带 items（429/409/422），此时照样渲染结果表。 */
+/**
+ * 从失败响应体里取 items。按形态取而不认类型，因为四种失败体带的字段各不相同：
+ *  - 429/409 限流或已在跑：带 items（单项 status='skipped'）
+ *  - 422 前置条件不满足（配置问题，故意不报 502）：带 site_family + items
+ *  - 502 认证/连接失败：**不带** items —— 所以返回 undefined 的分支不是兜底，
+ *    它就是 502 的正常路径，调用方靠它决定退回纯文本报错。
+ */
 function itemsOf(body: unknown): SyncItem[] | undefined {
   if (typeof body === 'object' && body !== null && 'items' in body) {
     const it = (body as { items?: unknown }).items
@@ -144,7 +151,6 @@ export const useChannelsStore = defineStore('channels', () => {
     load,
     create,
     select,
-    loadInventory,
     sync,
   }
 })

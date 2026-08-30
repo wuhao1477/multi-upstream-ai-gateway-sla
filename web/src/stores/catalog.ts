@@ -102,8 +102,6 @@ export const useCatalogStore = defineStore('catalog', () => {
   return {
     unit,
     q,
-    offset,
-    loading,
     segments,
     whole,
     items,

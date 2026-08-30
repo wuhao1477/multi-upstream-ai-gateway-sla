@@ -6,7 +6,6 @@
  */
 import { api } from './client'
 import type {
-  Account,
   CatalogResp,
   Channel,
   ChannelGroup,
@@ -73,11 +72,6 @@ export function channelCatalog(id: number, q: CatalogQuery = {}): Promise<Catalo
 }
 
 // ── 账号 / Key ───────────────────────────────────────────────────────────────
-
-export function listAccounts(channelID?: number): Promise<ListResp<Account>> {
-  const qs = channelID === undefined ? '' : `?channel_id=${channelID}`
-  return api<ListResp<Account>>(`/admin/accounts${qs}`)
-}
 
 export function listKeys(channelID?: number): Promise<ListResp<Key>> {
   const qs = channelID === undefined ? '' : `?channel_id=${channelID}`
