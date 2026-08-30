@@ -49,7 +49,7 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 | **不支持项显式上报** | ✅ `subscription_quotas` 出现在 items 里且标 `unsupported`，**不静默省略** |
 | 声明与实现一致 | ✅ 包级测试 `TestUnsupportedDeclarationsReturnErrUnsupported` 逐家族断言"声明 unsupported ⟺ 返回 `ErrUnsupported`"，且"声明 degraded 的**不得**返回 `ErrUnsupported`" |
 | 限流生效 | ✅ 60s 内重复调用返回 **429** 且 `items` 全 `skipped`，**不打上游** |
-| **每一个已注册家族都跑过**（AC-38 新判定基准） | ✅ `collector.All()` 现为 `newapi` / `sub2api` 两族，[§2.1](#21-全渠道覆盖率报告65-个真实站点) 覆盖率报告里两族的六项各自有真实结果：newapi 52 渠道、sub2api 13 渠道（可用 2 个，六项全 ok）。上面那份逐项输出是 newapi 系的单次完整 sync |
+| **每一个已注册家族都跑过**（AC-38 新判定基准） | ✅ `collector.All()` 现为 `newapi` / `sub2api` 两族，[§2.1](#21-全渠道覆盖率报告65-个真实站点) 覆盖率报告里两族的六项各自有真实结果：newapi 52 渠道、sub2api 13 渠道（可用 2 个，六项全 ok）。上面那份逐项输出是 newapi 系的单次完整 sync。<br>⚠️ **这条证据是 2026-08-29 那份归档**：2026-08-30 复测时 13 条 sub2api 全部 401，`matrix` 里 `sub2api|*` 六项一条不剩（[§2.1bis](#21bis-次轮复测sub2api-掉到-0-可用ac-38-的两族都有真实结果只对首轮成立)）。判定基准没变，但"跑过"的证据只剩首轮那份 |
 
 > AC-38 的判定基准已从"三个家族"改为**"每一个已注册家族"**（2026-08-29，见 [PRD AC-38](../PRD.md) 那条 ⚠️）。原文写死族数，而其中一族已整族移出支持范围（§3.1）—— 写死会让这条 AC 变成不可满足，而不是让它随代码走。改后判定基准是 `collector.All()`，**加一族自动纳入本条**，那正是留着适配器架构的意义（[04 §7bis](../dev/04-collector-adapter.md)）。
 
@@ -86,7 +86,19 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 
 ### 2.1 全渠道覆盖率报告（65 个真实站点）
 
-`ADMIN_TOKEN=… python3 verify/coverage_report.py` → `/tmp/p1-coverage.json`，2026-08-29 01:07，**65 渠道 / 86.4 秒**（并发 6，刻意保守：避免被上游当扫描，也避免我方过载造成假失败）。
+`ADMIN_TOKEN=… python3 verify/coverage_report.py`，并发 6（刻意保守：避免被上游当扫描，也避免我方过载造成假失败）。
+
+**两轮报告均已归档进仓库**，不再只留在 `/tmp`（那里迟早被清掉，而正文的数字就再没有出处）：
+
+| 归档 | 时间 | 规模 |
+| --- | --- | --- |
+| [`coverage/p1-coverage-2026-08-29.json`](coverage/p1-coverage-2026-08-29.json) | 2026-08-29 01:07 | 65 渠道 / 86.4 秒 |
+| [`coverage/p1-coverage-2026-08-30.json`](coverage/p1-coverage-2026-08-30.json) | 2026-08-30 20:06 | 65 渠道 / 167.0 秒 |
+
+归档前查过两份都无凭证串（`sk-` / `eyJ`（JWT）/ `Bearer` / `password` / `*token` 值：各 0 处）——
+报告只记站名、base_url、逐项 ok/failed 与失败原因文本，不含令牌。
+
+下表是 **2026-08-29 那轮**。次轮的差异与退化见 §2.1bis，**不要只读这一张**。
 
 | 家族 | 渠道 | 可用 | 凭证失效 | account | groups | keys | pricing | model_catalog | subscription_quotas |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -98,6 +110,38 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 落库结果：`channel_model_catalog` **2782 行 / 38 渠道**、`channel_groups` **203 行 / 45 渠道**、`group_models` **5546 行**；`models` 与 `price_versions` **均为 0 行**，与 AC-39 一致（目录不产生可路由模型，价格版本只为已登记模型写）。
 
 > 15 T6 的验证点（"~20 个渠道的价格数据是否都采得到"）由此回答：**可用渠道里 40/45 采到价格**（89%），6 个 newapi 站点的 `/api/pricing` 失败。剩余失败不是解析问题而是站点侧不提供该端点或返回非预期结构，按 FR-011 转人工。
+
+### 2.1bis 次轮复测：sub2api 掉到 0 可用，AC-38 的"两族都有真实结果"只对首轮成立
+
+2026-08-30 20:06 在 HEAD 上重跑同一份脚本（归档见上表）。**这一轮不是确认，是退化**：
+
+| | 2026-08-29 | 2026-08-30 | 差 |
+| --- | --- | --- | --- |
+| newapi 可用 | 43 | 41 | −2 |
+| newapi fatal | 8 | 10 | +2 |
+| **sub2api 可用** | **2** | **0** | **−2** |
+| sub2api fatal | 11 | 13 | +2 |
+| fatal 合计（全部"凭证失效/鉴权失败"） | 19 | 23 | +4 |
+| 耗时 | 86.4s | 167.0s | 慢一倍 |
+
+耗时翻倍是 fatal 变多的直接结果：失败路径要把七个用户 ID 头名逐个试探完
+（04 §3.1 的 fan-out）才判定鉴权失败，比成功路径贵。
+
+**要点在最后一行的矩阵，不在计数上**：次轮 `matrix` 里 **`sub2api|*` 六项全部消失** ——
+13 条 sub2api 渠道无一走到逐项采集，全部在 `GET /api/v1/auth/me` 上 401。
+于是 §1 AC-38 那句「覆盖率报告里**两族**的六项各自有真实结果」**只对 2026-08-29
+那份归档成立，对 HEAD 这份不成立**。判定基准（`collector.All()` 的每一族都跑过）
+本身没变，变的是"跑过"的证据现在只剩首轮那份。
+
+这 13 条 401 与 [§5.15](#515-registered-的凭证永远不会续期refreshlead-是个自锁2026-08-30) 是同一件事的两端：
+令牌过期、库里 0 个 `refresh_token`、`NeedsRefresh` 因 `token_expires_at` 为空而恒为 false，
+所以**没有任何一条会自己好起来**。§5.15 的修复让失败变成具名的 `ErrNeedsRelogin`，
+但恢复仍需人工重登或补 `refresh_token`（04 §5.3 账密通路）。
+
+⚠️ 不要把这一轮读成"代码退化了"：两轮之间 `internal/collector` 的改动只有 §5.15
+那一处（加 `TokenExpiryFrom`，让判定从"恒 false"变成"读令牌"），它不会让原本能过的
+站点变成 401。退的是**别人家站点的凭证有效期**，这正是 FR-011 把这类站转人工的原因。
+但报告如实记下来才有意义 —— 上一轮的 2 个 sub2api 可用是**当时**的事实，不是 HEAD 的。
 
 ---
 
