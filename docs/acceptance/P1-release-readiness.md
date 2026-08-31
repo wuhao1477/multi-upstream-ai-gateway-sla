@@ -2,8 +2,8 @@
 
 | | |
 | --- | --- |
-| 评估对象 | 分支 `feat/p1-upstream-inventory`，37 个提交 / 148 文件 / +19834 −2208（对 `main`） |
-| 评估日期 | 2026-08-30 |
+| 评估对象 | 分支 `feat/p1-upstream-inventory`，39 个提交 / 149 文件 / +19962 −2208（对 `main`） |
+| 评估日期 | 2026-08-30 首版；**2026-08-31 复评**，全套件在 HEAD `b2ba4ad` 上重跑（[§5.17](P1-evidence.md#517-全套件在-head-上重跑一遍并补掉真库套件的生命周期2026-08-31)） |
 | 判定依据 | [00 §3 P1 行](../dev/00-overview-and-milestones.md) 的四条退出标准 · [#13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13) 退出清单 · [14 §3](../dev/14-acceptance-matrix.md) 规则 3「不可判定即不通过」 |
 | 证据 | [P1-evidence.md](P1-evidence.md)（本文件不重复举证，只做判定） |
 | **结论** | **可以发版**，但**必须带着 §3 那五条已知缺口一起发**，且其中两条需要你先做决定（§4） |
@@ -28,16 +28,23 @@
 清单已出（[P1-manual-channels.md](P1-manual-channels.md)，20 个站含类别与动作），
 **责任人未指派**。这是 §4 要你决定的第一件事。
 
-## 2. 验收规模（本轮全部实跑，非推断）
+## 2. 验收规模（全部实跑，非推断）
+
+下表**整列都在 HEAD `b2ba4ad` 上重跑过**（2026-08-31）。复评先做的就是核对
+"每份证据取自哪个提交"，并查出一个空档：最后一次动产品代码的 `97a8caa` 只带了
+`make check`，而 58 项浏览器验收上一次跑在它前一个提交 —— 它改的正是界面
+「手动采集」驱动的那条采集路径。空档已补，细节见
+[§5.17](P1-evidence.md#517-全套件在-head-上重跑一遍并补掉真库套件的生命周期2026-08-31)。
 
 | 套件 | 结果 | 能否进 CI |
 | --- | --- | --- |
 | `make check`（fmt / vet / **test -race** / 配置键生成 / 迁移一致） | ✅ | ✅ |
-| `verify/gate.sh`（文档 12 类 + 覆盖率分类自测 + DDL 真跑 pg16） | ✅ | ✅ |
-| `test-migrate.sh` 6 步 · `ddl-check.sh` · `test-config-api.sh` 9+2 · `test-compose.sh` 5 步 | ✅ | ✅ |
+| `verify/gate.sh`（文档 13 类 + 覆盖率分类自测 + DDL 真跑 pg16） | ✅ | ✅ |
+| `test-migrate.sh` 6 步 · `test-integration` 6 步 · `test-config-api.sh` 9+2 · `test-compose.sh` 5 步 | ✅ | ✅ |
 | `ui-stack.sh`：SPA **14** + 浏览器 **58** + 日志 **1** | ✅ | ❌ 需真上游令牌 |
-| `verify-remote.mjs`：内网真库只读 **32** | ✅ | ❌ runner 到不了 <internal-db-host> |
-| `test-arm-cloud.sh`：云端 arm64 真机（3 个 ELF 均 arm64 / 镜像版本 = HEAD / 其上再跑 14+58） | ✅ | ❌ 需 arm64 宿主 + 真上游 |
+| `remote-stack.sh`：内网真库只读 **32** | ✅ | ❌ runner 到不了 <internal-db-host> |
+| `test-arm-cloud.sh`：云端 arm64 真机（3 个 ELF 均 arm64 / 镜像版本 = HEAD / 其上再跑 14+58） | ✅ 取自 `048dbfe` | ❌ 需 arm64 宿主 + 真上游 |
+| CI `gate` + `build-arm` @ `b2ba4ad` | ✅ | — |
 
 合计 **104 项** + 1 条日志 shell 断言。**其中 90 项只能本地跑** —— 真上游令牌不进
 GitHub secrets 是明确决定（第三方真凭证，fork 触发的 `pull_request` 与构建日志都会漏），
@@ -56,6 +63,11 @@ GitHub secrets 是明确决定（第三方真凭证，fork 触发的 `pull_reque
 只有一处改动（加 `TokenExpiryFrom`），它不会让原本能过的站变 401。判定基准
 （`collector.All()` 每族都跑过）在首轮那份归档里成立，且该基准本身有单测守着。
 **但要接受**：今天重跑，sub2api 侧拿不到新证据。
+
+2026-08-31 复评补了一条**旁证**（不是这条缺口的解）：`97a8caa` 之后在 HEAD 上重跑
+58 项，newapi 系那条采集路径六项仍全绿（`account`/`groups`/`keys`/`model_catalog` ok +
+`subscription_quotas` unsupported + 限流 429）。所以「改采集代码把站弄坏了」这个
+可能性被排除了；sub2api 那 13 条仍是凭证到期，不是代码。
 
 ### 3.2 那 20 个站里 11 条永远不会自愈
 
