@@ -77,10 +77,29 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 				res.Items[idx] = item
 				return
 			}
+			// ⚠️ 校验必须在**发出请求之前**（2026-09-01 修）。
+			//
+			// 原先这里直接把导出文件里的 SiteURL 交给 Detect，而 validateBaseURL
+			// 只在后面的落库阶段（importOne）才跑 —— 于是"拒绝落库"拦不住**已经
+			// 发出的探测请求**，而 SSRF 关心的正是那个出站请求。`dry_run=true`
+			// 根本走不到落库阶段，等于完全不校验。实测：喂一个
+			// `http://127.0.0.1:9/probe`，报告里回来的是 "connection refused" ——
+			// 请求真的发出去了。
+			//
+			// 这一条同时证伪了 §3.7 与那次提交说明里的一句话：「校验收成一处、
+			// 两个入口共用」—— 共用是真的，但导入侧共用得太晚。本轮自审与
+			// Codex 二次评审各自独立查到（后者判 [high]）。
+			probeURL := strings.TrimRight(strings.TrimSpace(a.SiteURL), "/")
+			if err := validateBaseURL(probeURL); err != nil {
+				item.Status = "skipped"
+				item.Reason = "site_url 不能用于采集：" + err.Error()
+				res.Items[idx] = item
+				return
+			}
 
 			// 每个站点单独给短超时：一个慢站不该拖累整批
 			pctx, pcancel := context.WithTimeout(ctx, 12*time.Second)
-			d, derr := s.Detect(pctx, a.SiteURL)
+			d, derr := s.Detect(pctx, probeURL)
 			pcancel()
 
 			if derr != nil || d.Family == collector.FamilyUnknown {
@@ -220,7 +239,18 @@ func (s *Server) importOne(
 		}
 		it.Status = "imported"
 		it.ChannelID = c.ID
-		it.Warning = fmt.Sprintf("补齐了已有渠道 #%d 的%s", c.ID, strings.Join(missing, "与"))
+		// ⚠️ **追加**而不是覆盖（2026-09-01 修）。原先这里是 `it.Warning = ...`，
+		// 于是探测阶段写下的「该站开启 turnstile…需转人工录入」或「导出里没有凭证」
+		// 被整句抹掉 —— 而 finishImport 靠 strings.Contains(it.Warning, …) 统计
+		// Shielded / NoCredential，覆盖之后这两个计数直接少计，界面上那行提示也没了。
+		// 实测：一个不带凭证的条目走补齐分支，warning 变成"补齐了…"，
+		// no_credential 从 1 掉成 0。
+		repaired := fmt.Sprintf("补齐了已有渠道 #%d 的%s", c.ID, strings.Join(missing, "与"))
+		if it.Warning == "" {
+			it.Warning = repaired
+		} else {
+			it.Warning += "；" + repaired
+		}
 		return nil
 	}
 
@@ -285,17 +315,27 @@ func (s *Server) importOne(
 
 // incompleteParts 返回该渠道缺哪几件东西（空 = 完整）。
 //
-// 判据是"采集需要什么"：没有账号或没有凭证的渠道，每轮 sync 都会在装配阶段
-// 报 ErrPrecondition，是一行采不到数据的台账。导出里没带 token 的站不算缺凭证 ——
-// 那是数据源本来就没有，补不出来，硬算成缺会让它每次导入都报一次"补齐失败"。
+// 判据是"采集需要什么"：缺其中任一件，每轮 sync 都会在装配阶段失败，
+// 是一行采不到数据的台账。导出里没带 token 的站不算缺凭证 —— 那是数据源本来
+// 就没有，补不出来，硬算成缺会让它每次导入都报一次"补齐失败"。
+//
+// ⚠️ **探测快照也是采集前置**（2026-09-01 补）。原先只查账号与凭证两张表，
+// 于是"有账号有凭证但没有 __detect__ 快照"的渠道被判为完整 → skipped，
+// 而 QuotaPerUnit() 取不到会返 0、FetchAccount 直接报错（04 §2：不猜，
+// 猜错差 50 万倍）。实测：手工建一个只有渠道行的半成品再导入，报 imported
+// 而快照仍是 0 行 —— 报告说成功，那个渠道其实一次都采不了。
+// 可达路径是 createChannel 的 auto_detect=false，以及本轮之前 SaveDetected
+// 落库失败只 Warn 不回滚的那一支（同轮已改成事务）。
 func (s *Server) incompleteParts(
 	ctx context.Context, db store.DBTX, chID int64, a collector.HubAccount,
 ) ([]string, error) {
-	var accounts, creds int
+	var accounts, creds, snaps int
 	if err := db.QueryRow(ctx, `
 SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
-       (SELECT count(*) FROM collector_credentials WHERE channel_id=$1)`,
-		chID).Scan(&accounts, &creds); err != nil {
+       (SELECT count(*) FROM collector_credentials WHERE channel_id=$1),
+       (SELECT count(*) FROM collector_snapshots
+         WHERE channel_id=$1 AND scope_type='pricing' AND scope_id='__detect__')`,
+		chID).Scan(&accounts, &creds, &snaps); err != nil {
 		return nil, fmt.Errorf("查渠道 %d 完整性: %w", chID, err)
 	}
 	var missing []string
@@ -304,6 +344,9 @@ SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
 	}
 	if creds == 0 && a.HasCredential() {
 		missing = append(missing, "凭证")
+	}
+	if snaps == 0 {
+		missing = append(missing, "探测快照")
 	}
 	return missing, nil
 }
@@ -322,6 +365,13 @@ func (s *Server) repairChannel(
 				ChannelID: chID, ExternalUserID: a.UserID(),
 			}); err != nil {
 				return fmt.Errorf("补账号: %w", err)
+			}
+		case "探测快照":
+			if s.SaveDetected == nil {
+				return fmt.Errorf("补探测快照：未注入 SaveDetected")
+			}
+			if err := s.SaveDetected(ctx, db, chID, d); err != nil {
+				return fmt.Errorf("补探测快照: %w", err)
 			}
 		case "凭证":
 			if s.SaveCredential == nil {
