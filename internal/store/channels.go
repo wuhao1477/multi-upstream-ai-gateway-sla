@@ -7,10 +7,28 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrNotFound 是通用的"记录不存在"。
 var ErrNotFound = errors.New("store: 记录不存在")
+
+// ErrDuplicate 是"唯一约束冲突"。
+//
+// 存在的理由：019 给 channels.base_url 加了唯一约束之后，"同地址已存在"从
+// 应用层的 read-then-insert 判断变成库级冲突。调用方要能把它与"请求写错了"
+// 分开 —— 前者该返 409（去改那一条），后者返 400（改自己的请求）。
+var ErrDuplicate = errors.New("store: 已存在")
+
+// asDuplicate 把 PG 的唯一约束冲突（23505）翻成 ErrDuplicate。
+// 其它错误原样返回。
+func asDuplicate(err error, msg string) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return fmt.Errorf("%w: %s", ErrDuplicate, msg)
+	}
+	return err
+}
 
 // Channel 是一个上游渠道。
 type Channel struct {
@@ -38,7 +56,11 @@ INSERT INTO channels (name, site_family, base_url, status)
 VALUES ($1,$2,$3,COALESCE(NULLIF($4,''),'enabled'))
 RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("建渠道 %q: %w", c.Name, err)
+		// 019 的唯一约束是"同地址只一个渠道"的**唯一**真实防线（read-then-insert
+		// 防不住并发）。撞上去时要能被上层区分出来，否则并发导入只会得到一句
+		// PG 原文，而正确的处置是"去用已有那条"。
+		return 0, asDuplicate(fmt.Errorf("建渠道 %q: %w", c.Name, err),
+			"已有渠道使用地址 "+c.BaseURL)
 	}
 	return id, nil
 }
@@ -108,7 +130,9 @@ UPDATE channels
  WHERE id = $1`, c.ID, c.Name, c.SiteFamily, c.BaseURL, c.Status,
 		c.DisabledReason, c.DisabledUntil)
 	if err != nil {
-		return fmt.Errorf("更新渠道 %d: %w", c.ID, err)
+		// PATCH 也能改 base_url，故同样会撞 019 的唯一约束。
+		return asDuplicate(fmt.Errorf("更新渠道 %d: %w", c.ID, err),
+			"已有渠道使用地址 "+c.BaseURL)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: 渠道 %d", ErrNotFound, c.ID)

@@ -98,7 +98,12 @@ CREATE TABLE channels (
   -- 取值范围 = 站型注册表的家族 + unknown 哨兵（04 §7bis）。加一族要配一条迁移
   -- 放宽它，否则新族的渠道**建不进来**（约束冲突，报在写入时而不是编译时）。
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
-  base_url        TEXT NOT NULL,
+  -- 全库唯一（019）：三处写入路径（createChannel / importOne / patchChannel）都是
+  -- "先查再插/改"，而 read-then-insert **防不住并发** —— 两个并发导入或一次 201
+  -- 丢失后的重试都能各插一条，台账里出现重复渠道而库里没有 DELETE 入口。
+  -- 约束认字面值，故写入侧必须先去尾斜杠；校验（scheme + host）见
+  -- internal/admin.validateBaseURL。
+  base_url        TEXT NOT NULL UNIQUE,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
