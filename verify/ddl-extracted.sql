@@ -21,6 +21,10 @@ CREATE TABLE channels (
   -- 校验（scheme 为 http/https 且 host 非空）**并返回规范形态**（去首尾空白、
   -- 小写 host、去尾斜杠）—— 三处入口共用它，少一处就能用一个 "/" 或一个大写字母
   -- 绕过本约束。只小写 host 不动 path：path 大小写敏感。
+  -- ⚠️ 019 文件头里那句"没做 lower()…这个残留缺口记在这里"**已过时，且改不了** ——
+  -- 019 已应用到真库，checksum 契约把整个文件（含注释）冻住了，改注释也会让
+  -- 迁移在启动时直接 return error。2026-09-01 实测撞过一次：只改了 019 的注释，
+  -- remote-stack.sh 起 core 就报"已应用但内容已变"。**以本处为准。**
   base_url        TEXT NOT NULL UNIQUE,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
