@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 python3 verify/extract_ddl.py
 
-docker rm -f ddlpg >/dev/null 2>&1 || true
+docker rm -f -v ddlpg >/dev/null 2>&1 || true
 docker run -d --name ddlpg -e POSTGRES_PASSWORD=x -e POSTGRES_DB=sla postgres:16 >/dev/null
 for _ in $(seq 1 60); do
   docker exec ddlpg pg_isready -U postgres >/dev/null 2>&1 && break
@@ -38,7 +38,7 @@ RESULT=$(docker exec ddlpg psql -U postgres -d sla -tAc \
 if [ "$RESULT" = "1/2" ]; then
   echo "✅ 匿名 401 聚合语义正确（1 行 / 计数 2）"
 else
-  echo "❌ 匿名 401 聚合异常: $RESULT（期望 1/2）"; docker rm -f ddlpg >/dev/null; exit 1
+  echo "❌ 匿名 401 聚合异常: $RESULT（期望 1/2）"; docker rm -f -v ddlpg >/dev/null; exit 1
 fi
 
-docker rm -f ddlpg >/dev/null
+docker rm -f -v ddlpg >/dev/null

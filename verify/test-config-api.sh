@@ -15,7 +15,7 @@ TOKEN="test-admin-token-$$"
 CORE_PID=""
 cleanup() {
   [ -n "$CORE_PID" ] && kill "$CORE_PID" 2>/dev/null || true
-  docker rm -f "$CT" >/dev/null 2>&1 || true
+  docker rm -f -v "$CT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup

@@ -68,7 +68,20 @@ cleanup() {
   if [ -n "$KEEP" ]; then echo ""; echo "── 清理 ──"; fi
   if [ -n "$CORE_PID" ]; then kill "$CORE_PID" 2>/dev/null || true; fi
   if [ -n "$USE_DOCKER" ]; then
-    docker rm -f "$PGNAME" >/dev/null 2>&1 || true
+    # ⚠️ `-v` 不可省。postgres 镜像自带 VOLUME 声明，`docker rm` 不带 -v
+    #    只删容器、**留下匿名数据卷**。2026-08-31 清出 80 个这样的孤儿卷、
+    #    共 4.1GB —— 全是本仓库四个验收脚本历次运行的残留。
+    #    与 8a7f5d7 那次同类（清理没做干净），只是漏在卷这一层：
+    #    容器层每轮都收干净了，所以 `docker ps` 一直是空的，看不出来。
+    docker rm -f -v "$PGNAME" >/dev/null 2>&1 || true
+    # 收干净了没有，当场验一次：本脚本起的容器不该留下任何卷。
+    if [ -n "${VOL_BEFORE:-}" ]; then
+      VOL_AFTER=$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$VOL_AFTER" -gt "$VOL_BEFORE" ]; then
+        echo "   ⚠️ 卷泄漏：跑之前 ${VOL_BEFORE} 个，拆完 ${VOL_AFTER} 个"
+        echo "      —— docker rm 少了 -v，或又多了一处起容器的地方"
+      fi
+    fi
   else
     # PGBIN 只在走本地 postgres 那条分支里才赋值；容器路径下它未定义，
     # 而 set -u 会让 "$PGBIN" 直接中止函数。用 ${PGBIN:-} 兜住。
@@ -143,7 +156,9 @@ echo "   ✅ 前端产物就绪"
 step "起 PostgreSQL"
 if docker info >/dev/null 2>&1; then
   USE_DOCKER=1
-  docker rm -f "$PGNAME" >/dev/null 2>&1 || true
+  # 记下起容器前的卷数，cleanup 里拿它验"拆干净了没有"
+  VOL_BEFORE=$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')
+  docker rm -f -v "$PGNAME" >/dev/null 2>&1 || true
   docker run -d --name "$PGNAME" -e POSTGRES_PASSWORD=x -e POSTGRES_DB=sla \
     -p "${PGPORT}:5432" postgres:16 >/dev/null
   for _ in $(seq 1 60); do

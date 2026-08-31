@@ -11,7 +11,7 @@ CT=migtestpg
 PORT=55433
 DSN="postgres://postgres:x@127.0.0.1:${PORT}/sla"
 
-cleanup() { docker rm -f "$CT" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f -v "$CT" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 
