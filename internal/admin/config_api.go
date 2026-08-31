@@ -40,12 +40,18 @@ type Server struct {
 	Snapshot func() *config.Snapshot
 	// SaveCredential 持久化采集凭证。注入函数而非 *store.Pool ——
 	// admin 只依赖 DB 接口，不该知道连接池的具体类型。
-	SaveCredential func(ctx context.Context, cred collector.Credential) error
+	//
+	// ⚠️ 收 `store.DBTX` 而不自己取连接（2026-08-29 改）：导入要把四处写入放进
+	// 同一个事务，而这个函数原先自己 `Pool.Acquire` 取**另一条连接**独立提交 ——
+	// 调用方无论怎么包事务都盖不住它。传 `*pgx.Conn` 时行为与从前一致。
+	SaveCredential func(ctx context.Context, db store.DBTX, cred collector.Credential) error
 	// SaveDetected 持久化站型探测结果。
 	// **必须落库**：quota_per_unit 是 NewAPI 系额度归一的必需输入，
 	// 而 FetchAccount 缺它会直接报错（不猜，猜错差 50 万倍）——
 	// 只在响应里回显给人看是不够的。
-	SaveDetected func(ctx context.Context, channelID int64, d collector.DetectResult) error
+	//
+	// ⚠️ 同上收 `store.DBTX`。
+	SaveDetected func(ctx context.Context, db store.DBTX, channelID int64, d collector.DetectResult) error
 
 	guard  *syncGuard
 	tokens *tokenStore

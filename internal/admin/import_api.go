@@ -160,32 +160,75 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 	s.ok(w, res)
 }
 
-// importOne 建渠道 + 账号 + 凭证。
+// importOne 建渠道 + 探测快照 + 账号 + 凭证，**四处同生共死**。
+//
+// ⚠️ 全程在一个事务里（2026-08-29 二次评审后改）。原先是四次独立写入，
+// 任一步失败只把条目标成 failed，已建的渠道/快照/账号**留在库里**；
+// 而下面那个"同 base_url 就跳过"的判断会让重导认定它已存在 ——
+// 于是半成品永不自愈，且台账里多一个采不到数据的渠道（每轮 sync 都报
+// ErrPrecondition：凭证读不到）。库里没有 DELETE 渠道的入口，只能手工补。
+//
+// 事务不是为了并发（导入是低频串行操作），是为了**失败原子性**。
 func (s *Server) importOne(
 	ctx context.Context, conn *pgx.Conn,
 	a collector.HubAccount, d collector.DetectResult, it *collector.HubImportItem,
 ) error {
+	want := strings.TrimRight(a.SiteURL, "/")
+
+	// 校验与 createChannel 同一处（SSRF 的最小边界）：导入侧原先直接把导出文件里的
+	// SiteURL 传给 Detect，连 http/https 前缀都不查 —— 同一个字段两个入口两套规矩。
+	if err := validateBaseURL(want); err != nil {
+		return err
+	}
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开事务: %w", err)
+	}
+	// Rollback 在已 Commit 后返回 ErrTxClosed，忽略即可；未提交时它才是真正的回滚。
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	// 同 base_url 已存在则跳过 —— 重复导入是常态（导出文件会更新后再导一次），
-	// 每次都新建会让台账里出现几十个重复渠道
-	existing, err := store.ListChannels(ctx, conn)
+	// 每次都新建会让台账里出现几十个重复渠道。
+	//
+	// ⚠️ 只跳过**完整**的渠道。不完整的（缺凭证/缺账号）要能补齐，否则一次失败
+	// 就把那个站永久钉死在半成品状态 —— 这正是上面那条事务要防的另一半。
+	existing, err := store.ListChannels(ctx, tx)
 	if err != nil {
 		return err
 	}
-	want := strings.TrimRight(a.SiteURL, "/")
 	for _, c := range existing {
-		if strings.TrimRight(c.BaseURL, "/") == want {
+		if strings.TrimRight(c.BaseURL, "/") != want {
+			continue
+		}
+		missing, err := s.incompleteParts(ctx, tx, c.ID, a)
+		if err != nil {
+			return err
+		}
+		if len(missing) == 0 {
 			it.Status = "skipped"
 			it.Reason = fmt.Sprintf("已存在同地址的渠道 #%d", c.ID)
 			it.ChannelID = c.ID
 			return nil
 		}
+		// 补齐后提交 —— 同一个事务，补不全就整体回滚。
+		if err := s.repairChannel(ctx, tx, c.ID, a, d, missing); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("提交补齐: %w", err)
+		}
+		it.Status = "imported"
+		it.ChannelID = c.ID
+		it.Warning = fmt.Sprintf("补齐了已有渠道 #%d 的%s", c.ID, strings.Join(missing, "与"))
+		return nil
 	}
 
 	name := strings.TrimSpace(a.SiteName)
 	if name == "" {
 		name = want
 	}
-	chID, err := store.CreateChannel(ctx, conn, store.Channel{
+	chID, err := store.CreateChannel(ctx, tx, store.Channel{
 		Name: name, BaseURL: want, SiteFamily: string(d.Family),
 	})
 	if err != nil {
@@ -196,18 +239,16 @@ func (s *Server) importOne(
 	// 探测结果落库：quota_per_unit 是额度归一的必需输入，
 	// 而它**逐站不同**（实测 500000 与 1000000 两种）
 	if s.SaveDetected != nil {
-		if err := s.SaveDetected(ctx, chID, d); err != nil {
+		if err := s.SaveDetected(ctx, tx, chID, d); err != nil {
 			return fmt.Errorf("存探测结果: %w", err)
 		}
 	}
 
-	accID, err := store.CreateAccount(ctx, conn, store.Account{
+	if _, err := store.CreateAccount(ctx, tx, store.Account{
 		ChannelID: chID, ExternalUserID: a.UserID(),
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("建账号: %w", err)
 	}
-	_ = accID
 
 	// 有凭证就一并登记 —— 否则运维还要逐站手填上百次。
 	// cred_type 与必需字段都走注册表的同一处判定（与 saveCredential 同一函数），
@@ -225,7 +266,7 @@ func (s *Server) importOne(
 			// 才暴露，而那时已经分不清是站点挂了还是导入时就缺字段。
 			return fmt.Errorf("导出里的凭证字段不足: %w", err)
 		}
-		if err := s.SaveCredential(ctx, collector.Credential{
+		if err := s.SaveCredential(ctx, tx, collector.Credential{
 			ChannelID: chID, Family: d.Family, CredType: credType,
 			BaseURL:        want,
 			AccessToken:    a.AccountInfo.AccessToken,
@@ -235,7 +276,75 @@ func (s *Server) importOne(
 		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交导入: %w", err)
+	}
 	it.Status = "imported"
+	return nil
+}
+
+// incompleteParts 返回该渠道缺哪几件东西（空 = 完整）。
+//
+// 判据是"采集需要什么"：没有账号或没有凭证的渠道，每轮 sync 都会在装配阶段
+// 报 ErrPrecondition，是一行采不到数据的台账。导出里没带 token 的站不算缺凭证 ——
+// 那是数据源本来就没有，补不出来，硬算成缺会让它每次导入都报一次"补齐失败"。
+func (s *Server) incompleteParts(
+	ctx context.Context, db store.DBTX, chID int64, a collector.HubAccount,
+) ([]string, error) {
+	var accounts, creds int
+	if err := db.QueryRow(ctx, `
+SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
+       (SELECT count(*) FROM collector_credentials WHERE channel_id=$1)`,
+		chID).Scan(&accounts, &creds); err != nil {
+		return nil, fmt.Errorf("查渠道 %d 完整性: %w", chID, err)
+	}
+	var missing []string
+	if accounts == 0 {
+		missing = append(missing, "账号")
+	}
+	if creds == 0 && a.HasCredential() {
+		missing = append(missing, "凭证")
+	}
+	return missing, nil
+}
+
+// repairChannel 给已存在但不完整的渠道补上缺的那几件。
+//
+// 只补 incompleteParts 报缺的，不动已有行 —— 补齐不该覆盖运维手工改过的凭证。
+func (s *Server) repairChannel(
+	ctx context.Context, db store.DBTX, chID int64,
+	a collector.HubAccount, d collector.DetectResult, missing []string,
+) error {
+	for _, m := range missing {
+		switch m {
+		case "账号":
+			if _, err := store.CreateAccount(ctx, db, store.Account{
+				ChannelID: chID, ExternalUserID: a.UserID(),
+			}); err != nil {
+				return fmt.Errorf("补账号: %w", err)
+			}
+		case "凭证":
+			if s.SaveCredential == nil {
+				return fmt.Errorf("补凭证：未注入 SaveCredential")
+			}
+			reg, ok := collector.Lookup(d.Family)
+			if !ok {
+				return fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
+			}
+			credType, err := reg.CredTypeFor(true, a.UserID() != "", false)
+			if err != nil {
+				return fmt.Errorf("导出里的凭证字段不足: %w", err)
+			}
+			if err := s.SaveCredential(ctx, db, collector.Credential{
+				ChannelID: chID, Family: d.Family, CredType: credType,
+				BaseURL:        strings.TrimRight(a.SiteURL, "/"),
+				AccessToken:    a.AccountInfo.AccessToken,
+				ExternalUserID: a.UserID(),
+			}); err != nil {
+				return fmt.Errorf("补凭证: %w", err)
+			}
+		}
+	}
 	return nil
 }
 

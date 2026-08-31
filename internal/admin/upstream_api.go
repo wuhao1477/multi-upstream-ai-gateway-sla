@@ -117,8 +117,8 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, "name 与 base_url 必填")
 		return
 	}
-	if !strings.HasPrefix(in.BaseURL, "http://") && !strings.HasPrefix(in.BaseURL, "https://") {
-		s.fail(w, http.StatusBadRequest, "base_url 须以 http:// 或 https:// 开头")
+	if err := validateBaseURL(strings.TrimSpace(in.BaseURL)); err != nil {
+		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -149,7 +149,7 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		if detected != nil {
 			// 探测结果必须落库：quota_per_unit 是后续额度归一的必需输入
 			if s.SaveDetected != nil {
-				if err := s.SaveDetected(r.Context(), id, *detected); err != nil {
+				if err := s.SaveDetected(r.Context(), conn, id, *detected); err != nil {
 					s.Logger.Warn("探测结果落库失败，采集时会因缺 quota_per_unit 而失败",
 						"channel_id", id, "err", err)
 					resp["warning_persist"] = "站型探测结果未能落库：" + err.Error()
@@ -879,7 +879,7 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusServiceUnavailable, "凭证存储未配置")
 			return
 		}
-		if err := s.SaveCredential(r.Context(), collector.Credential{
+		if err := s.SaveCredential(r.Context(), conn, collector.Credential{
 			ChannelID: in.ChannelID, Family: fam, CredType: credType,
 			BaseURL:     ch.BaseURL,
 			AccessToken: in.AccessToken, RefreshToken: in.RefreshToken,

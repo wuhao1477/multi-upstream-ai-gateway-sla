@@ -26,7 +26,7 @@ sleep 2
 
 q() { docker exec "$CT" psql -U postgres -d sla -tAc "$1"; }
 
-echo "── 1/7 首次迁移 ──"
+echo "── 1/8 首次迁移 ──"
 go run ./cmd/migrate -dsn "$DSN"
 
 # 对象数从**迁移文本算出**再逐个比对，不再用 `≥45` 的下界。
@@ -45,7 +45,7 @@ if [ "$WANT_RELS" != "$GOT_RELS" ]; then
 fi
 echo "   ✅ $(echo "$WANT_RELS" | wc -l | tr -d ' ') 个表/视图逐个对上（+ schema_migrations）"
 
-echo "── 2/7 种子：可种子化的键全部灌入 ──"
+echo "── 2/8 种子：可种子化的键全部灌入 ──"
 # 期望值**从生成物算出**而不写死：72 键里 EnvSourced 的不落表
 # （admin_token，09 §4bis 避免自己改自己），故库中应是 72-1=71。
 # 写死数字会在下次新增 EnvSourced 项时又挂一次。
@@ -75,7 +75,7 @@ MISSING=$(q "select coalesce((select param_value#>>'{}' from config_params
   echo "❌ catalog_missing_rounds = $MISSING，期望 $WANT_ROUNDS"; exit 1; }
 echo "   ✅ catalog_missing_rounds = $WANT_ROUNDS（取 0 会让每轮都判模型下架）"
 
-echo "── 3/7 幂等：重复迁移 ──"
+echo "── 3/8 幂等：重复迁移 ──"
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
 KEYS2=$(q "select count(*) from config_params where scope_type='global'")
 [ "$KEYS2" = "$WANT" ] || { echo "❌ 重复迁移后键数变成 $KEYS2，种子不幂等"; exit 1; }
@@ -84,7 +84,7 @@ APPLIED=$(q "select count(*) from schema_migrations")
 [ "$APPLIED" = "$WANT_MIG" ] || { echo "❌ schema_migrations = $APPLIED，期望 $WANT_MIG"; exit 1; }
 echo "   ✅ 重复执行不重复插入（键 $WANT、迁移记录 $WANT_MIG）"
 
-echo "── 4/7 运维改过的值不被重启抹回 ──"
+echo "── 4/8 运维改过的值不被重启抹回 ──"
 q "update config_params set param_value='99'::jsonb
     where param_key='catalog_missing_rounds'" >/dev/null
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
@@ -94,7 +94,7 @@ echo "   ✅ 已有值不被覆盖"
 q "update config_params set param_value='3'::jsonb
     where param_key='catalog_missing_rounds'" >/dev/null
 
-echo "── 5/7 账本母表是分区表（ddl-check 不覆盖这项）──"
+echo "── 5/8 账本母表是分区表（ddl-check 不覆盖这项）──"
 # 016 之前这里断言"3 张 2026-08 子表已挂载"。那三张子表是 02 §9.1 的**示例**
 # DDL（写死月份），016 已删 —— 分区管理属运行期（定时任务或 pg_partman）。
 # 于是这条改断更耐久的那一半：母表确实以 PARTITION BY 建出（relkind='p'）。
@@ -142,7 +142,7 @@ COLS=$(q "select count(*) from information_schema.columns where table_name='upst
 [ "$COLS" = "6" ] || { echo "❌ upstream_keys 的 P1 列 = $COLS，期望 6"; exit 1; }
 echo "   ✅ P1 三表 + upstream_keys 六列就位"
 
-echo "── 6/7 CHECK 取值与站型注册表一致 ──"
+echo "── 6/8 CHECK 取值与站型注册表一致 ──"
 # 017 收窄了 site_family 与 cred_type 的取值。这里断言"库里的取值范围 == 从注册表
 # 推导出来的"，两个方向都会红：
 #   · 加了一族却没配迁移放宽 → 该族的渠道**建不进来**，而约束冲突报在**写入时**，
@@ -191,7 +191,7 @@ if [ "$GOT_CRED" != "$WANT_CRED" ]; then
 fi
 echo "   ✅ cred_type 约束 = $(echo "$WANT_CRED" | tr '\n' ' ')"
 
-echo "── 7/7 两处 billing_unit 的列定义必须一致（018）──"
+echo "── 7/8 两处 billing_unit 的列定义必须一致（018）──"
 # 为什么断言"两处一致"而不是"权威表可空且有 CHECK"：
 #
 # 缺陷不是某一张表定错了，是**两张表对同一个列名给了相反的处置** —— 015 给目录
@@ -322,6 +322,33 @@ case "$PROBE" in
   *) echo "❌ 探针没跑到省略那一步，输出如下："; echo "$PROBE" | sed 's/^/   /'; exit 1;;
 esac
 echo "   ✅ 坏口径写入时被拦；省略口径落 NULL 而非被默认值补上（探针已回滚）"
+
+echo "── 8/8 导入的失败原子性与半成品补齐（真库 Go 测试）──"
+# 为什么挂在这里：这几条要**可写的真 PG**，而本脚本已经有一个。
+# internal/admin 的其余测试不碰库，SLA_TEST_DSN 不设时它们自己 t.Skip。
+#
+# 覆盖的缺口（2026-08-29 二次评审）：POST /admin/import/all-api-hub 的**写路径**
+# 此前零自动覆盖 —— 58 项浏览器验收只跑 dry_run=true（真导入会写上百个渠道，
+# 那是运维的决定），于是"四次独立写入中途失败留下半成品"没有任何断言看得见。
+if ! SLA_TEST_DSN="$DSN" go test ./internal/admin/ -run 'TestImport' -count=1 -v \
+     >/tmp/import-tx.log 2>&1; then
+  echo "❌ 导入事务测试失败"
+  sed 's/^/   /' /tmp/import-tx.log | tail -30
+  exit 1
+fi
+RAN=$(grep -c '^--- PASS: TestImport' /tmp/import-tx.log || true)
+SKIPPED=$(grep -c '^--- SKIP: TestImport' /tmp/import-tx.log || true)
+if [ "${SKIPPED:-0}" -gt 0 ]; then
+  echo "❌ 有 ${SKIPPED} 条被跳过 —— SLA_TEST_DSN 没传进去，这几条等于没跑"
+  grep '^--- SKIP' /tmp/import-tx.log | sed 's/^/   /'
+  exit 1
+fi
+if [ "${RAN:-0}" -ne 3 ]; then
+  echo "❌ 只跑了 ${RAN} 条，期望 3 条（回滚 / 补齐 / base_url 校验）"
+  grep -E '^--- (PASS|FAIL|SKIP)' /tmp/import-tx.log | sed 's/^/   /'
+  exit 1
+fi
+echo "   ✅ 凭证失败整体回滚（渠道/账号/凭证 0 行）；半成品能补齐；坏 base_url 被拒"
 
 echo
 echo "✅ 迁移集成测试全部通过"

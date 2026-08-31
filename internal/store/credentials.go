@@ -24,14 +24,31 @@ func NewCredentialStore(p *Pool) *CredentialStore { return &CredentialStore{Pool
 //
 // 一渠道一份采集凭证（P1 假设）：多账号采集属后续阶段，届时按
 // (channel_id, external_user_id) 拆分。
+// Save 自取连接并持久化凭证，满足 collector.CredentialStore。
+//
+// **续期路径用这一个**（Authenticator 在释放刷新锁前调它，不变式 S-1）：
+// 那里没有外层事务，自己取连接是对的。
 func (s *CredentialStore) Save(ctx context.Context, cred collector.Credential) error {
 	c, rel, err := s.Pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
 	defer rel()
+	return s.SaveTx(ctx, c, cred)
+}
 
-	_, err = c.Exec(ctx, `
+// SaveTx 在**调用方给的**执行器上持久化凭证。
+//
+// 为什么要与 Save 分成两个（2026-08-29 二次评审）：两个调用点要的不是一件事 ——
+//
+//	· 续期（Authenticator）：无外层事务，需要自己取连接 → Save
+//	· 导入（importOne）：四处写入必须同生共死 → SaveTx，传入 tx
+//
+// 原先只有前一种，于是导入侧无论怎么包事务都盖不住这处写入：它自取连接、
+// 独立提交，中途失败就留下"渠道在、凭证没有"的半成品，而重导会按 base_url
+// 判为已存在直接跳过 —— 永不自愈。
+func (s *CredentialStore) SaveTx(ctx context.Context, db DBTX, cred collector.Credential) error {
+	_, err := db.Exec(ctx, `
 INSERT INTO collector_credentials (channel_id, site_family, cred_type,
        access_token, refresh_token, username, password, external_user_id,
        user_id_header_name, token_expires_at, status, updated_at)
@@ -102,14 +119,12 @@ SELECT site_family, cred_type, access_token, refresh_token, username, password,
 // 用途：运维在 web 端建渠道时选了自动探测，此时就把 quota_per_unit 等
 // 家族特征存下来 —— 它是 NewAPI 系额度换算的必需输入，而 FetchAccount
 // **缺它会直接报错**（不猜，猜错差 50 万倍）。
+// SaveDetected 在调用方给的执行器上落探测结果。理由同 SaveTx。
+//
+// 这一处没有"自取连接"的变体：唯一调用方是导入与建渠道，两者都有连接在手。
 func (s *CredentialStore) SaveDetected(
-	ctx context.Context, channelID int64, d collector.DetectResult,
+	ctx context.Context, db DBTX, channelID int64, d collector.DetectResult,
 ) error {
-	c, rel, err := s.Pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer rel()
 	payload := map[string]any{"family": string(d.Family)}
 	if d.Version != "" {
 		payload["version"] = d.Version
@@ -118,7 +133,7 @@ func (s *CredentialStore) SaveDetected(
 		payload["quota_per_unit"] = d.QuotaPerUnit
 	}
 	payload["no_shield"] = d.NoShield
-	return InsertSnapshot(ctx, c, SnapshotRow{
+	return InsertSnapshot(ctx, db, SnapshotRow{
 		ChannelID: channelID, ScopeType: "pricing", ScopeID: "__detect__",
 		Payload: payload, DataSource: "auto_collect", FetchedAt: d.Meta.FetchedAt,
 	})

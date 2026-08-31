@@ -195,7 +195,7 @@ type SnapshotRow struct {
 // payload 结构见 02 §7.1：**未采到的字段一律省略该键，不写 null** ——
 // 便于区分"没采到"与"采到的值是 0"。这条纪律由调用方保证（构造 map 时
 // 只放有值的键），本函数只负责序列化。
-func InsertSnapshot(ctx context.Context, conn *pgx.Conn, row SnapshotRow) error {
+func InsertSnapshot(ctx context.Context, conn DBTX, row SnapshotRow) error {
 	payload, err := json.Marshal(row.Payload)
 	if err != nil {
 		return fmt.Errorf("序列化 payload: %w", err)

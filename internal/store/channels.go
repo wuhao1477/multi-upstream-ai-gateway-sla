@@ -26,7 +26,7 @@ type Channel struct {
 }
 
 // CreateChannel 登记一个渠道。
-func CreateChannel(ctx context.Context, conn *pgx.Conn, c Channel) (int64, error) {
+func CreateChannel(ctx context.Context, conn DBTX, c Channel) (int64, error) {
 	if c.SiteFamily == "" {
 		// 站型未知时显式写 unknown，而不是留空 —— CHECK 约束只认四个值，
 		// 且 unknown 有明确语义（04 §7：走未知家族接入流程）
@@ -44,7 +44,7 @@ RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status).Scan(&id)
 }
 
 // ListChannels 列出全部渠道。
-func ListChannels(ctx context.Context, conn *pgx.Conn) ([]Channel, error) {
+func ListChannels(ctx context.Context, conn DBTX) ([]Channel, error) {
 	rows, err := conn.Query(ctx, `
 SELECT id, name, site_family, base_url, status,
        COALESCE(disabled_reason,''), disabled_until, created_at, updated_at
@@ -127,7 +127,7 @@ type Account struct {
 }
 
 // CreateAccount 登记账号。
-func CreateAccount(ctx context.Context, conn *pgx.Conn, a Account) (int64, error) {
+func CreateAccount(ctx context.Context, conn DBTX, a Account) (int64, error) {
 	var id int64
 	err := conn.QueryRow(ctx, `
 INSERT INTO upstream_accounts (channel_id, external_user_id, balance_group_key, status)

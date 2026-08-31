@@ -3,10 +3,41 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
+
+// validateBaseURL 校验一个将被采集器请求的上游地址。
+//
+// **两个入口共用这一处**（2026-08-29 二次评审后收拢）：`createChannel` 与
+// 批量导入。原先只有前者查 `http://`/`https://` 前缀，导入侧把导出文件里的
+// `SiteURL` 直传 `Detect` —— 同一个字段两个入口两套规矩，而更宽的那个恰好是
+// 不经人眼逐条确认的批量路径。
+//
+// ⚠️ **这不是完整的 SSRF 防护**，只是把两处收成一处并挡掉明显不是 http 上游的
+// 输入。缺的那层（解析后拒绝 loopback/私有/链路本地/云元数据网段、自定义
+// Transport 在每次连接前复核 DNS、CheckRedirect 拦重定向）记在
+// docs/acceptance/P1-release-readiness.md §3.7：当前管理面是**单一 admin 令牌、
+// 无角色分级**，能改 base_url 的人已经握有配置面，故那层加固挂到引入 RBAC 时做。
+func validateBaseURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("base_url 必填")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("base_url 解析失败: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("base_url 须以 http:// 或 https:// 开头")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("base_url 缺主机名：%q", raw)
+	}
+	return nil
+}
 
 // validateValue 校验新值的形态与该键的默认值一致。
 //

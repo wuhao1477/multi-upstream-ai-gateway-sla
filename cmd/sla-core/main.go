@@ -138,7 +138,9 @@ func run(addr, dsn string, logger *slog.Logger) error {
 		return runChannelSync(ctx, pool, hc, sink, auth, ch)
 	}
 	credStore := store.NewCredentialStore(pool)
-	srv.SaveCredential = credStore.Save
+	// 注入收 DBTX 的那一版（SaveTx，不是 Save）：管理面的写入要能被调用方
+	// 收进事务。Save 那个自取连接的变体留给采集侧的续期路径（不变式 S-1）。
+	srv.SaveCredential = credStore.SaveTx
 	srv.SaveDetected = credStore.SaveDetected
 	srv.Routes(mux)
 	srv.UpstreamRoutes(mux)
