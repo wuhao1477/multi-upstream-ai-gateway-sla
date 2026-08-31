@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -212,8 +213,83 @@ VALUES ($1,$2,'newapi','enabled') RETURNING id`,
 	}
 }
 
-// TestImportRejectsBadBaseURL 导入必须复用 createChannel 的 base_url 校验。
+// TestImportRepairAddsSnapshotAndKeepsWarning 补齐要补上探测快照，且不吃掉已有 warning。
 //
+// 两条 2026-09-01 自审查出的缺陷合成一条测试（同一次 importOne 就能同时暴露）：
+//
+//  1. incompleteParts 原先只查账号与凭证两张表 —— "有账号有凭证但没有 __detect__
+//     快照"的渠道被判为完整 → skipped，而 QuotaPerUnit() 取不到会返 0、
+//     FetchAccount 直接报错（04 §2：不猜，猜错差 50 万倍）。实测过：手工建一个
+//     只有渠道行的半成品再导入，报 imported 而快照仍是 0 行。
+//  2. 补齐分支原先是 `it.Warning = …` **整句覆盖** —— 探测阶段写下的
+//     「turnstile…需转人工录入」或「导出里没有凭证」被抹掉，而 finishImport
+//     靠 strings.Contains(it.Warning, …) 统计 Shielded / NoCredential，
+//     覆盖之后这两个计数直接少计。
+func TestImportRepairAddsSnapshotAndKeepsWarning(t *testing.T) {
+	dsn := testDSN(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	a := hubAcct("snapwarn")
+	base := a.SiteURL
+	wipe(ctx, t, conn, base)
+	defer wipe(context.Background(), t, conn, base)
+
+	// 半成品：只有渠道行。等价于 auto_detect=false 建出来的渠道。
+	var chID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, base_url, site_family, status)
+VALUES ($1,$2,'newapi','enabled') RETURNING id`,
+		"事务测试-缺快照", base).Scan(&chID); err != nil {
+		t.Fatalf("造半成品: %v", err)
+	}
+
+	s := testServer()
+	s.SaveCredential = func(ctx context.Context, db store.DBTX, c collector.Credential) error {
+		return (&store.CredentialStore{}).SaveTx(ctx, db, c)
+	}
+	s.SaveDetected = func(ctx context.Context, db store.DBTX, id int64, d collector.DetectResult) error {
+		return (&store.CredentialStore{}).SaveDetected(ctx, db, id, d)
+	}
+
+	// 探测阶段会写的那种 warning —— 补齐分支不得把它吃掉
+	const pre = "该站开启 turnstile 人机验证，服务端自动采集不可行，需转人工录入（04 §6）"
+	it := collector.HubImportItem{Warning: pre}
+	if err := s.importOne(ctx, conn, a, detected(), &it); err != nil {
+		t.Fatalf("补齐失败: %v", err)
+	}
+	if it.Status != "imported" {
+		t.Errorf("状态 %q，应为 imported", it.Status)
+	}
+	if !strings.Contains(it.Warning, "turnstile") {
+		t.Errorf("补齐把探测阶段的 warning 覆盖了：%q\n"+
+			"   → finishImport 靠 Contains 统计 Shielded/NoCredential，覆盖后计数少计，"+
+			"界面上「需转人工录入」的提示也消失。", it.Warning)
+	}
+	if !strings.Contains(it.Warning, "补齐") {
+		t.Errorf("warning 里没有补齐说明：%q", it.Warning)
+	}
+
+	var snaps int
+	if err := conn.QueryRow(ctx, `
+SELECT count(*) FROM collector_snapshots
+ WHERE channel_id=$1 AND scope_type='pricing' AND scope_id='__detect__'`, chID).
+		Scan(&snaps); err != nil {
+		t.Fatalf("数探测快照: %v", err)
+	}
+	if snaps != 1 {
+		t.Errorf("补齐后 __detect__ 快照 %d 行，应为 1\n"+
+			"   → 缺它则 QuotaPerUnit() 返 0，FetchAccount 报错：报了 imported 的渠道"+
+			"其实一次都采不了。", snaps)
+	}
+}
+
+// TestImportRejectsBadBaseURL 导入必须复用 createChannel 的 base_url 校验。
+
 // 原先导入侧把导出文件里的 SiteURL 直传 Detect，连 http/https 前缀都不查 ——
 // 同一个字段两个入口两套规矩，而更宽的那个恰好是不经人眼逐条确认的批量路径。
 func TestImportRejectsBadBaseURL(t *testing.T) {

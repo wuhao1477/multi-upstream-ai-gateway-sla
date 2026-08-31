@@ -323,32 +323,42 @@ case "$PROBE" in
 esac
 echo "   ✅ 坏口径写入时被拦；省略口径落 NULL 而非被默认值补上（探针已回滚）"
 
-echo "── 8/8 导入的失败原子性与半成品补齐（真库 Go 测试）──"
+echo "── 8/8 渠道与导入写路径的真库 Go 测试 ──"
 # 为什么挂在这里：这几条要**可写的真 PG**，而本脚本已经有一个。
 # internal/admin 的其余测试不碰库，SLA_TEST_DSN 不设时它们自己 t.Skip。
 #
-# 覆盖的缺口（2026-08-29 二次评审）：POST /admin/import/all-api-hub 的**写路径**
-# 此前零自动覆盖 —— 58 项浏览器验收只跑 dry_run=true（真导入会写上百个渠道，
-# 那是运维的决定），于是"四次独立写入中途失败留下半成品"没有任何断言看得见。
-if ! SLA_TEST_DSN="$DSN" go test ./internal/admin/ -run 'TestImport' -count=1 -v \
+# 覆盖的缺口，两轮各一批：
+#  · 2026-08-29 二次评审：POST /admin/import/all-api-hub 的**写路径**零自动覆盖
+#    —— 58 项浏览器验收只跑 dry_run=true（真导入会写上百个渠道，那是运维的决定），
+#    于是"四次独立写入中途失败留下半成品"没有任何断言看得见。
+#  · 2026-09-01 自审 + Codex 三次评审：**PATCH /admin/channels/{id} 的 base_url
+#    一处校验都没有**（POST 拒 file:// 而 PATCH 落库），建渠道与探测快照不原子，
+#    补齐不补探测快照且覆盖 warning，渠道身份无库级唯一性。
+#    107 项验收跑过 PATCH 的改名/停用/启用，从没 PATCH 过 base_url。
+PAT='TestImport|TestPatchChannel|TestChannel|TestCreateChannel'
+EXPECT=8
+if ! SLA_TEST_DSN="$DSN" go test ./internal/admin/ -run "$PAT" -count=1 -v \
      >/tmp/import-tx.log 2>&1; then
-  echo "❌ 导入事务测试失败"
-  sed 's/^/   /' /tmp/import-tx.log | tail -30
+  echo "❌ 渠道/导入写路径测试失败"
+  sed 's/^/   /' /tmp/import-tx.log | tail -40
   exit 1
 fi
-RAN=$(grep -c '^--- PASS: TestImport' /tmp/import-tx.log || true)
-SKIPPED=$(grep -c '^--- SKIP: TestImport' /tmp/import-tx.log || true)
+RAN=$(grep -c '^--- PASS: Test' /tmp/import-tx.log || true)
+SKIPPED=$(grep -c '^--- SKIP: Test' /tmp/import-tx.log || true)
 if [ "${SKIPPED:-0}" -gt 0 ]; then
   echo "❌ 有 ${SKIPPED} 条被跳过 —— SLA_TEST_DSN 没传进去，这几条等于没跑"
   grep '^--- SKIP' /tmp/import-tx.log | sed 's/^/   /'
   exit 1
 fi
-if [ "${RAN:-0}" -ne 3 ]; then
-  echo "❌ 只跑了 ${RAN} 条，期望 3 条（回滚 / 补齐 / base_url 校验）"
+# 数目写死是刻意的：加了测试却忘了改这里会红，而"少跑了几条"正是最容易
+# 悄悄发生的假绿（-run 正则打错一个字就少匹配几条，日志里看不出来）。
+if [ "${RAN:-0}" -ne "$EXPECT" ]; then
+  echo "❌ 只跑了 ${RAN} 条，期望 ${EXPECT} 条"
   grep -E '^--- (PASS|FAIL|SKIP)' /tmp/import-tx.log | sed 's/^/   /'
   exit 1
 fi
-echo "   ✅ 凭证失败整体回滚（渠道/账号/凭证 0 行）；半成品能补齐；坏 base_url 被拒"
+echo "   ✅ 导入：凭证失败整体回滚 / 半成品能补齐 / 补齐补上探测快照且不覆盖 warning / 坏 base_url 被拒"
+echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 019 唯一约束 / 建渠道与探测快照同生共死"
 
 echo
 echo "✅ 迁移集成测试全部通过"
