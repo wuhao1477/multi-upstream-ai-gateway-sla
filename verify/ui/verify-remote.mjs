@@ -38,20 +38,30 @@ let FAMILIES = {};      // 站型分布 { newapi: n, sub2api: m }，现查
 let DISABLED = [];      // 已停用的渠道（2026-08-31 放弃纳管的那批）
 let ENABLED_FAMILIES = {}; // 仅在纳管渠道的站型分布
 let CRED_TOTAL = 0;     // 采集凭证条数
+let SUB2API_MATCH = 0;  // 过滤 'sub2api' 该命中几行（按前端那条三段拼接规则现算）
 // 真库 2 把 Key 都挂在 channel 1 的账号下（upstream_keys 走 account_id 关联，
 // 没有 channel_id 列）。FR-094「只显前缀」必须在有 Key 的渠道上验。
 //
-// ⚠️ 但 channel 1 是**夹具残留**，不是真渠道：名字 `UI验收-397444`（verify-ui.mjs
-// :148 的 `'UI验收-' + Date.now()`），base_url 指向 127.0.0.1:18099 —— 已删除的
+// channel 1 是**夹具残留**，不是真渠道：base_url 指向 127.0.0.1:18099 —— 已删除的
 // mock_newapi.py 的端口，2026-08-28 那轮 verify-ui 打真库时留下的。它名下两把 Key
 // 的明文是 verify-ui.mjs 的 SECRET 夹具（`sk-ui-secret…`），不是采来的。
 // 实测真渠道采到的 Key 数为 0（`upstream_keys` join 到 channel<>1：0 行）。
 //
+// **处置已定（2026-08-29）：停用 + 改名，不清除。** 现名
+// `【夹具·勿删】verify-ui 残留（FR-094 真库靶子）`，status=disabled 且带停用原因。
+//   · 为什么不清除：真渠道的 Key 数**恒为 0，不是"还没采"** —— FetchKeys 读的是
+//     `GET /api/token`（采集账号名下已建的令牌），64 个真站没人在上游建过令牌，
+//     而不变式 N-1（04 §5.1）禁止运行时调 `/api/user/token` 去建（每次调用都会
+//     作废上一把，等于把正在用的那把踢下线）。所以清掉它是**永久**销毁这三条断言
+//     的唯一靶子，不是"等下次同步就回来"。
+//   · 为什么停用：它永远采不通（端口已删），留在 enabled 里每轮都产一条
+//     retryable fatal，且台账上看是 45 个"正常"渠道里混着 1 个假的。
+//   · 三条断言不受影响：按 id 找靶子（KEY_CH），与 status 无关。
+//
 // 所以下面三条 Key 断言（有行 / 不回显明文 / 前缀截断）**跑在夹具上**。它们仍然
 // 有意义 —— 验的是渲染层不吐明文，与 Key 从哪来无关；但别把它们当作"真采集的 Key
 // 也不回显"的证据。真正在真上游上验这条的是 verify-ui.mjs（那边 SECRET 是刻意的
-// 假 Key，理由见 CLAUDE.md §1 例外表第一行）。
-// 夹具行的处置未决（清掉它会让这三条无靶子），见 docs/acceptance/P1-evidence.md §3.4。
+// 假 Key，理由见 CLAUDE.md §1 例外表第一行）。见 docs/acceptance/P1-evidence.md §3.4。
 const KEY_CH = Number(process.env.KEY_CH || 1);
 
 const results = [];
@@ -130,6 +140,11 @@ async function pickTargets() {
     ENABLED_FAMILIES[c.site_family] = (ENABLED_FAMILIES[c.site_family] || 0) + 1;
   }
   CRED_TOTAL = (await api('/admin/collector/credentials?limit=1000')).items.length;
+  // 与 stores/channels.ts:47 的 filtered 同一条规则（三段拼接 + 小写 + includes）。
+  // 复刻规则而不是"数一下 site_family=sub2api 有几个"：后者在名字撞车时会与界面
+  // 不一致，而这条断言要验的恰恰是界面那条规则。
+  SUB2API_MATCH = chans.filter(c =>
+    `${c.name} ${c.base_url} ${c.site_family}`.toLowerCase().includes('sub2api')).length;
   MIXED_CH = MIXED_CH || mixed.id;
   NULL_CH = NULL_CH || nulls.id;
   MIXED_UNITS = seen.find(s => s.id === MIXED_CH)?.units || {};
@@ -271,7 +286,15 @@ try {
   await page.type('#ch-filter', 'sub2api');
   await sleep(300);
   const filtered = await page.$$eval('#channels tbody tr', trs => trs.length);
-  check('按站型过滤生效', filtered === 13, `过滤后 ${filtered} 行（期望 13）`);
+  // 期望值**按前端那条规则现算**，不写死 13。
+  //
+  // ⚠️ 写死过。它躲过 2026-08-30「靶子不许写死」那轮纯属侥幸 —— 停用渠道不改
+  //    族数，所以停用 20 个站之后它照样绿。但过滤匹配的是
+  //    `name + base_url + site_family` 三段拼接（stores/channels.ts:47），于是
+  //    **一个名字里带 "sub2api" 的 newapi 渠道就会让它红**，而红的原因是台账里
+  //    多了个这样的名字，不是过滤坏了。导入渠道随时会带来这种名字。
+  check(`按站型过滤生效（库里 ${SUB2API_MATCH} 行匹配 sub2api）`,
+    filtered === SUB2API_MATCH, `过滤后 ${filtered} 行，期望 ${SUB2API_MATCH}`);
 
   await page.type('#ch-filter', 'zzz-不存在-zzz');
   await sleep(300);
