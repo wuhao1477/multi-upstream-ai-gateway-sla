@@ -136,23 +136,50 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ⚠️ 建渠道与探测结果落库**必须同生共死**（2026-09-01 修，Codex 三次评审 [high]）。
+	//
+	// 原先是：CreateChannel 先提交，SaveDetected 失败只 Logger.Warn + 往响应里塞
+	// 一个 warning_persist，接口照样返 201 Created。于是一次瞬时库错误就留下
+	// "看起来建成功、实际永远采不了"的渠道 —— quota_per_unit 缺失时 FetchAccount
+	// 直接报错（04 §2：不猜，猜错差 50 万倍）。更糟的是重试 POST 会再建一条而不是
+	// 修好它，而库里没有 DELETE 渠道的入口。
+	//
+	// 这与导入侧那条 [high] 是同一个缺陷的两半：上一轮只把导入侧收进了事务。
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		id, err := store.CreateChannel(r.Context(), conn, store.Channel{
+		tx, err := conn.Begin(r.Context())
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, "开事务: "+err.Error())
+			return
+		}
+		// 已 Commit 后 Rollback 返 ErrTxClosed，忽略即可；未提交时它才是真回滚。
+		defer func() { _ = tx.Rollback(r.Context()) }()
+
+		id, err := store.CreateChannel(r.Context(), tx, store.Channel{
 			Name: in.Name, BaseURL: strings.TrimRight(in.BaseURL, "/"),
 			SiteFamily: in.SiteFamily,
 		})
 		if err != nil {
+			// 同地址已存在是**冲突**而不是"请求写错了"：调用方该去改那一条，
+			// 不是改自己的请求。409 让重试逻辑能区分这两种。
+			if errors.Is(err, store.ErrDuplicate) {
+				s.fail(w, http.StatusConflict, err.Error())
+				return
+			}
 			s.fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		resp := map[string]any{"id": id, "name": in.Name, "site_family": in.SiteFamily}
 		if detected != nil {
-			// 探测结果必须落库：quota_per_unit 是后续额度归一的必需输入
+			// 探测结果必须落库：quota_per_unit 是后续额度归一的必需输入。
+			// 落不进去就整体回滚 —— 半个渠道比没有渠道更难处理。
 			if s.SaveDetected != nil {
-				if err := s.SaveDetected(r.Context(), conn, id, *detected); err != nil {
-					s.Logger.Warn("探测结果落库失败，采集时会因缺 quota_per_unit 而失败",
-						"channel_id", id, "err", err)
-					resp["warning_persist"] = "站型探测结果未能落库：" + err.Error()
+				if err := s.SaveDetected(r.Context(), tx, id, *detected); err != nil {
+					s.Logger.Error("探测结果落库失败，整笔回滚",
+						"base_url", in.BaseURL, "err", err)
+					s.fail(w, http.StatusInternalServerError,
+						"站型探测结果未能落库，渠道未创建（避免留下采不到数据的半成品）："+
+							err.Error())
+					return
 				}
 			}
 			resp["detected"] = map[string]any{
@@ -164,6 +191,10 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 				resp["warning"] = "该站点疑似开启 turnstile 人机验证，" +
 					"服务端自动采集可能不可行，需转人工录入（04 §6）"
 			}
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			s.fail(w, http.StatusInternalServerError, "提交建渠道: "+err.Error())
+			return
 		}
 		s.Logger.Info("渠道已创建", "id", id, "name", in.Name, "family", in.SiteFamily)
 		w.WriteHeader(http.StatusCreated)
@@ -195,6 +226,22 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 			"status 只能是 enabled 或 disabled，收到："+in.Status)
 		return
 	}
+	// base_url 是**会被采集器请求的地址**，与 POST 走同一道校验。
+	//
+	// ⚠️ 2026-09-01 之前这里一处校验都没有：POST 拒 `file:///etc/passwd`（400），
+	// PATCH 却返 200 并把它写进库（实测四种坏值 file:// / 非 URL / gopher:// /
+	// 无 host 全部落库）。于是"建渠道那道校验"可以被一次 PATCH 完整绕过，
+	// 而 syncChannel 之后每轮都会去请求那个地址。本轮自审与 Codex 三次评审
+	// 各自独立查到同一条（后者判 [critical]）。
+	//
+	// 规范化也必须与 POST 一致（去尾斜杠）：否则 019 的唯一约束能被一个 "/" 绕过。
+	if bu := strings.TrimSpace(in.BaseURL); bu != "" {
+		if err := validateBaseURL(bu); err != nil {
+			s.fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in.BaseURL = strings.TrimRight(bu, "/")
+	}
 	// FR-095：停用必须填原因。库里没有 CHECK 拦这个（原因列可空 —— 启用态本就
 	// 该是空），所以这道闸只能在这里。少了它就会出现"已停用但没人知道为什么"
 	// 的渠道，而停用是要人来解除的，没原因等于解不了。
@@ -209,6 +256,12 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 			DisabledUntil: in.DisabledUntil,
 		})
 		if err != nil {
+			// 改 base_url 会撞 019 的唯一约束 —— 那是冲突（去用已有那条），
+			// 不是"没找到"，两者混在一起会让调用方按错的方式重试。
+			if errors.Is(err, store.ErrDuplicate) {
+				s.fail(w, http.StatusConflict, err.Error())
+				return
+			}
 			s.mapNotFound(w, err)
 			return
 		}
