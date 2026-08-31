@@ -113,7 +113,7 @@ func TestImportRollsBackOnCredentialFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连库: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	s := testServer()
 	boom := errors.New("刻意失败：模拟凭证写入报错")
@@ -161,7 +161,7 @@ func TestImportRepairsIncompleteChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连库: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	a := hubAcct("repair")
 	base := a.SiteURL
@@ -223,7 +223,7 @@ func TestImportRejectsBadBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连库: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	s := testServer()
 	s.SaveCredential = func(context.Context, store.DBTX, collector.Credential) error { return nil }
