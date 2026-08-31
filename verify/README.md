@@ -13,7 +13,7 @@
 
 上游一律**真站点**，由 `pick-upstream.mjs` 从 all-api-hub 导出里现场探活挑选，
 不写死 URL（[CLAUDE.md §1](../CLAUDE.md)）。真上游令牌**不进 GitHub secrets**，
-所以要凭证的 58 项与真库 32 项**只在本地跑**，CI 只跑免密部分。
+所以要凭证的 58 项与真库 35 项**只在本地跑**，CI 只跑免密部分。
 
 `remote-stack.sh` 是 2026-08-31 补的包装。此前这套验收手起 `./bin/sla-core &`、
 手跑 node、手 kill —— 评估分支时发现 8-30 22:47 起的那个 core 一直挂着占 18390。

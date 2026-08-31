@@ -34,6 +34,9 @@ let MIXED_GROUPS = 0;   // 该渠道的分组数
 let NULL_ROWS = 0;      // 空口径渠道的目录行数
 let CAT_Q = '';         // 名称筛选用的关键词，取自 MIXED_CH 的非首段
 let CH_TOTAL = 0;       // 渠道总数（含 1 行夹具残留）
+let FAMILIES = {};      // 站型分布 { newapi: n, sub2api: m }，现查
+let DISABLED = [];      // 已停用的渠道（2026-08-31 放弃纳管的那批）
+let ENABLED_FAMILIES = {}; // 仅在纳管渠道的站型分布
 let CRED_TOTAL = 0;     // 采集凭证条数
 // 真库 2 把 Key 都挂在 channel 1 的账号下（upstream_keys 走 account_id 关联，
 // 没有 channel_id 列）。FR-094「只显前缀」必须在有 Key 的渠道上验。
@@ -115,6 +118,17 @@ async function pickTargets() {
   }
 
   CH_TOTAL = chans.length;
+  // 站型分布与停用态同样**每轮现查**。分布原先写死 `{newapi:52, sub2api:13}`,
+  // 它躲过 2026-08-30 那次"靶子不许写死"的清理纯属侥幸 —— 停用渠道不改族数,
+  // 所以 2026-08-31 放弃 20 个站之后它照样绿。但导入或删渠道就会让它红,
+  // 而红的原因是台账变了,不是被测对象坏了。
+  FAMILIES = {};
+  for (const c of chans) FAMILIES[c.site_family] = (FAMILIES[c.site_family] || 0) + 1;
+  DISABLED = chans.filter(c => c.status === 'disabled');
+  ENABLED_FAMILIES = {};
+  for (const c of chans.filter(c => c.status === 'enabled')) {
+    ENABLED_FAMILIES[c.site_family] = (ENABLED_FAMILIES[c.site_family] || 0) + 1;
+  }
   CRED_TOTAL = (await api('/admin/collector/credentials?limit=1000')).items.length;
   MIXED_CH = MIXED_CH || mixed.id;
   NULL_CH = NULL_CH || nulls.id;
@@ -203,10 +217,37 @@ try {
   // 就会红，而那与"分布对不对"无关。
   const canon = o => JSON.stringify(Object.fromEntries(
     Object.entries(o).sort(([a], [b]) => a.localeCompare(b))));
-  const wantFamilies = { newapi: 52, sub2api: 13 };
-  check('站型分布与库一致（52 newapi + 13 sub2api）',
-    canon(families) === canon(wantFamilies),
-    `实际 ${canon(families)}，期望 ${canon(wantFamilies)}`);
+  check(`站型分布与库一致（${canon(FAMILIES)}）`,
+    canon(families) === canon(FAMILIES),
+    `实际 ${canon(families)}，期望 ${canon(FAMILIES)}`);
+
+  // ── 放弃纳管的那批必须在界面上看得见（2026-08-31）──
+  //
+  // 20 个采不到的站改成了 status=disabled + 停用原因。这批行**在台账里仍然存在**
+  // （放弃 ≠ 删除，删了日后重新导入会静默复活它们），所以界面必须把状态与原因
+  // 都显示出来 —— 否则运维看到的是 65 行"正常"渠道，而其中 20 个根本不采集。
+  const stat = await page.$$eval('#channels tbody tr[data-ch-row]', trs => trs.map(tr => {
+    const badge = tr.querySelector('[data-ch-status] .badge');
+    const reason = tr.querySelector('[data-ch-reason]');
+    return {
+      st: badge ? badge.innerText.trim() : '',
+      reason: reason ? reason.innerText.trim() : '',
+    };
+  }));
+  const shownDisabled = stat.filter(s => s.st === 'disabled');
+  check(`已停用渠道逐行标出（库里 ${DISABLED.length} 个）`,
+    shownDisabled.length === DISABLED.length,
+    `界面 ${shownDisabled.length} 行标 disabled，库里 ${DISABLED.length} 个`);
+  // 只断言"标了 disabled"是空断言：原因丢了同样会绿，而运维就不知道为什么停的。
+  const withReason = shownDisabled.filter(s => s.reason.length > 0);
+  check('每个已停用渠道都带停用原因（不是只改了状态）',
+    DISABLED.length > 0 && withReason.length === DISABLED.length,
+    `${withReason.length}/${shownDisabled.length} 带原因；例：${shownDisabled[0]?.reason.slice(0, 42) || '（无）'}`);
+  // 反向：在纳管的那些不许被标成停用。少了这条，"全部标 disabled" 也能让上面两条绿。
+  const enabledTotal = Object.values(ENABLED_FAMILIES).reduce((a, b) => a + b, 0);
+  check(`在纳管的 ${enabledTotal} 个渠道未被误标为停用`,
+    stat.filter(s => s.st === 'enabled').length === enabledTotal,
+    `界面 ${stat.filter(s => s.st === 'enabled').length} 行 enabled，库里 ${enabledTotal} 个`);
 
   // 65 行表格最容易触发的布局事故：宽表把网格列顶宽、侧栏被挤出视口
   const layout = await page.evaluate(() => {

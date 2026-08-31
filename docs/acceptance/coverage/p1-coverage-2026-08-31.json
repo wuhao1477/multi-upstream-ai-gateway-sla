@@ -1,0 +1,2144 @@
+{
+  "generated_at": "2026-08-31 12:53:28",
+  "channels": 45,
+  "skipped_disabled": [
+    {
+      "id": 8,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 9,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：响应形态不符，站型待确认（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 12,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 13,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 14,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 18,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 21,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 25,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 27,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 30,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 31,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 33,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 37,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 38,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 42,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：凭证失效，鉴权失败（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 46,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：响应形态不符，站型待确认（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 57,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：响应形态不符，站型待确认（newapi，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 58,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 63,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    },
+    {
+      "id": 64,
+      "name": "redacted-channel",
+      "disabled_reason": "2026-08-31 放弃纳管：无 refresh_token，需人工重登（sub2api，见 docs/acceptance/P1-manual-channels.md）"
+    }
+  ],
+  "elapsed_seconds": 88.0,
+  "matrix": {
+    "newapi|account": {
+      "ok": 42,
+      "failed": 1
+    },
+    "newapi|groups": {
+      "ok": 42,
+      "failed": 1
+    },
+    "newapi|keys": {
+      "ok": 43
+    },
+    "newapi|pricing": {
+      "ok": 37,
+      "failed": 6
+    },
+    "newapi|model_catalog": {
+      "ok": 43
+    },
+    "newapi|subscription_quotas": {
+      "unsupported": 43
+    }
+  },
+  "per_channel": {
+    "newapi|fatal": 2,
+    "newapi|usable": 42,
+    "newapi|unusable": 1
+  },
+  "fatal_reasons": {
+    "网络/传输失败（与凭证无关）": 1,
+    "上游站点自身不可达（CDN 边缘 5xx）": 1
+  },
+  "need_manual": [],
+  "retryable": [
+    {
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "family": "newapi",
+      "klass": "网络/传输失败（与凭证无关）",
+      "reason": "鉴权失败: 七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: GET /api/user/self: Get \"https://redacted.invalid\": dial tcp 127.0.0.1:18099: connect: connection refused"
+    },
+    {
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "family": "newapi",
+      "klass": "上游站点自身不可达（CDN 边缘 5xx）",
+      "reason": "鉴权失败: 七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: GET /api/user/self 返回 523: "
+    }
+  ],
+  "details": [
+    {
+      "channel_id": 1,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 502,
+      "items": [],
+      "fatal": "鉴权失败: 七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: GET /api/user/self: Get \"https://redacted.invalid\": dial tcp 127.0.0.1:18099: connect: connection refused",
+      "fatal_class": "网络/传输失败（与凭证无关）"
+    },
+    {
+      "channel_id": 2,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 427,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1320,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 763,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 1252,
+          "note": "采到 67 个模型价格，其中 67 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1291,
+          "rows": 67
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 3,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 540,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 45981,
+          "rows": 6
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 766,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 19755,
+          "note": "采到 1370 个模型价格，其中 1370 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 19881,
+          "rows": 1370
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 4,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 447,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 7177,
+          "rows": 11
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 784,
+          "note": "2 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 2105,
+          "note": "采到 127 个模型价格，其中 127 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 2199,
+          "rows": 127
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 5,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 317,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 411,
+          "rows": 2,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 580,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 278,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 279
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 6,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 410,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1334,
+          "rows": 8
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 661
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 550,
+          "note": "采到 16 个模型价格，其中 16 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 579,
+          "rows": 16
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 7,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 285,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 771,
+          "rows": 9,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 358,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 372,
+          "note": "采到 14 个模型价格，其中 14 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 429,
+          "rows": 14
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 10,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 277,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 2091,
+          "rows": 16,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 436,
+          "note": "5 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 545,
+          "note": "采到 27 个模型价格，其中 27 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 573,
+          "rows": 27
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 11,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 449,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 501,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 754,
+          "note": "2 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 434,
+          "note": "采到 5 个模型价格，其中 5 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 461,
+          "rows": 5
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 15,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 246,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 422,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 396,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 272,
+          "note": "采到 6 个模型价格，其中 6 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 308,
+          "rows": 6
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 16,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 420,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 3991,
+          "rows": 16
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 775,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 1489,
+          "note": "采到 80 个模型价格，其中 80 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1448,
+          "rows": 80
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 17,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 323,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1865,
+          "rows": 9
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 555
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 1037,
+          "note": "采到 54 个模型价格，其中 54 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1037,
+          "rows": 54
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 19,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 214,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 582,
+          "rows": 5,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 307
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 411,
+          "note": "采到 17 个模型价格，其中 17 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 793,
+          "rows": 17
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 20,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 340,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1212,
+          "rows": 4
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 626,
+          "note": "3 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 808,
+          "note": "采到 38 个模型价格，其中 38 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 835,
+          "rows": 38
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 22,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 462,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 579,
+          "rows": 3,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 866,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 421,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 427
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 23,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 324,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 654,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 555
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 511,
+          "note": "采到 19 个模型价格，其中 19 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 559,
+          "rows": 19
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 24,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 376,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 652,
+          "rows": 4
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 687,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 461,
+          "note": "采到 10 个模型价格，其中 10 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 500,
+          "rows": 10
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 26,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 561,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1394,
+          "rows": 4
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 1044
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 1193,
+          "note": "采到 51 个模型价格，其中 51 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1232,
+          "rows": 51
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 28,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 423,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 519,
+          "rows": 3,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 772,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 379,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 377
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 29,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 382,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 702,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 685
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 559,
+          "note": "采到 17 个模型价格，其中 17 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 592,
+          "rows": 17
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 32,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "failed",
+          "elapsed_ms": 271,
+          "error": "写余额信号: ERROR: value for domain nonneg_usd violates check constraint \"nonneg_usd_check\" (SQLSTATE 23514)"
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 403,
+          "rows": 4,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 423,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 205,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 212
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 34,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 287,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 996,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 496
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 942,
+          "note": "采到 54 个模型价格，其中 54 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 952,
+          "rows": 54
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 35,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 283,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 905,
+          "rows": 3
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 391
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 454,
+          "note": "采到 21 个模型价格，其中 21 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 489,
+          "rows": 21
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 36,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 372,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 691,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 694,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 566,
+          "note": "采到 19 个模型价格，其中 19 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 602,
+          "rows": 19
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 39,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 312,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 646,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 529,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 576,
+          "note": "采到 25 个模型价格，其中 25 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 621,
+          "rows": 25
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 40,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 290,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 413,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 525,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 345,
+          "note": "采到 7 个模型价格，其中 7 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 389,
+          "rows": 7
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 41,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 388,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 755,
+          "rows": 4
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 710,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 340,
+          "note": "采到 12 个模型价格，其中 12 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 370,
+          "rows": 12
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 43,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 1005,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1114,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 545,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 939,
+          "note": "采到 50 个模型价格，其中 50 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 979,
+          "rows": 50
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 44,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 749,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 2547,
+          "rows": 2,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 1430
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 1686,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1689
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 45,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 502,
+      "items": [],
+      "fatal": "鉴权失败: 七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: GET /api/user/self 返回 523: ",
+      "fatal_class": "上游站点自身不可达（CDN 边缘 5xx）"
+    },
+    {
+      "channel_id": 47,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 458,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 822,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 773,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 761,
+          "note": "采到 28 个模型价格，其中 28 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 782,
+          "rows": 28
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 48,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 304,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "failed",
+          "elapsed_ms": 434,
+          "error": "写分组 az claude: ERROR: numeric field overflow (SQLSTATE 22003)"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 531
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 381,
+          "note": "采到 9 个模型价格，其中 9 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 408,
+          "rows": 9
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 49,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 386,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 2578,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 703,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 2497,
+          "note": "采到 163 个模型价格，其中 163 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 2532,
+          "rows": 163
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 50,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 800,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1545,
+          "rows": 7
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 1526,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 953,
+          "note": "采到 15 个模型价格，其中 15 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 999,
+          "rows": 15
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 51,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 724,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 1084,
+          "rows": 5
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 1344
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 762,
+          "note": "采到 7 个模型价格，其中 7 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 796,
+          "rows": 7
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 52,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 366,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 2419,
+          "rows": 19
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 655
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 764,
+          "note": "采到 33 个模型价格，其中 33 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 788,
+          "rows": 33
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 53,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 226,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 369,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 382,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 287,
+          "note": "采到 8 个模型价格，其中 8 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 306,
+          "rows": 8
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 54,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 215,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 312,
+          "rows": 3,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 370,
+          "note": "2 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "failed",
+          "elapsed_ms": 169,
+          "error": "/api/pricing 未解析出任何模型价格"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 201
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 55,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 463,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 901,
+          "rows": 3
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 864,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 734,
+          "note": "采到 24 个模型价格，其中 24 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 744,
+          "rows": 24
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 56,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 360,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 4947,
+          "rows": 8
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 632
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 4238,
+          "note": "采到 294 个模型价格，其中 294 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 4233,
+          "rows": 294
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 59,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 125,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 473,
+          "rows": 4,
+          "note": "degraded：缺 [available_models]，需人工补录（FR-011）"
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 182,
+          "note": "1 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 403,
+          "note": "采到 23 个模型价格，其中 23 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 415,
+          "rows": 23
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 60,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 384,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 465,
+          "rows": 1
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 710,
+          "note": "2 把 Key 上游存在但库中未登记，需补登记（计入异常项）"
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 394,
+          "note": "采到 4 个模型价格，其中 4 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 421,
+          "rows": 4
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 61,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 1324,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 2771,
+          "rows": 5
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 921
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 1402,
+          "note": "采到 82 个模型价格，其中 82 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 1445,
+          "rows": 82
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 62,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 307,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 712,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 538
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 436,
+          "note": "采到 13 个模型价格，其中 13 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 471,
+          "rows": 13
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    },
+    {
+      "channel_id": 65,
+      "name": "redacted-channel",
+      "base_url": "https://redacted.invalid",
+      "site_family": "newapi",
+      "http_code": 200,
+      "items": [
+        {
+          "capability": "account",
+          "status": "ok",
+          "elapsed_ms": 632,
+          "rows": 1
+        },
+        {
+          "capability": "groups",
+          "status": "ok",
+          "elapsed_ms": 723,
+          "rows": 2
+        },
+        {
+          "capability": "keys",
+          "status": "ok",
+          "elapsed_ms": 752
+        },
+        {
+          "capability": "pricing",
+          "status": "ok",
+          "elapsed_ms": 631,
+          "note": "采到 17 个模型价格，其中 17 个未登记为可路由模型（models 表无对应行）→ 不写 price_versions，价格已存入模型目录备查"
+        },
+        {
+          "capability": "model_catalog",
+          "status": "ok",
+          "elapsed_ms": 643,
+          "rows": 17
+        },
+        {
+          "capability": "subscription_quotas",
+          "status": "unsupported",
+          "elapsed_ms": 0,
+          "note": "订阅制属交付阶段 P4（ISSUE-005 §2）"
+        }
+      ],
+      "fatal": ""
+    }
+  ]
+}

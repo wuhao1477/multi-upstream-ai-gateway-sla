@@ -264,6 +264,35 @@ func (g *syncGuard) release(channelID int64, armWindow bool) {
 	}
 }
 
+// disabledSyncMessage 判定"已停用的渠道不采集"，返回给运维看的原因。
+//
+// 这条守卫此前不存在，症状是**"停用"只改了台账上的一个字段**：2026-08-31 放弃
+// 那 20 个采不到的站（PATCH status=disabled）之后，对已停用的渠道 30 发采集
+// 照样打了上游并返 502。于是每轮覆盖率报告仍会去打 20 个死站 —— 20 次无谓的
+// 上游请求、20 条注定的 fatal、人工清单永远停在 20 条，而"放弃"这个动作在
+// 报告上看不出任何效果。停用必须在采集侧真的生效。
+//
+// 归入 ErrPrecondition 那一类（调用方返 422 而非 502，且**不起算 60s 窗口**）：
+// 它在发第一个上游请求之前就失败，且是**配置态**而不是上游故障 —— 返 502 会让
+// 运维去查别人家站点为什么挂了，而真相是我们自己停用了它。
+//
+// 想重新采集就先 PATCH status=enabled，**不给"绕过停用"的旁路**：
+// 有旁路的话"已停用"就不再是一个可依赖的事实。
+//
+// 抽成纯函数是为了能单测：syncChannel 本体要真库连接（withConn），
+// 而这条判定的语义（哪个状态挡、消息里带不带原因、非 disabled 一律放行）
+// 不需要库就能钉住。真库那端的覆盖由 test-api / ui-stack 打。
+func disabledSyncMessage(status, disabledReason string) (string, bool) {
+	if status != "disabled" {
+		return "", false
+	}
+	msg := fmt.Sprintf("%v：渠道已停用", collector.ErrPrecondition)
+	if disabledReason != "" {
+		msg += "（" + disabledReason + "）"
+	}
+	return msg + "。要重新采集请先启用该渠道。", true
+}
+
 func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.pathID(w, r)
 	if !ok {
@@ -302,6 +331,12 @@ func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 		ch, err := store.GetChannel(r.Context(), conn, id)
 		if err != nil {
 			s.mapNotFound(w, err)
+			return
+		}
+		if msg, blocked := disabledSyncMessage(ch.Status, ch.DisabledReason); blocked {
+			s.failWith(w, http.StatusUnprocessableEntity, msg,
+				map[string]any{"channel_id": id, "site_family": ch.SiteFamily,
+					"items": []map[string]any{{"status": "skipped"}}})
 			return
 		}
 		// sync 会打多个上游端点，给足超时（限速本身就要花时间）

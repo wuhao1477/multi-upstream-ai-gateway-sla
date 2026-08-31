@@ -117,11 +117,29 @@ def main():
     code, data = api("/admin/channels")
     if code != 200:
         sys.exit(f"列渠道失败：{code} {data}")
-    channels = data.get("items") or []
-    if not channels:
+    allch = data.get("items") or []
+    if not allch:
         sys.exit("库中没有渠道")
 
-    print(f"对 {len(channels)} 个渠道跑全量 sync，并发 {CONCURRENCY}…")
+    # 只打**在纳管**的渠道。
+    #
+    # 2026-08-31 放弃了 20 个采不到的站（改 status=disabled）。若这里仍遍历全表，
+    # 那 20 个站每轮都会被打一次 —— 20 次无谓的上游请求，20 条注定的 fatal，
+    # 人工清单永远停在 20 条，而"放弃"这个动作在报告上看不出任何效果。
+    #
+    # 端点侧也挡了（停用即 422、不触达上游），两层都有是刻意的：这里不打是
+    # 为了不浪费一轮 60 秒的上游往返，端点那层是为了让"已停用"成为可依赖的事实。
+    channels = [c for c in allch if c.get("status") != "disabled"]
+    skipped = [c for c in allch if c.get("status") == "disabled"]
+    if not channels:
+        sys.exit(f"{len(allch)} 个渠道全部处于停用态，没有可采集的渠道")
+
+    print(f"对 {len(channels)} 个在纳管渠道跑全量 sync，并发 {CONCURRENCY}…")
+    if skipped:
+        # 跳过必须**吵**：静静少打 20 个站会让"覆盖率 100%"读成"全都采到了"。
+        print(f"⚠️ 另有 {len(skipped)} 个渠道已停用、不在本轮采集范围内：")
+        for c in skipped:
+            print(f"     #{c['id']:<4} {c['name'][:24]:<26} {c.get('disabled_reason','')[:44]}")
     print("（每站会打 5 个端点，站内已按 collector_request_interval_ms 限速）\n")
 
     results = []
@@ -240,6 +258,13 @@ def main():
         json.dump({
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "channels": len(results),
+            # 归档里必须留下"这轮少打了谁"，否则日后读到 channels:45 会以为
+            # 真库只有 45 个渠道，而实际是 65 个里有 20 个被放弃纳管。
+            "skipped_disabled": [
+                {"id": c["id"], "name": c["name"],
+                 "disabled_reason": c.get("disabled_reason", "")}
+                for c in skipped
+            ],
             "elapsed_seconds": round(elapsed, 1),
             "matrix": {f"{f}|{c}": dict(v) for (f, c), v in matrix.items()},
             "per_channel": per_channel_ok,
