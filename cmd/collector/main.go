@@ -20,7 +20,11 @@ var version = "dev"
 
 func main() {
 	var (
-		once    = flag.Bool("once", false, "跑一轮后退出（供 CI 与手动排查用）")
+		// ⚠️ 一期这个标志**不改变任何行为**（下面没有循环可跑）。留着是因为
+		// verify/docker-compose.arm.yml 传了它，且 FR-116 的周期采集接上之后
+		// 它就是"跑一轮后退出"的那个开关。删它要连那个 compose 一起改，
+		// 换来的只是少两行。
+		once    = flag.Bool("once", false, "跑一轮后退出（一期无周期采集，故当前无行为差异）")
 		showVer = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
@@ -49,7 +53,11 @@ func main() {
 		"version", version, "phase", "P1", "once", *once,
 		"request_interval_ms", interval)
 
-	// 采集实现随 #5（Detect+Auth）、#6（Groups/Keys）、#7（Pricing/Catalog）接入。
-	// 骨架阶段只验证配置可读 —— 这已经能挡住"键名写错"这类问题。
-	logger.Info("采集适配器尚未接入（#5/#6/#7），本轮无操作")
+	// ⚠️ 这行原先写的是"采集适配器尚未接入（#5/#6/#7）"，**已经不成立**：那三个
+	// issue 早已完成，`internal/collector` 的适配器齐全且在跑真站点。不成立的是
+	// **周期采集**（FR-116，P2 起）——一期只交付「按渠道手动触发立即刷新」
+	// （FR-128 / AC-38），编排在 sla-core 的管理面里（POST /admin/channels/{id}/sync）。
+	// 留着一句指向已关 issue 的话，会让人去翻三个已完成的 issue 找原因。
+	logger.Info("collector 本轮无操作：一期无周期采集（FR-116 属 P2 起），" +
+		"采集经管理面手动触发（FR-128，编排在 sla-core）")
 }
