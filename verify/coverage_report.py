@@ -14,6 +14,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -45,6 +46,68 @@ def api(path, method="GET", timeout=360):
             return e.code, {"error": e.reason}
     except Exception as e:
         return 0, {"error": f"{type(e).__name__}: {e}"}
+
+
+# 致命错误的归类。**判定顺序是这个函数的全部要点**，改动前先读完这段。
+#
+# ⚠️ 原先第一个分支是 `if "401" in reason or "鉴权" in reason`，而 sync.go:110
+# 把**所有** Authenticate 失败都包成 `鉴权失败: %w` —— 于是这个分支吃掉了一切，
+# 下面的"连接超时/不可达"分支对 fan-out 失败**永远不可达**。后果不是数字难看，
+# 而是**报告在撒谎**：2026-08-30 那轮把 `TLS handshake timeout`（渠道 3 redacted-channel-03）
+# 和 `connection refused`（渠道 1 夹具）都记成"凭证失效"，并列进 need_manual
+# 让人去重登。而渠道 3 的令牌与 all-api-hub 导出里那把**逐字节相同**（sha256
+# 前 12 位 [redacted fingerprint] 两边一致），同一轮 ui-stack.sh 拿它跑 58 项全绿 ——
+# 让运维去重登一把好令牌，是把人派去修一个不存在的问题。
+#
+# 所以传输层证据必须**先于**任何鉴权判定：底层连不上时，"鉴权失败"只是调用栈
+# 最外层的包装词，不是失败原因。这与 §5.15 那个 ErrPrecondition 是同一类错误
+# —— 都是把"没走到上游"误报成"上游/凭证有问题"。
+_TRANSPORT = (
+    "TLS handshake timeout", "connection refused", "no such host",
+    "i/o timeout", "context deadline exceeded", "connection reset",
+    "EOF", "server misbehaving", "network is unreachable",
+)
+# Cloudflare 边缘错误码：站点自己的源挂了或隧道断了，与我方凭证无关。
+# 1033=隧道未找到、520/521/522/523/524=源不可达/超时。这些站重登也没用。
+_EDGE_CODES = ("返回 520", "返回 521", "返回 522", "返回 523", "返回 524",
+               "返回 530", "error-1033", "Error 1033")
+
+
+def classify_fatal(reason: str) -> str:
+    if "未登记采集凭证" in reason:
+        return "未登记凭证"
+    # 「需人工重登」必须在传输判定**之前**，且必须独立成类。
+    #
+    # ⚠️ 这一类是 2026-08-30 修 RefreshLead 自锁（P1-evidence §5.15）之后才出现的
+    # 形态：13 条 sub2api 里 11 条现在报 `ErrPrecondition: 无 refresh_token 可用
+    # （需人工重登：ErrNeedsRelogin）`。它既不含 "401" 也不含 "鉴权" —— 第一版
+    # 分类改好之后，这 11 条**全部掉进兜底、进而被算成 retryable**，而它们恰恰是
+    # 这批里最确定需要人手的：库里没有 refresh_token，重试一万次也不会变好。
+    # 把它们记成"下一轮重试"，等于让这 11 个站永久停在坏状态而无人过问。
+    #
+    # 放在传输判定之前的理由：ErrPrecondition 的语义就是**没走到上游**
+    # （collector.go:74-81），所以此时不存在传输层证据可言，先判它不会掩盖网络问题。
+    if "需人工重登" in reason or "需要重新登录" in reason:
+        return "需人工重登（无 refresh_token）"
+    if any(k in reason for k in _TRANSPORT):
+        return "网络/传输失败（与凭证无关）"
+    if any(k in reason for k in _EDGE_CODES):
+        return "上游站点自身不可达（CDN 边缘 5xx）"
+    if "无预期字段" in reason:
+        return "鉴权通过但响应形态不符（需确认站型）"
+    if "401" in reason or "鉴权" in reason:
+        return "凭证失效/鉴权失败"
+    # 兜底键**必须去掉渠道号等每站不同的片段**，否则"分布"会碎成一堆计数 1。
+    # 实测过一次：11 条同因失败因为串里带「（sub2api/渠道 12）」而排成 11 行，
+    # 一个本该一眼看出的共性变成需要人眼归并的噪声。
+    return "其它: " + re.sub(r"（[^）]*渠道\s*\d+[^）]*）", "（…）", reason)[:60]
+
+
+# 只有这两类才是 FR-011 说的"转人工录入"。网络与边缘 5xx 是**重试**对象，
+# 混进同一张单子会让人工清单虚高，而虚高的清单没人会逐条看完。
+_MANUAL_CLASSES = ("凭证失效/鉴权失败", "未登记凭证",
+                   "需人工重登（无 refresh_token）",
+                   "鉴权通过但响应形态不符（需确认站型）")
 
 
 def main():
@@ -98,17 +161,8 @@ def main():
     for r in results:
         fam = r["site_family"]
         if r["fatal"]:
-            reason = r["fatal"]
-            # 归类致命错误：鉴权失败 vs 连不上 vs 其它
-            if "401" in reason or "鉴权" in reason:
-                fatal_reasons["凭证失效/鉴权失败"] += 1
-            elif "未登记采集凭证" in reason:
-                fatal_reasons["未登记凭证"] += 1
-            elif any(k in reason for k in ("timeout", "Timeout", "超时",
-                                           "deadline", "connect")):
-                fatal_reasons["连接超时/不可达"] += 1
-            else:
-                fatal_reasons["其它: " + reason[:60]] += 1
+            r["fatal_class"] = klass = classify_fatal(r["fatal"])
+            fatal_reasons[klass] += 1
             per_channel_ok[fam + "|fatal"] += 1
             continue
 
@@ -159,16 +213,28 @@ def main():
         for reason, n in fatal_reasons.most_common():
             print(f"  {n:3}  {reason}")
 
-    # 按 FR-011：采不到的必须列出来，运维据此决定人工录入
-    need_manual = [
-        {"name": r["name"], "base_url": r["base_url"],
-         "family": r["site_family"], "reason": r["fatal"][:120]}
-        for r in results if r["fatal"]
-    ]
+    # 按 FR-011：采不到的必须列出来，运维据此决定人工录入。
+    # **但只列真需要人手的那几类**（见 _MANUAL_CLASSES）：网络与边缘 5xx 归
+    # retryable，它们下一轮可能自己好，派人去重登纯属白跑。两张单子都产出，
+    # 于是"这轮到底几个站要人管"与"几个站只是当时网络不好"分得开。
+    def entry(r):
+        return {"name": r["name"], "base_url": r["base_url"],
+                "family": r["site_family"], "klass": r["fatal_class"],
+                "reason": r["fatal"][:160]}
+
+    need_manual = [entry(r) for r in results
+                   if r["fatal"] and r["fatal_class"] in _MANUAL_CLASSES]
+    retryable = [entry(r) for r in results
+                 if r["fatal"] and r["fatal_class"] not in _MANUAL_CLASSES]
     if need_manual:
         print(f"\n【需人工录入或修凭证的站点】共 {len(need_manual)} 个，前 10：")
         for m in need_manual[:10]:
             print(f"  {m['name'][:22]:24} {m['reason'][:70]}")
+    if retryable:
+        print(f"\n【本轮不可达但无需人工的站点】共 {len(retryable)} 个"
+              f"（网络/CDN 边缘，下一轮重试）：")
+        for m in retryable:
+            print(f"  {m['name'][:22]:24} {m['klass']:24} {m['reason'][:50]}")
 
     with open(OUT, "w") as f:
         json.dump({
@@ -179,6 +245,7 @@ def main():
             "per_channel": per_channel_ok,
             "fatal_reasons": dict(fatal_reasons),
             "need_manual": need_manual,
+            "retryable": retryable,
             "details": results,
         }, f, ensure_ascii=False, indent=2)
     print(f"\n明细已写 {OUT}（不含任何凭证）")
