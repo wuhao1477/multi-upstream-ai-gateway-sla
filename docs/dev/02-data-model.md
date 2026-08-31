@@ -4,7 +4,7 @@
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
 | 日期 | 2026-07-23 |
-| 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
+| 栈 | Go（pgx，手写 SQL —— [10 §5 开放点 3](./10-project-structure.md#5-开放点) 2026-08-29 翻掉 sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
 | 输入 | [PRD v1.5](../PRD.md)（FR-001~128、**AC-01~40**、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求 + **ISSUE-004 开工前裁决 20 条** + **ISSUE-005 交付切分 11 条**）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设；其 AxonHub schema 适配表已随 [11 转向](./11-decision-full-selfbuilt.md) 转为历史）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
 | 覆盖范围 | 本篇定义**自研 SLA 核心的 PG 库**结构。转向自研后（[11](./11-decision-full-selfbuilt.md)），本库是**账本唯一真相源**，无外部网关账本需对账 |
 
@@ -2988,7 +2988,12 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 **门禁规则（M0 起生效，纳入 CI）**：
 
 1. `migrations/` 的完整 DDL **必须在一次性 PostgreSQL 实例上真实执行成功**，才算 schema 基线通过。
-2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 执行一遍 `sqlc generate` → 全部成功才绿。
+2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 全部成功才绿。
+   ⚠️ 本条原文末尾还有「执行一遍 `sqlc generate`」—— **2026-08-29 删**：存储层已翻案为
+   纯手写 pgx（[10 §5 开放点 3](./10-project-structure.md#5-开放点) 的翻案记录），
+   仓库里没有 `sqlc.yaml` 也没有 `queries.sql`，那一步永远不会存在。
+   实际落地的是 `verify/test-migrate.sh` 8 步（真跑迁移 + 种子 + 幂等 + 分区母表 +
+   CHECK 与注册表一致 + 两处 `billing_unit` 列定义相等 + 导入失败原子性）。
 3. 本文档的 DDL 与 `migrations/` **以后者为准**；文档变更若涉及 DDL，须同步迁移文件并通过门禁。
    （第 47 轮起这条分两种情形读 —— 见 [§0.3](#03-本篇是全阶段设计migrations-只建当前阶段用的表第-47-轮)：
    延期表只有本篇有，那是设计而非漂移。）

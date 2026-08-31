@@ -4,7 +4,7 @@
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-25（v0.2：按 [11 转向决策](./11-decision-full-selfbuilt.md) 移除外部网关，改为自研直连） |
-| 栈 | Go（存储层 pgx + sqlc）/ PostgreSQL 单库 / 单机 Docker Compose / **无外部网关** |
+| 栈 | Go（存储层 pgx，手写 SQL —— [10 §5 开放点 3](./10-project-structure.md#5-开放点) 2026-08-29 翻掉 sqlc）/ PostgreSQL 单库 / 单机 Docker Compose / **无外部网关** |
 
 ## 1. 组件拓扑
 
