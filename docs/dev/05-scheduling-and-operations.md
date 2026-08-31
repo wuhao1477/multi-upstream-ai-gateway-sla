@@ -378,7 +378,7 @@ RETURNING canary_used_in_window, canary_inflight;
 > 此前只有预算**上限表**，没有"谁定时触发、谁抢执行权、预算怎么原子扣、模板怎么选" —— 开发无从下手。
 > **里程碑归属冻结：M4**（与 canary 闭环 AC-08、冷却/样本门槛同批交付，都属 steward 经营闭环）。M2 只做流式 SLA 核心，不含任何测活。
 
-**触发条件**（每 60s 一轮，advisory lock #3 抢占，见 [§5bis](#5bis-后台任务总表)）：
+**触发条件**（每 60s 一轮，advisory lock #3 抢占，见 [§5bis](#5bis-后台任务总表第-29-轮-p0此前八个-worker-散落各处没有一处说清周期多实例协调与失败重试--开发无法判断谁定时跑谁抢占执行权)）：
 
 ```text
 候选 binding = health_state = 'canary'
@@ -1118,7 +1118,7 @@ inflight_reserved_since = Σ attempts.single_hop_est_usd
 - **与下游配额预留不重复**：`client_reservations` 管的是**调用方**的日配额，
   这里管的是**上游账号**的余额，两者是不同主体的两笔账，同时存在不构成重复扣减。
 - **账号组聚合**：按 `upstream_accounts.balance_group_key` 归并（FR-022/AC-04）——同一 key 的多账号/多 Key **只算一份余额**，消耗则**全部累加**。`balance_group_key` 为空时按 account_id 独立成组。
-- **无法形成下限**的三种情形与处置见 [§1.1bis](#11bis-余额配额过滤的四条判据fr-026-落地)，本 worker 只负责在这些情形下**把 `conservative_floor` 置 NULL**（而非算出一个假值）。
+- **无法形成下限**的三种情形与处置见 [§1.1bis](#11bis-余额配额过滤的四条判据fr-025fr-026-落地)，本 worker 只负责在这些情形下**把 `conservative_floor` 置 NULL**（而非算出一个假值）。
 - **落 `balance_signals`**：每轮更新该账号组的行（`known_consumption_since`/`conservative_floor`/`updated_at`），供排障回溯"当时为什么排除了这个渠道"。
   ⚠️ 列名以 [02 §7](./02-data-model.md) 为准：确认时刻是 **`confirmed_at`**（不是 `last_confirmed_at`）、
   时间戳是 **`updated_at`**（表里**没有** `computed_at` 这一列）。第 41 轮：原文两处列名都是臆造的，照抄跑不通。

@@ -372,7 +372,7 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 
 实测某真实站点 1369 个模型中 **208 个（15%）是按次计价**，而两种口径的**数值区间重叠**——按次价样本 `0.15 / 0.56 / 0.22 / 0.08`，倍率样本 `30 / 2 / 0.685`。因此**无法从数值反推口径**：把 `$0.15/次` 当成倍率 `0.15` 参与成本排序，会让按次计价的模型显得比实际便宜若干个数量级，而这类模型（绘图、视频）往往恰恰是最贵的。
 
-这就是 [§3](#3-计价与账务) 与 [#7](https://github.com/) 一直强调的 `billing_unit` 缩放风险，只不过它先在 P1 的目录表上现形，而不是等到 P3 的成本计算。
+这就是 [§3](#3-价格版本域不可覆盖版本--美元口径) 与 [#7](https://github.com/) 一直强调的 `billing_unit` 缩放风险，只不过它先在 P1 的目录表上现形，而不是等到 P3 的成本计算。
 
 - **无价则口径留 NULL**：`pricing` 标 degraded 的站型（现役 Sub2API）单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
 - **消费方义务**：读 `input_price` 前必须先读 `billing_unit`，缺失时**不得**假定任何默认口径。
@@ -971,7 +971,7 @@ SELECT (SELECT count(*) FROM cap) AS capacity_ok,
 -- ⚠️ 块内不写 COMMIT：同上
 ```
 
-- **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（[stage 推进协议](#stage-的推进协议)）。
+- **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（见下方「`stage` 的推进协议」）。
 - **不追加预留**：预留在首跳已按 RoutePlan **全部跳**求和（见上方上界算法），接管跳不再动聚合。
 - **`attempt_no` 由 `UNIQUE (request_id, request_created_at, attempt_no)` 保证不重复**——并发重复插入会撞唯一约束而失败，正是期望行为。
 
@@ -1035,7 +1035,7 @@ WITH att AS (
          -- 第 40 轮补：两列建好后全库零赋值，FR-080/FR-058 因此没有任何数据可依。
          -- `continue_billing`：我们关连接时上游**已经在生成**（已提交首字）——
          --   上游不会因为我们断开就立刻停止计费，故这笔钱**还会继续涨**，
-         --   而我们再也观测不到（[§取消时的费用口径](#取消时的费用口径) 的误差敞口就在这里）。
+         --   而我们再也观测不到（「取消时的费用口径」那段的误差敞口就在这里）。
          --   未提交首字就取消的跳不置位：还没开始产出，继续计费的风险可忽略。
          continue_billing  = (a.attempt_status = 'committed'),
          -- `is_duplicate_cost`：本跳的钱照付，但它的输出**没有交付给用户**（被接管取代）。
@@ -1444,8 +1444,8 @@ cap_res AS (          -- 【变体 A：已登记容量】条件 UPDATE 原子递
 -- ⚠️ **变体 B 仍然写 capacity_claims，下面的 cap 段不变**（第 42 轮明确：
 --    05 §1.1 序 7 写的"未登记容量的渠道不设保留、本层直接放行"读起来像"跳过整段"，
 --    与这里的结构冲突，开发只能靠猜）。理由：claim 不只是计数器，
---    它还是**租约与悬挂回收的载体**（[§6bis](#6bis-claim-回收) 的回收任务、
---    [§4.2bis](#42bis-崩溃恢复扫描) 的悬挂检测都按 claim 找孤儿 attempt）。
+--    它还是**租约与悬挂回收的载体**（[§6bis](#6bis-canary-占用fr-121跨实例硬上限的执行载体) 的回收任务、
+--    [§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 的悬挂检测都按 claim 找孤儿 attempt）。
 --    不写 claim = 未登记容量的 binding 上的请求崩溃后无人回收。
 --    "不设保留"指的是**不做闸门判定**（没有上限可判），不是"不留痕迹"。
 -- ⚠️ 释放侧对称：`rel_cap` 照常把 claim 置 released；`dec` 递减 resource_health 时
@@ -1487,10 +1487,10 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 --    完整顺序见上方「三套 claim 的统一编排」：req→quota→resv→cap_res→cap→exp→att→adv。
 ```
 
-**应用层据四值分支**（与上方[统一编排](#三套-claim-的统一编排)同一张表，此处不重复列——以那一节为准）：
+**应用层据四值分支**（与上方「三套 claim 的统一编排」同一张表，此处不重复列——以那一节为准）：
 `quota_ok=0` → 429；`capacity_ok=0` → **换候选**；`exp_ok=0` → canary 回落普通路径 / probe 跳过；四值全 1 → 提交。
 
-**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回四值：
+**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方「三套 claim 的统一编排」的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回四值：
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
@@ -3056,7 +3056,7 @@ VALUES (:attempt_id, :rcat, :event_type, :payload, :attempt_id || ':' || :event_
 ON CONFLICT (idempotency_key) DO NOTHING;      -- 重放/重试只投一次
 ```
 
-> ⚠️ **`idempotency_key` 必须是 `<attempt_id>:<event_type>`**（[§2ter](#2ter-幂等键一览) 已登记）。
+> ⚠️ **`idempotency_key` 必须是 `<attempt_id>:<event_type>`**（本节 outbox 的 `ON CONFLICT (idempotency_key)` 即以此为键；全仓并无「幂等键一览」那一节）。
 > 用随机 UUID 会让每次重试都被当成新事件 —— 首字节时间戳被反复覆盖、`finalize_delivery` 反复触发。
 
 **投递（drain）**：后台 goroutine 每秒一轮，**取出 → 执行对应事务 → 标记已投递**。
@@ -3080,7 +3080,7 @@ RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
 - **`delivered_at` 的唯一写入者是本 drain**，不要在别处标记。
 
 **恢复流程**：实例启动时先 drain 一遍 `delivered_at IS NULL` 的行（同上语句），再进 §4.2bis 的悬挂扫描——
-顺序不可颠倒（[§4.2bis](#42bis-崩溃恢复扫描) 已定：已写完的请求靠 drain 收口，根本不该进恢复扫描）。
+顺序不可颠倒（[§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 已定：已写完的请求靠 drain 收口，根本不该进恢复扫描）。
 因幂等键存在，重放不会产生重复账目。
 
 ### 9.3 多实例并发写（FR-110）
