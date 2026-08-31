@@ -8,7 +8,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CT=migtestpg
-PORT=55433
+# ⚠️ PG 的宿主端口必须在 32768 以下。原先是 55433 —— 那落在 Linux 默认临时端口段
+# （net.ipv4.ip_local_port_range = 32768 60999）里，早前步骤的一条出站连接随时会
+# 借走同一个号，随后 docker-proxy 绑不上就红在 "address already in use"。
+# 2026-09-01 CI run #33432698039 就是这么红的（test-config-api 的 55434）——
+# 与被测代码无关的假红。core 那几个口一直是 18xxx，所以从没撞过。
+# ui-stack.sh / test-config-api.sh 的 PG 端口同理，理由不再各抄一遍。
+PORT=18433
 DSN="postgres://postgres:x@127.0.0.1:${PORT}/sla"
 
 cleanup() { docker rm -f -v "$CT" >/dev/null 2>&1 || true; }

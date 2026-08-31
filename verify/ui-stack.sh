@@ -37,14 +37,16 @@ esac
 
 # 模式相关的默认值。两套端口/容器名/数据目录/日志路径全部错开，
 # 于是 --keep 起的栈与自动验收的栈互不干扰。
+# PG 端口用 184xx 而非 554xx：后者在临时端口段里，会被出站连接借走
+# （理由见 test-migrate.sh 顶部）。
 if [ -n "$KEEP" ]; then
-  PORT="${PORT:-18290}"; PGPORT="${PGPORT:-55442}"
+  PORT="${PORT:-18290}"; PGPORT="${PGPORT:-18442}"
   PGNAME=sladevpg; PREFIX=sla-dev; TOTAL=4
   # 固定令牌而非 $$：你要把它粘到界面里，每次都变就没法照着文档点。
   # 这是本地一次性栈，Ctrl-C 后数据库即销毁，不涉及任何真实凭证。
   TOKEN="${ADMIN_TOKEN:-dev-ui-token}"
 else
-  PORT="${PORT:-18190}"; PGPORT="${PGPORT:-55441}"
+  PORT="${PORT:-18190}"; PGPORT="${PGPORT:-18441}"
   PGNAME=slauipg; PREFIX=sla-ui; TOTAL=7
   TOKEN="ui-verify-$$"
 fi

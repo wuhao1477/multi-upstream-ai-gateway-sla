@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CT=cfgtestpg
-PORT=55434
+PORT=18434   # 不用 554xx：那在临时端口段里，会被出站连接借走（见 test-migrate.sh 顶部）
 APIPORT=18081
 DSN="postgres://postgres:x@127.0.0.1:${PORT}/sla"
 TOKEN="test-admin-token-$$"
