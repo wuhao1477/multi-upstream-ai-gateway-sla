@@ -335,8 +335,27 @@ echo "── 8/8 渠道与导入写路径的真库 Go 测试 ──"
 #    一处校验都没有**（POST 拒 file:// 而 PATCH 落库），建渠道与探测快照不原子，
 #    补齐不补探测快照且覆盖 warning，渠道身份无库级唯一性。
 #    107 项验收跑过 PATCH 的改名/停用/启用，从没 PATCH 过 base_url。
-PAT='TestImport|TestPatchChannel|TestChannel|TestCreateChannel'
-EXPECT=8
+# ⚠️ 测试名**逐个列出并锚定**（`^(…)$`），不用 `TestImport|TestChannel|…` 那种前缀正则。
+# Codex 2026-09-01 三次评审 [low]：前缀正则会让**任何**日后新增的、名字碰巧以
+# TestImport/TestChannel/TestPatchChannel/TestCreateChannel 开头的合法测试把这一步
+# 弄红 —— 而它跟迁移毫无关系。锚定列表则相反：新增测试不影响本步，改名会红在这里。
+#
+# 但 `EXPECT` 那个固定数**留着**（Codex 建议删）：`-run` 里打错一个字的那条只是
+# 匹配不上，`go test` 照样 exit 0 并打 "no tests to run" —— 那正是最容易悄悄发生的
+# 假绿，而它恰恰**不会**被退出码抓到。列表 + 计数各管一头：列表管"别牵连无关测试"，
+# 计数管"列表本身别写错"。
+TESTS=(
+  TestImportRollsBackOnCredentialFailure
+  TestImportRepairsIncompleteChannel
+  TestImportRepairAddsSnapshotAndKeepsWarning
+  TestImportRejectsBadBaseURL
+  TestImportValidatesBeforeProbing
+  TestPatchChannelRejectsBadBaseURL
+  TestChannelBaseURLNormalizedAndUnique
+  TestCreateChannelRollsBackWhenSaveDetectedFails
+)
+PAT="^($(IFS='|'; echo "${TESTS[*]}"))\$"
+EXPECT=${#TESTS[@]}
 if ! SLA_TEST_DSN="$DSN" go test ./internal/admin/ -run "$PAT" -count=1 -v \
      >/tmp/import-tx.log 2>&1; then
   echo "❌ 渠道/导入写路径测试失败"
@@ -350,10 +369,9 @@ if [ "${SKIPPED:-0}" -gt 0 ]; then
   grep '^--- SKIP' /tmp/import-tx.log | sed 's/^/   /'
   exit 1
 fi
-# 数目写死是刻意的：加了测试却忘了改这里会红，而"少跑了几条"正是最容易
-# 悄悄发生的假绿（-run 正则打错一个字就少匹配几条，日志里看不出来）。
+# 计数与上面的 TESTS 列表联动（不再写死 8）：列表少一个名字就红在这里。
 if [ "${RAN:-0}" -ne "$EXPECT" ]; then
-  echo "❌ 只跑了 ${RAN} 条，期望 ${EXPECT} 条"
+  echo "❌ 只跑了 ${RAN} 条，期望 ${EXPECT} 条（TESTS 列表里有名字拼错或已改名？）"
   grep -E '^--- (PASS|FAIL|SKIP)' /tmp/import-tx.log | sed 's/^/   /'
   exit 1
 fi
