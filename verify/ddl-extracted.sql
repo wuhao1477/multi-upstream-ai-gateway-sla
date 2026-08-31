@@ -422,7 +422,11 @@ CREATE TABLE price_versions (
   input_price     nonneg_usd NOT NULL,        -- 每计费单位（归一为美元）
   output_price    nonneg_usd NOT NULL,
   cache_price     nonneg_usd,                 -- 缓存价（走折扣）
-  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
+  -- billing_unit：可空 + CHECK，与 channel_model_catalog **同一套定义**（018 对齐）。
+  -- ⚠️ 原为 `NOT NULL DEFAULT 'per_1m_token'`，与 §1.3bis 的「无价则口径留 NULL、
+  --    不补默认值」直接矛盾 —— 而**本表才是成本公式读的那张**。详见 018 头部。
+  billing_unit    TEXT CHECK (billing_unit IN
+                    ('per_1m_token','per_1k_token','per_token','per_call')),
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
   data_source     TEXT NOT NULL,              -- auto_collect / manual
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）

@@ -269,11 +269,19 @@ func (s *CollectorSink) SavePricing(
 		if err != nil {
 			continue // 未登记为可路由模型 → 跳过，其价格已在目录里
 		}
+		// billing_unit 用 NULLIF 落空，与 SaveCatalog 同一条规则（02 §1.3bis）：
+		// 缺失表示上游未声明，补 'per_1m_token' 会把它伪装成"已知按 token 计价"，
+		// 而成本公式按该口径要除以 1,000,000。
+		//
+		// ⚠️ 这里原本写的是 `COALESCE(NULLIF($7,''),'per_1m_token')` —— **不是
+		//    实现者的选择，是 006 的列定义（NOT NULL DEFAULT）逼出来的**：那张表
+		//    不接受 NULL，于是同一份写入代码在目录表上遵守规则、在权威价格表上
+		//    违反它。018 把列改成「可空 + CHECK」后这句才写得出来。
 		if _, err := c.Conn.Exec(ctx, `
 INSERT INTO price_versions (id, channel_id, model_id, input_price, output_price,
                             cache_price, billing_unit, currency, data_source,
                             queried_at, effective_at)
-VALUES ($1,$2,$3,$4,$5,$6,COALESCE(NULLIF($7,''),'per_1m_token'),'USD',
+VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),'USD',
         'auto_collect',$8,$8)`,
 			NewUUIDv7(), channelID, modelID, mp.InputPrice, mp.OutputPrice,
 			nullFloat(mp.CachePrice), mp.BillingUnit, p.Meta.FetchedAt); err != nil {

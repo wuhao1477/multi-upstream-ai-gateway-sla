@@ -392,7 +392,7 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 | Key 用量**历史**不建新表 | 复用已有 `collector_snapshots`（`scope_type='key'` + `payload` JSONB + 三元组 + 保留策略 + 索引全都在）。`upstream_keys` 六列只存**当前值**供列表展示 |
 | Key 归属分组用**单列**而非关联表 | 20 个渠道均为中转站，Key 建好后分组基本固定。多对多要传导到 `bindings` 唯一性定义与健康统计，代价不对等 |
 | `group_models` 不设 `available` 布尔 | 采到即可用，采不到即删行。恒为 true 的列没有信息量 |
-| 目录不存 `cache_price`/`billing_unit` | 权威价在 `price_versions`（不可覆盖版本，FR-012）；目录两列只为"看一眼贵不贵" |
+| 目录不存 `cache_price` | 权威价在 `price_versions`（不可覆盖版本，FR-012）；目录两列只为"看一眼贵不贵"。⚠️ 本行原含 `billing_unit`，**第 46 轮已推翻**：两种口径数值区间重叠，没有它目录里的价格是个无单位数字（见上方"`billing_unit` 为何必需"），故 015 把它加进目录 |
 | 目录不设 `enabled_model_id` | P1 无路由，"启用模型"这个动作不存在。P2 要启用时按 `(channel_id, model_name)` 匹配 `models.canonical_name` 即可 |
 | **`topup_rate` 不建**（充值倍率） | 唯一消费者是成本排序，P1 无成本排序。**P3 必建**——不建则 1:2 充值渠道成本被高估 2 倍（[ISSUE-005 §6 T-1](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 
@@ -1640,7 +1640,11 @@ CREATE TABLE price_versions (
   input_price     nonneg_usd NOT NULL,        -- 每计费单位（归一为美元）
   output_price    nonneg_usd NOT NULL,
   cache_price     nonneg_usd,                 -- 缓存价（走折扣）
-  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
+  -- billing_unit：可空 + CHECK，与 channel_model_catalog **同一套定义**（018 对齐）。
+  -- ⚠️ 原为 `NOT NULL DEFAULT 'per_1m_token'`，与 §1.3bis 的「无价则口径留 NULL、
+  --    不补默认值」直接矛盾 —— 而**本表才是成本公式读的那张**。详见 018 头部。
+  billing_unit    TEXT CHECK (billing_unit IN
+                    ('per_1m_token','per_1k_token','per_token','per_call')),
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
   data_source     TEXT NOT NULL,              -- auto_collect / manual
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）
@@ -1693,6 +1697,14 @@ CREATE TABLE price_change_log (
      u  = unit_tokens(pv.billing_unit)：per_1m_token→1_000_000 / per_1k_token→1_000 / per_token→1
      m  = COALESCE(mv.group_multiplier, 1) × COALESCE(mv.key_multiplier, 1)
 
+  ⚠️ 下式只覆盖**按 token 计价**那一支。billing_unit 另有两个取值，unit_tokens 都给不出数：
+     · per_call —— 实测占 15%（1369 个模型里 208 个），成本与 token 数**无关**：
+                   成本 = pv.input_price × 调用次数 × m（toModelPrice 已把输入/输出同价，
+                   按次计费不分输入输出）。**不得**套下式：把 $0.15/次 除以 1,000,000
+                   会让最贵的那批模型（绘图、视频）成本显示为约等于 0。
+     · NULL    —— 上游未声明口径（§1.3bis）。**不得**假定 per_1m_token，
+                   按 FR-015「价格查询失败/过期保守处理」走，不进低价优选。
+
   cached   = COALESCE(au.prompt_cached_tokens, 0)              -- 缓存命中的输入 token
   fresh_in = GREATEST(COALESCE(au.prompt_tokens,0) - cached, 0) -- 未命中的输入 token
   p_cache  = COALESCE(pv.cache_price, pv.input_price)           -- 无缓存价的渠道退回输入价
@@ -1710,7 +1722,8 @@ CREATE TABLE price_change_log (
     二者独立叠加；任一为 NULL 视作 1（未登记 ≠ 免费）。
   - **`upstream_keys.key_multiplier` 是登记态，`multiplier_versions.key_multiplier` 是版本快照**——
     算成本一律用后者（前者会被采集器覆盖，历史复算会失真）。
-  > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而 `billing_unit` 默认就是 `per_1m_token`——照原式实现会把每一笔成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
+  > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而实测口径以 `per_1m_token` 为主——照原式实现会把这批成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
+  > （此处原写「而 `billing_unit` 默认就是 `per_1m_token`」——018 已去掉那个默认值，理由见其头部：默认值会把"上游未声明"伪装成"已知按 token 计价"。缩放风险不因此减轻，只是不再有一个列默认值替上游做声明。）
   > **实现要求**：入库时**不做**归一（保留上游原始口径便于对账与排障），缩放只发生在算成本的这一处，且 `unit_tokens` 必须由 `billing_unit` 查表得出，**不得硬编码**。
   > **CI 断言**：给定 `per_1m_token` 单价 3.0、1000 token → 成本必须是 `0.003` 而非 `3000`。
 - **两个版本 id 都必须落到 attempt**，历史复算时同时取回才能还原当时的完整计价输入（FR-013/AC-02）。

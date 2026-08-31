@@ -174,7 +174,19 @@ jobs:
 
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
-      # 余下两道守卫随对应功能接入：
-      #   sk- 前缀脱敏断言 → #9 Key 管理端点（现在无端点会打印凭证）
-      #   billing_unit 缩放断言 → #7 价格采集（现在无成本计算代码）
-      # ⚠️ 两者都在对应 issue 的完成标准里，勿让 issue 关闭时漏掉本文件的启用。
+      #
+      # 那两道"随功能接入"的守卫（2026-08-29 结清此处记账）：
+      #   · sk- 前缀脱敏 —— **已落地**，且不止一处：ListKeys 在 SQL 侧就截断
+      #     （channels.go 的 secretPrefixExpr，明文不出库），真 Chrome 验收在
+      #     两套件里各断言一次 DOM 无长密钥串（verify-ui.mjs / verify-remote.mjs），
+      #     另有一条 shell 断言查全量日志无明文。#9 已关闭。
+      #   · billing_unit —— **缩放断言本身仍无处可写**：成本公式的消费方是 P3，
+      #     当前无成本计算代码，写出来只能是"测试自己算一遍除法"。#7 关闭时
+      #     落地的是采集侧那一半（口径逐条落库 + 两种口径可区分，
+      #     adapters_test.go / newapi_pricing_test.go）。
+      #     2026-08-29 复评又补上库侧那一半：两处 billing_unit 列定义必须一致
+      #     （可空 + 无默认 + 同一套 CHECK 取值），见 test-migrate.sh 7/7 与
+      #     migrations/018 —— 缺陷正是两张表处置相反，而不设防的是权威表。
+      # ⚠️ 给 P3 的人：`成本 = 单价 3.0 / per_1m_token × 1000 token → 0.003`
+      #    这条 CI 断言（02 §3 末尾）仍然欠着，且 per_call 与 NULL 两支公式没定义
+      #    （02 §3 已列出该怎么算）。它不再挂在任何 open issue 上，别让它就此消失。
