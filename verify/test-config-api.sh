@@ -27,6 +27,14 @@ for _ in $(seq 1 60); do
   docker exec "$CT" pg_isready -U postgres >/dev/null 2>&1 && break
   sleep 1
 done
+# ⚠️ 循环跑完必须查一次。原先不查就往下走 —— PG 没起来时 core 连不上库直接退出，
+#    而第一条断言表现成「无令牌应 401」失败、并打印**上一轮遗留的** /tmp/resp.json
+#    （2026-09-01 实测：打出来的是昨天那次 max_hops 的历史）。红是对的，
+#    但红的理由指向鉴权，人会去查鉴权。同 CLAUDE.md 那条：红要红在真原因上。
+docker exec "$CT" pg_isready -U postgres >/dev/null 2>&1 || {
+  echo "❌ PG 60s 内没起来（端口 ${PORT} 被占？镜像拉不到？）"
+  docker logs "$CT" 2>&1 | tail -20 | sed 's/^/   /'
+  exit 1; }
 sleep 2
 
 go build -o bin/sla-core ./cmd/sla-core
@@ -37,10 +45,14 @@ for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:${APIPORT}/healthz" >/dev/null 2>&1 && break
   sleep 1
 done
+curl -sf "http://127.0.0.1:${APIPORT}/healthz" >/dev/null 2>&1 || {
+  echo "❌ sla-core 30s 内没就绪，日志如下："
+  tail -20 /tmp/core-test.log | sed 's/^/   /'
+  exit 1; }
 
 A="http://127.0.0.1:${APIPORT}/admin"
 auth=(-H "Authorization: Bearer $TOKEN")
-code() { curl -s -o /tmp/resp.json -w "%{http_code}" "$@"; }
+code() { : >/tmp/resp.json; curl -s -o /tmp/resp.json -w "%{http_code}" "$@"; }
 body() { cat /tmp/resp.json; }
 
 fail() { echo "❌ $1"; echo "   响应: $(body)"; exit 1; }
