@@ -43,6 +43,7 @@ const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'shell',
   args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  timeout: 90_000,   // 理由见 verify-spa.mjs 同处
 });
 
 try {

@@ -25,6 +25,11 @@ const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'shell',
   args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  // puppeteer 默认只等 30s 拿 WS 端点。GitHub runner 上实测不够：
+  // 2026-09-01 gate run #33438992013 红在 "Timed out after 30000 ms while
+  // waiting for the WS endpoint URL"，而同一个 runner 镜像五分钟前那轮
+  // （#33438576085）同一步是绿的 —— 即慢，不是不兼容。90s 只在真慢时才花掉。
+  timeout: 90_000,
 });
 
 try {
