@@ -145,18 +145,12 @@ func TestChannelBaseURLNormalizedAndUnique(t *testing.T) {
 
 	_, h, tok := httpServer(t)
 	base := "https://uniq-guard.example.invalid"
-	// ⚠️ 两种拼法都要清：本条**故意**用带尾斜杠的地址发请求，一旦规范化失效
-	// （反向自验就是这么破坏的），库里会留下 base+"/" 那一行，而只清 base
-	// 清不掉它 —— 下一轮就红在"同一个地址落了 2 行"上，而那时被测代码是好的。
-	// 实测踩过：反向自验第二路之后收尾那次干净树全绿失败，红的理由与修复无关。
-	for _, v := range []string{base, base + "/"} {
-		wipe(ctx, t, conn, v)
-	}
-	defer func() {
-		for _, v := range []string{base, base + "/"} {
-			wipe(context.Background(), t, conn, v)
-		}
-	}()
+	// 本条故意用带尾斜杠、以及大写 host 的地址发请求，一旦规范化失效（反向自验
+	// 就是这么破坏的）库里会留下那几种拼法之一。**清理由 wipe 按"大小写与尾斜杠
+	// 都不敏感"匹配**，所以这里只传一次 —— 原先是在这里列拼法，而每漏一种就换来
+	// 一轮"红在落了 2 行上、而被测代码是好的"（两种拼法都实测踩过）。
+	wipe(ctx, t, conn, base)
+	defer wipe(context.Background(), t, conn, base)
 
 	id := newChannel(t, h, tok, "唯一约束靶子", base+"/")
 	if got := baseURLOf(ctx, t, conn, id); got != base {
@@ -177,9 +171,35 @@ func TestChannelBaseURLNormalizedAndUnique(t *testing.T) {
 		t.Errorf("同 base_url（带尾斜杠）再建应 409，得 %d：%s\n"+
 			"   → 规范化漏了，一个 \"/\" 就绕过 019 的唯一约束", code, body)
 	}
+	// 大写 host 再建一次：DNS 主机名大小写不敏感，这是同一个上游。
+	// Codex 2026-09-01 [medium]：019 的约束比**字面值**，所以少了"写入前小写 host"
+	// 这两个字符串都能插进去，各带自己的账号与凭证 —— 台账里一个上游两行渠道，
+	// 而库里没有 DELETE 渠道的入口。
+	code, body = do(t, h, tok, "POST", "/admin/channels",
+		fmt.Sprintf(`{"name":"重复地址大写host","base_url":%q,"auto_detect":false}`,
+			strings.ToUpper(base)))
+	if code != http.StatusConflict {
+		t.Errorf("同 base_url（大写 host）再建应 409，得 %d：%s\n"+
+			"   → 写入前没小写 host，一个大写字母就绕过 019 的唯一约束", code, body)
+	}
+	// 首尾带空白再建一次 —— 也要 409。守的是规范化的第三件事（去空白）。
+	// 原先它没有任何断言：反向自验里把 TrimSpace 去掉，8 条全绿 —— 那是"三份
+	// 规范化各不相同"里唯一没被测到的那半。
+	// ⚠️ 去掉 TrimSpace 的后果**不是**带空格的地址落库（`url.Parse` 认不出
+	// " https" 的 scheme，会被判 400），而是**同一个输入在两个阶段得到两种判定**：
+	// 导入侧探测那头 TrimSpace 过、放行并真的发出了请求，落库那头没 TrimSpace、
+	// 判 400 → 条目变成 failed 且理由是"须以 http:// 开头"，而它刚被探测成功。
+	code, body = do(t, h, tok, "POST", "/admin/channels",
+		fmt.Sprintf(`{"name":"重复地址带空白","base_url":%q,"auto_detect":false}`,
+			"  "+base+"  "))
+	if code != http.StatusConflict {
+		t.Errorf("同 base_url（首尾带空白）再建应 409，得 %d：%s\n"+
+			"   → 规范化没去首尾空白：同一个地址在校验与落库两处会得到不同判定",
+			code, body)
+	}
 	var n int
 	if err := conn.QueryRow(ctx,
-		`SELECT count(*) FROM channels WHERE base_url IN ($1,$2)`, base, base+"/").
+		`SELECT count(*) FROM channels WHERE lower(base_url) IN ($1,$2)`, base, base+"/").
 		Scan(&n); err != nil {
 		t.Fatalf("数渠道: %v", err)
 	}

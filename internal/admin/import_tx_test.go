@@ -55,18 +55,27 @@ func testServer() *Server {
 // （只有 channel_groups 与 channel_model_catalog 是 CASCADE）。第一版直接
 // `DELETE FROM channels` 撞了 upstream_accounts_channel_id_fkey，而当时那句
 // 错误被 `_, _ =` 吞掉，表现成"清了但没清掉"。
+// ⚠️ 匹配是**大小写与尾斜杠都不敏感**的（2026-09-01 改）。原先是 `base_url=$1`
+// 精确匹配，于是每加一种"规范化会把它折叠掉"的拼法，调用方就得多传一次 ——
+// 而漏掉一种的后果是：破坏自验那轮真的插进了 `https://UNIQ-GUARD.…`（scheme 被
+// url.Parse 小写、host 没被小写），精确匹配清不掉它，下一轮就红在"落了 2 行"上，
+// 而那时被测代码是好的。实测踩过一次。
+// 这里刻意与被测的规范化**同口径而不共用它**：共用等于让清理跟着被破坏的那个
+// 函数一起失效，那正是这条清理要防的情形。
 func wipe(ctx context.Context, t *testing.T, conn *pgx.Conn, base string) {
 	t.Helper()
+	const match = `lower(rtrim(base_url,'/')) = lower(rtrim($1,'/'))`
 	for _, tbl := range []string{
 		"upstream_accounts", "collector_credentials", "collector_snapshots",
 	} {
 		if _, err := conn.Exec(ctx, `DELETE FROM `+tbl+
-			` WHERE channel_id IN (SELECT id FROM channels WHERE base_url=$1)`,
+			` WHERE channel_id IN (SELECT id FROM channels WHERE `+match+`)`,
 			base); err != nil {
 			t.Fatalf("清 %s 里 %s 的残留: %v", base, tbl, err)
 		}
 	}
-	if _, err := conn.Exec(ctx, `DELETE FROM channels WHERE base_url=$1`, base); err != nil {
+	if _, err := conn.Exec(ctx,
+		`DELETE FROM channels WHERE `+match, base); err != nil {
 		t.Fatalf("清 %s 的残留: %v", base, err)
 	}
 }
