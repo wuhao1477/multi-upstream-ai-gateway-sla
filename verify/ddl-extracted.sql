@@ -17,8 +17,10 @@ CREATE TABLE channels (
   -- 全库唯一（019）：三处写入路径（createChannel / importOne / patchChannel）都是
   -- "先查再插/改"，而 read-then-insert **防不住并发** —— 两个并发导入或一次 201
   -- 丢失后的重试都能各插一条，台账里出现重复渠道而库里没有 DELETE 入口。
-  -- 约束认字面值，故写入侧必须先去尾斜杠；校验（scheme + host）见
-  -- internal/admin.validateBaseURL。
+  -- 约束认字面值，故规范化是写入侧的责任：internal/admin.validateBaseURL
+  -- 校验（scheme 为 http/https 且 host 非空）**并返回规范形态**（去首尾空白、
+  -- 小写 host、去尾斜杠）—— 三处入口共用它，少一处就能用一个 "/" 或一个大写字母
+  -- 绕过本约束。只小写 host 不动 path：path 大小写敏感。
   base_url        TEXT NOT NULL UNIQUE,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004

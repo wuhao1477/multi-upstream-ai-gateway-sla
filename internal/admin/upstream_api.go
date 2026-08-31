@@ -117,10 +117,15 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, "name 与 base_url 必填")
 		return
 	}
-	if err := validateBaseURL(strings.TrimSpace(in.BaseURL)); err != nil {
+	// 校验并就地换成规范形态：**下面所有用到 in.BaseURL 的地方（探测、落库、
+	// 日志）都必须是同一个字符串**。原先是"校验一次、落库时再 TrimRight 一次"，
+	// 于是探测打的地址与落库的地址可以不同。
+	canon, err := validateBaseURL(in.BaseURL)
+	if err != nil {
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	in.BaseURL = canon
 
 	var detected *collector.DetectResult
 	if in.AutoDetect && s.Detect != nil {
@@ -155,7 +160,7 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = tx.Rollback(r.Context()) }()
 
 		id, err := store.CreateChannel(r.Context(), tx, store.Channel{
-			Name: in.Name, BaseURL: strings.TrimRight(in.BaseURL, "/"),
+			Name: in.Name, BaseURL: in.BaseURL,
 			SiteFamily: in.SiteFamily,
 		})
 		if err != nil {
@@ -234,13 +239,15 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 	// 而 syncChannel 之后每轮都会去请求那个地址。本轮自审与 Codex 三次评审
 	// 各自独立查到同一条（后者判 [critical]）。
 	//
-	// 规范化也必须与 POST 一致（去尾斜杠）：否则 019 的唯一约束能被一个 "/" 绕过。
-	if bu := strings.TrimSpace(in.BaseURL); bu != "" {
-		if err := validateBaseURL(bu); err != nil {
+	// 规范化也必须与 POST 一致（去尾斜杠、小写 host）：否则 019 的唯一约束能被
+	// 一个 "/" 或一个大写字母绕过。校验与规范化在同一个函数里，分不开。
+	if strings.TrimSpace(in.BaseURL) != "" {
+		canon, err := validateBaseURL(in.BaseURL)
+		if err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		in.BaseURL = strings.TrimRight(bu, "/")
+		in.BaseURL = canon
 	}
 	// FR-095：停用必须填原因。库里没有 CHECK 拦这个（原因列可空 —— 启用态本就
 	// 该是空），所以这道闸只能在这里。少了它就会出现"已停用但没人知道为什么"

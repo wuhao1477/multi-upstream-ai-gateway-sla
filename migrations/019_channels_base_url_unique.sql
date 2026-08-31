@@ -21,8 +21,14 @@
 --    `https://x.com` 与 `https://x.com/` 会被当成两个不同的值。三处写入路径
 --    都已统一 `strings.TrimRight(url, "/")`（createChannel / importOne /
 --    patchChannel —— 最后一个是 2026-09-01 才补的，它此前连 http 前缀都不查）。
---    没做 lower()：host 大小写不敏感但 path 敏感，一刀切小写会改变语义；
---    真库 0 行大小写重复，这个残留缺口记在这里而不是用一个错的规范化盖住。
+--    没在**约束**上做 lower()：host 大小写不敏感但 path 敏感，
+--    `lower(base_url)` 一刀切会把两个真实不同的地址判成同一个。
+--    ⚠️ 2026-09-01 补：那时这里把"大小写能绕过"记成残留缺口，Codex 三次评审
+--    按 [medium] 指出它不必残留 —— 正确做法不在约束侧而在**写入侧**：
+--    validateBaseURL 现在只小写 **host**、不动 path，三个写入口共用它。
+--    于是 `https://EXAMPLE.invalid` 与 `https://example.invalid` 会规范成同一个
+--    字面值，被本约束拦住；而 `/API` 与 `/api` 仍是两个地址。
+--    守卫：TestChannelBaseURLNormalizedAndUnique 里的大写 host 那一段。
 --
 -- ⚠️ 为什么是新增 019 而不是回去改 001：
 --    migrate.go 的 checksum 契约 —— 已应用的迁移文件 checksum 不一致时直接

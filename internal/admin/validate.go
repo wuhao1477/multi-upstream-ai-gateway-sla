@@ -10,33 +10,56 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
 
-// validateBaseURL 校验一个将被采集器请求的上游地址。
+// validateBaseURL 校验一个将被采集器请求的上游地址，**并返回它的规范形态**。
 //
-// **两个入口共用这一处**（2026-08-29 二次评审后收拢）：`createChannel` 与
-// 批量导入。原先只有前者查 `http://`/`https://` 前缀，导入侧把导出文件里的
-// `SiteURL` 直传 `Detect` —— 同一个字段两个入口两套规矩，而更宽的那个恰好是
-// 不经人眼逐条确认的批量路径。
+// **三个入口共用这一处**：`createChannel`、`patchChannel`、批量导入
+// （`importAllAPIHub` 的探测前 + `importOne` 的落库前）。
+// ⚠️ 2026-08-29 那版注释写的是"两个入口" —— 那时 `patchChannel` 一处校验都没有，
+// 而写注释的人（我）以为有。**"已收敛到一处"这种话必须数路由表，不能数记忆。**
 //
-// ⚠️ **这不是完整的 SSRF 防护**，只是把两处收成一处并挡掉明显不是 http 上游的
-// 输入。缺的那层（解析后拒绝 loopback/私有/链路本地/云元数据网段、自定义
-// Transport 在每次连接前复核 DNS、CheckRedirect 拦重定向）记在
-// docs/acceptance/P1-release-readiness.md §3.7：当前管理面是**单一 admin 令牌、
-// 无角色分级**，能改 base_url 的人已经握有配置面，故那层加固挂到引入 RBAC 时做。
-func validateBaseURL(raw string) error {
-	if strings.TrimSpace(raw) == "" {
-		return fmt.Errorf("base_url 必填")
+// **校验与规范化必须是同一个函数**（2026-09-01 合并，Codex [medium]）。
+// 原先是分开的：校验一处、`strings.TrimRight(…, "/")` 散在三处，其中两处还漏了
+// `TrimSpace` —— 三份必然分叉，而分叉的后果落在 019 的唯一约束上（它比字面值）。
+// 规范化做三件事，各有理由：
+//   - 去首尾空白：**不是**为了防"带空格的地址落库"（`url.Parse` 认不出 " https"
+//     的 scheme，那种输入会被判 400）。防的是**同一个输入在两个阶段得到两种判定**：
+//     导入侧原先探测那头 TrimSpace 过、放行并真的发出了请求，落库那头没有、判 400 →
+//     条目变成 failed 且理由是"须以 http:// 开头"，而它刚刚被探测成功；
+//   - **小写 host**：DNS 主机名大小写不敏感，`https://EXAMPLE.invalid` 与
+//     `https://example.invalid` 是同一个上游，而字面唯一约束拦不住它们 ——
+//     两条都能插进去、各带自己的账号与凭证（Codex 本轮 [medium]）；
+//   - 去尾斜杠：同理，一个 "/" 就能绕过唯一约束。
+//
+// **只小写 host，不动 path**：path 大小写敏感，一刀切会把两个真实不同的地址
+// 判成同一个。也不动默认端口 —— `:443` 与省略在字面上不同，但真站点不会两种都给，
+// 而"规范化端口"要先知道 scheme 的默认端口表，收益不抵那份表。
+//
+// ⚠️ **这是格式校验，不是出站策略。** loopback 与私网地址**按设计放行** ——
+// 把采集器指向内网地址正是本系统的用途（真库在 <internal-db-host>；真库里那行夹具渠道
+// 就是 `http://127.0.0.1:18099`，35 项验收的 3 条 Key 断言全靠它）。
+// 缺的那层（拒绝 loopback/私有/链路本地/云元数据网段、自定义 Transport 在每次
+// 连接前复核 DNS、CheckRedirect 拦重定向）记在
+// docs/acceptance/P1-release-readiness.md §3.7，连触发条件一起：当前管理面是
+// **单一 admin 令牌、无角色分级**，能改 base_url 的人已经握有配置面本身，
+// 故那层加固挂到引入 RBAC 或把管理面暴露到公网时做。
+// Codex 2026-09-01 三次评审按 [high] 重提了这一条，判定未改，理由同上。
+func validateBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("base_url 必填")
 	}
-	u, err := url.Parse(raw)
+	u, err := url.Parse(trimmed)
 	if err != nil {
-		return fmt.Errorf("base_url 解析失败: %w", err)
+		return "", fmt.Errorf("base_url 解析失败: %w", err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("base_url 须以 http:// 或 https:// 开头")
+		return "", fmt.Errorf("base_url 须以 http:// 或 https:// 开头")
 	}
 	if u.Host == "" {
-		return fmt.Errorf("base_url 缺主机名：%q", raw)
+		return "", fmt.Errorf("base_url 缺主机名：%q", raw)
 	}
-	return nil
+	u.Host = strings.ToLower(u.Host)
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // validateValue 校验新值的形态与该键的默认值一致。

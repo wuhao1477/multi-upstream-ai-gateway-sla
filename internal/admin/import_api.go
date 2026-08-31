@@ -56,7 +56,11 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Minute)
 	defer cancel()
 
-	stash := &detectStash{m: map[int]collector.DetectResult{}}
+	// 探测结果按下标存进一个预分配切片，与下面 `res.Items[idx] = item` 同一个道理：
+	// 每个 goroutine 只写自己那一格，各格是各自的内存，不需要锁（`-race` 下全绿）。
+	// ⚠️ 这里原先是一个带 mutex 的 map（`detectStash`）—— 它与紧邻的 `res.Items[idx]`
+	// 做的是同一件事，而后者从来没上锁。多出来的那把锁不保护任何东西。
+	detects := make([]collector.DetectResult, len(accounts))
 	sem := make(chan struct{}, importConcurrency)
 	var wg sync.WaitGroup
 	for i := range accounts {
@@ -89,8 +93,8 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 			// 这一条同时证伪了 §3.7 与那次提交说明里的一句话：「校验收成一处、
 			// 两个入口共用」—— 共用是真的，但导入侧共用得太晚。本轮自审与
 			// Codex 二次评审各自独立查到（后者判 [high]）。
-			probeURL := strings.TrimRight(strings.TrimSpace(a.SiteURL), "/")
-			if err := validateBaseURL(probeURL); err != nil {
+			probeURL, err := validateBaseURL(a.SiteURL)
+			if err != nil {
 				item.Status = "skipped"
 				item.Reason = "site_url 不能用于采集：" + err.Error()
 				res.Items[idx] = item
@@ -131,9 +135,9 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 				item.Warning += "导出里没有凭证，需另行登记后才能采集"
 			}
 			item.Status = "detected"
-			// 探测结果暂存在 item 里，落库在下面串行做（避免并发写库争用）
+			// 探测结果按下标暂存，落库在下面串行做（避免并发写库争用）
 			res.Items[idx] = item
-			stash.store(idx, d)
+			detects[idx] = d
 		}(i)
 	}
 	wg.Wait()
@@ -148,12 +152,7 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 				if it.Status != "detected" {
 					continue
 				}
-				d, ok := stash.load(i)
-				if !ok {
-					it.Status, it.Reason = "failed", "探测结果丢失（内部错误）"
-					continue
-				}
-				if err := s.importOne(r.Context(), conn, accounts[i], d, it); err != nil {
+				if err := s.importOne(r.Context(), conn, accounts[i], detects[i], it); err != nil {
 					it.Status = "failed"
 					it.Reason = shortErr(err)
 				}
@@ -192,11 +191,15 @@ func (s *Server) importOne(
 	ctx context.Context, conn *pgx.Conn,
 	a collector.HubAccount, d collector.DetectResult, it *collector.HubImportItem,
 ) error {
-	want := strings.TrimRight(a.SiteURL, "/")
-
-	// 校验与 createChannel 同一处（SSRF 的最小边界）：导入侧原先直接把导出文件里的
-	// SiteURL 传给 Detect，连 http/https 前缀都不查 —— 同一个字段两个入口两套规矩。
-	if err := validateBaseURL(want); err != nil {
+	// 校验 + 规范化同一处（与 createChannel / patchChannel 共用）。
+	// 这里再跑一次不是重复：importOne 也被测试直接调用，且它收的是**原始**
+	// HubAccount —— 函数边界上的输入校验不该依赖"调用方已经查过了"。
+	// ⚠️ 但两处必须得出**同一个字符串**：原先这里是 `TrimRight(a.SiteURL,"/")`
+	// 而探测那头多了个 `TrimSpace`，于是首尾带空白的 site_url 在探测那头放行
+	// （请求真的发出去了），到这里判 400 —— 同一个输入两种判定，条目变成 failed
+	// 而理由是"须以 http:// 开头"。
+	want, err := validateBaseURL(a.SiteURL)
+	if err != nil {
 		return err
 	}
 
@@ -231,7 +234,7 @@ func (s *Server) importOne(
 			return nil
 		}
 		// 补齐后提交 —— 同一个事务，补不全就整体回滚。
-		if err := s.repairChannel(ctx, tx, c.ID, a, d, missing); err != nil {
+		if err := s.repairChannel(ctx, tx, c.ID, a, want, d, missing); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -354,9 +357,12 @@ SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
 // repairChannel 给已存在但不完整的渠道补上缺的那几件。
 //
 // 只补 incompleteParts 报缺的，不动已有行 —— 补齐不该覆盖运维手工改过的凭证。
+//
+// `base` 由调用方传入而不在这里再算一遍：那是 `a.SiteURL` 规范化的**第三份**
+// 拷贝，而它原先漏了 `TrimSpace`（另两份的规范化各不相同，见 validateBaseURL 头部）。
 func (s *Server) repairChannel(
 	ctx context.Context, db store.DBTX, chID int64,
-	a collector.HubAccount, d collector.DetectResult, missing []string,
+	a collector.HubAccount, base string, d collector.DetectResult, missing []string,
 ) error {
 	for _, m := range missing {
 		switch m {
@@ -387,7 +393,7 @@ func (s *Server) repairChannel(
 			}
 			if err := s.SaveCredential(ctx, db, collector.Credential{
 				ChannelID: chID, Family: d.Family, CredType: credType,
-				BaseURL:        strings.TrimRight(a.SiteURL, "/"),
+				BaseURL:        base,
 				AccessToken:    a.AccountInfo.AccessToken,
 				ExternalUserID: a.UserID(),
 			}); err != nil {
@@ -428,30 +434,4 @@ func shortErr(err error) string {
 		return s[:160] + "…"
 	}
 	return s
-}
-
-// detectStash 在探测（并发）与落库（串行）两阶段之间传递结果。
-//
-// ⚠️ **每次请求新建一个实例**，不用包级变量：两次并发导入会互相覆盖
-// 彼此的探测结果，进而把 A 站的 quota_per_unit 写到 B 站上 —— 那是
-// 静默的数据污染，比报错难查得多。
-//
-// 用独立结构而非塞进 item：DetectResult 含内部字段，
-// 不该出现在返回给调用方的报告里（报告是给人看的，不是状态转储）。
-type detectStash struct {
-	mu sync.Mutex
-	m  map[int]collector.DetectResult
-}
-
-func (d *detectStash) store(i int, r collector.DetectResult) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.m[i] = r
-}
-
-func (d *detectStash) load(i int) (collector.DetectResult, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	r, ok := d.m[i]
-	return r, ok
 }
