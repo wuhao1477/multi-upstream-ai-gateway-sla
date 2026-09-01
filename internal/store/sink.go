@@ -44,6 +44,11 @@ func (s *CollectorSink) SaveAccount(
 		return err
 	}
 	defer c.Close()
+	tx, err := c.Conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开启账号事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// 余额信号（FR-020/024/026）。
 	// ⚠️ **只写 last_confirmed_balance / confirmed_at / balance_state**，
@@ -51,7 +56,7 @@ func (s *CollectorSink) SaveAccount(
 	// 余额下限 worker（04 §4 列级写入归属）：采集器后写会把保守值抹回标称值，
 	// 余额只剩 $2、在途 $5 时 selector 会看到正数下限继续放行付费请求。
 	if !a.Meta.Degraded {
-		if _, err := c.Conn.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 INSERT INTO balance_signals (account_id, balance_state, last_confirmed_balance,
                              confirmed_at, updated_at)
 VALUES ($1,'normal',$2,$3,now())`,
@@ -69,10 +74,16 @@ VALUES ($1,'normal',$2,$3,now())`,
 	if a.UserID != "" {
 		payload["external_user_id"] = a.UserID
 	}
-	return InsertSnapshot(ctx, c.Conn, SnapshotRow{
+	if err := InsertSnapshot(ctx, tx, SnapshotRow{
 		ChannelID: channelID, ScopeType: "account", ScopeID: fmt.Sprint(accountID),
 		Payload: payload, DataSource: "auto_collect", FetchedAt: a.Meta.FetchedAt,
-	})
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交账号事务: %w", err)
+	}
+	return nil
 }
 
 // SaveGroups 写分组与分组可用模型（单事务，02 §1.3bis 全量替换）。
@@ -87,6 +98,11 @@ func (s *CollectorSink) SaveGroups(
 		return 0, err
 	}
 	defer c.Close()
+	tx, err := c.Conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("开启分组事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows := make([]GroupRow, 0, len(gs))
 	for _, g := range gs {
@@ -103,7 +119,7 @@ func (s *CollectorSink) SaveGroups(
 		}
 		rows = append(rows, r)
 	}
-	n, err := UpsertGroups(ctx, c.Conn, rows)
+	n, err := upsertGroups(ctx, tx, rows)
 	if err != nil {
 		return n, err
 	}
@@ -141,12 +157,15 @@ func (s *CollectorSink) SaveGroups(
 		if len(payload) == 0 {
 			continue
 		}
-		if err := InsertSnapshot(ctx, c.Conn, SnapshotRow{
+		if err := InsertSnapshot(ctx, tx, SnapshotRow{
 			ChannelID: channelID, ScopeType: "group", ScopeID: g.GroupRef,
 			Payload: payload, DataSource: "auto_collect", FetchedAt: g.Meta.FetchedAt,
 		}); err != nil {
 			return n, err
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("提交分组事务: %w", err)
 	}
 	return n, nil
 }
@@ -163,19 +182,27 @@ func (s *CollectorSink) SaveKey(
 		return err
 	}
 	defer c.Close()
+	tx, err := c.Conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开启 Key 事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	idx, err := KeyRefIndex(ctx, c.Conn, accountID)
+	idx, err := KeyRefIndex(ctx, tx, accountID)
 	if err != nil {
 		return err
 	}
 	keyID, ok := idx[k.KeyRef]
 	if !ok {
-		if err := InsertSnapshot(ctx, c.Conn, SnapshotRow{
+		if err := InsertSnapshot(ctx, tx, SnapshotRow{
 			ChannelID: channelID, ScopeType: "key", ScopeID: k.KeyRef,
 			Payload:    map[string]any{"unregistered": true},
 			DataSource: "auto_collect", FetchedAt: k.Meta.FetchedAt,
 		}); err != nil {
 			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("提交未登记 Key 快照: %w", err)
 		}
 		return fmt.Errorf("%w: external_ref=%s", collector.ErrKeyNotRegistered, k.KeyRef)
 	}
@@ -193,13 +220,13 @@ func (s *CollectorSink) SaveKey(
 		row.ConcurrencyLimit = &v
 	}
 	if k.GroupRef != "" {
-		if gid, found, err := GroupIDByRef(ctx, c.Conn, channelID, k.GroupRef); err != nil {
+		if gid, found, err := GroupIDByRef(ctx, tx, channelID, k.GroupRef); err != nil {
 			return err
 		} else if found {
 			row.ChannelGroupID = &gid
 		}
 	}
-	if err := UpdateKeyUsage(ctx, c.Conn, row); err != nil {
+	if err := UpdateKeyUsage(ctx, tx, row); err != nil {
 		return err
 	}
 
@@ -228,12 +255,15 @@ func (s *CollectorSink) SaveKey(
 		payload["current_concurrency"] = k.RateLimit.Concurrency
 	}
 	if len(payload) == 0 {
-		return nil
+		return tx.Commit(ctx)
 	}
-	return InsertSnapshot(ctx, c.Conn, SnapshotRow{
+	if err := InsertSnapshot(ctx, tx, SnapshotRow{
 		ChannelID: channelID, ScopeType: "key", ScopeID: fmt.Sprint(keyID),
 		Payload: payload, DataSource: "auto_collect", FetchedAt: k.Meta.FetchedAt,
-	})
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // SavePricing 刷新已有目录价格，并为已登记模型追加价格版本。
@@ -249,10 +279,15 @@ func (s *CollectorSink) SavePricing(
 		return 0, err
 	}
 	defer c.Close()
+	tx, err := c.Conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("开启价格事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var n int
 	for _, mp := range p.Models {
-		tag, err := c.Conn.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 UPDATE channel_model_catalog
    SET input_price=$3, output_price=$4, billing_unit=NULLIF($5,'')
  WHERE channel_id=$1 AND model_name=$2`,
@@ -261,18 +296,30 @@ UPDATE channel_model_catalog
 		if err != nil {
 			return n, fmt.Errorf("刷新模型 %s 目录价格: %w", mp.ModelName, err)
 		}
-		stored := tag.RowsAffected() > 0
+		_ = tag
+
+		payload := map[string]any{"input_price": mp.InputPrice, "output_price": mp.OutputPrice}
+		if mp.CachePrice != 0 {
+			payload["cache_price"] = mp.CachePrice
+		}
+		if mp.BillingUnit != "" {
+			payload["billing_unit"] = mp.BillingUnit
+		}
+		if err := InsertSnapshot(ctx, tx, SnapshotRow{
+			ChannelID: channelID, ScopeType: "pricing", ScopeID: mp.ModelName,
+			Payload: payload, DataSource: "auto_collect", FetchedAt: p.Meta.FetchedAt,
+		}); err != nil {
+			return 0, fmt.Errorf("写模型 %s 价格快照: %w", mp.ModelName, err)
+		}
+		n++ // 价格快照成功后才计入持久化行数
 
 		// 价格版本按 (channel, model) 作用域，需要 models.id。
 		// **不自动创建 models 行**：那张表要求 token 上界必填（02 §2bis
 		// 预留上界的硬前置），而目录阶段拿不到。故只为**已登记**的模型写价格版本。
 		var modelID int64
-		err = c.Conn.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			`SELECT id FROM models WHERE canonical_name=$1`, mp.ModelName).Scan(&modelID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			if stored {
-				n++
-			}
 			continue
 		}
 		if err != nil {
@@ -286,7 +333,7 @@ UPDATE channel_model_catalog
 		//    实现者的选择，是 006 的列定义（NOT NULL DEFAULT）逼出来的**：那张表
 		//    不接受 NULL，于是同一份写入代码在目录表上遵守规则、在权威价格表上
 		//    违反它。018 把列改成「可空 + CHECK」后这句才写得出来。
-		if _, err := c.Conn.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 INSERT INTO price_versions (id, channel_id, model_id, input_price, output_price,
                             cache_price, billing_unit, currency, data_source,
                             queried_at, effective_at)
@@ -296,7 +343,9 @@ VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),'USD',
 			nullFloat(mp.CachePrice), mp.BillingUnit, p.Meta.FetchedAt); err != nil {
 			return n, fmt.Errorf("写模型 %s 价格版本: %w", mp.ModelName, err)
 		}
-		n++ // 目录或价格版本至少有一处已写入；同一模型只计一次
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("提交价格事务: %w", err)
 	}
 	return n, nil
 }

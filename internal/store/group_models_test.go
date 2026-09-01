@@ -75,3 +75,63 @@ WHERE g.channel_id=$1 AND g.group_ref='paid'`, channelID).Scan(&count)
 		t.Fatalf("缺少 available_models 的降级响应不应清空旧清单，实际剩 %d 条", count)
 	}
 }
+
+func TestSaveGroupsRollsBackBusinessRowsWhenSnapshotFails(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatalf("建连接池: %v", err)
+	}
+	defer pool.Close()
+
+	const base = "https://groups-snapshot-atomic.example.invalid"
+	wipeInventoryTest(ctx, t, conn, base)
+	defer wipeInventoryTest(context.Background(), t, conn, base)
+	var channelID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, site_family, base_url)
+VALUES ('groups-snapshot-atomic', 'newapi', $1) RETURNING id`, base).Scan(&channelID); err != nil {
+		t.Fatalf("建渠道: %v", err)
+	}
+	cleanupTrigger := installSnapshotFailureTrigger(t, ctx, conn, "groups_snapshot_fail")
+	defer cleanupTrigger()
+	_, err = NewCollectorSink(pool).SaveGroups(ctx, channelID, []collector.Group{{
+		GroupRef: "paid", RateMultiplier: 0.5,
+		Meta: collector.SourceMeta{FetchedAt: time.Now()},
+	}})
+	if err == nil {
+		t.Fatal("快照写入失败时 SaveGroups 应返回错误")
+	}
+	var count int
+	if err := conn.QueryRow(ctx, `
+SELECT count(*) FROM channel_groups WHERE channel_id=$1`, channelID).Scan(&count); err != nil {
+		t.Fatalf("查分组: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("快照失败后分组业务行未回滚，剩余 %d 行", count)
+	}
+}
+
+func installSnapshotFailureTrigger(t *testing.T, ctx context.Context, conn *pgx.Conn, name string) func() {
+	t.Helper()
+	if _, err := conn.Exec(ctx, `
+CREATE OR REPLACE FUNCTION test_fail_collector_snapshot() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'snapshot failure'; END $$;
+CREATE TRIGGER `+name+` BEFORE INSERT ON collector_snapshots
+FOR EACH ROW EXECUTE FUNCTION test_fail_collector_snapshot();`); err != nil {
+		t.Fatalf("安装快照失败触发器: %v", err)
+	}
+	return func() {
+		_, _ = conn.Exec(context.Background(), `DROP TRIGGER IF EXISTS `+name+` ON collector_snapshots`)
+		_, _ = conn.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_fail_collector_snapshot()`)
+	}
+}

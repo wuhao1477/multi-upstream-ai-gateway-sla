@@ -130,6 +130,61 @@ SELECT remain_quota_usd, used_quota_usd
 	}
 }
 
+func TestSaveKeyRollsBackUsageWhenSnapshotFails(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatalf("建连接池: %v", err)
+	}
+	defer pool.Close()
+
+	const base = "https://key-snapshot-atomic.example.invalid"
+	wipeInventoryTest(ctx, t, conn, base)
+	defer wipeInventoryTest(context.Background(), t, conn, base)
+	channelID, err := CreateChannel(ctx, conn, Channel{
+		Name: "key-snapshot-atomic", SiteFamily: "newapi", BaseURL: base,
+	})
+	if err != nil {
+		t.Fatalf("建渠道: %v", err)
+	}
+	accountID, err := CreateAccount(ctx, conn, Account{ChannelID: channelID})
+	if err != nil {
+		t.Fatalf("建账号: %v", err)
+	}
+	keyID, err := CreateKey(ctx, conn, accountID, "secret", "remote-key", nil)
+	if err != nil {
+		t.Fatalf("建 Key: %v", err)
+	}
+	cleanupTrigger := installSnapshotFailureTrigger(t, ctx, conn, "key_snapshot_fail")
+	defer cleanupTrigger()
+	err = NewCollectorSink(pool).SaveKey(ctx, channelID, accountID, collector.Key{
+		KeyRef: "remote-key", RemainQuotaUSD: quotaPtr(9),
+		Meta: collector.SourceMeta{FetchedAt: time.Now()},
+	})
+	if err == nil {
+		t.Fatal("快照写入失败时 SaveKey 应返回错误")
+	}
+	var remain *float64
+	var synced *time.Time
+	if err := conn.QueryRow(ctx, `
+SELECT remain_quota_usd, quota_synced_at FROM upstream_keys WHERE id=$1`, keyID).
+		Scan(&remain, &synced); err != nil {
+		t.Fatalf("读 Key: %v", err)
+	}
+	if remain != nil || synced != nil {
+		t.Fatalf("快照失败后 Key 用量未回滚: remain=%v synced=%v", remain, synced)
+	}
+}
+
 func quotaPtr(v float64) *float64 { return &v }
 
 func hasAnomalyItem(items []Anomaly, kind, item string) bool {

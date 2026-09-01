@@ -25,7 +25,7 @@ type GroupRow struct {
 	Payload map[string]any
 }
 
-// UpsertGroups 写入分组与其可用模型。
+// UpsertGroups 写入分组与其可用模型，并自行提交一个事务。
 //
 // **单事务**（09 §5.0bis：③ 分组一个事务）。两个语义各不相同：
 //   - channel_groups：upsert（分组本身长期存在，倍率会变）
@@ -40,6 +40,17 @@ func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, er
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	n, err := upsertGroups(ctx, tx, rows)
+	if err != nil {
+		return n, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("提交分组事务: %w", err)
+	}
+	return n, nil
+}
+
+func upsertGroups(ctx context.Context, db DBTX, rows []GroupRow) (int, error) {
 	var n int
 	for _, g := range rows {
 		if g.GroupRef == "" {
@@ -48,7 +59,7 @@ func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, er
 			continue
 		}
 		var gid int64
-		err := tx.QueryRow(ctx, `
+		err := db.QueryRow(ctx, `
 INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier, data_source, fetched_at)
 VALUES ($1,$2,$3,$4,$5)
 ON CONFLICT (channel_id, group_ref) DO UPDATE
@@ -62,7 +73,7 @@ RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier, g.DataSource, g.Fetche
 
 		if !g.PreserveModels {
 			// 完整响应全量替换；显式空数组表示该分组当前没有可用模型。
-			if _, err := tx.Exec(ctx,
+			if _, err := db.Exec(ctx,
 				`DELETE FROM group_models WHERE channel_group_id = $1`, gid); err != nil {
 				return n, fmt.Errorf("清空分组 %s 的模型: %w", g.GroupRef, err)
 			}
@@ -70,7 +81,7 @@ RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier, g.DataSource, g.Fetche
 				if name == "" {
 					continue
 				}
-				if _, err := tx.Exec(ctx, `
+				if _, err := db.Exec(ctx, `
 INSERT INTO group_models (channel_group_id, model_name, fetched_at)
 VALUES ($1,$2,$3)
 ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
@@ -81,16 +92,13 @@ ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.f
 		}
 		n++
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("提交分组事务: %w", err)
-	}
 	return n, nil
 }
 
 // GroupIDByRef 取某渠道下分组的主键，供 Key 落库时填 channel_group_id。
-func GroupIDByRef(ctx context.Context, conn *pgx.Conn, channelID int64, ref string) (int64, bool, error) {
+func GroupIDByRef(ctx context.Context, db DBTX, channelID int64, ref string) (int64, bool, error) {
 	var id int64
-	err := conn.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		`SELECT id FROM channel_groups WHERE channel_id=$1 AND group_ref=$2`,
 		channelID, ref).Scan(&id)
 	if err == pgx.ErrNoRows {
@@ -126,8 +134,8 @@ type KeyUsageRow struct {
 // 凭空插一行没有 secret 的 Key 会让它永远不可用且污染资产台账。
 //
 // 每把 Key 一个事务（09 §5.0bis）：单把失败不影响其它。
-func UpdateKeyUsage(ctx context.Context, conn *pgx.Conn, row KeyUsageRow) error {
-	tag, err := conn.Exec(ctx, `
+func UpdateKeyUsage(ctx context.Context, db DBTX, row KeyUsageRow) error {
+	tag, err := db.Exec(ctx, `
 UPDATE upstream_keys
    SET remain_quota_usd  = COALESCE($2, remain_quota_usd),
        used_quota_usd    = COALESCE($3, used_quota_usd),

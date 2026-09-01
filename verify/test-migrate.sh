@@ -408,6 +408,9 @@ STORE_TESTS=(
   TestSaveKeyPersistsZeroQuota
   TestSavePricingUpdatesExistingCatalogPriceOnly
   TestSaveGroupsMissingModelFieldPreservesPreviousModels
+  TestSaveGroupsRollsBackBusinessRowsWhenSnapshotFails
+  TestSaveKeyRollsBackUsageWhenSnapshotFails
+  TestSavePricingStoresSnapshotBeforeCountingRow
   TestCredentialsAreUniquePerAccount
   TestSameExternalKeyRefUpdatesItsOwnAccount
 )
