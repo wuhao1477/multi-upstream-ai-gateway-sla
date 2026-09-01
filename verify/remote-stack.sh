@@ -124,5 +124,12 @@ echo "   ✅ pid ${LISTEN_PID} = 本脚本起的 core"
 
 # ── 5/5 验收 ──
 step "真库只读浏览器验收"
+# ⚠️ 截图目录必须由**本脚本**建，与 ui-stack.sh:281 / test-arm-cloud.sh:237 同法。
+#    verify-remote.mjs 只读 SHOTS 环境变量、不自建目录 —— 原先这行漏了，
+#    靠 /tmp 下碰巧还留着上一轮的目录才没暴露。2026-09-01 那个目录被清掉后：
+#    第 9 项的 page.screenshot 抛 ENOENT → 整轮在跑完 8 项后中断，
+#    而收尾写 results.json 也 ENOENT，于是**报错指向 results.json，
+#    真正断掉的是截图**。红得离原因两步远。
+mkdir -p /tmp/sla-remote-shots
 cd verify/ui
 ADMIN_TOKEN="$TOKEN" BASE="http://127.0.0.1:${PORT}" node verify-remote.mjs
