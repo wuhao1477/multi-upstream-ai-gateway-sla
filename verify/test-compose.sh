@@ -95,7 +95,7 @@ if echo "$LOGS" | grep -q "does not exist"; then
 fi
 echo "   ✅ 无建表竞态"
 
-# 种子竞态：两个实例同时灌 71 键，WHERE NOT EXISTS 挡不住并发
+# 种子竞态：两个实例同时灌七个 P1 配置键，WHERE NOT EXISTS 挡不住并发
 # （检查与插入之间有窗口，两侧都判"不存在"→ 同一 version=1 撞唯一约束）。
 # 这是本脚本抓到的第二个 bug，修法是 ON CONFLICT DO NOTHING。
 if echo "$LOGS" | grep -qi "duplicate key"; then

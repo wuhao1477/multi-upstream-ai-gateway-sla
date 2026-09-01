@@ -5,12 +5,11 @@
 // 就是第二份真相源，而"加了一族忘了同步"正是那条断言要查的事 —— 清单漏一项与
 // 迁移漏一条一样静默（同 registry_test.go 扫源码而不手写清单的理由）。
 //
-// 输出：每族一行，制表符分隔的三列
+// 输出：每族一行，制表符分隔的两列
 //
-//	<family>\t<cred_type>\t<passwd_cred_type>
+//	<family>\t<cred_type>
 //
-// 第三列为空表示该族不允许账密登记。选制表符是因为 cut -f 好取，
-// 且这三个字段都不可能含制表符（它们是 Go 源码里的字面量标识符）。
+// 选制表符是因为 cut -f 好取，且这两个字段都不可能含制表符。
 package main
 
 import (
@@ -29,6 +28,6 @@ func main() {
 		os.Exit(1)
 	}
 	for _, r := range regs {
-		fmt.Printf("%s\t%s\t%s\n", r.Family, r.CredType, r.PasswdCredType)
+		fmt.Printf("%s\t%s\n", r.Family, r.CredType)
 	}
 }

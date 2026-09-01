@@ -22,7 +22,7 @@
 | 一期不存正文/上下文/请求头/请求体 | **全库无 `body`/`messages`/`prompt_text`/`headers` 列**；只存 token 计数、延迟、状态、费用等元数据；采集侧只存额度/价格数值，不存上游返回正文 | FR-112 |
 | 多实例共享（sla-core ×2 无本地状态） | 所有写入走同一 PG；账本主键用 **UUIDv7**（时间有序、无需跨实例协调序列），配置/注册表用 `BIGINT IDENTITY` | FR-110 |
 | 决策 P99≤50ms | 同步决策路径**只读内存快照**，不查 PG；本库承担写路径与后台快照重建，不在关键路径上 | FR-110、01-架构 §5 |
-| 上游 Key 一期明文 | `upstream_keys.secret` / `collector_credentials.*` 明文列，仅在应用层脱敏展示（FR-094） | FR-113 |
+| 上游 Key 一期明文 | `upstream_keys.secret` / `collector_credentials` 的 token 明文列，仅在应用层脱敏展示（FR-094） | FR-113 |
 | TTFT 不采信网关字段 | attempt 同时存**自算内容感知 TTFT** 与**网关上报值（仅存证）**两列，语义上永不混用 | AC-31、假设 3/6 |
 | 取消按 errorMessage 归并 | attempt 存**网关原始 status** 与**归并后的 `cancel_reason`** 两列 | AC-30、假设 2 |
 | 记账不假设「一次调用=一次上游用量」 | attempt 存 `upstream_call_count`（隐藏重试补算）与外部调用恒为 1 attempt 的关系 | FR-119、假设 6 |
@@ -2810,16 +2810,11 @@ CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
-  -- cred_type 的取值 = 各 Registration 的 CredType 与 PasswdCredType（04 §7bis）。
-  -- account_password 当前无站型声明，**刻意留着**：它是"无令牌端点、只能账密重登"
-  -- 那条通路的库侧一端（04 §5.3），删了接自研站时要重新加一条迁移。
   cred_type       TEXT NOT NULL CHECK (cred_type IN
-                    ('newapi_access_token','sub2api_jwt','account_password')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / 账密重登站型存账号密码
+                    ('newapi_access_token','sub2api_jwt')),
+  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
   access_token    TEXT,
   refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
-  username        TEXT,                         -- 无令牌端点的站型：拿账密重登换新令牌（04 §5.3）
-  password        TEXT,                         -- 明文（一期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
   token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期
@@ -3167,7 +3162,7 @@ RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
 | 自建站 `primarySource/secondarySource` | `subscription_plans.primary_source/secondary_source` |
 | 自建站 `dailyReset`（usageThresholdPercent/dailyLimit） | `subscription_plans.active_reset_*`（只读登记，不自动触发） |
 | 自建站 `priceCnyCent + durationDays` / sub2api `price + validity_days` | `subscription_plans.fixed_fee + validity_days` → 双倍率输入 |
-| 各站型凭证/续期差异（长期令牌/refresh/账号密码重登） | `collector_credentials.cred_type + refresh_token/username/password` |
+| 各站型凭证/续期差异（长期令牌/refresh） | `collector_credentials.cred_type + refresh_token` |
 | 各站型额度单位（quota 整数 / USD / micros）归一 | 入库前由适配器归一为 `usd_amount`（§0.2） |
 
 ---

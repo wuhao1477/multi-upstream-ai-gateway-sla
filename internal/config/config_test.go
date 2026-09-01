@@ -1,20 +1,31 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-// allowsEmptyDefault 列出"空字符串就是正确默认值"的键及理由。
-// 白名单而非无条件放行：空默认值多半是文档漏填，只有明确语义的才该为空。
-var allowsEmptyDefault = map[string]bool{
-	// 为空 = 不外发告警（06 §5bis）。写成"空"字样会让 P3 拿到一个
-	// 名为"空"的 URL 去 POST，故文档用 `""` 表示、生成物为空串。
-	"alert_webhook_url": true,
+func TestP1ConfigSurface(t *testing.T) {
+	want := []string{
+		"collector_request_interval_ms",
+		"collector_price_interval_h",
+		"collector_balance_interval_min",
+		"collector_keyquota_interval_min",
+		"collector_catalog_interval_h",
+		"catalog_missing_rounds",
+		"sync_min_interval_s",
+		"admin_token",
+	}
+	if got := Keys(); !slices.Equal(got, want) {
+		t.Fatalf("P1 配置键 = %v，期望 %v", got, want)
+	}
 }
 
 // TestParamsMatchDoc 守住"生成物与文档同步"这条线。
 // 数量断言是刻意的：文档加键忘了跑 make gen-params 时，这条会红。
 func TestParamsMatchDoc(t *testing.T) {
-	if len(Params) != 72 {
-		t.Fatalf("配置键数 = %d，期望 72（09 §4bis）。改了文档请跑 make gen-params", len(Params))
+	if len(Params) != 8 {
+		t.Fatalf("配置键数 = %d，期望 8（09 §4bis）。改了文档请跑 make gen-params", len(Params))
 	}
 	seen := map[string]bool{}
 	for _, p := range Params {
@@ -25,11 +36,8 @@ func TestParamsMatchDoc(t *testing.T) {
 			t.Errorf("键重复: %s", p.Key)
 		}
 		seen[p.Key] = true
-		// 空字符串是**合法**默认值：alert_webhook_url 为空即"不外发"
-		// （06 §5bis）。故只对非空白名单外的项要求有值。
-		if p.Default == "" && !allowsEmptyDefault[p.Key] {
-			t.Errorf("键 %s 无默认值——§4bis 要求每项都有出厂默认值（FR-115）。"+
-				"若空值是刻意的，加入 allowsEmptyDefault 并说明理由", p.Key)
+		if p.Default == "" {
+			t.Errorf("键 %s 无默认值——§4bis 要求每项都有出厂默认值（FR-115）", p.Key)
 		}
 	}
 }
@@ -100,7 +108,7 @@ func TestValidateCatchesBadValue(t *testing.T) {
 	if err := NewSnapshot(nil).Validate(); err != nil {
 		t.Fatalf("全默认值的快照应通过校验: %v", err)
 	}
-	bad := NewSnapshot(map[string]string{"max_hops": "三跳"})
+	bad := NewSnapshot(map[string]string{"sync_min_interval_s": "三十"})
 	if err := bad.Validate(); err == nil {
 		t.Fatal("非法整数值应被 Validate 捕获——否则等到热路径才失败")
 	}
@@ -114,7 +122,7 @@ func TestCriticalKeysFlagged(t *testing.T) {
 			n++
 		}
 	}
-	if n != 12 {
-		t.Errorf("关键项 = %d，期望 12（§4bis 的 ✅ 标记）", n)
+	if n != 1 {
+		t.Errorf("关键项 = %d，期望 1（§4bis 的 ✅ 标记）", n)
 	}
 }

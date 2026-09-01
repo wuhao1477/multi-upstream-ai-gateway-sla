@@ -25,7 +25,7 @@ type Result struct {
 //
 // 顺序不可交换：
 //  1. 迁移（建表）—— 后面两步都依赖表存在
-//  2. 种子（灌 72 键）—— 快照要读它
+//  2. 种子（灌七个 P1 数据库配置键）—— 快照要读它
 //  3. 快照（读配置）—— 决策路径只读快照（01 §5）
 func Run(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) (*Result, error) {
 	if logger == nil {

@@ -67,13 +67,12 @@ func validateBaseURL(raw string) (string, error) {
 // 为什么按默认值推断类型而不在 §4bis 加"类型"列：默认值本身已表达类型，
 // 加一列就多一处可能与默认值矛盾的信息（config.inferKind 同一理由）。
 //
-// 这道校验的实际价值：挡住 `max_hops="三跳"` 这类改动在**写入前**失败，
+// 这道校验的实际价值：挡住 `sync_min_interval_s="三十"` 这类改动在**写入前**失败，
 // 而不是等启动时 Validate 才发现 —— 那时配置已经在库里，
 // 且关键项还占了一个版本号。
 func validateValue(spec config.ParamSpec, newValue string) error {
 	// 空值只在"该键的默认值就是空"时合法。
-	// 这不是形式主义：alert_webhook_url 为空即"不外发"（06 §5bis），
-	// 运维必须能把它**改回空**来关掉外发，否则一旦配了就再也关不掉。
+	// 默认值为空的字符串配置允许恢复为空；默认非空项不可清空。
 	if newValue == "" {
 		if spec.Default != "" {
 			return fmt.Errorf("new_value 不可为空（键 %s，默认值 %q）",
@@ -131,8 +130,7 @@ func valueToJSON(spec config.ParamSpec, v string) string {
 	case isIntLiteral(spec.Default), isFloatLiteral(spec.Default):
 		return v
 	}
-	// 数组/对象字面量原样用，不再套一层引号（balance_text_patterns 是关键词表）。
-	// 与 store.toJSONLiteral 的同一分支对应。
+	// 数组/对象字面量原样用，不再套一层引号；与 store.toJSONLiteral 保持一致。
 	if len(v) >= 2 && (v[0] == '[' || v[0] == '{') && json.Valid([]byte(v)) {
 		return v
 	}

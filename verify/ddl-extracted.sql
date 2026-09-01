@@ -960,16 +960,11 @@ CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
-  -- cred_type 的取值 = 各 Registration 的 CredType 与 PasswdCredType（04 §7bis）。
-  -- account_password 当前无站型声明，**刻意留着**：它是"无令牌端点、只能账密重登"
-  -- 那条通路的库侧一端（04 §5.3），删了接自研站时要重新加一条迁移。
   cred_type       TEXT NOT NULL CHECK (cred_type IN
-                    ('newapi_access_token','sub2api_jwt','account_password')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / 账密重登站型存账号密码
+                    ('newapi_access_token','sub2api_jwt')),
+  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
   access_token    TEXT,
   refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
-  username        TEXT,                         -- 无令牌端点的站型：拿账密重登换新令牌（04 §5.3）
-  password        TEXT,                         -- 明文（一期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
   token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期

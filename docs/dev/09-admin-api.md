@@ -100,7 +100,7 @@ type ParamMeta struct {
 
 ---
 
-## 4bis. `config_params` 全量键清单（**权威来源**，第 31 轮自查）
+## 4bis. P1 `config_params` 键清单（**权威来源**）
 
 > 此前配置键散落在 01/02/03/05/06/14 十余处，**没有一份清单** —— 开发不知道迁移种子该初始化哪些、`/admin/config` 该校验哪些、漏掉一个只会在运行时以默认零值的形式静默出错。
 > **本表是唯一权威来源**：新增键必须先进本表。**一行一个完整 `param_key`，不得用 `a / b` 合并行或 `.x` 缩写**——迁移种子与 `/admin/config` 白名单都按本表逐行生成，合并行会漏键。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
@@ -140,6 +140,25 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 **`prev_value` 的写入点**：`apply` 插入新版本行时，把**当时生效行**的 `param_value` 抄进新行的 `prev_value`
 （FR-099 要的是"前后值"可查）；首次设置该键时为 NULL。它是审计字段，**不参与取值**。
+
+| 键 | 默认 | 关键项 | 用途 / 定义处 |
+| --- | --- | --- | --- |
+| **采集** ||||
+| `collector_request_interval_ms` | 200 | | 站内请求间隔 |
+| `collector_price_interval_h` | 6 | | 价格采集周期（小时） |
+| `collector_balance_interval_min` | 5 | | 余额采集周期（分钟） |
+| `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
+| `collector_catalog_interval_h` | 12 | | 渠道模型目录采集周期（小时，FR-126） |
+| `catalog_missing_rounds` | 3 | | 模型连续 N 轮未出现即判下架（FR-126/AC-40） |
+| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128） |
+| **管理鉴权** ||||
+| `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`** |
+
+**CI 断言**：迁移种子为七个数据库配置键插入行；`admin_token` 只来自环境；`/admin/config` 拒绝写入表外键。
+
+## 4ter. 后续阶段配置设计（非 P1 运行白名单）
+
+> 下表仅保留 P2/P3/P4 设计语义，不生成代码、不种子、不被 P1 管理 API 接受。
 
 | 键 | 默认 | 关键项 | 用途 / 定义处 |
 | --- | --- | --- | --- |
@@ -227,9 +246,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `ledger_batch_commit_enabled` | `false` | | 组提交总开关（[14 §2ter](./14-acceptance-matrix.md)） |
 | `ledger_batch_commit_max_size` | 16 | | 单事务最多合并几个请求 |
 | `ledger_batch_commit_linger_ms` | 2 | | 攒批等待上限，**不得超 2ms** |
-| `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`**（避免自己改自己）；此处仅登记其存在 |
-
-**CI 断言**：迁移种子必须为上表**每一个键**插入一行 `config_params`；`/admin/config` 拒绝写入表外的键（防拼写错误静默生效）。
+> 该历史表不参与 P1 CI 与运行配置。
 
 ---
 
@@ -253,7 +270,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
-| `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`/`allows_password`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
+| `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
 | `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容） | **P1** |
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）

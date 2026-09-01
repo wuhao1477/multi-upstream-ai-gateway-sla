@@ -38,6 +38,10 @@ RUNNER_TABLES = {"schema_migrations"}
 #
 # 分组与理由见 migrations/016_drop_unbuilt_phase_tables.sql，不在这里重复。
 DEFERRED_TABLES = {
+    # P2/P3 运行面（P1 只保留上游采集与管理）
+    "requests", "attempts", "attempt_usage", "ledger_outbox",
+    "session_prefix_ledger", "probe_templates", "bindings", "cache_scopes",
+    "model_aliases", "multiplier_versions", "routing_policies", "gateway_clients",
     # P2/P3 调度与健康域
     "binding_fault_domains", "fault_domains", "routing_policy_revisions",
     "sla_targets", "channel_models", "resource_health", "health_metric_windows",
@@ -121,6 +125,8 @@ def objects(sql: str) -> tuple[set[str], dict[str, set[str]]]:
         tbl, body = m.group(1), m.group(2)
         for c in re.finditer(r"ADD COLUMN (?:IF NOT EXISTS )?(\w+)", body):
             cols.setdefault(tbl, set()).add(c.group(1))
+        for c in re.finditer(r"DROP COLUMN (?:IF EXISTS )?(\w+)", body):
+            cols.setdefault(tbl, set()).discard(c.group(1))
 
     # 删表：连带索引闭包与列。索引要推导，因为 CASCADE 不点名它们。
     dropped = {
@@ -138,7 +144,7 @@ def objects(sql: str) -> tuple[set[str], dict[str, set[str]]]:
 
 
 def main() -> int:
-    subprocess.run(["python3", str(ROOT / "verify/extract_ddl.py")],
+    subprocess.run([sys.executable, str(ROOT / "verify/extract_ddl.py")],
                    check=True, capture_output=True)
     doc_sql = (ROOT / "verify/ddl-extracted.sql").read_text()
 
