@@ -140,6 +140,12 @@ def objects(sql: str) -> tuple[set[str], dict[str, set[str]]]:
         for t in dropped:
             cols.pop(t, None)
 
+    # 前向迁移可能替换独立索引（例如凭证唯一性从渠道迁到账号）；
+    # 显式 DROP 后该索引不应继续出现在净对象集合中。
+    for m in re.finditer(r"DROP INDEX(?: IF EXISTS)?\s+(\w+)", sql,
+                         flags=re.IGNORECASE):
+        objs.discard(m.group(1))
+
     return objs, cols
 
 

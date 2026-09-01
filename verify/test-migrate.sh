@@ -62,7 +62,7 @@ echo "   ✅ $WANT 键已灌入（EnvSourced 项按设计不落表）"
 
 # 同样派生：关键项里 EnvSourced 的不落表（admin_token 既关键又 env 来源）
 WANT_CRIT=$(grep -c 'Critical: true, Group: "[^"]*", EnvSourced: false}' \
-  internal/config/params_gen.go)
+  internal/config/params_gen.go || true)
 CRIT=$(q "select count(*) from config_params where is_critical")
 [ "$CRIT" = "$WANT_CRIT" ] || { echo "❌ 关键项 = $CRIT，期望 $WANT_CRIT"; exit 1; }
 echo "   ✅ $WANT_CRIT 个关键项（EnvSourced 的关键项不落表）"
@@ -153,6 +153,17 @@ LEGACY_CRED_COLS=$(q "select count(*) from information_schema.columns
 [ "$LEGACY_CRED_COLS" = "0" ] || {
   echo "❌ collector_credentials 仍有未实现的账密列"; exit 1; }
 echo "   ✅ 未实现的账密列已移除"
+
+CRED_ACCOUNT=$(q "select count(*) from information_schema.columns
+                  where table_name='collector_credentials'
+                    and column_name='account_id' and is_nullable='NO'")
+[ "$CRED_ACCOUNT" = "1" ] || {
+  echo "❌ collector_credentials.account_id 缺失或可为空"; exit 1; }
+IDX_ACCOUNT=$(q "select count(*) from pg_indexes
+                 where indexname='idx_cred_account_unique'")
+[ "$IDX_ACCOUNT" = "1" ] || {
+  echo "❌ 缺账号级凭证唯一索引 idx_cred_account_unique"; exit 1; }
+echo "   ✅ 凭证按账号归属且唯一"
 
 echo "── 6/8 CHECK 取值与站型注册表一致 ──"
 # 017 收窄了 site_family 与 cred_type 的取值。这里断言"库里的取值范围 == 从注册表
@@ -397,6 +408,8 @@ STORE_TESTS=(
   TestSaveKeyPersistsZeroQuota
   TestSavePricingUpdatesExistingCatalogPriceOnly
   TestSaveGroupsMissingModelFieldPreservesPreviousModels
+  TestCredentialsAreUniquePerAccount
+  TestSameExternalKeyRefUpdatesItsOwnAccount
 )
 PAT="^($(IFS='|'; echo "${STORE_TESTS[*]}"))\$"
 EXPECT=${#STORE_TESTS[@]}

@@ -709,32 +709,41 @@ func (s *Server) failWith(w http.ResponseWriter, code int, msg string, extra map
 
 func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ChannelID      int64  `json:"channel_id"`
-		AccessToken    string `json:"access_token"`
-		RefreshToken   string `json:"refresh_token"`
-		ExternalUserID string `json:"external_user_id"`
-		UserIDHeader   string `json:"user_id_header_name"`
+		AccountID    int64  `json:"account_id"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		UserIDHeader string `json:"user_id_header_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.ChannelID <= 0 {
-		s.fail(w, http.StatusBadRequest, "channel_id 必填")
+	if in.AccountID <= 0 {
+		s.fail(w, http.StatusBadRequest, "account_id 必填")
 		return
 	}
 
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		ch, err := store.GetChannel(r.Context(), conn, in.ChannelID)
-		if err != nil {
-			s.mapNotFound(w, err)
+		var channelID int64
+		var baseURL, family, externalUserID string
+		err := conn.QueryRow(r.Context(), `
+SELECT a.channel_id, c.base_url, c.site_family, COALESCE(a.external_user_id,'')
+  FROM upstream_accounts AS a
+  JOIN channels AS c ON c.id=a.channel_id
+ WHERE a.id=$1`, in.AccountID).Scan(&channelID, &baseURL, &family, &externalUserID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			s.fail(w, http.StatusNotFound, fmt.Sprintf("账号 %d 不存在", in.AccountID))
 			return
 		}
-		fam := collector.Family(ch.SiteFamily)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		fam := collector.Family(family)
 		reg, ok := collector.Lookup(fam)
 		if !ok {
 			s.fail(w, http.StatusBadRequest,
-				fmt.Sprintf("渠道站型为 %q，无法确定凭证形态：请先探测站型", ch.SiteFamily))
+				fmt.Sprintf("渠道站型为 %q，无法确定凭证形态：请先探测站型", family))
 			return
 		}
 		// 必需字段校验与 cred_type 选型**同一次调用**（collector 的注册表）。
@@ -743,7 +752,7 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 		// 缺字段提前拒绝：缺了必然在采集时 401，事后从日志里查比现在报贵得多。
 		credType, err := reg.CredTypeFor(
 			in.AccessToken != "",
-			in.ExternalUserID != "",
+			externalUserID != "",
 		)
 		if err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())
@@ -755,18 +764,20 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.SaveCredential(r.Context(), conn, collector.Credential{
-			ChannelID: in.ChannelID, Family: fam, CredType: credType,
-			BaseURL:     ch.BaseURL,
+			AccountID: in.AccountID, ChannelID: channelID, Family: fam, CredType: credType,
+			BaseURL:     baseURL,
 			AccessToken: in.AccessToken, RefreshToken: in.RefreshToken,
-			ExternalUserID: in.ExternalUserID, UserIDHeaderName: in.UserIDHeader,
+			ExternalUserID: externalUserID, UserIDHeaderName: in.UserIDHeader,
 		}); err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.Logger.Info("采集凭证已登记", "channel_id", in.ChannelID, "cred_type", credType)
+		s.Logger.Info("采集凭证已登记", "account_id", in.AccountID,
+			"channel_id", channelID, "cred_type", credType)
 		// **不回显任何凭证内容**（FR-094 同源纪律）
 		s.ok(w, map[string]any{
-			"channel_id": in.ChannelID, "cred_type": credType, "stored": true,
+			"account_id": in.AccountID, "channel_id": channelID,
+			"cred_type": credType, "stored": true,
 			"note": "凭证内容不回显；可点“立即采集”验证是否可用",
 		})
 	})
@@ -775,7 +786,7 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listCredentials(w http.ResponseWriter, r *http.Request) {
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		rows, err := conn.Query(r.Context(), `
-SELECT channel_id, site_family, cred_type, status,
+SELECT account_id, channel_id, site_family, cred_type, status,
        token_expires_at, updated_at,
        (access_token IS NOT NULL) AS has_token
   FROM collector_credentials ORDER BY channel_id`)
@@ -785,6 +796,7 @@ SELECT channel_id, site_family, cred_type, status,
 		}
 		defer rows.Close()
 		type item struct {
+			AccountID  int64      `json:"account_id"`
 			ChannelID  int64      `json:"channel_id"`
 			SiteFamily string     `json:"site_family"`
 			CredType   string     `json:"cred_type"`
@@ -796,7 +808,7 @@ SELECT channel_id, site_family, cred_type, status,
 		out := []item{}
 		for rows.Next() {
 			var i item
-			if err := rows.Scan(&i.ChannelID, &i.SiteFamily, &i.CredType, &i.Status,
+			if err := rows.Scan(&i.AccountID, &i.ChannelID, &i.SiteFamily, &i.CredType, &i.Status,
 				&i.ExpiresAt, &i.UpdatedAt, &i.HasToken); err != nil {
 				s.fail(w, http.StatusInternalServerError, err.Error())
 				return

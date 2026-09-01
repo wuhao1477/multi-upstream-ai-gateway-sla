@@ -11,10 +11,10 @@ import (
 
 // Runner owns the dependencies shared by manual and periodic channel syncs.
 type Runner struct {
-	Client         *collector.Client
-	Sink           collector.Sink
-	Auth           *collector.Authenticator
-	LoadCredential func(context.Context, store.Channel) (collector.Credential, error)
+	Client          *collector.Client
+	Sink            collector.Sink
+	Auth            *collector.Authenticator
+	LoadCredentials func(context.Context, store.Channel) ([]collector.Credential, error)
 }
 
 // NewRunner builds a production Runner backed by PostgreSQL.
@@ -24,18 +24,21 @@ func NewRunner(pool *store.Pool, client *collector.Client) *Runner {
 		Client: client,
 		Sink:   store.NewCollectorSink(pool),
 		Auth:   collector.NewAuthenticator(credentials),
-		LoadCredential: func(ctx context.Context, ch store.Channel) (collector.Credential, error) {
+		LoadCredentials: func(ctx context.Context, ch store.Channel) ([]collector.Credential, error) {
 			conn, release, err := pool.Acquire(ctx)
 			if err != nil {
-				return collector.Credential{}, err
+				return nil, err
 			}
 			defer release()
-			cred, err := credentials.Load(ctx, conn, ch)
+			creds, err := credentials.ListByChannel(ctx, conn, ch)
 			if err != nil {
-				return collector.Credential{}, err
+				return nil, err
 			}
-			cred.QuotaPerUnit = store.QuotaPerUnit(ctx, conn, ch.ID)
-			return cred, nil
+			quotaPerUnit := store.QuotaPerUnit(ctx, conn, ch.ID)
+			for i := range creds {
+				creds[i].QuotaPerUnit = quotaPerUnit
+			}
+			return creds, nil
 		},
 	}
 }
@@ -48,10 +51,10 @@ func (r *Runner) Sync(
 	if !ok {
 		return nil, fmt.Errorf("%w：渠道站型 %q 无对应适配器", collector.ErrPrecondition, ch.SiteFamily)
 	}
-	if r.LoadCredential == nil {
+	if r.LoadCredentials == nil {
 		return nil, fmt.Errorf("%w：采集凭证加载器未配置", collector.ErrPrecondition)
 	}
-	cred, err := r.LoadCredential(ctx, ch)
+	creds, err := r.LoadCredentials(ctx, ch)
 	if err != nil {
 		return nil, fmt.Errorf("%w：%w", collector.ErrPrecondition, err)
 	}
@@ -61,7 +64,7 @@ func (r *Runner) Sync(
 		Adapter: adapter, Sink: r.Sink, Auth: r.Auth, Refresher: refresher,
 	}
 	if len(capabilities) == 0 {
-		return syncer.Sync(ctx, cred)
+		return syncer.SyncMany(ctx, creds)
 	}
-	return syncer.SyncSelected(ctx, cred, capabilities...)
+	return syncer.SyncManySelected(ctx, creds, capabilities...)
 }

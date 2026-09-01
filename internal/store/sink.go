@@ -37,7 +37,7 @@ func (s *CollectorSink) acquire(ctx context.Context) (*pgxConn, error) {
 
 // SaveAccount 写余额信号 + 账号快照。
 func (s *CollectorSink) SaveAccount(
-	ctx context.Context, channelID int64, a collector.Account,
+	ctx context.Context, channelID, accountID int64, a collector.Account,
 ) error {
 	c, err := s.acquire(ctx)
 	if err != nil {
@@ -45,29 +45,12 @@ func (s *CollectorSink) SaveAccount(
 	}
 	defer c.Close()
 
-	// 找到该渠道的账号行（P1 一渠道通常一账号；多账号时按 external_user_id 匹配）
-	accounts, err := ListAccounts(ctx, c.Conn, channelID)
-	if err != nil {
-		return err
-	}
-	var accountID int64
-	for _, acc := range accounts {
-		if a.UserID != "" && acc.ExternalUserID == a.UserID {
-			accountID = acc.ID
-			break
-		}
-	}
-	if accountID == 0 && len(accounts) == 1 {
-		// 只有一个账号时直接用它 —— 上游的 UserID 可能与登记值格式不同
-		accountID = accounts[0].ID
-	}
-
 	// 余额信号（FR-020/024/026）。
 	// ⚠️ **只写 last_confirmed_balance / confirmed_at / balance_state**，
 	// 不写 known_consumption_since 与 conservative_floor —— 那两列归 P3 的
 	// 余额下限 worker（04 §4 列级写入归属）：采集器后写会把保守值抹回标称值，
 	// 余额只剩 $2、在途 $5 时 selector 会看到正数下限继续放行付费请求。
-	if accountID > 0 && !a.Meta.Degraded {
+	if !a.Meta.Degraded {
 		if _, err := c.Conn.Exec(ctx, `
 INSERT INTO balance_signals (account_id, balance_state, last_confirmed_balance,
                              confirmed_at, updated_at)
@@ -86,12 +69,8 @@ VALUES ($1,'normal',$2,$3,now())`,
 	if a.UserID != "" {
 		payload["external_user_id"] = a.UserID
 	}
-	scopeID := a.UserID
-	if scopeID == "" && accountID > 0 {
-		scopeID = fmt.Sprint(accountID)
-	}
 	return InsertSnapshot(ctx, c.Conn, SnapshotRow{
-		ChannelID: channelID, ScopeType: "account", ScopeID: scopeID,
+		ChannelID: channelID, ScopeType: "account", ScopeID: fmt.Sprint(accountID),
 		Payload: payload, DataSource: "auto_collect", FetchedAt: a.Meta.FetchedAt,
 	})
 }
@@ -177,7 +156,7 @@ func (s *CollectorSink) SaveGroups(
 // **只 UPDATE 不 INSERT**：库中无该 Key 时返回 collector.ErrKeyNotRegistered
 // （02 §1.3bis：secret 是明文凭证、上游只回掩码，凭空插一行会让它永远不可用）。
 func (s *CollectorSink) SaveKey(
-	ctx context.Context, channelID int64, k collector.Key,
+	ctx context.Context, channelID, accountID int64, k collector.Key,
 ) error {
 	c, err := s.acquire(ctx)
 	if err != nil {
@@ -185,7 +164,7 @@ func (s *CollectorSink) SaveKey(
 	}
 	defer c.Close()
 
-	idx, err := KeyRefIndex(ctx, c.Conn, channelID)
+	idx, err := KeyRefIndex(ctx, c.Conn, accountID)
 	if err != nil {
 		return err
 	}

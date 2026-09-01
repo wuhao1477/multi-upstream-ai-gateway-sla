@@ -150,18 +150,17 @@ UPDATE upstream_keys
 	return nil
 }
 
-// KeyRefIndex 返回某渠道下 KeyRef → upstream_keys.id 的映射。
+// KeyRefIndex 返回某账号下 KeyRef → upstream_keys.id 的映射。
 //
 // 采集侧只能拿到脱敏引用（上游的 key id/name），故用 external_ref 匹配。
 // 匹配不上的 Key 计入 inventory 异常项"上游存在但库中未登记"。
-func KeyRefIndex(ctx context.Context, conn *pgx.Conn, channelID int64) (map[string]int64, error) {
-	rows, err := conn.Query(ctx, `
+func KeyRefIndex(ctx context.Context, db DBTX, accountID int64) (map[string]int64, error) {
+	rows, err := db.Query(ctx, `
 SELECT k.id, COALESCE(k.external_ref,'')
   FROM upstream_keys k
-  JOIN upstream_accounts a ON a.id = k.account_id
- WHERE a.channel_id = $1`, channelID)
+ WHERE k.account_id = $1`, accountID)
 	if err != nil {
-		return nil, fmt.Errorf("查渠道 %d 的 Key: %w", channelID, err)
+		return nil, fmt.Errorf("查账号 %d 的 Key: %w", accountID, err)
 	}
 	defer rows.Close()
 

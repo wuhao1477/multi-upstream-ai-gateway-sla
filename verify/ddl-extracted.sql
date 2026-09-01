@@ -958,6 +958,7 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_id      BIGINT NOT NULL REFERENCES upstream_accounts(id),
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   cred_type       TEXT NOT NULL CHECK (cred_type IN
@@ -1018,7 +1019,7 @@ CREATE TABLE balance_signals (
 
 CREATE INDEX idx_cred_channel     ON collector_credentials(channel_id, status);
 
-CREATE UNIQUE INDEX idx_cred_channel_unique ON collector_credentials (channel_id);
+CREATE UNIQUE INDEX idx_cred_account_unique ON collector_credentials (account_id);
 
 CREATE INDEX idx_snap_scope       ON collector_snapshots(channel_id, scope_type, fetched_at DESC);
 

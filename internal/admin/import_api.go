@@ -277,9 +277,10 @@ func (s *Server) importOne(
 		}
 	}
 
-	if _, err := store.CreateAccount(ctx, tx, store.Account{
+	accountID, err := store.CreateAccount(ctx, tx, store.Account{
 		ChannelID: chID, ExternalUserID: a.UserID(),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("建账号: %w", err)
 	}
 
@@ -300,7 +301,7 @@ func (s *Server) importOne(
 			return fmt.Errorf("导出里的凭证字段不足: %w", err)
 		}
 		if err := s.SaveCredential(ctx, tx, collector.Credential{
-			ChannelID: chID, Family: d.Family, CredType: credType,
+			AccountID: accountID, ChannelID: chID, Family: d.Family, CredType: credType,
 			BaseURL:        want,
 			AccessToken:    a.AccountInfo.AccessToken,
 			ExternalUserID: a.UserID(),
@@ -335,11 +336,14 @@ func (s *Server) incompleteParts(
 ) ([]string, error) {
 	var accounts, creds, snaps int
 	if err := db.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
-       (SELECT count(*) FROM collector_credentials WHERE channel_id=$1),
+SELECT (SELECT count(*) FROM upstream_accounts
+         WHERE channel_id=$1 AND ($2='' OR external_user_id=$2)),
+       (SELECT count(*) FROM collector_credentials AS c
+          JOIN upstream_accounts AS a ON a.id=c.account_id
+         WHERE a.channel_id=$1 AND ($2='' OR a.external_user_id=$2)),
        (SELECT count(*) FROM collector_snapshots
          WHERE channel_id=$1 AND scope_type='pricing' AND scope_id='__detect__')`,
-		chID).Scan(&accounts, &creds, &snaps); err != nil {
+		chID, a.UserID()).Scan(&accounts, &creds, &snaps); err != nil {
 		return nil, fmt.Errorf("查渠道 %d 完整性: %w", chID, err)
 	}
 	var missing []string
@@ -374,12 +378,15 @@ func (s *Server) repairChannel(
 	ctx context.Context, db store.DBTX, chID int64,
 	a collector.HubAccount, base string, d collector.DetectResult, missing []string,
 ) error {
+	var accountID int64
 	for _, m := range missing {
 		switch m {
 		case "账号":
-			if _, err := store.CreateAccount(ctx, db, store.Account{
+			var err error
+			accountID, err = store.CreateAccount(ctx, db, store.Account{
 				ChannelID: chID, ExternalUserID: a.UserID(),
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("补账号: %w", err)
 			}
 		case "探测快照":
@@ -401,8 +408,14 @@ func (s *Server) repairChannel(
 			if err != nil {
 				return fmt.Errorf("导出里的凭证字段不足: %w", err)
 			}
+			if accountID == 0 {
+				accountID, err = importAccountID(ctx, db, chID, a.UserID())
+				if err != nil {
+					return fmt.Errorf("补凭证: %w", err)
+				}
+			}
 			if err := s.SaveCredential(ctx, db, collector.Credential{
-				ChannelID: chID, Family: d.Family, CredType: credType,
+				AccountID: accountID, ChannelID: chID, Family: d.Family, CredType: credType,
 				BaseURL:        base,
 				AccessToken:    a.AccountInfo.AccessToken,
 				ExternalUserID: a.UserID(),
@@ -423,6 +436,20 @@ UPDATE collector_credentials SET site_family=$2, updated_at=now()
 		}
 	}
 	return nil
+}
+
+func importAccountID(
+	ctx context.Context, db store.DBTX, channelID int64, externalUserID string,
+) (int64, error) {
+	var accountID int64
+	err := db.QueryRow(ctx, `
+SELECT id FROM upstream_accounts
+ WHERE channel_id=$1 AND ($2='' OR external_user_id=$2)
+ ORDER BY id LIMIT 1`, channelID, externalUserID).Scan(&accountID)
+	if err != nil {
+		return 0, fmt.Errorf("找不到渠道 %d 的账号 %q: %w", channelID, externalUserID, err)
+	}
+	return accountID, nil
 }
 
 func finishImport(res *collector.HubImportResult) {

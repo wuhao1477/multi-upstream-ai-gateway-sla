@@ -56,18 +56,25 @@ func TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey(t *testing.T)
 	defer wipeRefreshLockTest(context.Background(), t, conn, base1, base2)
 
 	channels := make([]Channel, 2)
+	accountIDs := make([]int64, 2)
 	for i, base := range []string{base1, base2} {
 		channels[i] = Channel{Name: "refresh-lock", SiteFamily: "sub2api", BaseURL: base}
 		channels[i].ID, err = CreateChannel(ctx, conn, channels[i])
 		if err != nil {
 			t.Fatalf("建渠道: %v", err)
 		}
+		accountIDs[i], err = CreateAccount(ctx, conn, Account{
+			ChannelID: channels[i].ID, ExternalUserID: "shared-account",
+		})
+		if err != nil {
+			t.Fatalf("建账号: %v", err)
+		}
 		_, err = conn.Exec(ctx, `
 INSERT INTO collector_credentials (
-       channel_id, site_family, cred_type, access_token, refresh_token,
+       account_id, channel_id, site_family, cred_type, access_token, refresh_token,
        token_expires_at, refresh_lock_key)
-VALUES ($1,'sub2api','sub2api_jwt','old-access','old-refresh',$2,$3)`,
-			channels[i].ID, time.Now().Add(10*time.Second), lockKey)
+VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
+			accountIDs[i], channels[i].ID, time.Now().Add(10*time.Second), lockKey)
 		if err != nil {
 			t.Fatalf("写凭证: %v", err)
 		}
@@ -80,10 +87,12 @@ VALUES ($1,'sub2api','sub2api_jwt','old-access','old-refresh',$2,$3)`,
 	}
 	creds := make([]collector.Credential, 2)
 	for i := range channels {
-		creds[i], err = stores[i].Load(ctx, conn, channels[i])
+		listed, listErr := stores[i].ListByChannel(ctx, conn, channels[i])
+		err = listErr
 		if err != nil {
 			t.Fatalf("读凭证: %v", err)
 		}
+		creds[i] = listed[0]
 	}
 
 	refresher := &rotatingRefresher{}
@@ -144,12 +153,18 @@ func TestSaveTxPreservesExistingRefreshLockKeyOnPartialUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建渠道: %v", err)
 	}
+	accountID, err := CreateAccount(ctx, conn, Account{
+		ChannelID: channelID, ExternalUserID: "stable-account",
+	})
+	if err != nil {
+		t.Fatalf("建账号: %v", err)
+	}
 	_, err = conn.Exec(ctx, `
 INSERT INTO collector_credentials (
-       channel_id, site_family, cred_type, access_token, refresh_token,
+       account_id, channel_id, site_family, cred_type, access_token, refresh_token,
        token_expires_at, refresh_lock_key)
-VALUES ($1,'sub2api','sub2api_jwt','old-access','old-refresh',$2,$3)`,
-		channelID, time.Now().Add(time.Hour), wantLockKey)
+VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
+		accountID, channelID, time.Now().Add(time.Hour), wantLockKey)
 	if err != nil {
 		t.Fatalf("写凭证: %v", err)
 	}
@@ -157,6 +172,7 @@ VALUES ($1,'sub2api','sub2api_jwt','old-access','old-refresh',$2,$3)`,
 	// This sparse write has no account identity or base URL. It must update the
 	// token without replacing the stable lock domain with a fallback key.
 	if err := (&CredentialStore{}).SaveTx(ctx, conn, collector.Credential{
+		AccountID:   accountID,
 		ChannelID:   channelID,
 		Family:      collector.FamilySub2API,
 		CredType:    "sub2api_jwt",
@@ -234,6 +250,150 @@ INSERT INTO collector_credentials VALUES (1, 'sub2api', ' 7500 ', NULL);`); err 
 	}
 }
 
+func TestCredentialsAreUniquePerAccount(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	const base = "https://credential-per-account.example.invalid"
+	wipeCredentialAccountTest(ctx, t, conn, base)
+	defer wipeCredentialAccountTest(context.Background(), t, conn, base)
+
+	channelID, err := CreateChannel(ctx, conn, Channel{
+		Name: "credential-per-account", SiteFamily: "newapi", BaseURL: base,
+	})
+	if err != nil {
+		t.Fatalf("建渠道: %v", err)
+	}
+	account1, err := CreateAccount(ctx, conn, Account{
+		ChannelID: channelID, ExternalUserID: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("建账号 1: %v", err)
+	}
+	account2, err := CreateAccount(ctx, conn, Account{
+		ChannelID: channelID, ExternalUserID: "user-2",
+	})
+	if err != nil {
+		t.Fatalf("建账号 2: %v", err)
+	}
+
+	credentials := &CredentialStore{}
+	for _, cred := range []collector.Credential{
+		{AccountID: account1, ChannelID: channelID, Family: collector.FamilyNewAPI,
+			CredType: "newapi_access_token", AccessToken: "token-1", ExternalUserID: "user-1"},
+		{AccountID: account2, ChannelID: channelID, Family: collector.FamilyNewAPI,
+			CredType: "newapi_access_token", AccessToken: "token-2", ExternalUserID: "user-2"},
+	} {
+		if err := credentials.SaveTx(ctx, conn, cred); err != nil {
+			t.Fatalf("保存账号 %d 凭证: %v", cred.AccountID, err)
+		}
+	}
+
+	got, err := credentials.ListByChannel(ctx, conn, Channel{ID: channelID, BaseURL: base})
+	if err != nil {
+		t.Fatalf("列渠道凭证: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("凭证数 = %d，期望 2", len(got))
+	}
+	if got[0].AccountID != account1 || got[0].AccessToken != "token-1" ||
+		got[1].AccountID != account2 || got[1].AccessToken != "token-2" {
+		t.Fatalf("凭证未按账号保存: %+v", got)
+	}
+}
+
+func TestSameExternalKeyRefUpdatesItsOwnAccount(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatalf("建连接池: %v", err)
+	}
+	defer pool.Close()
+
+	const base = "https://same-key-ref-per-account.example.invalid"
+	wipeCredentialAccountTest(ctx, t, conn, base)
+	defer wipeCredentialAccountTest(context.Background(), t, conn, base)
+
+	channelID, err := CreateChannel(ctx, conn, Channel{
+		Name: "same-key-ref-per-account", SiteFamily: "newapi", BaseURL: base,
+	})
+	if err != nil {
+		t.Fatalf("建渠道: %v", err)
+	}
+	account1, err := CreateAccount(ctx, conn, Account{ChannelID: channelID, ExternalUserID: "user-1"})
+	if err != nil {
+		t.Fatalf("建账号 1: %v", err)
+	}
+	account2, err := CreateAccount(ctx, conn, Account{ChannelID: channelID, ExternalUserID: "user-2"})
+	if err != nil {
+		t.Fatalf("建账号 2: %v", err)
+	}
+	key1, err := CreateKey(ctx, conn, account1, "secret-1", "1", nil)
+	if err != nil {
+		t.Fatalf("建 Key 1: %v", err)
+	}
+	key2, err := CreateKey(ctx, conn, account2, "secret-2", "1", nil)
+	if err != nil {
+		t.Fatalf("建 Key 2: %v", err)
+	}
+
+	sink := NewCollectorSink(pool)
+	for accountID, quota := range map[int64]float64{account1: 11, account2: 22} {
+		if err := sink.SaveKey(ctx, channelID, accountID, collector.Key{
+			KeyRef: "1", RemainQuotaUSD: quotaPtr(quota),
+			Meta: collector.SourceMeta{FetchedAt: time.Now()},
+		}); err != nil {
+			t.Fatalf("保存账号 %d 的 Key 用量: %v", accountID, err)
+		}
+	}
+
+	for keyID, want := range map[int64]float64{key1: 11, key2: 22} {
+		var got float64
+		if err := conn.QueryRow(ctx,
+			`SELECT remain_quota_usd FROM upstream_keys WHERE id=$1`, keyID).Scan(&got); err != nil {
+			t.Fatalf("读 Key %d: %v", keyID, err)
+		}
+		if got != want {
+			t.Fatalf("Key %d 额度 = %v，期望 %v", keyID, got, want)
+		}
+	}
+}
+
+func wipeCredentialAccountTest(
+	ctx context.Context, t *testing.T, conn *pgx.Conn, base string,
+) {
+	t.Helper()
+	for _, stmt := range []string{
+		`DELETE FROM collector_snapshots WHERE channel_id IN (SELECT id FROM channels WHERE base_url=$1)`,
+		`DELETE FROM collector_credentials WHERE channel_id IN (SELECT id FROM channels WHERE base_url=$1)`,
+		`DELETE FROM upstream_keys WHERE account_id IN (
+			SELECT a.id FROM upstream_accounts a JOIN channels c ON c.id=a.channel_id WHERE c.base_url=$1)`,
+		`DELETE FROM upstream_accounts WHERE channel_id IN (SELECT id FROM channels WHERE base_url=$1)`,
+		`DELETE FROM channels WHERE base_url=$1`,
+	} {
+		if _, err := conn.Exec(ctx, stmt, base); err != nil {
+			t.Fatalf("清理账号凭证测试: %v", err)
+		}
+	}
+}
+
 func wipeRefreshLockTest(
 	ctx context.Context, t *testing.T, conn *pgx.Conn, bases ...string,
 ) {
@@ -242,6 +402,11 @@ func wipeRefreshLockTest(
 DELETE FROM collector_credentials
  WHERE channel_id IN (SELECT id FROM channels WHERE base_url = ANY($1))`, bases); err != nil {
 		t.Fatalf("清理刷新锁测试凭证: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+DELETE FROM upstream_accounts
+ WHERE channel_id IN (SELECT id FROM channels WHERE base_url = ANY($1))`, bases); err != nil {
+		t.Fatalf("清理刷新锁测试账号: %v", err)
 	}
 	if _, err := conn.Exec(ctx, `DELETE FROM channels WHERE base_url = ANY($1)`, bases); err != nil {
 		t.Fatalf("清理刷新锁测试渠道: %v", err)

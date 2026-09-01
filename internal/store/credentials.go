@@ -33,13 +33,16 @@ func NewCredentialStore(p *Pool) *CredentialStore { return &CredentialStore{Pool
 func (s *CredentialStore) SaveTx(ctx context.Context, db DBTX, cred collector.Credential) error {
 	lockKey := collector.RefreshLockKey(cred)
 	_, err := db.Exec(ctx, `
-INSERT INTO collector_credentials (channel_id, site_family, cred_type,
+INSERT INTO collector_credentials (account_id, channel_id, site_family, cred_type,
        access_token, refresh_token, external_user_id,
        user_id_header_name, token_expires_at, refresh_lock_key, status, updated_at)
-VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),
-        NULLIF($7,''),$8,NULLIF($9,''),'valid',now())
-ON CONFLICT (channel_id) DO UPDATE
-   SET access_token       = COALESCE(NULLIF(EXCLUDED.access_token,''), collector_credentials.access_token),
+VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),
+        NULLIF($8,''),$9,NULLIF($10,''),'valid',now())
+ON CONFLICT (account_id) DO UPDATE
+   SET channel_id         = EXCLUDED.channel_id,
+       site_family        = EXCLUDED.site_family,
+       cred_type          = EXCLUDED.cred_type,
+       access_token       = COALESCE(NULLIF(EXCLUDED.access_token,''), collector_credentials.access_token),
        refresh_token      = COALESCE(NULLIF(EXCLUDED.refresh_token,''), collector_credentials.refresh_token),
        external_user_id   = COALESCE(EXCLUDED.external_user_id, collector_credentials.external_user_id),
        user_id_header_name = COALESCE(EXCLUDED.user_id_header_name, collector_credentials.user_id_header_name),
@@ -47,11 +50,11 @@ ON CONFLICT (channel_id) DO UPDATE
        refresh_lock_key   = COALESCE(NULLIF(collector_credentials.refresh_lock_key,''), EXCLUDED.refresh_lock_key),
        status             = 'valid',
        updated_at         = now()`,
-		cred.ChannelID, string(cred.Family), cred.CredType,
+		cred.AccountID, cred.ChannelID, string(cred.Family), cred.CredType,
 		cred.AccessToken, cred.RefreshToken, cred.ExternalUserID,
 		cred.UserIDHeaderName, nullTime(cred.TokenExpiresAt), lockKey)
 	if err != nil {
-		return fmt.Errorf("保存渠道 %d 凭证: %w", cred.ChannelID, err)
+		return fmt.Errorf("保存账号 %d 凭证: %w", cred.AccountID, err)
 	}
 	return nil
 }
@@ -76,22 +79,22 @@ func (s *CredentialStore) WithRefreshLock(
 	var lockKey string
 	if err := tx.QueryRow(ctx, `
 SELECT COALESCE(refresh_lock_key,'')
-  FROM collector_credentials WHERE channel_id=$1`, cred.ChannelID).Scan(&lockKey); err != nil {
-		return cred, fmt.Errorf("读渠道 %d 刷新锁键: %w", cred.ChannelID, err)
+  FROM collector_credentials WHERE account_id=$1`, cred.AccountID).Scan(&lockKey); err != nil {
+		return cred, fmt.Errorf("读账号 %d 刷新锁键: %w", cred.AccountID, err)
 	}
 	if lockKey == "" {
-		return cred, fmt.Errorf("渠道 %d 缺 refresh_lock_key", cred.ChannelID)
+		return cred, fmt.Errorf("账号 %d 缺 refresh_lock_key", cred.AccountID)
 	}
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
-		return cred, fmt.Errorf("获取渠道 %d 刷新锁: %w", cred.ChannelID, err)
+		return cred, fmt.Errorf("获取账号 %d 刷新锁: %w", cred.AccountID, err)
 	}
-	current, err := s.load(ctx, tx, Channel{ID: cred.ChannelID, BaseURL: cred.BaseURL}, true)
+	current, err := s.loadByAccount(ctx, tx, cred.AccountID, true)
 	if err != nil {
 		return cred, err
 	}
 	if current.RefreshLockKey != lockKey {
-		return cred, fmt.Errorf("渠道 %d 刷新锁键已变化", cred.ChannelID)
+		return cred, fmt.Errorf("账号 %d 刷新锁键已变化", cred.AccountID)
 	}
 	fresh, changed, err := refresh(current)
 	if err != nil {
@@ -108,15 +111,15 @@ UPDATE collector_credentials
  WHERE refresh_lock_key = $1 AND site_family = $5`, lockKey, fresh.AccessToken,
 			fresh.RefreshToken, nullTime(fresh.TokenExpiresAt), string(fresh.Family))
 		if err != nil {
-			return current, fmt.Errorf("刷新后保存渠道 %d 凭证: %w", cred.ChannelID, err)
+			return current, fmt.Errorf("刷新后保存账号 %d 凭证: %w", cred.AccountID, err)
 		}
 		if tag.RowsAffected() == 0 {
-			return current, fmt.Errorf("刷新后保存渠道 %d 凭证: 刷新锁键 %q 没有关联凭证",
-				cred.ChannelID, lockKey)
+			return current, fmt.Errorf("刷新后保存账号 %d 凭证: 刷新锁键 %q 没有关联凭证",
+				cred.AccountID, lockKey)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return current, fmt.Errorf("提交渠道 %d 凭证刷新: %w", cred.ChannelID, err)
+		return current, fmt.Errorf("提交账号 %d 凭证刷新: %w", cred.AccountID, err)
 	}
 	if changed {
 		return fresh, nil
@@ -124,44 +127,80 @@ UPDATE collector_credentials
 	return current, nil
 }
 
-// Load 读取某渠道的采集凭证。
-func (s *CredentialStore) Load(ctx context.Context, conn DBTX, ch Channel) (collector.Credential, error) {
-	return s.load(ctx, conn, ch, false)
+// ListByChannel 读取渠道下全部有效账号的采集凭证。
+func (s *CredentialStore) ListByChannel(
+	ctx context.Context, db DBTX, ch Channel,
+) ([]collector.Credential, error) {
+	rows, err := db.Query(ctx, `
+SELECT c.account_id, c.site_family, c.cred_type, c.access_token, c.refresh_token,
+       c.external_user_id, c.user_id_header_name, c.token_expires_at, c.refresh_lock_key,
+       c.channel_id, ch.base_url
+  FROM collector_credentials AS c
+  JOIN upstream_accounts AS a ON a.id = c.account_id
+  JOIN channels AS ch ON ch.id = c.channel_id
+ WHERE c.channel_id=$1 AND c.status='valid' AND a.status='active'
+ ORDER BY c.account_id`, ch.ID)
+	if err != nil {
+		return nil, fmt.Errorf("列渠道 %d 凭证: %w", ch.ID, err)
+	}
+	defer rows.Close()
+
+	out := []collector.Credential{}
+	for rows.Next() {
+		var cred collector.Credential
+		if err := scanCredential(rows, &cred); err != nil {
+			return nil, fmt.Errorf("读渠道 %d 凭证: %w", ch.ID, err)
+		}
+		out = append(out, cred)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("列渠道 %d 凭证: %w", ch.ID, err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: 渠道 %d 未登记有效账号凭证", ErrNotFound, ch.ID)
+	}
+	return out, nil
 }
 
-func (s *CredentialStore) load(
-	ctx context.Context, conn DBTX, ch Channel, forUpdate bool,
+func (s *CredentialStore) loadByAccount(
+	ctx context.Context, db DBTX, accountID int64, forUpdate bool,
 ) (collector.Credential, error) {
 	var cred collector.Credential
-	var family, credType string
-	var access, refresh, extUID, hdrName, lockKey *string
-	// ⚠️ 必须用指针接 token_expires_at：**NewAPI 的长期令牌没有到期时间**
-	// （04 §5.1），该列为 NULL。用 time.Time 直接扫会报
-	// "cannot scan NULL into *time.Time" —— 而那正是最常见的站型，
-	// 等于 NewAPI 渠道一次都采不成。
-	var expiresAt *time.Time
-
 	query := `
-SELECT site_family, cred_type, access_token, refresh_token, external_user_id,
-	       user_id_header_name, token_expires_at, refresh_lock_key
-  FROM collector_credentials WHERE channel_id=$1`
+SELECT c.account_id, c.site_family, c.cred_type, c.access_token, c.refresh_token,
+       c.external_user_id, c.user_id_header_name, c.token_expires_at, c.refresh_lock_key,
+       c.channel_id, ch.base_url
+  FROM collector_credentials AS c
+  JOIN channels AS ch ON ch.id = c.channel_id
+ WHERE c.account_id=$1`
 	if forUpdate {
-		query += " FOR UPDATE"
+		query += " FOR UPDATE OF c"
 	}
-	err := conn.QueryRow(ctx, query, ch.ID).
-		Scan(&family, &credType, &access, &refresh,
-			&extUID, &hdrName, &expiresAt, &lockKey)
+	row := db.QueryRow(ctx, query, accountID)
+	err := scanCredential(row, &cred)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return cred, fmt.Errorf("%w: 渠道 %d 未登记采集凭证", ErrNotFound, ch.ID)
+		return cred, fmt.Errorf("%w: 账号 %d 未登记采集凭证", ErrNotFound, accountID)
 	}
 	if err != nil {
-		return cred, fmt.Errorf("读渠道 %d 凭证: %w", ch.ID, err)
+		return cred, fmt.Errorf("读账号 %d 凭证: %w", accountID, err)
 	}
+	return cred, nil
+}
 
-	cred.ChannelID = ch.ID
+type credentialScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCredential(row credentialScanner, cred *collector.Credential) error {
+	var family, credType string
+	var access, refresh, extUID, hdrName, lockKey *string
+	var expiresAt *time.Time
+	if err := row.Scan(&cred.AccountID, &family, &credType, &access, &refresh,
+		&extUID, &hdrName, &expiresAt, &lockKey, &cred.ChannelID, &cred.BaseURL); err != nil {
+		return err
+	}
 	cred.Family = collector.Family(family)
 	cred.CredType = credType
-	cred.BaseURL = ch.BaseURL
 	cred.AccessToken = deref(access)
 	cred.RefreshToken = deref(refresh)
 	cred.ExternalUserID = deref(extUID)
@@ -170,8 +209,7 @@ SELECT site_family, cred_type, access_token, refresh_token, external_user_id,
 	if expiresAt != nil {
 		cred.TokenExpiresAt = *expiresAt
 	}
-	// 留零值即"无到期时间"：NeedsRefresh 对零值返 false（NewAPI 本就不刷新）
-	return cred, nil
+	return nil
 }
 
 // SaveDetected 把 Detect 的结果登记为凭证骨架（尚无令牌）。

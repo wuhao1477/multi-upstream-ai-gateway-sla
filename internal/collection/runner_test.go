@@ -2,7 +2,11 @@ package collection
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sort"
 	"testing"
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
@@ -13,9 +17,9 @@ func TestRunnerUnknownFamilyFailsBeforeCredentialLoad(t *testing.T) {
 	loaded := false
 	r := &Runner{
 		Client: collector.NewClient(0),
-		LoadCredential: func(context.Context, store.Channel) (collector.Credential, error) {
+		LoadCredentials: func(context.Context, store.Channel) ([]collector.Credential, error) {
 			loaded = true
-			return collector.Credential{}, nil
+			return nil, nil
 		},
 	}
 	_, err := r.Sync(context.Background(), store.Channel{
@@ -27,4 +31,152 @@ func TestRunnerUnknownFamilyFailsBeforeCredentialLoad(t *testing.T) {
 	if loaded {
 		t.Fatal("未知站型不应读取凭证")
 	}
+}
+
+type runnerSavedItem struct {
+	accountID int64
+	ref       string
+}
+
+type runnerSink struct {
+	accounts []runnerSavedItem
+	keys     []runnerSavedItem
+	groups   [][]collector.Group
+	pricing  []collector.Pricing
+	catalogs [][]collector.CatalogModel
+}
+
+func (s *runnerSink) SaveAccount(
+	_ context.Context, _, accountID int64, account collector.Account,
+) error {
+	s.accounts = append(s.accounts, runnerSavedItem{accountID: accountID, ref: account.UserID})
+	return nil
+}
+
+func (s *runnerSink) SaveGroups(
+	_ context.Context, _ int64, groups []collector.Group,
+) (int, error) {
+	s.groups = append(s.groups, groups)
+	return len(groups), nil
+}
+
+func (s *runnerSink) SaveKey(
+	_ context.Context, _, accountID int64, key collector.Key,
+) error {
+	s.keys = append(s.keys, runnerSavedItem{accountID: accountID, ref: key.KeyRef})
+	return nil
+}
+
+func (s *runnerSink) SavePricing(
+	_ context.Context, _ int64, pricing collector.Pricing,
+) (int, error) {
+	s.pricing = append(s.pricing, pricing)
+	return len(pricing.Models), nil
+}
+
+func (s *runnerSink) SaveCatalog(
+	_ context.Context, _ int64, catalog []collector.CatalogModel,
+) (int, error) {
+	s.catalogs = append(s.catalogs, catalog)
+	return len(catalog), nil
+}
+
+func TestRunnerCollectsEveryAccountAndMergesChannelData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		userID := "101"
+		group := "account-a"
+		model := "model-a"
+		if token == "Bearer token-b" {
+			userID, group, model = "202", "account-b", "model-b"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/self":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"id": userID, "quota": 100, "used_quota": 10},
+			})
+		case "/api/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{
+					"id": "key-" + userID, "group": group,
+					"remain_quota": 50, "used_quota": 10, "expired_time": -1,
+				}},
+			})
+		case "/api/pricing":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":     true,
+				"group_ratio": map[string]any{"shared": 1, group: 0.5},
+				"data": []map[string]any{
+					{"model_name": "shared-model", "quota_type": 0, "model_ratio": 1,
+						"enable_groups": []string{"shared"}},
+					{"model_name": model, "quota_type": 0, "model_ratio": 2,
+						"enable_groups": []string{group}},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := collector.NewClient(0)
+	client.HC = server.Client()
+	sink := &runnerSink{}
+	runner := &Runner{
+		Client: client,
+		Sink:   sink,
+		LoadCredentials: func(context.Context, store.Channel) ([]collector.Credential, error) {
+			return []collector.Credential{
+				{AccountID: 11, ChannelID: 7, Family: collector.FamilyNewAPI,
+					BaseURL: server.URL, AccessToken: "token-a", ExternalUserID: "101",
+					UserIDHeaderName: "New-API-User", QuotaPerUnit: 100},
+				{AccountID: 22, ChannelID: 7, Family: collector.FamilyNewAPI,
+					BaseURL: server.URL, AccessToken: "token-b", ExternalUserID: "202",
+					UserIDHeaderName: "New-API-User", QuotaPerUnit: 100},
+			}, nil
+		},
+	}
+
+	result, err := runner.Sync(context.Background(), store.Channel{
+		ID: 7, SiteFamily: string(collector.FamilyNewAPI), BaseURL: server.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("多账号采集: %v", err)
+	}
+	if len(sink.accounts) != 2 || len(sink.keys) != 2 {
+		t.Fatalf("账号级数据未逐账号保存: accounts=%+v keys=%+v", sink.accounts, sink.keys)
+	}
+	accountIDs := []int64{sink.accounts[0].accountID, sink.accounts[1].accountID}
+	keyAccountIDs := []int64{sink.keys[0].accountID, sink.keys[1].accountID}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	sort.Slice(keyAccountIDs, func(i, j int) bool { return keyAccountIDs[i] < keyAccountIDs[j] })
+	if accountIDs[0] != 11 || accountIDs[1] != 22 ||
+		keyAccountIDs[0] != 11 || keyAccountIDs[1] != 22 {
+		t.Fatalf("账号归属错误: accounts=%v keys=%v", accountIDs, keyAccountIDs)
+	}
+	if len(sink.groups) != 1 || len(sink.groups[0]) != 3 ||
+		len(sink.pricing) != 1 || len(sink.pricing[0].Models) != 3 ||
+		len(sink.catalogs) != 1 || len(sink.catalogs[0]) != 3 {
+		t.Fatalf("渠道级数据未合并后单次保存: groups=%d/%d pricing=%d/%d catalog=%d/%d",
+			len(sink.groups), firstLen(sink.groups), len(sink.pricing), firstPricingLen(sink.pricing),
+			len(sink.catalogs), firstLen(sink.catalogs))
+	}
+	if len(result.Items) != 5 {
+		t.Fatalf("同步结果应按能力合并为 5 项，得到 %+v", result.Items)
+	}
+}
+
+func firstLen[T any](items [][]T) int {
+	if len(items) == 0 {
+		return 0
+	}
+	return len(items[0])
+}
+
+func firstPricingLen(items []collector.Pricing) int {
+	if len(items) == 0 {
+		return 0
+	}
+	return len(items[0].Models)
 }

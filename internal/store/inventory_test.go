@@ -40,7 +40,7 @@ func TestUnregisteredKeySnapshotVisibleInInventory(t *testing.T) {
 		t.Fatalf("建渠道: %v", err)
 	}
 
-	err = NewCollectorSink(pool).SaveKey(ctx, ch.ID, collector.Key{
+	err = NewCollectorSink(pool).SaveKey(ctx, ch.ID, 0, collector.Key{
 		KeyRef:         "remote-only-key",
 		RemainQuotaUSD: quotaPtr(3),
 		Meta:           collector.SourceMeta{FetchedAt: time.Now()},
@@ -111,7 +111,7 @@ func TestSaveKeyPersistsZeroQuota(t *testing.T) {
 
 	sink := NewCollectorSink(pool)
 	for _, quota := range []float64{3, 0} {
-		if err := sink.SaveKey(ctx, channelID, collector.Key{
+		if err := sink.SaveKey(ctx, channelID, accountID, collector.Key{
 			KeyRef: "zero-key", RemainQuotaUSD: quotaPtr(quota), UsedQuotaUSD: quotaPtr(quota),
 			Meta: collector.SourceMeta{FetchedAt: time.Now()},
 		}); err != nil {

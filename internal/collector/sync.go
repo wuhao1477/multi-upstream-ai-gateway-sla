@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -47,12 +48,12 @@ type SyncResult struct {
 // 是本模块最容易出错的部分，不该只能靠集成测试验证。
 type Sink interface {
 	// SaveAccount 写余额信号与账号快照。
-	SaveAccount(ctx context.Context, channelID int64, a Account) error
+	SaveAccount(ctx context.Context, channelID, accountID int64, a Account) error
 	// SaveGroups 写分组与分组可用模型（单事务）。
 	SaveGroups(ctx context.Context, channelID int64, gs []Group) (int, error)
 	// SaveKey 写一把 Key 的用量（每把一个事务）。
 	// 返回 ErrKeyNotRegistered 表示上游有、库中无 —— 计入异常项而非失败。
-	SaveKey(ctx context.Context, channelID int64, k Key) error
+	SaveKey(ctx context.Context, channelID, accountID int64, k Key) error
 	// SavePricing 写价格版本。
 	SavePricing(ctx context.Context, channelID int64, p Pricing) (int, error)
 	// SaveCatalog 写模型目录（upsert，first_seen_at 不覆盖）。
@@ -83,7 +84,16 @@ func (s *Syncer) SyncSelected(
 ) (*SyncResult, error) {
 	selected := *s
 	selected.only = capabilities
-	return selected.Sync(ctx, cred)
+	return selected.SyncMany(ctx, []Credential{cred})
+}
+
+// SyncManySelected 执行同一渠道多个账号的指定能力。
+func (s *Syncer) SyncManySelected(
+	ctx context.Context, creds []Credential, capabilities ...Capability,
+) (*SyncResult, error) {
+	selected := *s
+	selected.only = capabilities
+	return selected.SyncMany(ctx, creds)
 }
 
 func (s *Syncer) wants(capability Capability) bool {
@@ -105,160 +115,292 @@ func (s *Syncer) wants(capability Capability) bool {
 // 一次 sync 可能写数百行，单事务会长时间持锁；且"价格采到了但目录超时"
 // 没有理由把价格也丢掉：采集是幂等补齐动作，不是要么全有要么全无的账务操作。
 func (s *Syncer) Sync(ctx context.Context, cred Credential) (*SyncResult, error) {
+	return s.SyncMany(ctx, []Credential{cred})
+}
+
+type syncAccount struct {
+	cred Credential
+	sess Session
+}
+
+// SyncMany 采集同一渠道下的全部账号，并把渠道级数据合并后各写一次。
+func (s *Syncer) SyncMany(ctx context.Context, creds []Credential) (*SyncResult, error) {
+	if len(creds) == 0 {
+		return nil, fmt.Errorf("采集凭证为空")
+	}
 	res := &SyncResult{
-		ChannelID: cred.ChannelID, SiteFamily: cred.Family,
+		ChannelID: creds[0].ChannelID, SiteFamily: creds[0].Family,
 		StartedAt: time.Now(),
 	}
 	defer func() { res.ElapsedMs = time.Since(res.StartedAt).Milliseconds() }()
 
 	caps := s.Adapter.Capabilities()
-
-	// ── ① 凭证新鲜 + 鉴权。失败即整体中止：连不上或认不过，谈不上采集 ──
-	if s.Auth != nil && s.Refresher != nil {
-		fresh, err := s.Auth.EnsureFresh(ctx, cred, s.Refresher, time.Now())
-		if err != nil {
-			return res, fmt.Errorf("凭证续期失败: %w", err)
-		}
-		cred = fresh
-	}
-	sess, err := s.Adapter.Authenticate(ctx, cred)
-	if err != nil {
-		return res, fmt.Errorf("鉴权失败: %w", err)
+	accounts, authErrs := s.authenticate(ctx, creds)
+	if len(accounts) == 0 {
+		return res, fmt.Errorf("全部账号鉴权失败: %w", errors.Join(authErrs...))
 	}
 
-	// ── ② 账号 ──
 	if s.wants(CapAccount) {
 		s.run(ctx, res, caps, CapAccount, func() (int, int, string, error) {
-			a, err := s.Adapter.FetchAccount(ctx, sess)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			// ⚠️ 账号级的 external_user_id 要回填进会话：NewAPI 系后续请求
-			// 必须带用户 ID 头（04 §3.1），Detect 阶段拿不到它。
-			if a.UserID != "" && sess.ExternalUserID == "" {
-				sess.ExternalUserID = a.UserID
-			}
-			if err := s.Sink.SaveAccount(ctx, cred.ChannelID, a); err != nil {
-				return 0, 0, "", err
-			}
-			return 1, 0, degradedNote(a.Meta), nil
+			return s.syncAccounts(ctx, accounts, authErrs)
 		})
 	}
-
-	// ── ③ 分组（必须先于 ④）──
 	if s.wants(CapGroups) {
 		s.run(ctx, res, caps, CapGroups, func() (int, int, string, error) {
-			gs, err := s.Adapter.FetchGroups(ctx, sess)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			n, err := s.Sink.SaveGroups(ctx, cred.ChannelID, gs)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			notes := make([]string, 0, len(gs))
-			for _, g := range gs {
-				if note := degradedNote(g.Meta); note != "" {
-					notes = append(notes, note)
-				}
-			}
-			return n, 0, joinNotes(notes...), nil
+			return s.syncGroups(ctx, accounts, authErrs)
 		})
 	}
-
-	// ── ④ Key：**每把一个事务**，单把失败不影响其它（09 §5.0bis）──
 	if s.wants(CapKeys) {
 		s.run(ctx, res, caps, CapKeys, func() (int, int, string, error) {
-			ks, err := s.Adapter.FetchKeys(ctx, sess)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			var ok, failed, unregistered int
-			var firstErr error
-			for _, k := range ks {
-				err := s.Sink.SaveKey(ctx, cred.ChannelID, k)
-				switch {
-				case err == nil:
-					ok++
-				case errors.Is(err, ErrKeyNotRegistered):
-					// 上游有、库中无 → 异常项而非失败（02 §1.3bis）
-					unregistered++
-				default:
-					failed++
-					if firstErr == nil {
-						firstErr = err
-					}
-				}
-			}
-			note := ""
-			if unregistered > 0 {
-				note = fmt.Sprintf("%d 把 Key 上游存在但库中未登记，需补登记（计入异常项）",
-					unregistered)
-			}
-			processed := ok + unregistered
-			if failed > 0 {
-				return processed, failed, note, fmt.Errorf("部分 Key 写入失败: %w", firstErr)
-			}
-			return processed, 0, note, nil
+			return s.syncKeys(ctx, accounts, authErrs)
 		})
 	}
-
-	// ── ⑤ 价格 ──
 	if s.wants(CapPricing) {
 		s.run(ctx, res, caps, CapPricing, func() (int, int, string, error) {
-			p, err := s.Adapter.FetchPricing(ctx, sess)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			n, err := s.Sink.SavePricing(ctx, cred.ChannelID, p)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			// ⚠️ 采到 ≠ 写入：价格版本按 (channel, model) 作用域，只为**已登记进
-			// models 的可路由模型**写行（02 §2bis：models 要求 token 上界必填，
-			// 目录阶段拿不到，故不自动建行）。P1 不登记任何可路由模型（AC-39），
-			// 于是这里**必然 n=0**。
-			//
-			// 不说明就会退化成"ok + rows=0 + 无备注"——运维无法区分"写成功了"
-			// 和"一行都没写"，而后者在 P1 是**预期行为**、在 P3 则是**故障**。
-			// 同 ④ 未登记 Key 的处理：如实记 note，而不是让 ok 替它兜着。
-			if skipped := len(p.Models) - n; skipped > 0 {
-				extra := fmt.Sprintf(
-					"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
-						"不写 price_versions，价格已存入模型目录备查",
-					len(p.Models), skipped)
-				rows := n
-				if rows == 0 {
-					rows = len(p.Models)
-				}
-				return rows, 0, joinNotes(degradedNote(p.Meta), extra), nil
-			}
-			return n, 0, degradedNote(p.Meta), nil
+			return s.syncPricing(ctx, accounts, authErrs)
 		})
 	}
-
-	// ── ⑥ 目录 ──
 	if s.wants(CapModelCatalog) {
 		s.run(ctx, res, caps, CapModelCatalog, func() (int, int, string, error) {
-			cs, err := s.Adapter.FetchModelCatalog(ctx, sess)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			n, err := s.Sink.SaveCatalog(ctx, cred.ChannelID, cs)
-			if err != nil {
-				return 0, 0, "", err
-			}
-			notes := make([]string, 0, len(cs))
-			for _, model := range cs {
-				if note := degradedNote(model.Meta); note != "" {
-					notes = append(notes, note)
-				}
-			}
-			return n, 0, joinNotes(notes...), nil
+			return s.syncCatalog(ctx, accounts, authErrs)
 		})
 	}
-
 	return res, nil
+}
+
+func (s *Syncer) authenticate(ctx context.Context, creds []Credential) ([]syncAccount, []error) {
+	accounts := make([]syncAccount, 0, len(creds))
+	var errs []error
+	for _, cred := range creds {
+		if s.Auth != nil && s.Refresher != nil {
+			fresh, err := s.Auth.EnsureFresh(ctx, cred, s.Refresher, time.Now())
+			if err != nil {
+				errs = append(errs, accountErr(cred, "续期", err))
+				continue
+			}
+			cred = fresh
+		}
+		sess, err := s.Adapter.Authenticate(ctx, cred)
+		if err != nil {
+			errs = append(errs, accountErr(cred, "鉴权", err))
+			continue
+		}
+		accounts = append(accounts, syncAccount{cred: cred, sess: sess})
+	}
+	return accounts, errs
+}
+
+func (s *Syncer) syncAccounts(
+	ctx context.Context, accounts []syncAccount, baseErrs []error,
+) (int, int, string, error) {
+	errs := append([]error{}, baseErrs...)
+	var rows int
+	var notes []string
+	for i := range accounts {
+		a, err := s.Adapter.FetchAccount(ctx, accounts[i].sess)
+		if err == nil {
+			// 账号响应可能补全 external_user_id；后续同一会话的分组/Key
+			// 请求必须立即带上它。
+			if a.UserID != "" && accounts[i].sess.ExternalUserID == "" {
+				accounts[i].sess.ExternalUserID = a.UserID
+			}
+			err = s.Sink.SaveAccount(ctx, accounts[i].cred.ChannelID, accounts[i].cred.AccountID, a)
+		}
+		if err != nil {
+			errs = append(errs, accountErr(accounts[i].cred, "账号", err))
+			continue
+		}
+		rows++
+		notes = append(notes, degradedNote(a.Meta))
+	}
+	return capabilityResult(rows, errs, joinNotes(notes...))
+}
+
+func (s *Syncer) syncGroups(
+	ctx context.Context, accounts []syncAccount, baseErrs []error,
+) (int, int, string, error) {
+	errs := append([]error{}, baseErrs...)
+	var all []Group
+	for _, account := range accounts {
+		groups, err := s.Adapter.FetchGroups(ctx, account.sess)
+		if err != nil {
+			errs = append(errs, accountErr(account.cred, "分组", err))
+			continue
+		}
+		all = append(all, groups...)
+	}
+	groups := mergeGroups(all)
+	n, err := s.Sink.SaveGroups(ctx, accounts[0].cred.ChannelID, groups)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	var notes []string
+	for _, group := range groups {
+		notes = append(notes, degradedNote(group.Meta))
+	}
+	return capabilityResult(n, errs, joinNotes(notes...))
+}
+
+func (s *Syncer) syncKeys(
+	ctx context.Context, accounts []syncAccount, baseErrs []error,
+) (int, int, string, error) {
+	errs := append([]error{}, baseErrs...)
+	var rows, unregistered int
+	for _, account := range accounts {
+		keys, err := s.Adapter.FetchKeys(ctx, account.sess)
+		if err != nil {
+			errs = append(errs, accountErr(account.cred, "Key", err))
+			continue
+		}
+		for _, key := range keys {
+			err := s.Sink.SaveKey(ctx, account.cred.ChannelID, account.cred.AccountID, key)
+			switch {
+			case err == nil:
+				rows++
+			case errors.Is(err, ErrKeyNotRegistered):
+				rows++
+				unregistered++
+			default:
+				errs = append(errs, accountErr(account.cred, "Key "+key.KeyRef, err))
+			}
+		}
+	}
+	note := ""
+	if unregistered > 0 {
+		note = fmt.Sprintf("%d 把 Key 上游存在但库中未登记，需补登记（计入异常项）", unregistered)
+	}
+	return capabilityResult(rows, errs, note)
+}
+
+func (s *Syncer) syncPricing(
+	ctx context.Context, accounts []syncAccount, baseErrs []error,
+) (int, int, string, error) {
+	errs := append([]error{}, baseErrs...)
+	var all []Pricing
+	for _, account := range accounts {
+		pricing, err := s.Adapter.FetchPricing(ctx, account.sess)
+		if err != nil {
+			errs = append(errs, accountErr(account.cred, "价格", err))
+			continue
+		}
+		all = append(all, pricing)
+	}
+	pricing := mergePricing(all)
+	n, err := s.Sink.SavePricing(ctx, accounts[0].cred.ChannelID, pricing)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	note := degradedNote(pricing.Meta)
+	if skipped := len(pricing.Models) - n; skipped > 0 {
+		note = joinNotes(note, fmt.Sprintf(
+			"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
+				"不写 price_versions，价格已存入模型目录备查", len(pricing.Models), skipped))
+		if n == 0 {
+			n = len(pricing.Models)
+		}
+	}
+	return capabilityResult(n, errs, note)
+}
+
+func (s *Syncer) syncCatalog(
+	ctx context.Context, accounts []syncAccount, baseErrs []error,
+) (int, int, string, error) {
+	errs := append([]error{}, baseErrs...)
+	var all []CatalogModel
+	for _, account := range accounts {
+		catalog, err := s.Adapter.FetchModelCatalog(ctx, account.sess)
+		if err != nil {
+			errs = append(errs, accountErr(account.cred, "目录", err))
+			continue
+		}
+		all = append(all, catalog...)
+	}
+	catalog := mergeCatalog(all)
+	n, err := s.Sink.SaveCatalog(ctx, accounts[0].cred.ChannelID, catalog)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	var notes []string
+	for _, model := range catalog {
+		notes = append(notes, degradedNote(model.Meta))
+	}
+	return capabilityResult(n, errs, joinNotes(notes...))
+}
+
+func capabilityResult(rows int, errs []error, note string) (int, int, string, error) {
+	if len(errs) == 0 {
+		return rows, 0, note, nil
+	}
+	if rows == 0 {
+		return 0, 0, note, errors.Join(errs...)
+	}
+	return rows, len(errs), note, errors.Join(errs...)
+}
+
+func accountErr(cred Credential, stage string, err error) error {
+	return fmt.Errorf("账号 %d %s失败: %w", cred.AccountID, stage, err)
+}
+
+func mergeGroups(all []Group) []Group {
+	byRef := map[string]Group{}
+	for _, group := range all {
+		if current, ok := byRef[group.GroupRef]; ok {
+			for _, model := range group.AvailableModels {
+				if !slices.Contains(current.AvailableModels, model) {
+					current.AvailableModels = append(current.AvailableModels, model)
+				}
+			}
+			byRef[group.GroupRef] = current
+			continue
+		}
+		group.AvailableModels = append([]string{}, group.AvailableModels...)
+		byRef[group.GroupRef] = group
+	}
+	out := make([]Group, 0, len(byRef))
+	for _, group := range byRef {
+		sort.Strings(group.AvailableModels)
+		out = append(out, group)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].GroupRef < out[j].GroupRef })
+	return out
+}
+
+func mergePricing(all []Pricing) Pricing {
+	out := Pricing{GroupRatios: map[string]float64{}}
+	models := map[string]ModelPrice{}
+	for _, pricing := range all {
+		if out.Meta.FetchedAt.IsZero() {
+			out.Meta = pricing.Meta
+		}
+		for group, ratio := range pricing.GroupRatios {
+			out.GroupRatios[group] = ratio
+		}
+		for _, model := range pricing.Models {
+			if _, exists := models[model.ModelName]; !exists {
+				models[model.ModelName] = model
+			}
+		}
+	}
+	for _, model := range models {
+		out.Models = append(out.Models, model)
+	}
+	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ModelName < out.Models[j].ModelName })
+	return out
+}
+
+func mergeCatalog(all []CatalogModel) []CatalogModel {
+	models := map[string]CatalogModel{}
+	for _, model := range all {
+		if _, exists := models[model.ModelName]; !exists {
+			models[model.ModelName] = model
+		}
+	}
+	out := make([]CatalogModel, 0, len(models))
+	for _, model := range models {
+		out = append(out, model)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ModelName < out[j].ModelName })
+	return out
 }
 
 // run 执行一项采集并记录结果。

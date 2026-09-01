@@ -16,7 +16,7 @@ type fakeSink struct {
 	pricingRows *int
 }
 
-func (f *fakeSink) SaveAccount(context.Context, int64, Account) error {
+func (f *fakeSink) SaveAccount(context.Context, int64, int64, Account) error {
 	f.order = append(f.order, "account")
 	return nil
 }
@@ -27,7 +27,7 @@ func (f *fakeSink) SaveGroups(_ context.Context, _ int64, gs []Group) (int, erro
 	}
 	return len(gs), nil
 }
-func (f *fakeSink) SaveKey(_ context.Context, _ int64, k Key) error {
+func (f *fakeSink) SaveKey(_ context.Context, _, _ int64, k Key) error {
 	f.order = append(f.order, "key:"+k.KeyRef)
 	if f.keyErrs != nil {
 		return f.keyErrs[k.KeyRef]

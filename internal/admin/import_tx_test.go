@@ -66,7 +66,7 @@ func wipe(ctx context.Context, t *testing.T, conn *pgx.Conn, base string) {
 	t.Helper()
 	const match = `lower(rtrim(base_url,'/')) = lower(rtrim($1,'/'))`
 	for _, tbl := range []string{
-		"upstream_accounts", "collector_credentials", "collector_snapshots",
+		"collector_credentials", "collector_snapshots", "upstream_accounts",
 	} {
 		if _, err := conn.Exec(ctx, `DELETE FROM `+tbl+
 			` WHERE channel_id IN (SELECT id FROM channels WHERE `+match+`)`,
@@ -127,14 +127,15 @@ VALUES ($1,$2,'unknown','enabled') RETURNING id`,
 		"事务测试-站型补齐", base).Scan(&chID); err != nil {
 		t.Fatalf("造 unknown 渠道: %v", err)
 	}
-	if _, err := store.CreateAccount(ctx, conn, store.Account{
+	accountID, err := store.CreateAccount(ctx, conn, store.Account{
 		ChannelID: chID, ExternalUserID: a.UserID(),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("造账号: %v", err)
 	}
 	credentials := &store.CredentialStore{}
 	if err := credentials.SaveTx(ctx, conn, collector.Credential{
-		ChannelID: chID, Family: collector.FamilyUnknown,
+		AccountID: accountID, ChannelID: chID, Family: collector.FamilyUnknown,
 		CredType: "newapi_access_token", AccessToken: a.AccountInfo.AccessToken,
 		ExternalUserID: a.UserID(),
 	}); err != nil {

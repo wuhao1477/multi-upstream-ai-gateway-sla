@@ -124,6 +124,7 @@ type DetectResult struct {
 
 // Credential 是登记的采集凭证（明文，FR-113）。
 type Credential struct {
+	AccountID int64
 	ChannelID int64
 	Family    Family
 	// CredType 由 Registration.CredTypeFor 定。
