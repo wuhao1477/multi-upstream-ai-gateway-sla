@@ -94,7 +94,7 @@ echo "   ✅ webdist 就绪"
 # ── 3/5 起 core ──
 step "起 sla-core（只读真库）"
 go build -o bin/sla-core ./cmd/sla-core
-ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" >"$CORELOG" 2>&1 &
+ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" -read-only >"$CORELOG" 2>&1 &
 CORE_PID=$!
 ready=false
 for _ in $(seq 1 40); do
@@ -105,8 +105,8 @@ for _ in $(seq 1 40); do
   sleep 1
 done
 $ready || { echo "❌ sla-core 未就绪"; tail -20 "$CORELOG"; exit 1; }
-# 迁移一致性的证据留在日志里：applied:0 说明没动真库 schema。
-grep -o '"msg":"迁移完成"[^}]*' "$CORELOG" | sed 's/^/   /' || true
+grep -q '"msg":"只读初始化完成"' "$CORELOG" || {
+  echo "❌ core 未进入只读初始化模式"; tail -20 "$CORELOG"; exit 1; }
 echo "   ✅ sla-core 就绪（pid ${CORE_PID}）"
 
 # ── 4/5 答话的必须是自己 ──

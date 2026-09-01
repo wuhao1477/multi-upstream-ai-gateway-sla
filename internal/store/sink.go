@@ -2,8 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
@@ -110,6 +114,7 @@ func (s *CollectorSink) SaveGroups(
 		r := GroupRow{
 			ChannelID: channelID, GroupRef: g.GroupRef,
 			AvailableModels: g.AvailableModels,
+			PreserveModels:  slices.Contains(g.Meta.MissingFields, "available_models"),
 			DataSource:      "auto_collect", FetchedAt: g.Meta.FetchedAt,
 		}
 		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"
@@ -186,13 +191,19 @@ func (s *CollectorSink) SaveKey(
 	}
 	keyID, ok := idx[k.KeyRef]
 	if !ok {
+		if err := InsertSnapshot(ctx, c.Conn, SnapshotRow{
+			ChannelID: channelID, ScopeType: "key", ScopeID: k.KeyRef,
+			Payload:    map[string]any{"unregistered": true},
+			DataSource: "auto_collect", FetchedAt: k.Meta.FetchedAt,
+		}); err != nil {
+			return err
+		}
 		return fmt.Errorf("%w: external_ref=%s", collector.ErrKeyNotRegistered, k.KeyRef)
 	}
 
-	row := KeyUsageRow{KeyID: keyID, SyncedAt: k.Meta.FetchedAt, ExpiredAt: k.ExpiredAt}
-	if k.RemainQuotaUSD > 0 || k.UsedQuotaUSD > 0 {
-		rq, uq := k.RemainQuotaUSD, k.UsedQuotaUSD
-		row.RemainQuotaUSD, row.UsedQuotaUSD = &rq, &uq
+	row := KeyUsageRow{
+		KeyID: keyID, SyncedAt: k.Meta.FetchedAt, ExpiredAt: k.ExpiredAt,
+		RemainQuotaUSD: k.RemainQuotaUSD, UsedQuotaUSD: k.UsedQuotaUSD,
 	}
 	if k.RateLimit.RPM > 0 {
 		v := k.RateLimit.RPM
@@ -215,9 +226,11 @@ func (s *CollectorSink) SaveKey(
 
 	// 用量历史进快照（FR-125）——**省略未采到的键**（02 §7.1）
 	payload := map[string]any{}
-	if k.RemainQuotaUSD > 0 || k.UsedQuotaUSD > 0 {
-		payload["remain_quota_usd"] = k.RemainQuotaUSD
-		payload["used_quota_usd"] = k.UsedQuotaUSD
+	if k.RemainQuotaUSD != nil {
+		payload["remain_quota_usd"] = *k.RemainQuotaUSD
+	}
+	if k.UsedQuotaUSD != nil {
+		payload["used_quota_usd"] = *k.UsedQuotaUSD
 	}
 	if k.RequestCount > 0 {
 		payload["request_count"] = k.RequestCount
@@ -244,7 +257,7 @@ func (s *CollectorSink) SaveKey(
 	})
 }
 
-// SavePricing 写价格版本（append-only，FR-012 不可覆盖）。
+// SavePricing 刷新已有目录价格，并为已登记模型追加价格版本。
 func (s *CollectorSink) SavePricing(
 	ctx context.Context, channelID int64, p collector.Pricing,
 ) (int, error) {
@@ -260,14 +273,31 @@ func (s *CollectorSink) SavePricing(
 
 	var n int
 	for _, mp := range p.Models {
+		tag, err := c.Conn.Exec(ctx, `
+UPDATE channel_model_catalog
+   SET input_price=$3, output_price=$4, billing_unit=NULLIF($5,'')
+ WHERE channel_id=$1 AND model_name=$2`,
+			channelID, mp.ModelName, nullFloat(mp.InputPrice), nullFloat(mp.OutputPrice),
+			mp.BillingUnit)
+		if err != nil {
+			return n, fmt.Errorf("刷新模型 %s 目录价格: %w", mp.ModelName, err)
+		}
+		stored := tag.RowsAffected() > 0
+
 		// 价格版本按 (channel, model) 作用域，需要 models.id。
 		// **不自动创建 models 行**：那张表要求 token 上界必填（02 §2bis
 		// 预留上界的硬前置），而目录阶段拿不到。故只为**已登记**的模型写价格版本。
 		var modelID int64
-		err := c.Conn.QueryRow(ctx,
+		err = c.Conn.QueryRow(ctx,
 			`SELECT id FROM models WHERE canonical_name=$1`, mp.ModelName).Scan(&modelID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if stored {
+				n++
+			}
+			continue
+		}
 		if err != nil {
-			continue // 未登记为可路由模型 → 跳过，其价格已在目录里
+			return n, fmt.Errorf("查模型 %s: %w", mp.ModelName, err)
 		}
 		// billing_unit 用 NULLIF 落空，与 SaveCatalog 同一条规则（02 §1.3bis）：
 		// 缺失表示上游未声明，补 'per_1m_token' 会把它伪装成"已知按 token 计价"，
@@ -287,7 +317,7 @@ VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),'USD',
 			nullFloat(mp.CachePrice), mp.BillingUnit, p.Meta.FetchedAt); err != nil {
 			return n, fmt.Errorf("写模型 %s 价格版本: %w", mp.ModelName, err)
 		}
-		n++
+		n++ // 目录或价格版本至少有一处已写入；同一模型只计一次
 	}
 	return n, nil
 }
@@ -311,6 +341,20 @@ func (s *CollectorSink) SaveCatalog(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var syncSeq int64
+	if catalogPresenceReliable(cs) {
+		err = tx.QueryRow(ctx, `
+UPDATE channels SET catalog_sync_seq = catalog_sync_seq + 1
+ WHERE id=$1 RETURNING catalog_sync_seq`, channelID).Scan(&syncSeq)
+	} else {
+		err = tx.QueryRow(ctx,
+			`SELECT catalog_sync_seq FROM channels WHERE id=$1 FOR UPDATE`, channelID).
+			Scan(&syncSeq)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("更新渠道 %d 目录轮次: %w", channelID, err)
+	}
+
 	var n int
 	for _, m := range cs {
 		if m.ModelName == "" {
@@ -320,15 +364,16 @@ func (s *CollectorSink) SaveCatalog(
 		// 补 'per_1m_token' 会把"未声明"伪装成"已知按 token 计价"（02 §1.3bis）。
 		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_model_catalog (channel_id, model_name, input_price, output_price,
-                                   billing_unit, first_seen_at, last_seen_at)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$6)
+                                   billing_unit, first_seen_at, last_seen_at, last_seen_seq)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$6,$7)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price  = EXCLUDED.input_price,
        output_price = EXCLUDED.output_price,
        billing_unit = EXCLUDED.billing_unit,
-       last_seen_at = EXCLUDED.last_seen_at`,
+       last_seen_at = EXCLUDED.last_seen_at,
+       last_seen_seq = EXCLUDED.last_seen_seq`,
 			channelID, m.ModelName, nullFloat(m.InputPrice), nullFloat(m.OutputPrice),
-			m.BillingUnit, m.Meta.FetchedAt); err != nil {
+			m.BillingUnit, m.Meta.FetchedAt, syncSeq); err != nil {
 			return n, fmt.Errorf("写目录条目 %s: %w", m.ModelName, err)
 		}
 		n++
@@ -337,6 +382,21 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 		return 0, fmt.Errorf("提交目录事务: %w", err)
 	}
 	return n, nil
+}
+
+func catalogPresenceReliable(models []collector.CatalogModel) bool {
+	validModels := 0
+	for _, model := range models {
+		if model.ModelName != "" {
+			validModels++
+		}
+		for _, field := range model.Meta.MissingFields {
+			if field == "available_models" || field == "model_catalog" {
+				return false
+			}
+		}
+	}
+	return validModels > 0
 }
 
 // nullFloat 把 0 转成 NULL：目录与价格的 0 值语义上是"未采到"而非"免费"。

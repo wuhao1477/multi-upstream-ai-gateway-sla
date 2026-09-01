@@ -2,8 +2,6 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +36,13 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// 账号
 	mux.Handle("GET /admin/accounts", h(s.listAccounts))
 	mux.Handle("POST /admin/accounts", h(s.createAccount))
+	mux.Handle("PATCH /admin/accounts/{id}", h(s.patchAccount))
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
+	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
+	mux.Handle("POST /admin/keys/{id}/delete-preview", h(s.previewDeleteKey))
+	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
 	mux.Handle("POST /admin/keys/{id}/rotate", h(s.rotateKey))
 	mux.Handle("POST /admin/keys/{id}/disable", h(s.disableKey))
 	mux.Handle("GET /admin/keys/{id}/usage", h(s.keyUsage))
@@ -278,10 +280,10 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 
 // ── sync（09 §5.0bis）──
 
-// syncGuard 保证同渠道互斥且遵守最小间隔。
+// syncGuard 保证单实例内的快速互斥并记录手动同步最小间隔。
 //
-// 用进程内状态而非 PG 咨询锁：管理请求只到一个实例（Caddy 不代理 /admin/*，
-// 06 §1），跨实例互斥无意义；而进程内 map 免掉一次库往返。
+// 周期 collector 是另一个进程，因此真正的跨进程互斥由 syncChannel 中的
+// PG advisory lock 提供；这里保留手动端的最小间隔与快速重复点击反馈。
 type syncGuard struct {
 	mu      sync.Mutex
 	running map[int64]bool
@@ -343,7 +345,16 @@ func (g *syncGuard) release(channelID int64, armWindow bool) {
 // 而这条判定的语义（哪个状态挡、消息里带不带原因、非 disabled 一律放行）
 // 不需要库就能钉住。真库那端的覆盖由 test-api / ui-stack 打。
 func disabledSyncMessage(status, disabledReason string) (string, bool) {
+	return disabledSyncMessageAt(status, disabledReason, nil, time.Now())
+}
+
+func disabledSyncMessageAt(
+	status, disabledReason string, disabledUntil *time.Time, now time.Time,
+) (string, bool) {
 	if status != "disabled" {
+		return "", false
+	}
+	if disabledUntil != nil && !now.Before(*disabledUntil) {
 		return "", false
 	}
 	msg := fmt.Sprintf("%v：渠道已停用", collector.ErrPrecondition)
@@ -393,12 +404,32 @@ func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 			s.mapNotFound(w, err)
 			return
 		}
-		if msg, blocked := disabledSyncMessage(ch.Status, ch.DisabledReason); blocked {
+		if msg, blocked := disabledSyncMessageAt(
+			ch.Status, ch.DisabledReason, ch.DisabledUntil, time.Now(),
+		); blocked {
 			s.failWith(w, http.StatusUnprocessableEntity, msg,
 				map[string]any{"channel_id": id, "site_family": ch.SiteFamily,
 					"items": []map[string]any{{"status": "skipped"}}})
 			return
 		}
+		locked, err := store.TryChannelSyncLock(r.Context(), conn, id)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, "取得渠道采集锁失败: "+err.Error())
+			return
+		}
+		if !locked {
+			s.failWith(w, http.StatusConflict, "该渠道已有手动或周期采集在执行",
+				map[string]any{"channel_id": id,
+					"items": []map[string]any{{"status": "skipped"}}})
+			return
+		}
+		defer func() {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := store.UnlockChannelSync(unlockCtx, conn, id); err != nil {
+				s.Logger.Error("释放渠道采集锁失败", "channel_id", id, "err", err)
+			}
+		}()
 		// sync 会打多个上游端点，给足超时（限速本身就要花时间）
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		defer cancel()
@@ -464,7 +495,7 @@ func (s *Server) channelInventory(w http.ResponseWriter, r *http.Request) {
 			s.mapNotFound(w, err)
 			return
 		}
-		inv, err := store.BuildInventory(ctx, conn, ch)
+		inv, err := store.BuildInventory(ctx, conn, ch, s.catalogMissingRounds())
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
@@ -485,213 +516,14 @@ func (s *Server) channelInventory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ── 账号 ──
-
-func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
-	chID, _ := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		as, err := store.ListAccounts(r.Context(), conn, chID)
-		if err != nil {
-			s.fail(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if as == nil {
-			as = []store.Account{}
-		}
-		s.ok(w, map[string]any{"count": len(as), "items": as})
-	})
-}
-
-func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		ChannelID       int64  `json:"channel_id"`
-		ExternalUserID  string `json:"external_user_id"`
-		BalanceGroupKey string `json:"balance_group_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if in.ChannelID <= 0 {
-		s.fail(w, http.StatusBadRequest, "channel_id 必填")
-		return
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		id, err := store.CreateAccount(r.Context(), conn, store.Account{
-			ChannelID: in.ChannelID, ExternalUserID: in.ExternalUserID,
-			BalanceGroupKey: in.BalanceGroupKey,
-		})
-		if err != nil {
-			s.fail(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": id})
-	})
-}
-
-// ── Key（FR-122，脱敏是硬要求）──
-
-func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
-	chID, _ := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		ks, err := store.ListKeys(r.Context(), conn, chID)
-		if err != nil {
-			s.fail(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if ks == nil {
-			ks = []store.Key{}
-		}
-		s.ok(w, map[string]any{"count": len(ks), "items": ks})
-	})
-}
-
-func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AccountID   int64  `json:"account_id"`
-		Secret      string `json:"secret"`
-		ExternalRef string `json:"external_ref"`
-		GroupRef    string `json:"group_ref"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if in.AccountID <= 0 || in.Secret == "" {
-		s.fail(w, http.StatusBadRequest, "account_id 与 secret 必填")
-		return
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		var gid *int64
-		if in.GroupRef != "" {
-			// 需要 channel_id 才能定位分组，先查账号
-			as, err := store.ListAccounts(r.Context(), conn, 0)
-			if err == nil {
-				for _, a := range as {
-					if a.ID == in.AccountID {
-						if id, found, _ := store.GroupIDByRef(
-							r.Context(), conn, a.ChannelID, in.GroupRef); found {
-							gid = &id
-						}
-						break
-					}
-				}
-			}
-		}
-		id, err := store.CreateKey(r.Context(), conn, in.AccountID,
-			in.Secret, in.ExternalRef, gid)
-		if err != nil {
-			s.fail(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.Logger.Info("Key 已登记", "id", id, "account_id", in.AccountID)
-		w.WriteHeader(http.StatusCreated)
-		// **不回显明文**（FR-094）：只确认已收到
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": id, "secret_stored": true,
-			"note": "明文不回显；列表只显示前缀（FR-094）",
-		})
-	})
-}
-
-func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	var in struct {
-		Secret string `json:"secret"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-
-	newSecret := in.Secret
-	generated := false
-	if newSecret == "" {
-		// 未提供则生成一个 —— 便于"我就想换一个"的场景
-		buf := make([]byte, 24)
-		if _, err := rand.Read(buf); err != nil {
-			s.fail(w, http.StatusInternalServerError, "生成随机 secret 失败")
-			return
-		}
-		newSecret = "sk-" + hex.EncodeToString(buf)
-		generated = true
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		if err := store.RotateKey(r.Context(), conn, id, newSecret); err != nil {
-			s.mapNotFound(w, err)
-			return
-		}
-		s.Logger.Info("Key 已轮换", "id", id, "generated", generated)
-		resp := map[string]any{"id": id, "rotated": true}
-		if generated {
-			// **明文只在此处返回一次**（09 §5.0 / FR-094）
-			resp["secret"] = newSecret
-			resp["note"] = "明文只返回这一次，请立即保存"
-		}
-		s.ok(w, resp)
-	})
-}
-
-func (s *Server) disableKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		if err := store.DisableKey(r.Context(), conn, id); err != nil {
-			s.mapNotFound(w, err)
-			return
-		}
-		s.ok(w, map[string]any{"id": id, "status": "revoked"})
-	})
-}
-
-func (s *Server) keyUsage(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	from := time.Now().Add(-30 * 24 * time.Hour)
-	to := time.Now()
-	if v := r.URL.Query().Get("from"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			from = t
+func (s *Server) catalogMissingRounds() int {
+	rounds := 3
+	if s.Snapshot != nil {
+		if value, err := s.Snapshot().Int("catalog_missing_rounds"); err == nil && value > 0 {
+			rounds = value
 		}
 	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			to = t
-		}
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		// 需要 channel_id 定位快照
-		ks, err := store.ListKeys(r.Context(), conn, 0)
-		if err != nil {
-			s.fail(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		var chID int64
-		for _, k := range ks {
-			if k.ID == id {
-				chID = k.ChannelID
-				break
-			}
-		}
-		if chID == 0 {
-			s.fail(w, http.StatusNotFound, fmt.Sprintf("Key %d 不存在", id))
-			return
-		}
-		pts, err := store.KeyUsageHistory(r.Context(), conn, chID, id, from, to)
-		if err != nil {
-			s.fail(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if pts == nil {
-			pts = []store.KeyUsagePoint{}
-		}
-		s.ok(w, map[string]any{"key_id": id, "count": len(pts), "points": pts})
-	})
+	return rounds
 }
 
 // ── 分组与目录 ──
@@ -744,19 +576,10 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
 	limit, offset := parsePaging(r.URL.Query())
 
-	rounds, interval := 3, 12
-	if s.Snapshot != nil {
-		snap := s.Snapshot()
-		if v, err := snap.Int("catalog_missing_rounds"); err == nil && v > 0 {
-			rounds = v
-		}
-		if v, err := snap.Int("collector_catalog_interval_h"); err == nil && v > 0 {
-			interval = v
-		}
-	}
-
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		all, err := store.ListCatalog(r.Context(), conn, id, staleOnly, rounds, interval)
+		all, err := store.ListCatalog(
+			r.Context(), conn, id, staleOnly, s.catalogMissingRounds(),
+		)
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return

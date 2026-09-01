@@ -97,6 +97,70 @@ func detected() collector.DetectResult {
 	}
 }
 
+func TestUnknownImportedChannelNeedsFamilyRepair(t *testing.T) {
+	if !needsFamilyRepair("unknown", collector.FamilyNewAPI) {
+		t.Fatal("已有渠道为 unknown、探测得到 newapi 时必须补写站型")
+	}
+	if needsFamilyRepair("newapi", collector.FamilyNewAPI) {
+		t.Fatal("已有站型正确时不应重复修改")
+	}
+}
+
+func TestImportRepairUpdatesCredentialFamily(t *testing.T) {
+	dsn := testDSN(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	a := hubAcct("family-repair")
+	base := a.SiteURL
+	wipe(ctx, t, conn, base)
+	defer wipe(context.Background(), t, conn, base)
+
+	var chID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, base_url, site_family, status)
+VALUES ($1,$2,'unknown','enabled') RETURNING id`,
+		"事务测试-站型补齐", base).Scan(&chID); err != nil {
+		t.Fatalf("造 unknown 渠道: %v", err)
+	}
+	if _, err := store.CreateAccount(ctx, conn, store.Account{
+		ChannelID: chID, ExternalUserID: a.UserID(),
+	}); err != nil {
+		t.Fatalf("造账号: %v", err)
+	}
+	credentials := &store.CredentialStore{}
+	if err := credentials.SaveTx(ctx, conn, collector.Credential{
+		ChannelID: chID, Family: collector.FamilyUnknown,
+		CredType: "newapi_access_token", AccessToken: a.AccountInfo.AccessToken,
+		ExternalUserID: a.UserID(),
+	}); err != nil {
+		t.Fatalf("造 unknown 凭证: %v", err)
+	}
+	if err := credentials.SaveDetected(ctx, conn, chID, detected()); err != nil {
+		t.Fatalf("造探测快照: %v", err)
+	}
+
+	var it collector.HubImportItem
+	if err := testServer().importOne(ctx, conn, a, detected(), &it); err != nil {
+		t.Fatalf("补站型失败: %v", err)
+	}
+	var channelFamily, credentialFamily string
+	if err := conn.QueryRow(ctx, `
+SELECT c.site_family, cc.site_family
+  FROM channels c JOIN collector_credentials cc ON cc.channel_id=c.id
+ WHERE c.id=$1`, chID).Scan(&channelFamily, &credentialFamily); err != nil {
+		t.Fatalf("读补齐结果: %v", err)
+	}
+	if channelFamily != "newapi" || credentialFamily != "newapi" {
+		t.Fatalf("站型未同步补齐：channel=%q credential=%q，期望均为 newapi",
+			channelFamily, credentialFamily)
+	}
+}
+
 func countFor(ctx context.Context, t *testing.T, conn *pgx.Conn, base string) (ch, acc, cred int) {
 	t.Helper()
 	err := conn.QueryRow(ctx, `

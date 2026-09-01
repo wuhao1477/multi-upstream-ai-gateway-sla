@@ -27,11 +27,11 @@ func (a *Sub2APIAdapter) Capabilities() CapabilityMap {
 	return CapabilityMap{
 		CapAccount: Supported,
 		CapKeys:    Supported,
-		CapGroups:  Supported,
+		CapGroups:  Degraded,
 		// pricing 标 degraded（04 §3.2）：倍率经 groups/available 与分组耦合，
 		// **无独立模型价格表** → 目录里逐模型单价会缺失，用 MissingFields 标明。
 		CapPricing:      Degraded,
-		CapModelCatalog: Supported,
+		CapModelCatalog: Degraded,
 		// ⏭ P4：订阅制整体推迟，一期所有站型一律 unsupported
 		CapSubscriptionQuotas: Unsupported,
 	}
@@ -176,10 +176,10 @@ func (a *Sub2APIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error
 		}
 		// Sub2API 的额度直接是 USD 浮点（04 §3.4 额度单位表），无需换算
 		if q, ok := asFloat(t["quota"]); ok {
-			k.RemainQuotaUSD = q
+			k.RemainQuotaUSD = &q
 		}
 		if u, ok := asFloat(t["quota_used"]); ok {
-			k.UsedQuotaUSD = u
+			k.UsedQuotaUSD = &u
 		}
 		if exp := asString(t["expires_at"]); exp != "" {
 			if tm, err := time.Parse(time.RFC3339, exp); err == nil {
@@ -262,6 +262,10 @@ func (a *Sub2APIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, e
 				break
 			}
 		}
+		if len(g.AvailableModels) == 0 {
+			g.Meta.Degraded = true
+			g.Meta.MissingFields = []string{"available_models"}
+		}
 		out = append(out, g)
 	}
 	return out, nil
@@ -286,6 +290,14 @@ func (a *Sub2APIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, 
 	meta := NewAPIMeta("/api/v1/groups/available", time.Now())
 	meta.Degraded = true
 	meta.MissingFields = []string{"input_price", "output_price"}
+	for _, group := range groups {
+		for _, field := range group.Meta.MissingFields {
+			if field == "available_models" {
+				meta.MissingFields = append(meta.MissingFields, field)
+				break
+			}
+		}
+	}
 
 	p := Pricing{GroupRatios: map[string]float64{}, Meta: meta}
 	for _, g := range groups {
@@ -311,6 +323,14 @@ func (a *Sub2APIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Ca
 	meta := NewAPIMeta("/api/v1/groups/available", time.Now())
 	meta.Degraded = true
 	meta.MissingFields = []string{"input_price", "output_price"}
+	for _, group := range groups {
+		for _, field := range group.Meta.MissingFields {
+			if field == "available_models" {
+				meta.MissingFields = append(meta.MissingFields, field)
+				break
+			}
+		}
+	}
 
 	seen := map[string]bool{}
 	out := make([]CatalogModel, 0)

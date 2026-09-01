@@ -36,8 +36,8 @@ func TestCapabilitiesMatchDocMatrix(t *testing.T) {
 			CapSubscriptionQuotas: Unsupported,
 		},
 		FamilySub2API: {
-			CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
-			CapPricing: Degraded, CapModelCatalog: Supported,
+			CapAccount: Supported, CapKeys: Supported, CapGroups: Degraded,
+			CapPricing: Degraded, CapModelCatalog: Degraded,
 			CapSubscriptionQuotas: Unsupported,
 		},
 	}
@@ -278,7 +278,7 @@ func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
 			if keys[0].KeyRef != "7" {
 				t.Errorf("KeyRef = %q，期望 \"7\"", keys[0].KeyRef)
 			}
-			if keys[0].RemainQuotaUSD != 1 {
+			if keys[0].RemainQuotaUSD == nil || *keys[0].RemainQuotaUSD != 1 {
 				t.Errorf("剩余额度 = %v，期望 1", keys[0].RemainQuotaUSD)
 			}
 		})
@@ -303,7 +303,7 @@ func TestNewAPIFetchKeys(t *testing.T) {
 		t.Fatalf("Key 数 = %d，期望 2", len(keys))
 	}
 	k := keys[0]
-	if k.RemainQuotaUSD != 1 { // 500000/500000
+	if k.RemainQuotaUSD == nil || *k.RemainQuotaUSD != 1 { // 500000/500000
 		t.Errorf("剩余额度 = %v，期望 1", k.RemainQuotaUSD)
 	}
 	if k.GroupRef != "vip" {
@@ -426,6 +426,24 @@ func TestNewAPIModelCatalog(t *testing.T) {
 	}
 }
 
+func TestNewAPIEmptyModelCatalogFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":[]}`))
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	_, err := ad.FetchModelCatalog(context.Background(), Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "New-API-User", ExternalUserID: "42",
+	})
+	if err == nil {
+		t.Fatal("supported 的模型目录为空时必须失败，不能把空目录报告为采集成功")
+	}
+}
+
 // ── Sub2API 适配器 ──
 
 func sub2apiSite(t *testing.T) *httptest.Server {
@@ -473,7 +491,7 @@ func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
 	}
 	k := keys[0]
 	// Sub2API 额度已是 USD 浮点，**不需换算**（04 §3.4 额度单位表）
-	if k.RemainQuotaUSD != 12.5 {
+	if k.RemainQuotaUSD == nil || *k.RemainQuotaUSD != 12.5 {
 		t.Errorf("剩余 = %v，期望 12.5（USD 浮点直接用）", k.RemainQuotaUSD)
 	}
 	if k.RateLimit.Concurrency != 3 {
@@ -510,6 +528,74 @@ func TestSub2APIFetchGroups(t *testing.T) {
 	if !g.PeakEnabled || g.PeakMultiplier != 1.5 {
 		t.Errorf("高峰字段未采到: enabled=%v mult=%v", g.PeakEnabled, g.PeakMultiplier)
 	}
+}
+
+func TestSub2APIGroupWithoutModelsExplainsDegradation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"g-1"}]}`))
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	groups, err := ad.FetchGroups(context.Background(), Session{
+		Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("分组数 = %d，期望 1", len(groups))
+	}
+	if !groups[0].Meta.Degraded {
+		t.Fatal("分组缺 available_models 时必须声明 degraded")
+	}
+	found := false
+	for _, field := range groups[0].Meta.MissingFields {
+		if field == "available_models" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("降级说明应包含 available_models，得到 %v", groups[0].Meta.MissingFields)
+	}
+}
+
+func TestSub2APIPartialGroupCatalogIsPresenceUnreliable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":[
+			{"id":"complete","available_models":["m1"]},
+			{"id":"missing"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	catalog, err := ad.FetchModelCatalog(context.Background(), Session{
+		Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog) != 1 {
+		t.Fatalf("目录数 = %d，期望 1", len(catalog))
+	}
+	if !containsString(catalog[0].Meta.MissingFields, "available_models") {
+		t.Fatalf("任一分组缺模型列表时，整轮目录必须标为不可靠，得到 %v",
+			catalog[0].Meta.MissingFields)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Sub2API 声明 pricing=degraded：必须返回数据 + nil，并标明缺什么。

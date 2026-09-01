@@ -80,6 +80,46 @@ func TestP1TablesPresent(t *testing.T) {
 	}
 }
 
+func TestCatalogRoundColumnsPresent(t *testing.T) {
+	ms, err := LoadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all string
+	for _, migration := range ms {
+		all += migration.SQL
+	}
+	for _, column := range []string{"catalog_sync_seq", "last_seen_seq"} {
+		if !strings.Contains(all, column) {
+			t.Errorf("缺真实目录轮次列 %s", column)
+		}
+	}
+}
+
+func TestCredentialRefreshLockMigrationPresent(t *testing.T) {
+	ms, err := LoadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sql string
+	for _, migration := range ms {
+		if migration.Name == "021_credential_refresh_lock.sql" {
+			sql = migration.SQL
+			break
+		}
+	}
+	if !strings.Contains(sql, "refresh_lock_key") ||
+		!strings.Contains(sql, "rtrim(btrim(ch.base_url), '/')") {
+		t.Fatal("021 必须包含 refresh_lock_key 存量回填")
+	}
+	if strings.Contains(sql, "lower(rtrim(ch.base_url") {
+		t.Fatal("021 不得整串 lower base_url：path 大小写敏感，迁移必须只小写 scheme/host")
+	}
+	if !strings.Contains(sql, "collector_credentials_refresh_lock_key_check") {
+		t.Fatal("021 必须约束 Sub2API 凭证有 refresh_lock_key")
+	}
+}
+
 // ledgerTables 是 FR-112「不存正文」约束的作用域（02 §9.2 原文：
 // 「禁止任何**账本表**出现 body/messages/prompt/completion_text/headers 命名列」）。
 //

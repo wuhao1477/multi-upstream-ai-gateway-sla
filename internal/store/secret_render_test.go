@@ -193,9 +193,14 @@ func TestSecretPrefixExprTruncates(t *testing.T) {
 // FR-094 / 09 §5.0：轮换生成新 secret 时明文返回一次（"请立即保存"），
 // 这是**唯一**允许的回显点。多一处就是多一条泄漏路径，而它不会报错。
 func TestPlaintextResponseOnlyInRotate(t *testing.T) {
-	src, ok := readSource(t)["../admin/upstream_api.go"]
-	if !ok {
-		t.Fatal("找不到 ../admin/upstream_api.go —— 文件改名了？本断言已空转")
+	var src string
+	for name, body := range readSource(t) {
+		if strings.HasPrefix(name, "../admin/") {
+			src += "\n" + body
+		}
+	}
+	if src == "" {
+		t.Fatal("找不到 ../admin/*.go —— 路径错了？本断言已空转")
 	}
 	clean := stripComments(src)
 	// 往响应 map 里塞明文的形态：resp["secret"] = …

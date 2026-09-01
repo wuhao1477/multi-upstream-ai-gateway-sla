@@ -91,7 +91,9 @@ function statusClass(s: ItemStatus): string {
             </p>
             <div v-else style="margin-top: 14px">
               <div class="anom" v-for="a in channels.inventory.anomalies" :key="a.kind">
-                <span class="badge warn">{{ a.kind }}</span>
+                <span class="badge warn">{{
+                  a.kind === 'delisted_model' ? '疑似下架模型' : a.kind
+                }}</span>
                 <span class="dim" style="font-size: 12px"> × {{ a.count }}</span>
                 <div class="dim" style="font-size: 12px">{{ a.hint }}</div>
                 <details v-if="a.items !== undefined && a.items.length > 0">
@@ -121,6 +123,7 @@ function statusClass(s: ItemStatus): string {
                 <thead>
                   <tr>
                     <th>能力</th>
+                    <th>支持级别</th>
                     <th>状态</th>
                     <th>行数</th>
                     <th>耗时</th>
@@ -134,6 +137,7 @@ function statusClass(s: ItemStatus): string {
                     <td>
                       <code>{{ i.capability ?? '-' }}</code>
                     </td>
+                    <td><code>{{ i.support ?? '-' }}</code></td>
                     <td>
                       <span class="badge" :class="statusClass(i.status)">{{ i.status }}</span>
                     </td>

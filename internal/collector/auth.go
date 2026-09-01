@@ -2,9 +2,11 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -40,81 +42,58 @@ var (
 // 抽成接口而非直接依赖 store 包：collector 不该反向依赖存储层的具体实现，
 // 且这样才能对"刷新结果先持久化再释放锁"做单测（04 §5.2 不变式 S-1）。
 type CredentialStore interface {
-	// Save 持久化凭证。必须在**释放刷新锁之前**完成（不变式 S-1）。
-	Save(ctx context.Context, cred Credential) error
+	// WithRefreshLock serializes, reloads, and persists one credential refresh.
+	WithRefreshLock(ctx context.Context, cred Credential,
+		refresh func(Credential) (Credential, bool, error)) (Credential, error)
 }
 
 // Authenticator 按站型执行鉴权与续期，并保证两条硬约束。
 type Authenticator struct {
 	Store CredentialStore
-
-	// mu 保护 locks 与 latest 两个 map。
-	mu sync.Mutex
-	// locks 是**按账号**的刷新互斥锁（不变式 S-1）。
-	// 键用 (family, channelID)：同一渠道的凭证共享一把锁。
-	locks map[string]*sync.Mutex
-	// latest 是每个账号**最近一次刷新后**的凭证。
-	//
-	// ⚠️ 没有它，不变式 S-1 只做到一半（本包测试抓到）：锁只保证串行**进入**，
-	// 而锁内的 double-check 读的是调用方自己那份 cred —— 每个 goroutine 各持
-	// 一份旧副本，判定永远是"需要刷新"，于是 10 个并发照样刷 10 次，
-	// 真实环境下后 9 次会互相作废 refresh_token。
-	// 串行化的目的不是排队，而是**让后到者看见先到者的结果**。
-	latest map[string]Credential
 }
 
 // NewAuthenticator 构造鉴权器。
 func NewAuthenticator(store CredentialStore) *Authenticator {
-	return &Authenticator{
-		Store:  store,
-		locks:  map[string]*sync.Mutex{},
-		latest: map[string]Credential{},
-	}
+	return &Authenticator{Store: store}
 }
 
-func credKey(cred Credential) string {
-	return fmt.Sprintf("%s:%d", cred.Family, cred.ChannelID)
-}
-
-// lockFor 取某账号的刷新锁。
-func (a *Authenticator) lockFor(cred Credential) *sync.Mutex {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.locks == nil {
-		a.locks = map[string]*sync.Mutex{}
+// RefreshLockKey returns the stable account-level lock key persisted with a credential.
+func RefreshLockKey(cred Credential) string {
+	if key := strings.TrimSpace(cred.RefreshLockKey); key != "" {
+		return key
 	}
-	key := credKey(cred)
-	l, ok := a.locks[key]
-	if !ok {
-		l = &sync.Mutex{}
-		a.locks[key] = l
+	if cred.Family != FamilySub2API {
+		return ""
 	}
-	return l
-}
-
-// newestKnown 返回该账号已知最新的凭证；无记录则返回传入值。
-func (a *Authenticator) newestKnown(cred Credential) Credential {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if c, ok := a.latest[credKey(cred)]; ok {
-		return c
+	accountID := strings.TrimSpace(cred.ExternalUserID)
+	if accountID == "" {
+		var claims struct {
+			UserID json.RawMessage `json:"user_id"`
+		}
+		if decodeJWTPayload(cred.AccessToken, &claims) {
+			if len(claims.UserID) > 0 && claims.UserID[0] == '"' {
+				_ = json.Unmarshal(claims.UserID, &accountID)
+			} else {
+				accountID = string(claims.UserID)
+			}
+			accountID = strings.TrimSpace(accountID)
+		}
 	}
-	return cred
-}
-
-// remember 记录刷新结果，供后到者的 double-check 使用。
-func (a *Authenticator) remember(cred Credential) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.latest == nil {
-		a.latest = map[string]Credential{}
+	if accountID == "" || accountID == "null" {
+		accountID = fmt.Sprintf("channel:%d", cred.ChannelID)
 	}
-	a.latest[credKey(cred)] = cred
+	baseURL := strings.TrimRight(strings.TrimSpace(cred.BaseURL), "/")
+	if u, err := url.Parse(baseURL); err == nil {
+		u.Scheme = strings.ToLower(u.Scheme)
+		u.Host = strings.ToLower(u.Host)
+		baseURL = u.String()
+	}
+	return fmt.Sprintf("refresh:%s:%s:%s", cred.Family, baseURL, accountID)
 }
 
 // Refresher 是站型特定的续期实现。
 //
-// **实现它就等于声明"本族要主动续期"**（cmd/sla-core/sync.go 靠类型断言取，
+// **实现它就等于声明"本族要主动续期"**（collection.Runner 靠类型断言取，
 // registry_test 双向钉住它与 RefreshLead 一致），所以不要"顺手实现一个"。
 // 两条已知形态：令牌换令牌（Sub2API：POST /api/v1/auth/refresh，会轮换
 // refresh_token，故必须走账号锁）、账密重登（无令牌端点的站型只有这条路，
@@ -175,43 +154,28 @@ func NeedsRefresh(cred Credential, now time.Time) bool {
 func (a *Authenticator) EnsureFresh(
 	ctx context.Context, cred Credential, r Refresher, now time.Time,
 ) (Credential, error) {
-	// 快速路径：先看本账号已知最新的凭证够不够新，避免无谓抢锁。
-	if cur := a.newestKnown(cred); !NeedsRefresh(cur, now) {
-		return cur, nil
+	if !NeedsRefresh(cred, now) {
+		return cred, nil
 	}
-
-	lock := a.lockFor(cred)
-	lock.Lock()
-	defer lock.Unlock()
-
-	// 锁内二次判定：等锁期间前一个持有者很可能已经刷过了。
-	// **必须读 newestKnown 而不是传入的 cred** —— 每个调用方各持一份旧副本，
-	// 读它的话判定恒为"需要刷新"，串行化就只剩排队、防不住重复刷新
-	// （不变式 S-1 的真正目的是让后到者看见先到者的结果）。
-	cur := a.newestKnown(cred)
-	if !NeedsRefresh(cur, time.Now()) {
-		return cur, nil
+	if a.Store == nil {
+		return cred, fmt.Errorf("续期失败（%s/渠道 %d）：凭证存储未配置",
+			cred.Family, cred.ChannelID)
 	}
-
-	fresh, err := r.Refresh(ctx, cur)
+	fresh, err := a.Store.WithRefreshLock(ctx, cred,
+		func(cur Credential) (Credential, bool, error) {
+			if !NeedsRefresh(cur, time.Now()) {
+				return cur, false, nil
+			}
+			fresh, err := r.Refresh(ctx, cur)
+			if err != nil {
+				return cur, false, fmt.Errorf("续期失败（%s/渠道 %d）: %w",
+					cred.Family, cred.ChannelID, err)
+			}
+			return fresh, true, nil
+		})
 	if err != nil {
-		return cur, fmt.Errorf("续期失败（%s/渠道 %d）: %w",
-			cred.Family, cred.ChannelID, err)
+		return cred, err
 	}
-
-	// **先持久化再释放锁**（defer 在函数返回时才释放，故此处顺序正确）。
-	// 若先释放锁，下一个等待者会读到旧凭证又刷一次，把刚拿到的 refresh_token
-	// 作废 —— 这正是不变式 S-1 要防的。
-	if a.Store != nil {
-		if err := a.Store.Save(ctx, fresh); err != nil {
-			return cur, fmt.Errorf("续期成功但持久化失败（%s/渠道 %d）"+
-				"—— 新 refresh_token 已生效而库中仍是旧的，下次刷新会失败: %w",
-				cred.Family, cred.ChannelID, err)
-		}
-	}
-	// 只在持久化成功后才登记：否则后到者会拿到一个"库里没有"的凭证，
-	// 进程重启后无从恢复。
-	a.remember(fresh)
 	return fresh, nil
 }
 

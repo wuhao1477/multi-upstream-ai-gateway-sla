@@ -9,7 +9,7 @@ import (
 // 站型注册表：**加一个站型 = 加一份 Registration + 一个 Adapter**。
 //
 // 为什么要有它：此前一个站型的信息散在九处 —— Family 常量、detectSteps、
-// adapterFor、authHeaders、NeedsRefresh、凭证必需字段校验、两处 credType
+// collection.Runner、authHeaders、NeedsRefresh、凭证必需字段校验、两处 credType
 // 映射、导入侧别名表。前几处漏了会编译错或探测不到（看得见），而
 // **authHeaders 与 NeedsRefresh 漏了是静默的**：编译过、单测过，
 // 跑起来才 401 或令牌悄悄过期不续。
@@ -91,7 +91,7 @@ type Registration struct {
 	TokenExpiryFrom func(accessToken string) (time.Time, bool)
 
 	// New 构造该站型的适配器。**是否支持续期不在这里声明** ——
-	// 由 Adapter 有没有实现 Refresher 决定（cmd/sla-core/sync.go 的类型断言），
+	// 由 Adapter 有没有实现 Refresher 决定（collection.Runner 的类型断言），
 	// 声明与实现因此不可能不一致。
 	New func(*Client) Adapter
 }

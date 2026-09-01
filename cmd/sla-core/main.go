@@ -20,6 +20,7 @@ import (
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/admin"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/health"
@@ -31,9 +32,10 @@ var version = "dev"
 
 func main() {
 	var (
-		addr    = flag.String("addr", envOr("SLA_ADDR", ":8080"), "监听地址（管理平面 + /healthz）")
-		dsn     = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
-		showVer = flag.Bool("version", false, "打印版本后退出")
+		addr     = flag.String("addr", envOr("SLA_ADDR", ":8080"), "监听地址（管理平面 + /healthz）")
+		dsn      = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
+		readOnly = flag.Bool("read-only", false, "只读启动：跳过迁移和种子，并让 PG 会话拒绝写入")
+		showVer  = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
 
@@ -47,13 +49,13 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	if err := run(*addr, *dsn, logger); err != nil {
+	if err := run(*addr, *dsn, *readOnly, logger); err != nil {
 		logger.Error("退出", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, dsn string, logger *slog.Logger) error {
+func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
 	if dsn == "" {
 		return errors.New("缺少 DSN：设 DATABASE_URL 或用 -dsn")
 	}
@@ -61,7 +63,11 @@ func run(addr, dsn string, logger *slog.Logger) error {
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancelStart()
 
-	pool, err := store.NewPool(startCtx, dsn)
+	newPool := store.NewPool
+	if readOnly {
+		newPool = store.NewReadOnlyPool
+	}
+	pool, err := newPool(startCtx, dsn)
 	if err != nil {
 		return fmt.Errorf("连接 PG: %w", err)
 	}
@@ -73,7 +79,12 @@ func run(addr, dsn string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	res, err := bootstrap.Run(startCtx, conn, logger)
+	var res *bootstrap.Result
+	if readOnly {
+		res, err = bootstrap.LoadReadOnly(startCtx, conn, logger)
+	} else {
+		res, err = bootstrap.Run(startCtx, conn, logger)
+	}
 	release()
 	if err != nil {
 		return fmt.Errorf("初始化: %w", err)
@@ -120,8 +131,7 @@ func run(addr, dsn string, logger *slog.Logger) error {
 		interval = time.Duration(v) * time.Millisecond
 	}
 	hc := collector.NewClient(interval)
-	sink := store.NewCollectorSink(pool)
-	auth := collector.NewAuthenticator(store.NewCredentialStore(pool))
+	runner := collection.NewRunner(pool, hc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", &health.Handler{
@@ -135,7 +145,7 @@ func run(addr, dsn string, logger *slog.Logger) error {
 		return collector.Detect(ctx, hc.HC, baseURL)
 	}
 	srv.Sync = func(ctx context.Context, ch store.Channel) (*collector.SyncResult, error) {
-		return runChannelSync(ctx, pool, hc, sink, auth, ch)
+		return runner.Sync(ctx, ch, nil)
 	}
 	credStore := store.NewCredentialStore(pool)
 	// 注入收 DBTX 的那一版（SaveTx，不是 Save）：管理面的写入要能被调用方
@@ -160,7 +170,8 @@ func run(addr, dsn string, logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("sla-core 启动", "addr", addr, "version", version, "phase", "P1")
+		logger.Info("sla-core 启动", "addr", addr, "version", version,
+			"phase", "P1", "read_only", readOnly)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

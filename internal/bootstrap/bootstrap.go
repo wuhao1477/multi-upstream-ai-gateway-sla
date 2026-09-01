@@ -41,20 +41,40 @@ func Run(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) (*Result, err
 		return nil, fmt.Errorf("配置种子: %w", err)
 	}
 
-	values, err := store.LoadConfigValues(ctx, conn)
+	snap, values, err := loadSnapshot(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("读配置: %w", err)
-	}
-	snap := config.NewSnapshot(values)
-
-	// 启动即校验：把"某键被改成非法值"暴露在启动阶段，
-	// 而不是等采集器凌晨跑到那一行才失败。
-	if err := snap.Validate(); err != nil {
-		return nil, fmt.Errorf("配置校验: %w", err)
+		return nil, err
 	}
 
 	logger.Info("初始化完成",
 		"elapsed_ms", time.Since(start).Milliseconds(),
 		"config_keys", len(values))
 	return &Result{Snapshot: snap}, nil
+}
+
+// LoadReadOnly builds the runtime snapshot without migrations or seeds.
+func LoadReadOnly(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) (*Result, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	snap, values, err := loadSnapshot(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("只读初始化完成", "config_keys", len(values))
+	return &Result{Snapshot: snap}, nil
+}
+
+func loadSnapshot(
+	ctx context.Context, conn *pgx.Conn,
+) (*config.Snapshot, map[string]string, error) {
+	values, err := store.LoadConfigValues(ctx, conn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("读配置: %w", err)
+	}
+	snap := config.NewSnapshot(values)
+	if err := snap.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("配置校验: %w", err)
+	}
+	return snap, values, nil
 }

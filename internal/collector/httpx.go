@@ -234,7 +234,7 @@ func asMap(v any) map[string]any {
 	return m
 }
 
-// jwtExpiry 读 JWT 的 exp 声明，读不出返回 false。
+// decodeJWTPayload decodes a JWT payload without validating its signature.
 //
 // **不验签，只读 claim。** 读的是我方自己库里已存的令牌，用途仅是决定何时
 // 续期 —— 签名的意义是"上游能不能确认这是它签的"，而我方伪造自己的令牌来
@@ -247,22 +247,27 @@ func asMap(v any) map[string]any {
 //
 // exp 是 Unix 秒（RFC 7519 §4.1.4 的 NumericDate）。JSON 解出来是 float64，
 // 大整数在 float64 里到 2^53 都是精确的，Unix 秒离那儿还很远。
-func jwtExpiry(accessToken string) (time.Time, bool) {
+func decodeJWTPayload(accessToken string, dst any) bool {
 	parts := strings.Split(accessToken, ".")
 	if len(parts) != 3 {
-		return time.Time{}, false
+		return false
 	}
 	// JWT 用的是无填充的 base64url（RFC 7515 §2）。有些实现仍带 '='，
 	// 两种都吃：只认一种会让"看着像 JWT 的令牌"静默读不出 exp。
 	seg := parts[1]
 	dec, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(seg, "="))
 	if err != nil {
-		return time.Time{}, false
+		return false
 	}
+	return json.Unmarshal(dec, dst) == nil
+}
+
+// jwtExpiry 读 JWT 的 exp 声明，读不出返回 false。
+func jwtExpiry(accessToken string) (time.Time, bool) {
 	var claims struct {
 		Exp *float64 `json:"exp"`
 	}
-	if err := json.Unmarshal(dec, &claims); err != nil || claims.Exp == nil {
+	if !decodeJWTPayload(accessToken, &claims) || claims.Exp == nil {
 		return time.Time{}, false
 	}
 	// exp<=0 当读不出：0 会被 time.Unix 解成 1970，于是"早已过期"，

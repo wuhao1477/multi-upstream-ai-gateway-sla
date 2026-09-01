@@ -8,7 +8,7 @@
 | 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md)、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)、[00 总览](./00-overview-and-milestones.md)、[01 架构](./01-architecture.md) |
 | 覆盖 FR | FR-010/011/012/013/017/018、FR-020～032、FR-116（⏭ FR-033～039 订阅采集移入二期，[15 §1.2](./15-scope-and-preflight.md)） |
 | 覆盖 AC | AC-17、AC-28、AC-29（⏭ AC-20～24 订阅制维持二期） |
-| 里程碑 | M3 元数据采集（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
+| 里程碑 | P1 上游采集与管理已实现采集与管理面；P3 继续消费价格、告警与调度数据（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
 
 > **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；**全自研站**（闭源面板、自建平台）**一站一适配器，不可复用、不作探测基准** —— 接入路径见 §7bis「全自研站怎么接」。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
 
@@ -30,9 +30,9 @@ import (
 type SupportLevel string
 
 const (
-	Supported   SupportLevel = "supported"   // 有该对象且可自动采集
-	Degraded    SupportLevel = "degraded"    // 部分可采 / 需人工补全 / 数据陈旧
-	Unsupported SupportLevel = "unsupported" // 该站型无此对象（如 NewAPI 无订阅）
+	Supported   SupportLevel = "supported"   // 有该对象且可自动采集；空结果是失败
+	Degraded    SupportLevel = "degraded"    // 部分可采 / 需人工补全 / 数据陈旧；必须带 note 说明
+	Unsupported SupportLevel = "unsupported" // 该站型无此对象（如 NewAPI 无订阅）；必须显式返回
 )
 
 // ── 站型家族 ──
@@ -369,10 +369,10 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: supported, groups: supported, pricing: degraded,
- model_catalog: supported, subscription_quotas: **unsupported（一期）**}
+{account: supported, keys: supported, groups: degraded, pricing: degraded,
+ model_catalog: degraded, subscription_quotas: **unsupported（一期）**}
 ```
-（价格倍率经 `/api/v1/groups/available.rate_multiplier` 与分组耦合，非独立价格表，标 `degraded`。）
+（分组由 `/api/v1/groups/available` 取得，但真站点可能缺少分组可用模型字段，故标 `degraded` 并说明；价格倍率也经该端点与分组耦合，非独立价格表；模型目录依赖同端点，真站点缺少 `available_models`/`models`/`supported_models` 时同样标 `degraded`，不伪造完整成功。）
 
 ### 3.3 全自研站（**已无现役样本**，第 48 轮）
 
@@ -400,10 +400,10 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | --- | --- | --- |
 | `account` | supported | supported |
 | `keys` | supported | supported |
-| `groups` | supported | supported |
+| `groups` | supported | degraded |
 | `subscription_quotas` | **unsupported** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
 | `pricing` | supported（公开） | degraded |
-| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | supported（`/api/v1/groups/available` 带分组模型） |
+| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | degraded（实现会读 `/api/v1/groups/available`；实测站点未返回 `available_models`/`models`/`supported_models` 时必须说明，不能伪造空成功） |
 | 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 |
 | 额度单位 | `quota/quota_per_unit` | USD 浮点 |
 | 共享额度归集键 | Key 独立 | `(user,group)` |
@@ -422,7 +422,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | 请求本身失败（网络/401/5xx） | `nil` + 真实 error | `failed` |
 | 该站型**根本没有这个对象** | `ErrUnsupported` | `unsupported` |
 
-- **判定口径（供 AC-28/38 执行）**：`Capabilities()` 声明 `degraded` ⟺ 该方法**不得**返回 `ErrUnsupported`。声明 `unsupported` ⟺ 必须返回 `ErrUnsupported`。声明 `supported` ⟺ 不得返回 `ErrUnsupported` 且必备字段齐全。
+- **判定口径（供 AC-28/38 执行）**：`Capabilities()` 声明 `supported` 时必须产出数据，空结果判 `failed`；声明 `degraded` 时该方法**不得**返回 `ErrUnsupported`，并必须用 `note`/`MissingFields` 说明缺失；声明 `unsupported` ⟺ 必须返回 `ErrUnsupported`，并在 sync items 里显式出现。
 - **三处 `degraded` 的具体含义**：
   - NewAPI `pricing`：无（它是 `supported`，`/api/pricing` 公开且完整）。
   - Sub2API `pricing`：倍率与分组耦合在 `/api/v1/groups/available`，**无独立模型价格表** → 目录里 `input_price`/`output_price` 可能为空，`MissingFields=["input_price","output_price"]`。
@@ -501,7 +501,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | 列 | 谁写 | 谁读 |
 | --- | --- | --- |
 | `user_id_header_name` | `Authenticate` 完成 fan-out 后**立即持久化**命中的头名（§3.1 七选一） | 后续每次采集直接取用，**不再 fan-out**；命中失效（401）时清空该列并重试试探 |
-| `refresh_lock_key` | 凭证登记时按账号生成，**同一上游账号的多条凭证共用同一值**（如 `refresh:<site_family>:<external_user_id>`） | Sub2API 刷新前 `pg_advisory_xact_lock(hashtext(refresh_lock_key))` 串行化——并发刷新会互相作废（§5.2） |
+| `refresh_lock_key` | 凭证登记时按账号生成，**同一上游账号的多条凭证共用同一值**（`refresh:<site_family>:<normalized_base_url>:<external_user_id>`；缺少账号 ID 时使用 JWT `user_id`，再缺失才退回渠道键） | Sub2API 刷新前在事务内执行 `pg_advisory_xact_lock(hashtext(refresh_lock_key))`，锁内重读并保存轮换后的凭证——并发刷新会互相作废（§5.2） |
 
 - **为什么必须落库而非只在内存**：fan-out 是**七次带凭证的试探请求**，重启就重来一遍，
   既慢又平白给上游制造异常鉴权记录；而互斥锁若只在进程内，**多实例部署时完全失效**——

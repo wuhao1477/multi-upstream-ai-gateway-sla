@@ -261,7 +261,6 @@ if [ -n "$KEEP" ]; then
   日志  core=${CORELOG}
   Ctrl-C 拆除（数据库一并销毁）
 ══════════════════════════════════════════════════════════
-
 EOF
   # 停在前台等人工操作；子进程死了就退出，别留个假活着的壳
   while kill -0 "$CORE_PID" 2>/dev/null; do sleep 2; done
@@ -342,5 +341,4 @@ if [ ! -s "$CORELOG" ]; then
   exit 1
 fi
 echo "   ✅ core 日志无 Key 明文（日志 $(wc -l < "$CORELOG" | tr -d ' ') 行，非空）"
-
 

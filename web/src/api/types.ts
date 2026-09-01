@@ -46,7 +46,8 @@ export type Capability =
 export type ItemStatus = 'ok' | 'partial' | 'failed' | 'unsupported' | 'skipped'
 
 /** 能力矩阵：能力 → 支持程度。 */
-export type CapabilityMap = Partial<Record<Capability, string>>
+export type SupportLevel = 'supported' | 'degraded' | 'unsupported'
+export type CapabilityMap = Partial<Record<Capability, SupportLevel>>
 
 // ── 列表实体（internal/store/channels.go）─────────────────────────────────────
 
@@ -143,6 +144,7 @@ export interface AnomalyGroup {
  */
 export interface SyncItem {
   capability?: Capability
+  support?: SupportLevel
   status: ItemStatus
   elapsed_ms?: number
   rows?: number
@@ -213,8 +215,6 @@ export interface CreateChannelResp {
   detected?: DetectedInfo
   /** 开盾提示。 */
   warning?: string
-  /** 探测结果落库失败 —— 渠道建成了但采集会缺 quota_per_unit。 */
-  warning_persist?: string
 }
 
 /** 所有 4xx/5xx 都带这个字段；同步接口的失败体另外附带 items 等字段，

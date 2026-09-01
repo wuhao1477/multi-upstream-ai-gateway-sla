@@ -36,7 +36,16 @@ type Pool struct{ p *pgxpool.Pool }
 
 // NewPool 建连接池并验证可达。
 func NewPool(ctx context.Context, dsn string) (*Pool, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+	return newPool(ctx, dsn, false)
+}
+
+// NewReadOnlyPool creates a pool whose every session rejects writes.
+func NewReadOnlyPool(ctx context.Context, dsn string) (*Pool, error) {
+	return newPool(ctx, dsn, true)
+}
+
+func newPool(ctx context.Context, dsn string, readOnly bool) (*Pool, error) {
+	cfg, err := poolConfig(dsn, readOnly)
 	if err != nil {
 		return nil, fmt.Errorf("解析 DSN: %w", err)
 	}
@@ -49,6 +58,20 @@ func NewPool(ctx context.Context, dsn string) (*Pool, error) {
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 	return &Pool{p: p}, nil
+}
+
+func poolConfig(dsn string, readOnly bool) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if readOnly {
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	}
+	return cfg, nil
 }
 
 // Acquire 取一个连接，返回的函数用于归还。

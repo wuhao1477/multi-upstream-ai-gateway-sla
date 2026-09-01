@@ -30,7 +30,7 @@
 | --- | --- | --- |
 | detect / pricing / model_catalog | ✅ | `/api/status` 与 `/api/pricing` 免密 |
 | account / keys / groups | ❌ 只在本地 | 要 `Authorization` + 用户 ID 头 |
-| 真库只读验收（31 项） | ❌ 只在本地 | runner 到不了内网 <internal-db-host> |
+| 真库只读验收（35 项） | ❌ 只在本地 | runner 到不了内网 <internal-db-host>；只读模式启动，不写测试行 |
 
 跑不了的在本地跑，结论写进 PR/提交说明。**不要因为 CI 跑不了就换回 mock** ——
 那样得到的绿是假的，真实覆盖仍然为零（[CLAUDE.md §1](../../CLAUDE.md)）。
@@ -67,9 +67,9 @@
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
 | **AC-37** | 一个渠道挂 2 账号、每账号 2 把 Key、分属不同分组（FR-122/123） | FIXTURE | `GET /admin/channels/{id}/inventory` 返回 `accounts=2`/`keys=4`/`groups≥2`；`GET /admin/keys?channel_id=` 4 行各带 `channel_group_id` 非空与对应 `rate_multiplier`；**4 把 Key 的明文一律不回显**（响应中只有前缀，全文 grep 不到完整 secret）；库中 `upstream_keys.channel_group_id` 4 行非空。<br>**另断言 Key 生命周期**：`POST /admin/keys/{id}/disable` 后该 Key `status='revoked'`；`rotate` 后**新明文只返回一次**、旧 Key 进宽限期 |
-| **AC-38** | 对**每一个已注册站型家族**的站点各触发一次手动刷新（FR-128；判定基准是站型注册表 `collector.All()`，不是写死的族数——理由见 [PRD AC-38](../PRD.md) 那条 ⚠️） | **REAL** | `POST /admin/channels/{id}/sync` 返回**逐项结果与耗时**；四类数据均更新——`channel_groups`/`group_models`/`channel_model_catalog` 有新行、`upstream_keys.quota_synced_at` 前进；该站型不支持的项返回 **`unsupported` 而非静默留空**（与 AC-28 同口径，且须与 `Capabilities()` 声明一致——声明 supported 而实现返回 `ErrUnsupported` 即判不通过）。<br>**另断言限流**：同渠道连续两次 sync 之间强制最小间隔（[04 §6](./04-collector-adapter.md)），第二次立即调用返回 429 或排队而非直接打上游 |
+| **AC-38** | 对**每一个已注册站型家族**的站点各触发一次手动刷新（FR-128；判定基准是站型注册表 `collector.All()`，不是写死的族数——理由见 [PRD AC-38](../PRD.md) 那条 ⚠️） | **REAL** | `POST /admin/channels/{id}/sync` 返回**逐项结果与耗时**；`channel_groups`/`group_models`/`channel_model_catalog` 与 `upstream_keys.quota_synced_at` 按能力分级验收。`supported` 必须产出数据并更新对应存储，空结果为失败；`degraded` 允许部分或零数据，但必须用 `note` 说明缺失字段或上游未提供的数据；`unsupported` 必须显式出现在 items，不能留空。<br>**另断言限流**：同渠道连续两次 sync 之间强制最小间隔（[04 §6](./04-collector-adapter.md)），第二次立即调用返回 429 或排队而非直接打上游 |
 | **AC-39** | 某渠道暴露 200 个以上模型（FR-126） | FIXTURE | `channel_model_catalog` 200+ 行**全部入库且无需任何 token 上界**；`GET /admin/channels/{id}/catalog` 可分页并按价格排序；**`models` 表行数不变**（目录与可路由模型是两层——这是本条的核心断言，若目录写进了 `models` 就等于要求 4000 行手填 token 上界）；`channel_models` 亦不产生行 |
-| **AC-40** | 上游下架某个模型（FR-126） | FIXTURE | 构造该模型在后续 N 轮（默认 3，`config_params` 可配）采集中消失 → 其 `last_seen_at` 停止前进、`GET /admin/channels/{id}/catalog?stale=true` 能筛出它；产生 **P3** `alert_events(category='model_capability')`（复用既有枚举，不新增 category）。<br>⚠️ **不断言"自动停用"**：P1 无路由，没有可停用的对象；`channel_models.enabled` 的联动属 P2（[ISSUE-005 §6 T-5](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
+| **AC-40** | 上游下架某个模型（FR-126） | FIXTURE | 构造该模型在后续 N 轮可靠采集中消失（默认 3，`config_params` 可配）→ `last_seen_seq` 停止前进，`channels.catalog_sync_seq - last_seen_seq >= N` 时 `stale=true`；`GET /admin/channels/{id}/catalog?stale=true` 能筛出它，目录 UI 标「疑似下架」，资产总览显示 `delisted_model` 异常。`alert_events(category='model_capability')` 持久化归 **P3**，不作为 P1 判定项。<br>⚠️ **不断言"自动停用"**：P1 无路由，没有可停用的对象；`channel_models.enabled` 的联动属 P2（[ISSUE-005 §6 T-5](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 
 > **P1 退出标准**（[ISSUE-005 §2](../issues/ISSUE-005-phase1-upstream-inventory.md)）：AC-37~40 全绿 **且** 对全部真实渠道跑一次全量 sync 并留存覆盖率报告——这提前完成了 [15 T6](./15-scope-and-preflight.md)「~20 个渠道的价格数据是否都采得到」的验证点。
 
@@ -127,7 +127,7 @@
 | AC-04 | 多 Key 共享账号余额且并发 | FIXTURE | 同 `balance_group_key` 的多 Key 并发：余额**只计一次**，不重复累加可用额度 |
 | AC-05 | 账号有余额但 Key 日额度耗尽 | FIXTURE | 该 Key 被排除出候选（决策快照原因 = Key 额度耗尽），同账号其他 Key 仍可用 |
 | AC-17 | 两渠道不同币种/计费单位 | FIXTURE | 统一美元口径比较（一期 1:1）；不同计费单位归一后可比 |
-| AC-19 | 余额耗尽 / Key 失效 / 错误预算快速消耗 | FIXTURE | 三场景各产生 P1 或 P2 `alert_events`；**P1 无延迟**（触发到落库 < 5s）；同因合并为一个持续事件（`dedup_key` + `uq_alert_active` 部分唯一索引：同键未关闭状态下只允许一行）。<br>**载体归属**（2026-07-26 裁决）：`alert_events` **写入路径已在 M3 交付**（原列 M4，与本条 M3 验收时序错位）；本条只验落库与合并，**不验外发** —— 最小 P1 webhook 属 M4（[06 §5bis](./06-deployment-and-operations.md)），其失败计数另在 M4 断言。 |
+| AC-19 | 余额耗尽 / Key 失效 / 错误预算快速消耗 | FIXTURE | 三场景各产生告警候选；`alert_events` 持久化、查询与同因合并归 **P3**。本条不验外发 —— 最小 webhook 属 M4（[06 §5bis](./06-deployment-and-operations.md)），其失败计数另在 M4 断言。 |
 | AC-28 | **每一个已注册家族**的站点接入采集（现役 NewAPI / Sub2API；判定基准同 AC-38，是 `collector.All()` 而非族数） | **REAL** | 每族至少一个实测站点：`Detect()` 正确归族；各自 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；不支持字段返回 `unsupported` 而非留空；**`subscription_quotas` 在一期须为全站型 `unsupported`**（订阅制移入二期），且 `Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 的实际返回一致——声明 supported 而实现返回 `ErrUnsupported` 即判不通过 |
 | AC-29 | 非标准方式返回"余额不足" | **REAL** | 构造/捕获该信号 → `balance_signals.balance_state = 'exhausted'`，停止向其发新付费请求。<br>**FR-026 保守下限**（[05 §1.1bis](./05-scheduling-and-operations.md)）：①`last_confirmed_balance` 有值但 `known_consumption_since` 为空 → 该 binding **被排除**，`decision_snapshot.excluded[]` 原因为 `balance_floor_unavailable`；②`conservative_floor` 为负 → 按 `balance_floor_exhausted` 排除；③floor 可形成且 >0 → 通过，且后续判定**用 floor 而非标称余额** |
 

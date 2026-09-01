@@ -146,6 +146,8 @@ type Credential struct {
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。
 	UserIDHeaderName string
 	TokenExpiresAt   time.Time
+	// RefreshLockKey identifies credentials for the same upstream account.
+	RefreshLockKey string
 	// BaseURL 是该渠道的站点地址（随渠道登记而来）。
 	BaseURL string
 	// QuotaPerUnit 是 NewAPI 系的额度换算基数，来自 Detect。
@@ -197,8 +199,8 @@ type WindowUsage struct {
 type Key struct {
 	// KeyRef 是脱敏引用，**不含明文**（FR-094）。
 	KeyRef         string
-	RemainQuotaUSD float64
-	UsedQuotaUSD   float64
+	RemainQuotaUSD *float64
+	UsedQuotaUSD   *float64
 	Unlimited      bool
 	ExpiredAt      *time.Time
 	ModelLimits    []string

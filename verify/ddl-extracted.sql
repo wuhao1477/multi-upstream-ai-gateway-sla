@@ -30,6 +30,7 @@ CREATE TABLE channels (
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
+  catalog_sync_seq BIGINT NOT NULL DEFAULT 0 CHECK (catalog_sync_seq >= 0), -- 可靠目录成功轮次（FR-126）
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -186,6 +187,7 @@ CREATE TABLE channel_model_catalog (
                   ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
   PRIMARY KEY (channel_id, model_name)
 );
 
@@ -975,7 +977,9 @@ CREATE TABLE collector_credentials (
   refresh_lock_key TEXT,                        -- 按账号加互斥锁串行刷新
   status          TEXT NOT NULL DEFAULT 'valid'
                     CHECK (status IN ('valid','expiring','invalid','needs_relogin')),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT collector_credentials_refresh_lock_key_check
+    CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
 CREATE TABLE collector_snapshots (

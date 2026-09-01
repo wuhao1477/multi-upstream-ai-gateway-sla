@@ -19,7 +19,6 @@ export const useCatalogStore = defineStore('catalog', () => {
   const q = ref('')
   const offset = ref(0)
   const resp = ref<CatalogResp | null>(null)
-  const loading = ref(false)
 
   let channelID: number | null = null
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -45,19 +44,30 @@ export const useCatalogStore = defineStore('catalog', () => {
   const filtering = computed(() => unit.value !== '' || q.value !== '')
 
   async function load(): Promise<void> {
-    if (channelID === null) return
-    loading.value = true
+    const id = channelID
+    if (id === null) return
+    const request = {
+      unit: unit.value,
+      q: q.value,
+      offset: offset.value,
+    }
     try {
-      resp.value = await adminApi.channelCatalog(channelID, {
-        unit: unit.value,
-        q: q.value,
+      const data = await adminApi.channelCatalog(id, {
+        unit: request.unit,
+        q: request.q,
         limit: CAT_PAGE,
-        offset: offset.value,
+        offset: request.offset,
       })
+      if (
+        channelID === id &&
+        unit.value === request.unit &&
+        q.value === request.q &&
+        offset.value === request.offset
+      ) {
+        resp.value = data
+      }
     } catch (e) {
       toast.fail('加载目录失败', e)
-    } finally {
-      loading.value = false
     }
   }
 

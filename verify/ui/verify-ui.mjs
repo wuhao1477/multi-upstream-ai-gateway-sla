@@ -300,7 +300,7 @@ try {
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
   check('采集结果表已渲染', syncRows.length >= 6, `${syncRows.length} 项`);
 
-  const byCap = Object.fromEntries(syncRows.map(r => [r[0], r[1]]));
+  const byCap = Object.fromEntries(syncRows.map(r => [r[0], r[2]]));
   check('account 采集成功', byCap['account'] === 'ok', byCap['account']);
   check('groups 采集成功', byCap['groups'] === 'ok', byCap['groups']);
   check('keys 采集成功', byCap['keys'] === 'ok', byCap['keys']);

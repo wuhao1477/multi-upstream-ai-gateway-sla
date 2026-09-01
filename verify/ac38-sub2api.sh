@@ -21,6 +21,7 @@
 # 用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/ac38-sub2api.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+umask 077
 
 HUB_FILE="${HUB_FILE:-}"
 [ -n "$HUB_FILE" ] && [ -f "$HUB_FILE" ] || {
@@ -32,19 +33,35 @@ PORT=18435       # 184xx 段：554xx 在临时端口段里会被出站连接借�
 APIPORT=18082
 DSN="postgres://postgres:x@127.0.0.1:${PORT}/sla"
 TOKEN="ac38-sub2api-$$"
-LOG=/tmp/ac38-core.log
 
 CORE_PID=""
+AC38_TMP=""
 cleanup() {
-  [ -n "$CORE_PID" ] && kill "$CORE_PID" 2>/dev/null || true
+  if [ -n "$CORE_PID" ]; then
+    kill "$CORE_PID" 2>/dev/null || true
+    wait "$CORE_PID" 2>/dev/null || true
+  fi
   docker rm -f -v "$CT" >/dev/null 2>&1 || true
+  if [ -n "$AC38_TMP" ] && [ -d "$AC38_TMP" ]; then
+    rm -rf "$AC38_TMP"
+  fi
+  return 0
 }
 trap cleanup EXIT
 cleanup
+AC38_TMP=$(mktemp -d "${TMPDIR:-/tmp}/ac38-sub2api.XXXXXX")
+LOG="$AC38_TMP/core.log"
+RESP_JSON="$AC38_TMP/resp.json"
+SYNC_JSON="$AC38_TMP/sync.json"
+CRED_JSON="$AC38_TMP/cred.json"
+KEY_JSON="$AC38_TMP/key.json"
+ACC_JSON="$AC38_TMP/acc.json"
+KEYREQ_JSON="$AC38_TMP/keyreq.json"
+TOKEN_FILE="$AC38_TMP/access-token"
 
 echo "── 1/6 探活选一个真 Sub2API 站（不写死）──"
-PICK=$(HUB_FILE="$HUB_FILE" python3 - <<'PY'
-import json, os, sys, urllib.request, urllib.error, base64, time
+PICK=$(HUB_FILE="$HUB_FILE" TOKEN_FILE="$TOKEN_FILE" python3 - <<'PY'
+import base64, json, os, sys, time, urllib.request
 d = json.load(open(os.environ["HUB_FILE"]))
 subs = [a for a in d["accounts"]["accounts"] if a.get("site_type") == "sub2api"]
 def exp(t):
@@ -68,8 +85,9 @@ for a in subs:
                        "User-Agent": "Go-http-client/2.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
             if r.status == 200:
+                open(os.environ["TOKEN_FILE"], "w").write(tok)
                 print(json.dumps({"base": base, "name": a.get("site_name") or base,
-                                  "token": tok, "tried": len(tried)}))
+                                  "tried": len(tried)}))
                 sys.exit(0)
     except Exception as e:
         tried.append(f"{base}: {getattr(e,'code',type(e).__name__)}")
@@ -82,7 +100,6 @@ PY
 
 BASE=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['base'])" "$PICK")
 SITE=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['name'])" "$PICK")
-ATOK=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['token'])" "$PICK")
 SKIP=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['tried'])" "$PICK")
 echo "   ✅ 选中 ${SITE} <${BASE}>（前面 ${SKIP} 个令牌已失效，跳过）"
 
@@ -90,10 +107,10 @@ echo "── 2/6 起 PG 与 sla-core ──"
 docker run -d --name "$CT" -e POSTGRES_PASSWORD=x -e POSTGRES_DB=sla \
   -p "${PORT}:5432" postgres:16 >/dev/null
 for _ in $(seq 1 60); do
-  docker exec "$CT" pg_isready -U postgres >/dev/null 2>&1 && break
+  docker exec "$CT" pg_isready -h 127.0.0.1 -U postgres -d sla >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec "$CT" pg_isready -U postgres >/dev/null 2>&1 || {
+docker exec "$CT" pg_isready -h 127.0.0.1 -U postgres -d sla >/dev/null 2>&1 || {
   echo "❌ PG 60s 内没起来"; docker logs "$CT" 2>&1 | tail -20 | sed 's/^/   /'; exit 1; }
 sleep 2
 go build -o bin/sla-core ./cmd/sla-core
@@ -109,15 +126,15 @@ echo "   ✅ 就绪（PG :${PORT} / core :${APIPORT}）"
 
 A="http://127.0.0.1:${APIPORT}/admin"
 auth=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
-code() { : >/tmp/ac38-resp.json; curl -s -o /tmp/ac38-resp.json -w "%{http_code}" "$@"; }
-fail() { echo "❌ $1"; echo "   响应: $(cat /tmp/ac38-resp.json)"; exit 1; }
+code() { : >"$RESP_JSON"; curl -s -o "$RESP_JSON" -w "%{http_code}" "$@"; }
+fail() { echo "❌ $1"; echo "   响应: $(cat "$RESP_JSON")"; exit 1; }
 psql_() { docker exec "$CT" psql -U postgres -d sla -tAc "$1"; }
 
 echo "── 3/6 建渠道（auto_detect）并断言归族 ──"
 C=$(code "${auth[@]}" -X POST "$A/channels" \
      -d "{\"name\":\"AC38-sub2api-${SITE}\",\"base_url\":\"${BASE}\",\"auto_detect\":true}")
 [ "$C" = "201" ] || fail "建渠道应 201，得 $C"
-CHID=$(python3 -c "import json;print(json.load(open('/tmp/ac38-resp.json'))['id'])")
+CHID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$RESP_JSON")
 FAM=$(psql_ "SELECT site_family FROM channels WHERE id=$CHID")
 [ "$FAM" = "sub2api" ] || fail "探测归族为 '$FAM'，应为 sub2api（AC-28 同口径）"
 echo "   ✅ 渠道 #${CHID} 归族 sub2api"
@@ -126,77 +143,76 @@ echo "── 4/6 登记凭证 + 那把真 Key（quota_synced_at 要有行才能�
 # ⚠️ 请求体一律写文件再 `-d @file`：内联 `$(python3 -c "…{'k':v,…}")` 会被 bash
 #    按逗号做大括号展开，python 收到的是被切碎的半截代码（实测过一次）。
 python3 -c "
-import json,sys;json.dump({'channel_id':int(sys.argv[1]),'access_token':sys.argv[2]},
-open('/tmp/ac38-cred.json','w'))" "$CHID" "$ATOK"
-C=$(code "${auth[@]}" -X POST "$A/collector/credentials" -d @/tmp/ac38-cred.json)
+import json,sys;json.dump({'channel_id':int(sys.argv[1]),'access_token':open(sys.argv[2]).read()},
+open(sys.argv[3],'w'))" "$CHID" "$TOKEN_FILE" "$CRED_JSON"
+C=$(code "${auth[@]}" -X POST "$A/collector/credentials" -d @"$CRED_JSON")
 [ "$C" = "200" ] || fail "登记凭证应 200，得 $C"
 
 # 从上游取回那把真 Key 登记进来。**不是造数据**：值来自 /api/v1/keys 的真实响应。
 # 不这么做的话库里没有 upstream_keys 行，AC-38 的 quota_synced_at 那半就无从断言
 # （不变式 N-1：本系统运行期不建 Key，Key 由人工登记）。
-python3 - "$BASE" "$ATOK" <<'PY'
+python3 - "$BASE" "$TOKEN_FILE" "$KEY_JSON" <<'PY'
 import json,sys,urllib.request
+token=open(sys.argv[2]).read()
 req=urllib.request.Request(sys.argv[1].rstrip("/")+"/api/v1/keys",
-    headers={"Authorization":"Bearer "+sys.argv[2],"Accept":"application/json",
+    headers={"Authorization":"Bearer "+token,"Accept":"application/json",
              "User-Agent":"Go-http-client/2.0"})
 d=json.loads(urllib.request.urlopen(req,timeout=25).read())
 items=(d.get("data") or {}).get("items") or []
 k=items[0] if items else {}
-json.dump({"secret":k.get("key",""),"ref":str(k.get("id","")),
-           "group":str((k.get("group") or {}).get("name",""))},
-          open("/tmp/ac38-key.json","w"))
+json.dump({"secret":k.get("key",""),"ref":str(k.get("id",""))},
+          open(sys.argv[3],"w"))
 PY
-SECRET=$(python3 -c "import json;print(json.load(open('/tmp/ac38-key.json'))['secret'])")
+SECRET=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['secret'])" "$KEY_JSON")
 [ -n "$SECRET" ] || fail "上游 /api/v1/keys 没有可登记的 Key —— AC-38 的 quota 那半跑不了"
 python3 -c "
 import json,sys;json.dump({'channel_id':int(sys.argv[1]),'external_user_id':'ac38'},
-open('/tmp/ac38-acc.json','w'))" "$CHID"
-C=$(code "${auth[@]}" -X POST "$A/accounts" -d @/tmp/ac38-acc.json)
+open(sys.argv[2],'w'))" "$CHID" "$ACC_JSON"
+C=$(code "${auth[@]}" -X POST "$A/accounts" -d @"$ACC_JSON")
 [ "$C" = "201" ] || fail "建账号应 201，得 $C"
-ACCID=$(python3 -c "import json;print(json.load(open('/tmp/ac38-resp.json'))['id'])")
+ACCID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$RESP_JSON")
 python3 -c "
 import json,sys
-k=json.load(open('/tmp/ac38-key.json'))
-json.dump({'account_id':int(sys.argv[1]),'secret':k['secret'],
-           'external_ref':k['ref'],'group_ref':k['group']},
-          open('/tmp/ac38-keyreq.json','w'))" "$ACCID"
-C=$(code "${auth[@]}" -X POST "$A/keys" -d @/tmp/ac38-keyreq.json)
+k=json.load(open(sys.argv[2]))
+# 首轮同步前 channel_groups 为空；同步会先写分组，再把 Key 关联到该分组。
+json.dump({'account_id':int(sys.argv[1]),'secret':k['secret'],'external_ref':k['ref']},
+          open(sys.argv[3],'w'))" "$ACCID" "$KEY_JSON" "$KEYREQ_JSON"
+C=$(code "${auth[@]}" -X POST "$A/keys" -d @"$KEYREQ_JSON")
 [ "$C" = "201" ] || fail "登记 Key 应 201，得 $C"
 echo "   ✅ 凭证 + 1 把真 Key 已登记"
 
 echo "── 5/6 触发一次手动刷新（AC-38 本体）──"
 C=$(code "${auth[@]}" -X POST "$A/channels/${CHID}/sync")
 [ "$C" = "200" ] || fail "sync 应 200，得 $C"
-cp /tmp/ac38-resp.json /tmp/ac38-sync.json
-python3 - <<'PY' || exit 1
+cp "$RESP_JSON" "$SYNC_JSON"
+python3 - "$SYNC_JSON" <<'PY' || exit 1
 import json,sys
-res=json.load(open('/tmp/ac38-sync.json'))
+res=json.load(open(sys.argv[1]))
 bad=[]
 if not res.get("items"): bad.append("响应没有 items —— AC-38 要求逐项结果")
 if not res.get("elapsed_ms"): bad.append("响应没有 elapsed_ms —— AC-38 要求带耗时")
 for it in res.get("items",[]):
-    for f in ("capability","status"):
+    for f in ("capability","support","status"):
         if not it.get(f): bad.append(f"某项缺 {f}：{it}")
     if "elapsed_ms" not in it: bad.append(f"项 {it.get('capability')} 缺 elapsed_ms")
-got={it["capability"]:it["status"] for it in res.get("items",[])}
-print("   逐项：" + " ".join(f"{k}={v}" for k,v in got.items()))
-# AC-38：不支持的项要**显式**返回 unsupported 而不是静默留空。
-# 一期唯一允许 unsupported 的是 subscription_quotas（14 AC-28 原文：
-# "subscription_quotas 在一期须为全站型 unsupported"）—— 锚在那句写下来的
-# 规则上，而不是抄一份 sub2api.Capabilities() 的拷贝到这里。
-# "声明与实现一致"那一半由 TestCapabilitiesMatchDocMatrix 守（退出标准④），
-# 本脚本不重复实现一遍比较逻辑。
-if got.get("subscription_quotas") != "unsupported":
-    bad.append(f"subscription_quotas 应显式 unsupported，实际 {got.get('subscription_quotas')!r}"
-               "（缺项就是 AC-38 点名的'静默留空'）")
-for cap,st in got.items():
-    if cap!="subscription_quotas" and st=="unsupported":
-        bad.append(f"{cap} 返回 unsupported —— 一期只有 subscription_quotas 可以是它（14 AC-28）")
+print("   逐项：" + " ".join(
+    f"{i.get('capability')}={i.get('support')}/{i.get('status')}/rows={i.get('rows',0)}"
+    for i in res.get("items",[])))
+for it in res.get("items",[]):
+    cap, support, st = it.get("capability"), it.get("support"), it.get("status")
+    rows, note = int(it.get("rows") or 0), it.get("note") or ""
+    if support == "supported" and rows == 0:
+        bad.append(f"{cap} supported 能力必须产生数据，实际 rows=0")
+    if rows == 0:
+        if support not in ("degraded", "unsupported"):
+            bad.append(f"{cap} rows=0 时 support={support!r}，零行只允许 degraded/unsupported 且必须有说明")
+        if not note:
+            bad.append(f"{cap} rows=0 但缺 note，零行只允许 degraded/unsupported 且必须有说明")
     if st=="failed":
         bad.append(f"{cap} 失败：{next((i.get('error') for i in res['items'] if i['capability']==cap),'')}")
 if bad:
     print("❌ AC-38 响应断言未过："); [print("   - "+b) for b in bad]; sys.exit(1)
-print("   ✅ 逐项结果 + 耗时齐全；不支持项显式 unsupported，无 failed")
+print("   ✅ 逐项结果 + support + 耗时齐全；零行均有声明与说明，无 failed")
 PY
 
 echo "── 6/6 四类数据落库 + 限流 ──"
@@ -218,10 +234,10 @@ echo "   channel_groups=$G group_models=$GM channel_model_catalog=$CAT quota_syn
 #    故本条按 AC-38 的控制性条款判：**不得静默留空**。0 行必须带说明，
 #    人才能区分"上游没给"与"我们写失败了"。判据落在 sync 响应的 note 上 ——
 #    行数只在有数据时才是有效断言，拿它当唯一判据会把上游的缺失记成我们的失败。
-python3 - "$GM" "$CAT" <<'PYEOF' || exit 1
+python3 - "$GM" "$CAT" "$SYNC_JSON" <<'PYEOF' || exit 1
 import json,sys
 gm,cat=int(sys.argv[1]),int(sys.argv[2])
-items={i["capability"]:i for i in json.load(open('/tmp/ac38-sync.json'))["items"]}
+items={i["capability"]:i for i in json.load(open(sys.argv[3]))["items"]}
 # ⚠️ 只查 model_catalog 那一项。groups 项的 rows 是**分组数**（本轮 8），
 #    不是分组模型数 —— 拿 group_models=0 去要求 groups 项带 note，是把两个
 #    不同的计数当成同一个（第一版就是这么写的，红在一条好路径上）。

@@ -148,10 +148,12 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 			Meta:      NewAPIMeta("/api/token", now),
 		}
 		if remain, ok := asFloat(t["remain_quota"]); ok {
-			k.RemainQuotaUSD = remain / qpu
+			remain /= qpu
+			k.RemainQuotaUSD = &remain
 		}
 		if used, ok := asFloat(t["used_quota"]); ok {
-			k.UsedQuotaUSD = used / qpu
+			used /= qpu
+			k.UsedQuotaUSD = &used
 		}
 		// expired_time = -1 表示永不过期（NewAPI 约定），不是 1969 年
 		if exp, ok := asFloat(t["expired_time"]); ok && exp > 0 {
@@ -277,6 +279,9 @@ func (a *NewAPIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Cat
 			BillingUnit: mp.BillingUnit,
 			Meta:        NewAPIMeta("/api/pricing", now),
 		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("NewAPI 模型目录为空：supported 能力必须返回数据")
 	}
 	return out, nil
 }

@@ -245,7 +245,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | --- | --- | --- |
 | `GET /admin/channels`、`POST /admin/channels`、`PATCH /admin/channels/{id}` | 渠道 CRUD。此前只能经 `/admin/bindings` 间接建渠道，无独立管理面 | **P1** |
 | `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / **异常项计数**（FR-128 展示面、FR-129 并入）。<br>**异常项的构成（第 45 轮定义——它被三处引用却从未定义）**：① 数据陈旧（`fetched_at` 超对应 `collector_*_interval` 的 2 倍）；② `Degraded` 结果的 `MissingFields` 待人工补录（[04 §3.4bis](./04-collector-adapter.md)）；③ 上游存在但库中未登记的 Key（[02 §1.3bis](./02-data-model.md)）；④ 疑似下架模型（`catalog_missing_rounds` 已达阈值）；⑤ 凭证状态非 `valid`（`collector_credentials.status`）；⑥ Key 状态非 `active` 或已过期。**逐类给出计数与可下钻的列表**，不合并为一个总数——否则运维看到"异常 7"却不知道该修什么 | **P1** |
-| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现 | **P1** |
+| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现；与周期采集共用同一 Runner | **P1** |
 | `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
 | `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；可设 `channel_group_id` | **P1** |
 | `POST /admin/keys/{id}/rotate`、`POST /admin/keys/{id}/disable` | Key 轮换与停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
@@ -254,6 +254,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
 | `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`/`allows_password`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
+| `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容） | **P1** |
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
 
@@ -305,7 +306,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 - `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
 - **`unsupported` 必须出现在 `items` 里**，不能省略该项——AC-38 要求"不支持的项返回明确的不支持而非静默留空"，且须与 `Capabilities()` 声明一致。
-- **`degraded` 能力的 status 取值**：见 [04 §3.4bis](./04-collector-adapter.md) —— 采到部分即 `ok` 并在 `note` 说明缺哪些字段，采不到即 `failed`；**`degraded` 是能力声明，不是运行时状态**。
+- **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 
 **限流与并发**：
 
@@ -341,7 +342,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/fault-domains` | 列出故障域（`kind` + `label` 作显示名）及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |
 | `POST /admin/fault-domains/{id}/disable` | **人工隔离整个故障域**：置 `disabled_until`（入参 `duration_sec`，**省略 = NULL = 无限期，须人工恢复**）+ `disabled_reason`。用于已知供应商维护窗口等自动判据覆盖不到的场景（[05 §5bis.1bis](./05-scheduling-and-operations.md)） | M3 |
 | `POST /admin/fault-domains/{id}/enable` | 解除封禁（置 `disabled_until=NULL`）。⚠️ 若集中失败仍在持续，下一轮健康聚合会**再次自动封禁**——这是预期行为，不是解封失败 | M3 |
-| `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
+| ~~`POST /admin/collector/credentials`~~ | 已前移到 P1，见 §5.0 | P1 |
 | `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`（NULL=不限额）/`rpm_limit`（**NULL=不限速**，此时跳过 RPM 闸）/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效。⚠️ **遇 `is_system=true` 返回 403** —— 内置 `system-probe` 被误吊销会让主动测活整体静默失效 | **M0** |

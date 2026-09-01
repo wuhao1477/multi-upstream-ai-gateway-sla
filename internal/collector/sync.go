@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,13 +22,14 @@ const (
 
 // SyncItem 是一项采集的结果。
 type SyncItem struct {
-	Capability Capability `json:"capability"`
-	Status     ItemStatus `json:"status"`
-	ElapsedMs  int64      `json:"elapsed_ms"`
-	Rows       int        `json:"rows,omitempty"`
-	Failed     int        `json:"failed,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	Note       string     `json:"note,omitempty"`
+	Capability Capability   `json:"capability"`
+	Support    SupportLevel `json:"support"`
+	Status     ItemStatus   `json:"status"`
+	ElapsedMs  int64        `json:"elapsed_ms"`
+	Rows       int          `json:"rows,omitempty"`
+	Failed     int          `json:"failed,omitempty"`
+	Error      string       `json:"error,omitempty"`
+	Note       string       `json:"note,omitempty"`
 }
 
 // SyncResult 是一次 sync 的完整结果（09 §5.0bis 的响应结构）。
@@ -72,6 +74,20 @@ type Syncer struct {
 	Auth *Authenticator
 	// Refresher 是站型特定的续期实现（NewAPI 传 nil：不变式 N-1 禁止刷新）。
 	Refresher Refresher
+	only      []Capability
+}
+
+// SyncSelected 执行指定能力，供不同周期的后台任务复用同一套采集编排。
+func (s *Syncer) SyncSelected(
+	ctx context.Context, cred Credential, capabilities ...Capability,
+) (*SyncResult, error) {
+	selected := *s
+	selected.only = capabilities
+	return selected.Sync(ctx, cred)
+}
+
+func (s *Syncer) wants(capability Capability) bool {
+	return len(s.only) == 0 || slices.Contains(s.only, capability)
 }
 
 // Sync 按 09 §5.0bis 的**冻结顺序**执行，逐项独立提交。
@@ -111,126 +127,148 @@ func (s *Syncer) Sync(ctx context.Context, cred Credential) (*SyncResult, error)
 	}
 
 	// ── ② 账号 ──
-	s.run(ctx, res, caps, CapAccount, func() (int, int, string, error) {
-		a, err := s.Adapter.FetchAccount(ctx, sess)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		// ⚠️ 账号级的 external_user_id 要回填进会话：NewAPI 系后续请求
-		// 必须带用户 ID 头（04 §3.1），Detect 阶段拿不到它。
-		if a.UserID != "" && sess.ExternalUserID == "" {
-			sess.ExternalUserID = a.UserID
-		}
-		if err := s.Sink.SaveAccount(ctx, cred.ChannelID, a); err != nil {
-			return 0, 0, "", err
-		}
-		return 1, 0, degradedNote(a.Meta), nil
-	})
+	if s.wants(CapAccount) {
+		s.run(ctx, res, caps, CapAccount, func() (int, int, string, error) {
+			a, err := s.Adapter.FetchAccount(ctx, sess)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			// ⚠️ 账号级的 external_user_id 要回填进会话：NewAPI 系后续请求
+			// 必须带用户 ID 头（04 §3.1），Detect 阶段拿不到它。
+			if a.UserID != "" && sess.ExternalUserID == "" {
+				sess.ExternalUserID = a.UserID
+			}
+			if err := s.Sink.SaveAccount(ctx, cred.ChannelID, a); err != nil {
+				return 0, 0, "", err
+			}
+			return 1, 0, degradedNote(a.Meta), nil
+		})
+	}
 
 	// ── ③ 分组（必须先于 ④）──
-	s.run(ctx, res, caps, CapGroups, func() (int, int, string, error) {
-		gs, err := s.Adapter.FetchGroups(ctx, sess)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		n, err := s.Sink.SaveGroups(ctx, cred.ChannelID, gs)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		var note string
-		if len(gs) > 0 {
-			note = degradedNote(gs[0].Meta)
-		}
-		return n, 0, note, nil
-	})
-
-	// ── ④ Key：**每把一个事务**，单把失败不影响其它（09 §5.0bis）──
-	s.run(ctx, res, caps, CapKeys, func() (int, int, string, error) {
-		ks, err := s.Adapter.FetchKeys(ctx, sess)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		var ok, failed, unregistered int
-		var firstErr error
-		for _, k := range ks {
-			err := s.Sink.SaveKey(ctx, cred.ChannelID, k)
-			switch {
-			case err == nil:
-				ok++
-			case errors.Is(err, ErrKeyNotRegistered):
-				// 上游有、库中无 → 异常项而非失败（02 §1.3bis）
-				unregistered++
-			default:
-				failed++
-				if firstErr == nil {
-					firstErr = err
+	if s.wants(CapGroups) {
+		s.run(ctx, res, caps, CapGroups, func() (int, int, string, error) {
+			gs, err := s.Adapter.FetchGroups(ctx, sess)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			n, err := s.Sink.SaveGroups(ctx, cred.ChannelID, gs)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			notes := make([]string, 0, len(gs))
+			for _, g := range gs {
+				if note := degradedNote(g.Meta); note != "" {
+					notes = append(notes, note)
 				}
 			}
-		}
-		note := ""
-		if unregistered > 0 {
-			note = fmt.Sprintf("%d 把 Key 上游存在但库中未登记，需补登记（计入异常项）",
-				unregistered)
-		}
-		if failed > 0 {
-			return ok, failed, note, fmt.Errorf("部分 Key 写入失败: %w", firstErr)
-		}
-		return ok, 0, note, nil
-	})
+			return n, 0, joinNotes(notes...), nil
+		})
+	}
+
+	// ── ④ Key：**每把一个事务**，单把失败不影响其它（09 §5.0bis）──
+	if s.wants(CapKeys) {
+		s.run(ctx, res, caps, CapKeys, func() (int, int, string, error) {
+			ks, err := s.Adapter.FetchKeys(ctx, sess)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			var ok, failed, unregistered int
+			var firstErr error
+			for _, k := range ks {
+				err := s.Sink.SaveKey(ctx, cred.ChannelID, k)
+				switch {
+				case err == nil:
+					ok++
+				case errors.Is(err, ErrKeyNotRegistered):
+					// 上游有、库中无 → 异常项而非失败（02 §1.3bis）
+					unregistered++
+				default:
+					failed++
+					if firstErr == nil {
+						firstErr = err
+					}
+				}
+			}
+			note := ""
+			if unregistered > 0 {
+				note = fmt.Sprintf("%d 把 Key 上游存在但库中未登记，需补登记（计入异常项）",
+					unregistered)
+			}
+			processed := ok + unregistered
+			if failed > 0 {
+				return processed, failed, note, fmt.Errorf("部分 Key 写入失败: %w", firstErr)
+			}
+			return processed, 0, note, nil
+		})
+	}
 
 	// ── ⑤ 价格 ──
-	s.run(ctx, res, caps, CapPricing, func() (int, int, string, error) {
-		p, err := s.Adapter.FetchPricing(ctx, sess)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		n, err := s.Sink.SavePricing(ctx, cred.ChannelID, p)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		// ⚠️ 采到 ≠ 写入：价格版本按 (channel, model) 作用域，只为**已登记进
-		// models 的可路由模型**写行（02 §2bis：models 要求 token 上界必填，
-		// 目录阶段拿不到，故不自动建行）。P1 不登记任何可路由模型（AC-39），
-		// 于是这里**必然 n=0**。
-		//
-		// 不说明就会退化成"ok + rows=0 + 无备注"——运维无法区分"写成功了"
-		// 和"一行都没写"，而后者在 P1 是**预期行为**、在 P3 则是**故障**。
-		// 同 ④ 未登记 Key 的处理：如实记 note，而不是让 ok 替它兜着。
-		if skipped := len(p.Models) - n; skipped > 0 {
-			extra := fmt.Sprintf(
-				"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
-					"不写 price_versions，价格已存入模型目录备查",
-				len(p.Models), skipped)
-			return n, 0, joinNotes(degradedNote(p.Meta), extra), nil
-		}
-		return n, 0, degradedNote(p.Meta), nil
-	})
+	if s.wants(CapPricing) {
+		s.run(ctx, res, caps, CapPricing, func() (int, int, string, error) {
+			p, err := s.Adapter.FetchPricing(ctx, sess)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			n, err := s.Sink.SavePricing(ctx, cred.ChannelID, p)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			// ⚠️ 采到 ≠ 写入：价格版本按 (channel, model) 作用域，只为**已登记进
+			// models 的可路由模型**写行（02 §2bis：models 要求 token 上界必填，
+			// 目录阶段拿不到，故不自动建行）。P1 不登记任何可路由模型（AC-39），
+			// 于是这里**必然 n=0**。
+			//
+			// 不说明就会退化成"ok + rows=0 + 无备注"——运维无法区分"写成功了"
+			// 和"一行都没写"，而后者在 P1 是**预期行为**、在 P3 则是**故障**。
+			// 同 ④ 未登记 Key 的处理：如实记 note，而不是让 ok 替它兜着。
+			if skipped := len(p.Models) - n; skipped > 0 {
+				extra := fmt.Sprintf(
+					"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
+						"不写 price_versions，价格已存入模型目录备查",
+					len(p.Models), skipped)
+				rows := n
+				if rows == 0 {
+					rows = len(p.Models)
+				}
+				return rows, 0, joinNotes(degradedNote(p.Meta), extra), nil
+			}
+			return n, 0, degradedNote(p.Meta), nil
+		})
+	}
 
 	// ── ⑥ 目录 ──
-	s.run(ctx, res, caps, CapModelCatalog, func() (int, int, string, error) {
-		cs, err := s.Adapter.FetchModelCatalog(ctx, sess)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		n, err := s.Sink.SaveCatalog(ctx, cred.ChannelID, cs)
-		if err != nil {
-			return 0, 0, "", err
-		}
-		var note string
-		if len(cs) > 0 {
-			note = degradedNote(cs[0].Meta)
-		}
-		return n, 0, note, nil
-	})
+	if s.wants(CapModelCatalog) {
+		s.run(ctx, res, caps, CapModelCatalog, func() (int, int, string, error) {
+			cs, err := s.Adapter.FetchModelCatalog(ctx, sess)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			n, err := s.Sink.SaveCatalog(ctx, cred.ChannelID, cs)
+			if err != nil {
+				return 0, 0, "", err
+			}
+			notes := make([]string, 0, len(cs))
+			for _, model := range cs {
+				if note := degradedNote(model.Meta); note != "" {
+					notes = append(notes, note)
+				}
+			}
+			return n, 0, joinNotes(notes...), nil
+		})
+	}
 
 	// ── 订阅：P4，但**必须出现在 items 里** ──
 	// AC-38 要求"不支持的项返回明确的不支持而非静默留空"，
 	// 且须与 Capabilities() 声明一致。
-	res.Items = append(res.Items, SyncItem{
-		Capability: CapSubscriptionQuotas,
-		Status:     StatusUnsupported,
-		Note:       "订阅制属交付阶段 P4（ISSUE-005 §2）",
-	})
+	if s.wants(CapSubscriptionQuotas) {
+		res.Items = append(res.Items, SyncItem{
+			Capability: CapSubscriptionQuotas,
+			Support:    Unsupported,
+			Status:     StatusUnsupported,
+			Note:       "订阅制属交付阶段 P4（ISSUE-005 §2）",
+		})
+	}
 
 	return res, nil
 }
@@ -245,7 +283,7 @@ func (s *Syncer) run(
 ) {
 	if caps[cap] == Unsupported {
 		res.Items = append(res.Items, SyncItem{
-			Capability: cap, Status: StatusUnsupported,
+			Capability: cap, Support: Unsupported, Status: StatusUnsupported,
 			Note: "该站型不支持此能力（04 §3.4）",
 		})
 		return
@@ -255,6 +293,7 @@ func (s *Syncer) run(
 	rows, failed, note, err := fn()
 	item := SyncItem{
 		Capability: cap,
+		Support:    caps[cap],
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Rows:       rows, Failed: failed, Note: note,
 	}
@@ -272,24 +311,19 @@ func (s *Syncer) run(
 			item.Note = "⚠️ 声明 degraded 却返回 ErrUnsupported —— " +
 				"违反 04 §3.4bis，属实现缺陷"
 		}
+	case caps[cap] == Supported && rows == 0:
+		item.Status = StatusFailed
+		item.Error = "该能力声明 supported，但上游未返回任何数据"
+		item.Note = joinNotes(note,
+			"supported 能力必须产生数据；请检查上游端点或修正 Capabilities() 声明")
 	default:
 		item.Status = StatusOK
-		// 采到 0 行必须**说出来**（AC-38 的"不得静默留空"）。
-		//
-		// 这条原先只在 ⑤ 价格那一项里手写着（"采到 N 个、其中 M 个未登记"），
-		// 而 ⑥ 目录与 ③ 分组没有 —— 于是 2026-09-01 第一次对真 Sub2API 站跑
-		// AC-38 时，model_catalog 返回的是 `ok`、无 rows、无 note，读起来与
-		// "采集成功且有内容"一模一样。实测真因：Sub2API 的目录派生自
-		// /api/v1/groups/available 的 available_models，而真站点（0.1.183）
-		// 一个都不返回；内网真库 13 个 sub2api 渠道合计 0 行目录可佐证
-		// （同库 newapi 是 2905 行）。
-		//
-		// 收到 run() 一处而不是各项各写一遍：这是**每一项**都成立的规则，
-		// 而散着写必然漏 —— 它已经漏了两处。fn 自己给了 note 就不覆盖
-		// （价格那条更具体：它要说的是"采到了但没写"，不是"上游没给"）。
-		if rows == 0 && failed == 0 && item.Note == "" {
-			item.Note = "上游未返回任何数据 → 落 0 行。**采集成功，不是写入失败**；" +
-				"若该站型本应有此项数据，查上游端点或 Capabilities() 声明是否过度声明"
+		if caps[cap] == Degraded && item.Note == "" {
+			if rows == 0 {
+				item.Note = "该能力声明 degraded；上游未返回可用数据"
+			} else {
+				item.Note = "该站型仅部分支持此能力；结果可能缺少字段"
+			}
 		}
 	}
 	res.Items = append(res.Items, item)

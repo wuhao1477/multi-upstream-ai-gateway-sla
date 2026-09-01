@@ -6,6 +6,7 @@
 # 02 §9.1bis 明确说 ddl-check 不覆盖的分区子表创建。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export LC_ALL=C LANG=C
 
 CT=migtestpg
 # ⚠️ PG 的宿主端口必须在 32768 以下。原先是 55433 —— 那落在 Linux 默认临时端口段
@@ -79,7 +80,7 @@ MISSING=$(q "select coalesce((select param_value#>>'{}' from config_params
   where param_key='catalog_missing_rounds'),'ABSENT')")
 [ "$MISSING" = "$WANT_ROUNDS" ] || {
   echo "❌ catalog_missing_rounds = $MISSING，期望 $WANT_ROUNDS"; exit 1; }
-echo "   ✅ catalog_missing_rounds = $WANT_ROUNDS（取 0 会让每轮都判模型下架）"
+echo "   ✅ catalog_missing_rounds = ${WANT_ROUNDS}（取 0 会让每轮都判模型下架）"
 
 echo "── 3/8 幂等：重复迁移 ──"
 go run ./cmd/migrate -dsn "$DSN" >/dev/null
@@ -146,7 +147,32 @@ COLS=$(q "select count(*) from information_schema.columns where table_name='upst
           and column_name in ('channel_group_id','remain_quota_usd','used_quota_usd',
                               'rpm_limit','concurrency_limit','quota_synced_at')")
 [ "$COLS" = "6" ] || { echo "❌ upstream_keys 的 P1 列 = $COLS，期望 6"; exit 1; }
-echo "   ✅ P1 三表 + upstream_keys 六列就位"
+coldef() {
+  q "select a.attnotnull::text||'/'||coalesce(pg_get_expr(d.adbin,d.adrelid),'')
+     from pg_class c
+     join pg_attribute a on a.attrelid=c.oid
+     left join pg_attrdef d on d.adrelid=c.oid and d.adnum=a.attnum
+     where c.relname='$1' and a.attname='$2' and not a.attisdropped"
+}
+CSEQ=$(coldef channels catalog_sync_seq)
+LSEQ=$(coldef channel_model_catalog last_seen_seq)
+[ "$CSEQ" = "true/0" ] || {
+  echo "❌ channels.catalog_sync_seq = ${CSEQ:-ABSENT}，期望 NOT NULL DEFAULT 0"; exit 1; }
+[ "$LSEQ" = "true/0" ] || {
+  echo "❌ channel_model_catalog.last_seen_seq = ${LSEQ:-ABSENT}，期望 NOT NULL DEFAULT 0"; exit 1; }
+SEQ_CHECKS=$(q "select count(*) from pg_constraint
+                where conname in ('channels_catalog_sync_seq_nonnegative',
+                                  'channel_model_catalog_last_seen_seq_nonnegative')
+                  and pg_get_constraintdef(oid) like '%>= 0%'")
+[ "$SEQ_CHECKS" = "2" ] || {
+  echo "❌ 020 的非负 CHECK = $SEQ_CHECKS，期望 2"; exit 1; }
+echo "   ✅ P1 三表 + upstream_keys 六列 + 020 目录轮次两列就位"
+
+CRED_LOCK=$(q "select count(*) from pg_constraint
+               where conname='collector_credentials_refresh_lock_key_check'")
+[ "$CRED_LOCK" = "1" ] || {
+  echo "❌ 缺 Sub2API refresh_lock_key 约束（021）"; exit 1; }
+echo "   ✅ Sub2API 凭证 refresh_lock_key 约束就位"
 
 echo "── 6/8 CHECK 取值与站型注册表一致 ──"
 # 017 收窄了 site_family 与 cred_type 的取值。这里断言"库里的取值范围 == 从注册表
@@ -354,11 +380,13 @@ TESTS=(
   TestImportRollsBackOnCredentialFailure
   TestImportRepairsIncompleteChannel
   TestImportRepairAddsSnapshotAndKeepsWarning
+  TestImportRepairUpdatesCredentialFamily
   TestImportRejectsBadBaseURL
   TestImportValidatesBeforeProbing
   TestPatchChannelRejectsBadBaseURL
   TestChannelBaseURLNormalizedAndUnique
   TestCreateChannelRollsBackWhenSaveDetectedFails
+  TestCreateKeyRejectsUnknownGroupRef
 )
 PAT="^($(IFS='|'; echo "${TESTS[*]}"))\$"
 EXPECT=${#TESTS[@]}
@@ -381,8 +409,40 @@ if [ "${RAN:-0}" -ne "$EXPECT" ]; then
   grep -E '^--- (PASS|FAIL|SKIP)' /tmp/import-tx.log | sed 's/^/   /'
   exit 1
 fi
-echo "   ✅ 导入：凭证失败整体回滚 / 半成品能补齐 / 补齐补上探测快照且不覆盖 warning / 坏 base_url 被拒"
+echo "   ✅ 导入：凭证失败整体回滚 / 半成品能补齐 / 补齐补上探测快照且不覆盖 warning / 凭证站型同步更新 / 坏 base_url 被拒"
 echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 019 唯一约束 / 建渠道与探测快照同生共死"
+
+STORE_TESTS=(
+  TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey
+  TestSaveTxPreservesExistingRefreshLockKeyOnPartialUpdate
+  TestCredentialRefreshLockMigrationMatchesRuntimeURLNormalization
+  TestCatalogStaleAfterReliableMissingRounds
+  TestUnregisteredKeySnapshotVisibleInInventory
+  TestSaveKeyPersistsZeroQuota
+  TestSavePricingUpdatesExistingCatalogPriceOnly
+  TestSaveGroupsMissingModelFieldPreservesPreviousModels
+)
+PAT="^($(IFS='|'; echo "${STORE_TESTS[*]}"))\$"
+EXPECT=${#STORE_TESTS[@]}
+if ! SLA_TEST_DSN="$DSN" go test ./internal/store/ -run "$PAT" -count=1 -v \
+     >/tmp/catalog-round.log 2>&1; then
+  echo "❌ 资产采集持久化测试失败"
+  sed 's/^/   /' /tmp/catalog-round.log | tail -40
+  exit 1
+fi
+RAN=$(grep -c '^--- PASS: Test' /tmp/catalog-round.log || true)
+SKIPPED=$(grep -c '^--- SKIP: Test' /tmp/catalog-round.log || true)
+if [ "${SKIPPED:-0}" -gt 0 ] || [ "${RAN:-0}" -ne "$EXPECT" ]; then
+  echo "❌ 资产采集持久化测试未真实跑完（pass=${RAN:-0}/${EXPECT} skip=${SKIPPED:-0}）"
+  grep -E '^--- (PASS|FAIL|SKIP): Test' /tmp/catalog-round.log | sed 's/^/   /'
+  exit 1
+fi
+echo "   ✅ 目录轮次：连续 3 个可靠轮次缺席后 stale；再次出现后清除 stale"
+echo "   ✅ 异常：未登记 Key 可见，补登记后消失"
+echo "   ✅ Key 用量：明确采到 0 时覆盖旧额度，不把 0 当成缺字段"
+echo "   ✅ 价格：独立价格周期刷新现有目录且不推进目录轮次"
+echo "   ✅ 分组：降级响应缺少模型字段时保留旧模型清单"
+echo "   ✅ 凭证：跨实例共享 refresh_lock_key 且只刷新一次"
 
 echo
 echo "✅ 迁移集成测试全部通过"

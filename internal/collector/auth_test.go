@@ -14,24 +14,43 @@ import (
 )
 
 type memStore struct {
-	mu    sync.Mutex
-	saved []Credential
-	err   error
+	mu     sync.Mutex
+	saved  []Credential
+	latest map[string]Credential
+	err    error
 	// onSave 在保存时回调，用于验证"先持久化再释放锁"的顺序
 	onSave func()
 }
 
-func (m *memStore) Save(_ context.Context, c Credential) error {
+func (m *memStore) WithRefreshLock(
+	_ context.Context, c Credential,
+	refresh func(Credential) (Credential, bool, error),
+) (Credential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := RefreshLockKey(c)
+	if cur, ok := m.latest[key]; ok {
+		c = cur
+	}
+	fresh, changed, err := refresh(c)
+	if err != nil {
+		return c, err
+	}
+	if !changed {
+		return fresh, nil
+	}
 	if m.onSave != nil {
 		m.onSave()
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.err != nil {
-		return m.err
+		return c, m.err
 	}
-	m.saved = append(m.saved, c)
-	return nil
+	if m.latest == nil {
+		m.latest = map[string]Credential{}
+	}
+	m.saved = append(m.saved, fresh)
+	m.latest[key] = fresh
+	return fresh, nil
 }
 
 func (m *memStore) count() int {
@@ -242,6 +261,34 @@ func testJWT(t *testing.T, claims map[string]any) string {
 	}
 	return "eyJhbGciOiJIUzI1NiJ9." +
 		base64.RawURLEncoding.EncodeToString(b) + ".sig-not-verified"
+}
+
+func TestRefreshLockKeyUsesSub2APIAccountIdentity(t *testing.T) {
+	tok := testJWT(t, map[string]any{"user_id": 42, "exp": time.Now().Add(time.Hour).Unix()})
+	first := Credential{
+		Family: FamilySub2API, ChannelID: 1, BaseURL: "HTTPS://API.EXAMPLE.COM/",
+		AccessToken: tok,
+	}
+	withStoredID := first
+	withStoredID.ExternalUserID = "7500"
+	if got := RefreshLockKey(withStoredID); !strings.HasSuffix(got, ":7500") {
+		t.Fatalf("已有 external_user_id 时应优先于 JWT user_id，得到 %q", got)
+	}
+	second := first
+	second.ChannelID = 2
+	second.BaseURL = "https://api.example.com"
+	if a, b := RefreshLockKey(first), RefreshLockKey(second); a == "" || a != b {
+		t.Fatalf("同站同账号应共享刷新锁键，得到 %q 与 %q", a, b)
+	}
+
+	other := second
+	other.AccessToken = testJWT(t, map[string]any{"user_id": 43})
+	if RefreshLockKey(other) == RefreshLockKey(first) {
+		t.Fatal("同站不同账号不得共享刷新锁键")
+	}
+	if got := RefreshLockKey(Credential{Family: FamilyNewAPI, ChannelID: 1}); got != "" {
+		t.Fatalf("无需主动刷新的 NewAPI 不应生成刷新锁键，得到 %q", got)
+	}
 }
 
 // ── 不变式 S-1：同账号刷新必须串行 ──
@@ -461,8 +508,12 @@ func TestFailedPersistDoesNotBecomeLatest(t *testing.T) {
 	if _, err := auth.EnsureFresh(context.Background(), cred, r, time.Now()); err == nil {
 		t.Fatal("持久化失败应报错")
 	}
-	// 第二次调用应重新尝试刷新（而不是复用那个没落库的凭证）
-	if got := auth.newestKnown(cred).AccessToken; got != "old" {
-		t.Errorf("未落库的凭证不该成为 latest，当前 %q", got)
+	store.err = nil
+	got, err := auth.EnsureFresh(context.Background(), cred, r, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.calls.Load() != 2 || got.AccessToken != "new-access" {
+		t.Errorf("未落库的凭证不应被复用：calls=%d access=%q", r.calls.Load(), got.AccessToken)
 	}
 }

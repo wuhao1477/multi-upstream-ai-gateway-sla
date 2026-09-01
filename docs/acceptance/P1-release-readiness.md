@@ -3,10 +3,10 @@
 | | |
 | --- | --- |
 | 评估对象 | 分支 `feat/p1-upstream-inventory`，74 个提交 / 168 文件 / +25540 −2301（`git diff main...b1c58f5`，即 §2 那条基线；不写"对 HEAD"是因为 HEAD 每加一段文档就变，那样这行会天天过期） |
-| 评估日期 | 2026-08-30 首版；2026-08-31 复评（`b2ba4ad`）；2026-08-29 修掉 §3.3 表定义缺陷与 §3.4 处置后再全跑（`7be34a7`→`340a048`）；2026-09-01 第一轮：sqlc 翻案落文档后整列重跑于 `a321e73`；**第二轮**：自审 + Codex 三次评审共六条缺陷全修后重跑于 `97fb4ab`，并把退出标准①从 ✅ 改判为"不可判定 → 未通过"；**第三轮**：审"有没有过度设计"（[附三](#附三2026-09-01-第三轮--这次审的是有没有过度设计)），删掉 −40 行后又撞出三条验证链缺陷，重跑于 `2b77241`；**第四轮**：AC-38 的 sub2api 一族**真跑了一次**（[附四](#附四2026-09-01-第四轮--ac-38-的-sub2api-那半跑起来了)），①改判回 ✅；补跑 §2 三格时又撞出一条脚本缺陷（附四⑧），基线 `b1c58f5` |
+| 评估日期 | 2026-08-30 首版；2026-08-31 复评（`b2ba4ad`）；2026-08-29 修掉 §3.3 表定义缺陷与 §3.4 处置后再全跑（`7be34a7`→`340a048`）；2026-09-01 第一轮：sqlc 翻案落文档后整列重跑于 `a321e73`；**第二轮**：自审 + Codex 三次评审共六条缺陷全修后重跑于 `97fb4ab`，并把退出标准①从 ✅ 改判为"不可判定 → 未通过"；**第三轮**：审"有没有过度设计"（[附三](#附三2026-09-01-第三轮--这次审的是有没有过度设计)），删掉 −40 行后又撞出三条验证链缺陷，重跑于 `2b77241`；**第四轮**：AC-38 的 sub2api 一族**真跑了一次**（[附四](#附四2026-09-01-第四轮--ac-38-的-sub2api-那半跑起来了)），①改判回 ✅；补跑 §2 三格时又撞出一条脚本缺陷（附四⑧），基线 `b1c58f5`；**第五轮本地复验**：当前工作树新增周期采集、能力分级、真实轮次 stale、管理 CRUD、只读验收模式，并完成本地/fixture/DDL/迁移/前端、真 Sub2API AC-38 6/6 与真 NewAPI 浏览器 58/58 验证 |
 | 判定依据 | [00 §3 P1 行](../dev/00-overview-and-milestones.md) 的四条退出标准 · [#13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13) 退出清单 · [14 §3](../dev/14-acceptance-matrix.md) 规则 3「不可判定即不通过」 |
 | 证据 | [P1-evidence.md](P1-evidence.md)（本文件不重复举证，只做判定） |
-| **结论** | **四条退出标准全部满足，技术上可发。** ①的 AC-38 在 sub2api 一族上当日已在 HEAD 上实跑通过（`verify/ac38-sub2api.sh` 打真站点 `upstream-b.invalid`），②③④ 可复跑且全绿。§3 那**六条**已知缺口一起发（§3 共列九条，§3.1 / §3.2 / §3.6 已结清；§3.9 是本轮新增：Sub2API 的模型目录在真站点上恒 0 行）。§4 三个待决事项**全部已决定并执行**。§2 整列已在 `b1c58f5` 上跑完（上一版留的三格 ⏸/⏳ 已补齐；补跑本身又抓出附四⑧那条脚本缺陷）。四轮评审的处置：2026-08-29 复评两处（标准③ CI 零覆盖 → 已补守卫；`pgx + sqlc` → 按 A 结清）；同日 Codex 二次评审两条 [high]（导入半成品已修；SSRF 边界部分修，§3.7）；2026-09-01 自审 + Codex 三次评审共六条**全部已修**（[附二](#附二2026-09-01-自审--codex-三次评审的六条)）；第三、四轮见附三、附四 |
+| **结论** | **当前工作树的 P1 技术验收通过，可以提交。远端 PR #14 仍不可合并**：本地修复尚未 commit/push，远端 HEAD 仍为 `a317c06`；PR 仍是 Draft，新 HEAD 尚无 CI。`remote-stack` 本轮因无 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35，不冒充当前证据。 |
 
 > 这份文件此前不存在。2026-08-30 的 P1-evidence §5.13 记着一条我自己的记账错误：
 > 上一轮我声称写下并提交过 `P1-release-readiness.md`（commit `7c4c72f`），实测
@@ -19,7 +19,7 @@
 
 | # | 标准（00 §3 原文） | 判定 | 依据 |
 | --- | --- | --- | --- |
-| ① | **AC-37/38/39/40 全通过** | ✅（2026-09-01 **第四轮**恢复；同日第三轮曾判"不可判定 → 未通过"） | AC-37/39/40 在 HEAD 可复跑且全绿；**AC-38 的 sub2api 一族当日已在 HEAD 上真跑一次** —— `verify/ac38-sub2api.sh` 打真站点 `upstream-b.invalid`（Sub2API 0.1.183），探测归族、逐项结果带耗时、429 限流、Key 额度前进全部实测通过。详见下方改判说明与 §3.1 |
+| ① | **AC-37/38/39/40 全通过** | ✅ 当前工作树已复验 | fixture 真库回归通过；真 NewAPI 浏览器 58/58；真 Sub2API AC-38 6/6（supported 有数据、degraded 零行有说明、unsupported 显式、第二次 sync 429）。 |
 | ② | 对**全部真实渠道**跑一次全量 sync 并留存覆盖率报告 | ✅ | 四轮已归档进 [`coverage/`](coverage/)。前三轮 65 渠道逐站有结果；2026-08-31 那轮是 45 渠道（放弃 20 个后的在纳管范围），跳过的 20 个记在 `skipped_disabled` 里 |
 | ③ | Key 明文在响应/日志/抓包中**一处都不出现** | ✅ | 整份 DOM grep（FR-094）+ core 日志断言（`ui-stack.sh` 末步）+ 脱敏在 SQL 侧（`left(secret,8)\|\|'…'`，完整 secret 不出库）+ **CI 侧 `secret_render_test.go` 三条源码断言**（2026-08-29 补，见下） |
 | ④ | **每个已注册家族**的 `Capabilities()` 与实际返回一致 | ✅ | `TestCapabilitiesMatchDocMatrix` + [§5.14](P1-evidence.md#514-加一族更可靠这个声称本身的验证2026-08-30) 的注入验证（往注册表塞一族假家族，五种填错各红一次） |
@@ -105,7 +105,7 @@
 
 ## 2. 验收规模（全部实跑，非推断）
 
-下表**整列都在 `b1c58f5`（当前 HEAD）上重跑过**（2026-09-01 第四轮；此前是同日的
+下表**整列都在 `b1c58f5`（历史基线）上重跑过**（2026-09-01 第四轮；此前是同日的
 `c826cd7`、`2b77241`、`97fb4ab` 与 `a321e73`、2026-08-29 的 `7be34a7` 与 `340a048`、
 2026-08-31 的 `b2ba4ad`）。
 复评每轮先做的都是核对"每份证据取自哪个提交"，而这条纪律**已经抓出过两次同类空档**：
@@ -132,14 +132,19 @@
 ⚠️ **这不算第三行空档** —— 空档的定义是"文档里那句话已经过期而没人改"，
 而这几次都是在同一轮里连着改的。判据仍是下面那条命令，不是我的记性。
 
-**基线 `b1c58f5` 之后的提交只有文档**，判据是一条可复跑的命令（空输出即成立）：
+**基线 `b1c58f5` 之后只有文档**这条历史判据已不适用于当前工作树。本轮核对时可见
+`internal/**`、`verify/**`、`web/**` 均已有 P1 相关改动；因此下面这条只保留为历史基线的判据，
+不能替当前工作树背书：
 
 ```bash
 git diff b1c58f5..HEAD --stat -- '*.go' '*.sh' '*.mjs' Makefile deploy/ web/ migrations/
 ```
 
-这么写而不是"再改一次基线号"，是因为每加一段文档就重跑一遍 107 项没有意义 ——
-但**判据必须可复跑**，否则"只改了文档"又是一句只能靠我记性的话。
+当前工作树已补跑：`go test -race -p=1 ./...`、`go vet ./...`、fmt/gen/migration 与文档检查、
+DDL 真跑、迁移真库集成、前端 test/lint/typecheck/build、verify 脚本检查、P1 浏览器 58/58、
+`make test-ac38-sub2api` 6/6、`cmd/collector -once` 与 `git diff --check`。`remote-stack.sh`
+因本轮环境没有 `DATABASE_URL` 未重跑，仍只引用 `b1c58f5` 的历史 35/35；它不替代上述
+当前工作树证据，也不作为 P1 四条退出标准的新阻塞。
 
 ⚠️ 历史注记：实库迁移（018）与实库写入（`channel 1` 的 PATCH）都在 `340a048` 那轮
 之前完成，故 35 项自那轮起跑的都是改后的台账（44 在纳管 / 21 停用）。
@@ -151,9 +156,9 @@ git diff b1c58f5..HEAD --stat -- '*.go' '*.sh' '*.mjs' Makefile deploy/ web/ mig
 | `make check`（fmt / vet / **test -race** / 配置键生成 / 迁移一致）+ 本地 `golangci-lint`（**不含在 `make check` 里**，CI 的 `gate` 才跑） | ✅ | ✅ |
 | `verify/gate.sh`（文档 13 类 + 覆盖率分类自测 + DDL 真跑 pg16，109 条） | ✅ | ✅ |
 | `test-migrate.sh` **8/8**（第 6、7 步：站型注册表一致 + 两处 `billing_unit` 列定义一致；**第 8 步是渠道与导入写路径的 8 条真库 Go 测试**，两轮各一批，见[附一](#附codex-二次评审的两条-high2026-08-29)与[附二](#附二2026-09-01-自审--codex-三次评审的六条)） · `test-config-api.sh` 9+2 · `test-compose.sh` 5 步 | ✅ | ✅ |
-| `ui-stack.sh`：SPA **14** + 浏览器 **58** + 日志 **1**（真上游取自探活：redacted-channel-03 API `upstream-a.invalid`，1370 个模型 / 倍率 1161 + 按次 209；导入试运行 106/110 条 → 可入库 67 / 跳过 39 / 失败 0） | ✅ 两份导出各跑一遍（0828 与 0901），均 58/58 | ❌ 需真上游令牌 |
-| **`ac38-sub2api.sh`（本轮新增）**：AC-38 的 sub2api 一族 —— 真站点 `upstream-b.invalid`（0.1.183）+ 临时 PG。探测归族 / 逐项带耗时 / 不支持项显式 unsupported / 8 个分组 / Key 额度前进 / 第二次 sync 429 | ✅ 6/6 步 | ❌ 需真上游令牌 |
-| `remote-stack.sh`：内网真库只读 **35**（2026-08-31 从 32 增：停用态 3 条） | ✅ 35/35 | ❌ runner 到不了 <internal-db-host> |
+| `ui-stack.sh`：SPA **14** + 浏览器 **58** + 日志 **1**（真上游取自探活：redacted-channel-03 API `upstream-a.invalid`，1370 个模型 / 倍率 1161 + 按次 209；当前导出 110 条 → 可入库 69 / 跳过 41 / 失败 0） | ✅ 当前工作树 58/58 | ❌ 需真上游令牌 |
+| **`ac38-sub2api.sh`**：AC-38 的 sub2api 一族 —— 真站点 `upstream-b.invalid` + 临时 PG。探测归族 / 能力分级 / 逐项带耗时 / 9 个分组 / Key 额度前进 / 第二次 sync 429 | ✅ 当前工作树 6/6 步 | ❌ 需真上游令牌 |
+| `remote-stack.sh`：内网真库只读 **35**（2026-08-31 从 32 增：停用态 3 条） | ⚠️ `b1c58f5` 历史 35/35；本轮无 `DATABASE_URL` 未重跑 | ❌ runner 到不了 <internal-db-host> |
 | `test-arm-cloud.sh`：云端 arm64 真机（3 个 ELF 均 arm64 / 镜像版本 = HEAD / 其上再跑 14+58） | ✅ 8/8 步 —— 镜像 `sla-core:arm64-b1c58f5`，云端 run #33472831550，其上 14/14 + 58/58 | ❌ 需 arm64 宿主 + 真上游 |
 | `secret_render_test.go` **3** 条（2026-08-29 补：标准③的唯一 CI 侧守卫，5 路反向自验；**含在 `make check` 的 `test` 里**，不另计入 107） | ✅ | ✅ |
 | CI `gate` + `build-arm` | ✅ @ `b1c58f5`：run #33472831566 / #33472831550 | — |
@@ -394,8 +399,8 @@ no_shield / quota_per_unit），**不回原始响应体** —— 故它不是外
 
 | | |
 | --- | --- |
-| 被消费的 | **4 个** —— `collector_request_interval_ms`（`cmd/sla-core`、`cmd/collector`）、`collector_catalog_interval_h`、`catalog_missing_rounds`、`sync_min_interval_s`（后三个在 `internal/admin`） |
-| 未被消费的 | **68 个** —— 调度期限、探测预算、容量上限、余额安全垫、健康与冷却、计费容差、告警生命周期、账本批提交、debug 抓包…… 全部属 P2~P4 |
+| 被消费的 | **7 个** —— `collector_request_interval_ms`、`collector_balance_interval_min`、`collector_keyquota_interval_min`、`collector_price_interval_h`、`collector_catalog_interval_h`、`catalog_missing_rounds`、`sync_min_interval_s` |
+| 未被消费的 | **65 个** —— 调度期限、探测预算、容量上限、余额安全垫、健康与冷却、计费容差、告警生命周期、账本批提交、debug 抓包…… 全部属 P2~P4 |
 | 判据 | 遍历 `params_gen.go` 的 72 个 `Key:`，在非生成、非测试的 Go 源里搜 `"<key>"`；68 个零命中 |
 | 现在的表现 | 运维改 `max_hops`：走完两步确认 → 落 `config_params` → 进版本历史 → **零行为变化**。接口与界面都不说这件事 |
 
@@ -409,10 +414,10 @@ no_shield / quota_per_unit），**不回原始响应体** —— 故它不是外
 「不写死家族清单」的理由。真正管得住的判据是上面那条命令，写在这里。
 
 **不阻断**：一期没有任何 AC 依赖这 68 个键；四条退出标准也不涉及。它的后果是**运维
-可能以为自己调了参数**，而这条现在写下来了。⚠️ P2 接线时逐个键要做的事：接上 →
+可能以为自己调了参数**，而这条现在写下来了。P2 接线时逐个键要做的事：接上 →
 从这张表的"未被消费"里划掉。**这张表的两个数字加起来必须永远是 72。**
 
-### 3.9 Sub2API 的模型目录在真站点上恒为 0 行，而 `Capabilities()` 声明 supported（2026-09-01 第四轮查明）
+### 3.9 Sub2API 的模型目录在真站点上恒为 0 行，当前声明为 degraded（2026-09-01 校正）
 
 跑 AC-38 的 sub2api 一族时撞到的。**先说结论：这条是"上游不给"，不是"我们没写"。**
 
@@ -421,14 +426,14 @@ no_shield / quota_per_unit），**不回原始响应体** —— 故它不是外
 | 现象 | 真 Sub2API 站（`upstream-b.invalid`，0.1.183）采集后 `channel_model_catalog` 与 `group_models` 都是 **0 行**，而 `channel_groups` 有 8 行、Key 额度正常前进 |
 | 真因 | 该族的模型目录**派生自** `/api/v1/groups/available` 的 `available_models` —— 实测该端点的分组对象里没有 `available_models` / `models` / `supported_models` 任何一个字段 |
 | 佐证 | 内网真库 13 个 sub2api 渠道合计 **0 行**目录（同库 newapi 是 2905 行）。即这不是这一个站的偏差 |
-| 声明 | `Sub2APIAdapter.Capabilities()` 里 `CapModelCatalog: Supported` |
+| 声明 | `Sub2APIAdapter.Capabilities()` 里 `CapModelCatalog: Degraded` |
 
 **当轮修的是"静默"，不是"0 行"。** 原先这一项返回 `status=ok`、无 `rows`、无 `note` ——
 与"采到了几百个模型"在响应里**完全无法区分**，正是 AC-38 点名的静默留空，只不过
 它藏在 `ok` 那一侧。现在 `sync.go` 的 `run()` 统一给 0 行的项补一条说明
 （守卫 `TestSyncNotesEmptyResultInsteadOfSilentOK`，反向自验红在四项上）。
 
-**为什么不把声明改成 `Unsupported`**（这是另一条看起来更"诚实"的路）：
+**为什么不把声明改成 `Unsupported`**：
 `Unsupported` 会让 `run()` **完全跳过这一项**，连请求都不发。那样一旦某个 Sub2API
 部署真的返回了 `available_models`，我们永远采不到它 —— 用一个更窄的谎换掉一个更宽的。
 适配器**实现了**这条通路，缺的是上游数据；这两件事必须分开记。
@@ -602,7 +607,7 @@ make 目标。同一个符号，底下垫的东西不同 —— 这正是 §1 �
 | ① | `import_api.go` 的 `detectStash` | 带 mutex 的 map + 两个方法 + 一段注释（-28 行） | `make([]DetectResult, len(accounts))`，按下标写。它与紧邻的 `res.Items[idx] = item` 做的是同一件事，而后者从来没上锁 —— 那把锁不保护任何东西（`-race` 全绿证明了这点）。顺带删掉 `load` 的 `ok` 分支：`status=="detected"` 时它恒真 | 我 |
 | ② | `validateBaseURL` + 三处 `TrimRight` | 校验与规范化分离的四处代码 | **合成一个函数**：`validateBaseURL` 现在返回规范形态，三个入口各一次调用。原先三份规范化里**两份漏了 `TrimSpace`** —— 首尾带空白的 `site_url` 在探测那头放行（请求真的发出去了）、到落库那头判 400，同一个输入两种判定 | 我 + Codex |
 | ③ | `test-migrate.sh` 第 8 步的 `-run` 前缀正则 | `TestImport\|TestChannel\|…` | 逐个列出并锚定 `^(…)$` 的 8 个测试名。前缀正则会让**任何**日后新增的同前缀合法测试把迁移验收弄红，而那跟迁移毫无关系 | Codex [low] |
-| ④ | `cmd/collector` 的一行日志 | 「采集适配器尚未接入（#5/#6/#7）」—— **已经不成立**，那三个 issue 早已完成 | 说真话：一期无周期采集（FR-116 属 P2 起），采集经管理面手动触发（FR-128）。留一句指向已关 issue 的话，会让人去翻三个已完成的 issue 找原因 | 我 |
+| ④ | `cmd/collector` 的一行日志 | 「采集适配器尚未接入（#5/#6/#7）」—— **已经不成立**，那三个 issue 早已完成 | 说真话：P1 已有周期采集入口，手动 sync 与周期采集共用 Runner；留一句指向已关 issue 的话，会让人去翻三个已完成的 issue 找原因 | 我 |
 
 ②同时修掉 Codex 的 [medium]：`validateBaseURL` 现在**小写 host**（不动 path），于是
 `https://EXAMPLE.invalid` 与 `https://example.invalid` 规范成同一个字面值，被 019 拦住。
@@ -670,8 +675,8 @@ sub2api 渠道」。
 | # | 做了什么 | 为什么 |
 | --- | --- | --- |
 | ① | 新增 `verify/ac38-sub2api.sh` + `make test-ac38-sub2api` | AC-38 的 sub2api 一族。**站点从 `HUB_FILE` 探活选，不写死**（令牌是短寿 JWT，写死站名 = 明天必红且红错地方）；**库用临时 PG，不碰真库**（REAL 要真站点，而真库没有 DELETE 渠道的入口） |
-| ② | `sync.go` 的 `run()`：0 行的项补一条说明 | 跑①时撞到 `model_catalog` 返回 `ok` / 无 rows / 无 note，与"采到几百个模型"无法区分 —— AC-38 点名的静默留空，藏在 `ok` 那一侧。规则本来就写在 ⑤ 价格那一项里，但它是手写在**那一项**里的，于是 ③ 分组与 ⑥ 目录都漏了 |
-| ③ | 记下 [§3.9](#39-sub2api-的模型目录在真站点上恒为-0-行而-capabilities-声明-supported2026-09-01-第四轮查明) | Sub2API 的目录派生自 `available_models`，而真站点不返回该字段 → 恒 0 行。真库 13 个渠道合计 0 行佐证。**没把声明改成 `Unsupported`**：那会让 `run()` 连请求都不发 |
+| ② | `sync.go` 的 `run()`：0 行的项补一条说明 | 跑①时撞到 `model_catalog` 返回 `ok` / 无 rows / 无 note，与"采到几百个模型"无法区分 —— AC-38 点名的静默留空，藏在 `ok` 那一侧。现在口径是：`supported` 空结果为失败，`degraded` 空结果必须说明原因 |
+| ③ | 记下 [§3.9](#39-sub2api-的模型目录在真站点上恒为-0-行当前声明为-degraded2026-09-01-校正) | Sub2API 的目录派生自 `available_models`，而真站点不返回该字段 → 恒 0 行。真库 13 个渠道合计 0 行佐证。**没把声明改成 `Unsupported`**：那会让 `run()` 连请求都不发 |
 | ④ | ① 改判回 ✅、§3.1 结清、#12 第一项改回可勾 | 依据变了（那件事跑了），不是重新解释规则 |
 
 ### 三条自己撞出来的（都在验收脚本里，不在产品代码）

@@ -17,8 +17,10 @@ type GroupRow struct {
 	GroupRef        string
 	RateMultiplier  *float64 // 可空：采不到倍率时不写 0（0 倍率语义上是"免费"）
 	AvailableModels []string
-	DataSource      string // auto_collect | manual
-	FetchedAt       time.Time
+	// PreserveModels keeps the last complete list when this response omitted the model field.
+	PreserveModels bool
+	DataSource     string // auto_collect | manual
+	FetchedAt      time.Time
 	// Payload 是不落结构化列的字段（高峰倍率/独占/平台等，ISSUE-005 §3.1）。
 	Payload map[string]any
 }
@@ -27,9 +29,7 @@ type GroupRow struct {
 //
 // **单事务**（09 §5.0bis：③ 分组一个事务）。两个语义各不相同：
 //   - channel_groups：upsert（分组本身长期存在，倍率会变）
-//   - group_models：**按分组全量替换**（02 §1.3bis）—— 上游的完整声明，
-//     diff 需要额外判断"这次没返回"是下架还是接口抽风，而全量替换配合
-//     "采集失败则整项 failed 不进事务"已表达正确语义
+//   - group_models：完整响应按分组全量替换；缺少模型字段的 degraded 响应保留旧清单
 func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -60,21 +60,23 @@ RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier, g.DataSource, g.Fetche
 			return n, fmt.Errorf("写分组 %s: %w", g.GroupRef, err)
 		}
 
-		// 全量替换该分组的可用模型
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM group_models WHERE channel_group_id = $1`, gid); err != nil {
-			return n, fmt.Errorf("清空分组 %s 的模型: %w", g.GroupRef, err)
-		}
-		for _, name := range g.AvailableModels {
-			if name == "" {
-				continue
+		if !g.PreserveModels {
+			// 完整响应全量替换；显式空数组表示该分组当前没有可用模型。
+			if _, err := tx.Exec(ctx,
+				`DELETE FROM group_models WHERE channel_group_id = $1`, gid); err != nil {
+				return n, fmt.Errorf("清空分组 %s 的模型: %w", g.GroupRef, err)
 			}
-			if _, err := tx.Exec(ctx, `
+			for _, name := range g.AvailableModels {
+				if name == "" {
+					continue
+				}
+				if _, err := tx.Exec(ctx, `
 INSERT INTO group_models (channel_group_id, model_name, fetched_at)
 VALUES ($1,$2,$3)
 ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
-				gid, name, g.FetchedAt); err != nil {
-				return n, fmt.Errorf("写分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+					gid, name, g.FetchedAt); err != nil {
+					return n, fmt.Errorf("写分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+				}
 			}
 		}
 		n++

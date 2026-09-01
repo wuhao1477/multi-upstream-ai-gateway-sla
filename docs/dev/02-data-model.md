@@ -114,6 +114,7 @@ CREATE TABLE channels (
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
+  catalog_sync_seq BIGINT NOT NULL DEFAULT 0 CHECK (catalog_sync_seq >= 0), -- 可靠目录成功轮次（FR-126）
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -309,6 +310,7 @@ CREATE TABLE channel_model_catalog (
                   ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
   PRIMARY KEY (channel_id, model_name)
 );
 
@@ -353,7 +355,7 @@ SELECT :gid, unnest(:model_names::text[]), :fetched_at;
 COMMIT;
 ```
 
-- **全量替换而非 diff**：分组可用模型是**上游的完整声明**，diff 需要额外判断"这次没返回"是"下架了"还是"接口抽风"——而全量替换配合"采集失败则整项 `failed`、不进事务"已经表达了正确语义：**要么用这次的完整快照，要么保留上一次的**。
+- **完整响应全量替换**：分组可用模型是上游的完整声明；显式空数组会清空旧清单。若响应缺少 `available_models`/`models`/`supported_models` 字段并标为 `degraded`，则只更新分组本身并保留上一次模型清单，避免把“上游没给字段”误当成“当前零模型”。
 - **并发安全**：③ 已被 `sync` 的渠道级 advisory lock 串行化（[09 §5.0bis](./09-admin-api.md)），同渠道不会有两个 sync 同时删同一分组。
 - **空结果的处理**：若上游明确返回"该分组零个可用模型"，则删完不插——这是合法状态。但**若采集报错，整项 `failed`、事务不提交**，旧行保留。
 
@@ -362,13 +364,14 @@ COMMIT;
 ```sql
 INSERT INTO channel_model_catalog
        (channel_id, model_name, input_price, output_price, billing_unit,
-        first_seen_at, last_seen_at)
-VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''), :now, :now)
+        first_seen_at, last_seen_at, last_seen_seq)
+VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''), :now, :now, :sync_seq)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price   = EXCLUDED.input_price,
        output_price  = EXCLUDED.output_price,
        billing_unit  = EXCLUDED.billing_unit,
-       last_seen_at  = EXCLUDED.last_seen_at;
+       last_seen_at  = EXCLUDED.last_seen_at,
+       last_seen_seq = EXCLUDED.last_seen_seq;
        -- ⚠️ **不更新 first_seen_at** —— 它记录"首次见到"，被覆盖就永久丢失
 ```
 
@@ -388,8 +391,10 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 - **无价则口径留 NULL**：`pricing` 标 degraded 的站型（现役 Sub2API）单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
 - **消费方义务**：读 `input_price` 前必须先读 `billing_unit`，缺失时**不得**假定任何默认口径。
 
-- **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断——`last_seen_at` 停止前进**本身就是下架信号**。
-- **下架判据**：`last_seen_at` 连续 `catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）轮采集未前进 → 视为下架，触发 P3 告警（AC-40）。用"轮数"而非"时长"是因为采集周期可配，轮数对周期变化免疫。
+- **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断。
+- **真实轮次**：仅当本轮模型存在性信息完整时，`channels.catalog_sync_seq` 才递增；本轮出现的模型把 `last_seen_seq` 更新为该值。缺 `available_models` 等字段的降级结果不递增，避免把"上游没给完整清单"误判成下架。
+- **独立价格周期**：`collector_price_interval_h` 到期时只刷新已有目录行的价格与 `billing_unit`，不改 `last_seen_at`/`last_seen_seq`，也不推进目录可靠轮次；已登记为可路由模型时同时追加 `price_versions`。
+- **下架判据**：`catalog_sync_seq - last_seen_seq >= catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）即疑似下架，并在 P1 管理界面显示异常；`alert_events` 持久化告警属 P3（AC-40）。该判据直接计可靠成功轮次，不受任务延迟、手动刷新或采集周期修改影响。
 
 **`upstream_keys` 的用量列：只更新、不插入**
 
@@ -2822,7 +2827,9 @@ CREATE TABLE collector_credentials (
   refresh_lock_key TEXT,                        -- 按账号加互斥锁串行刷新
   status          TEXT NOT NULL DEFAULT 'valid'
                     CHECK (status IN ('valid','expiring','invalid','needs_relogin')),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT collector_credentials_refresh_lock_key_check
+    CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
 -- 采集快照（FR-011/020/116；ISSUE-002 §5 降级一致性）：每次采集一行，标来源+时效
@@ -2876,13 +2883,14 @@ CREATE TABLE balance_signals (
 
 | `scope_type` | `scope_id` 填什么 | payload 必备键 | 可选键 |
 | --- | --- | --- | --- |
-| `key` | `upstream_keys.id`（十进制字符串） | `remain_quota_usd`、`used_quota_usd` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
+| `key` | 已登记时为 `upstream_keys.id`（十进制字符串）；未登记时为上游 `external_ref` | 已登记：`remain_quota_usd`、`used_quota_usd`；未登记：`unregistered=true` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
 | `group` | `channel_groups.group_ref` | `rate_multiplier` | `peak_enabled`、`peak_start`、`peak_end`、`peak_rate_multiplier`、`is_exclusive`、`platform`、`subscription_type`、`rpm_limit` —— **这几项 P1 只进 payload、不落结构化列**（[§1.3](#13-上游分组与模型目录交付阶段-p1fr-123127) 的取舍表），P2/P3 需要时按本表回填 |
 | `account` | `upstream_accounts.id` | `balance_usd` | `used_usd`、`external_user_id`、`quota_per_unit`（NewAPI 的额度换算基数，逐站不同、**不可写死**） |
 | `pricing` | `models.canonical_name` 或上游原始模型名 | `input_price`、`output_price` | `cache_price`、`billing_unit`、`group_ratio`、`completion_ratio` |
 | `subscription` | ⏭ P4 | — | 订阅制整体推迟，P1~P3 不写该 scope |
 
 - **`GET /admin/keys/{id}/usage` 的读取契约**：按 `scope_type='key' AND scope_id=<id>` 取，按 `fetched_at` 升序返回 `{fetched_at, remain_quota_usd, used_quota_usd, request_count?}` 序列。缺键的点位**跳过该字段**而不是填 0（填 0 会在曲线上造出假的"额度归零"）。
+- **未登记 Key**：采集器以 `scope_id=<external_ref>`、`payload.unregistered=true` 写快照；资产总览只用该标记识别异常，并在后来登记相同 `external_ref` 后自动消失，不把它混入 Key ID 的用量时序。
 - **为何 `scope_id` 用 TEXT 存数字 id**：该列是跨 scope 复用的通用标识（`group` 用的是字符串 `group_ref`），故统一 TEXT；读取侧自行转换。
 
 **索引**

@@ -40,8 +40,6 @@ export class ApiError extends Error {
     this.name = 'ApiError'
     this.status = status
     this.body = body
-    // 继承内置类后要显式修正原型，否则 instanceof 在部分降级目标下不成立
-    Object.setPrototypeOf(this, new.target.prototype)
   }
 }
 

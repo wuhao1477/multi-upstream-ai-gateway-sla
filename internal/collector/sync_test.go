@@ -3,15 +3,17 @@ package collector
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
 // fakeSink 记录落库调用顺序，用于验证编排顺序（09 §5.0bis 冻结的依赖）。
 type fakeSink struct {
-	order      []string
-	keyErrs    map[string]error // KeyRef → 返回的错误
-	groupsErr  error
-	pricingErr error
+	order       []string
+	keyErrs     map[string]error // KeyRef → 返回的错误
+	groupsErr   error
+	pricingErr  error
+	pricingRows *int
 }
 
 func (f *fakeSink) SaveAccount(context.Context, int64, Account) error {
@@ -36,6 +38,9 @@ func (f *fakeSink) SavePricing(_ context.Context, _ int64, p Pricing) (int, erro
 	f.order = append(f.order, "pricing")
 	if f.pricingErr != nil {
 		return 0, f.pricingErr
+	}
+	if f.pricingRows != nil {
+		return *f.pricingRows, nil
 	}
 	return len(p.Models), nil
 }
@@ -204,7 +209,7 @@ func TestSyncUnregisteredKeyIsNotFailure(t *testing.T) {
 	sink := &fakeSink{keyErrs: map[string]error{"k2": ErrKeyNotRegistered}}
 	ad := &stubAdapter{
 		caps: fullCaps(),
-		keys: []Key{{KeyRef: "k1"}, {KeyRef: "k2"}},
+		keys: []Key{{KeyRef: "k2"}},
 	}
 	s := &Syncer{Adapter: ad, Sink: sink}
 	res, _ := s.Sync(context.Background(), Credential{ChannelID: 1})
@@ -218,6 +223,9 @@ func TestSyncUnregisteredKeyIsNotFailure(t *testing.T) {
 	if item.Status != StatusOK {
 		t.Fatalf("未登记的 Key 不该让该项失败（采集不自动建 Key，02 §1.3bis），"+
 			"实际 %s", item.Status)
+	}
+	if item.Rows != 1 {
+		t.Fatalf("未登记 Key 已记录异常快照，应计为 1 条采集数据，实际 rows=%d", item.Rows)
 	}
 	if item.Note == "" {
 		t.Error("应在 note 里提示需补登记（计入 inventory 异常项）")
@@ -254,6 +262,12 @@ func TestSyncReportsUnsupportedExplicitly(t *testing.T) {
 		}
 		if it.Status != StatusUnsupported {
 			t.Errorf("%s 应标 unsupported，实际 %s", cap, it.Status)
+		}
+		if it.Support != Unsupported {
+			t.Errorf("%s support = %q，期望 unsupported", cap, it.Support)
+		}
+		if it.Note == "" {
+			t.Errorf("%s 必须解释为何 unsupported", cap)
 		}
 	}
 	// unsupported 的项不该真去请求上游（省一次无谓请求）
@@ -296,7 +310,7 @@ func TestSyncDegradedCarriesNote(t *testing.T) {
 // model_catalog 返回的就是 ok / 无 rows / 无 note —— 因为该族目录派生自
 // /api/v1/groups/available 的 available_models，而真站点一个都不返回。
 // 内网真库佐证：13 个 sub2api 渠道合计 0 行目录，同库 newapi 是 2905 行。
-func TestSyncNotesEmptyResultInsteadOfSilentOK(t *testing.T) {
+func TestSyncSupportedEmptyResultFails(t *testing.T) {
 	sink := &fakeSink{}
 	// 全部声明 supported，但适配器什么都没采到（上游没给）
 	ad := &stubAdapter{caps: fullCaps()}
@@ -309,14 +323,101 @@ func TestSyncNotesEmptyResultInsteadOfSilentOK(t *testing.T) {
 		if it.Capability == CapSubscriptionQuotas || it.Rows > 0 {
 			continue
 		}
-		if it.Status != StatusOK {
-			continue // 失败项有 Error，不归本条管
+		if it.Support != Supported {
+			t.Errorf("%s support = %q，期望 supported", it.Capability, it.Support)
 		}
-		if it.Note == "" {
-			t.Errorf("%s 落 0 行却既无 rows 也无 note —— 与“采集成功且有内容”\n"+
-				"   在响应里完全无法区分（AC-38：不得静默留空）", it.Capability)
+		if it.Status != StatusFailed || it.Error == "" {
+			t.Errorf("%s 声明 supported 却落 0 行，应 failed 并解释；实际 status=%s error=%q",
+				it.Capability, it.Status, it.Error)
 		}
 	}
+}
+
+func TestSyncSupportedZeroRowsFailsEvenWithNote(t *testing.T) {
+	ad := &stubAdapter{
+		caps: fullCaps(),
+		pricing: Pricing{Meta: SourceMeta{
+			Degraded: true, MissingFields: []string{"model_price"},
+		}},
+	}
+	res, err := (&Syncer{Adapter: ad, Sink: &fakeSink{}}).Sync(
+		context.Background(), Credential{ChannelID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range res.Items {
+		if it.Capability == CapPricing {
+			if it.Status != StatusFailed {
+				t.Fatalf("supported 零行即使有 note 也必须 failed，得到 %+v", it)
+			}
+			return
+		}
+	}
+	t.Fatal("未找到 pricing 项")
+}
+
+func TestSyncPricingReportsFetchedModelsWhenVersionsSkipped(t *testing.T) {
+	zero := 0
+	ad := &stubAdapter{
+		caps:    fullCaps(),
+		pricing: Pricing{Models: []ModelPrice{{ModelName: "m"}}},
+	}
+	res, err := (&Syncer{Adapter: ad, Sink: &fakeSink{pricingRows: &zero}}).Sync(
+		context.Background(), Credential{ChannelID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range res.Items {
+		if it.Capability == CapPricing {
+			if it.Status != StatusOK || it.Rows != 1 {
+				t.Fatalf("采到价格但未写 price_versions 时应按采到模型数报告，得到 %+v", it)
+			}
+			return
+		}
+	}
+	t.Fatal("未找到 pricing 项")
+}
+
+func TestSyncDegradedEmptyResultIsExplicit(t *testing.T) {
+	ad := &stubAdapter{caps: CapabilityMap{CapGroups: Degraded}}
+	res, err := (&Syncer{Adapter: ad, Sink: &fakeSink{}}).Sync(
+		context.Background(), Credential{ChannelID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range res.Items {
+		if it.Capability != CapGroups {
+			continue
+		}
+		if it.Support != Degraded || it.Note == "" {
+			t.Fatalf("degraded 空结果必须返回声明与说明，得到 %+v", it)
+		}
+		return
+	}
+	t.Fatal("未找到 groups 项")
+}
+
+func TestSyncFindsDegradationOutsideFirstGroup(t *testing.T) {
+	ad := &stubAdapter{
+		caps: CapabilityMap{CapGroups: Degraded},
+		groups: []Group{
+			{GroupRef: "complete"},
+			{GroupRef: "partial", Meta: SourceMeta{
+				Degraded: true, MissingFields: []string{"available_models"},
+			}},
+		},
+	}
+	res, _ := (&Syncer{Adapter: ad, Sink: &fakeSink{}}).Sync(
+		context.Background(), Credential{ChannelID: 1})
+	for _, it := range res.Items {
+		if it.Capability == CapGroups {
+			if !strings.Contains(it.Note, "available_models") {
+				t.Fatalf("必须扫描所有分组的降级元数据，得到 note=%q", it.Note)
+			}
+			return
+		}
+	}
+	t.Fatal("未找到 groups 项")
 }
 
 // 声明 degraded 却返回 ErrUnsupported 是实现 bug，必须被显式点出
@@ -353,5 +454,30 @@ func TestSyncResultHasFailure(t *testing.T) {
 	r.Items = append(r.Items, SyncItem{Status: StatusPartial})
 	if !r.HasFailure() {
 		t.Error("partial 应算失败")
+	}
+}
+
+func TestSyncSelectedRunsOnlyRequestedCapabilities(t *testing.T) {
+	sink := &fakeSink{}
+	ad := &stubAdapter{
+		caps:    fullCaps(),
+		groups:  []Group{{GroupRef: "g1"}},
+		catalog: []CatalogModel{{ModelName: "m1"}},
+	}
+	res, err := (&Syncer{Adapter: ad, Sink: sink}).SyncSelected(
+		context.Background(), Credential{ChannelID: 1},
+		CapGroups, CapModelCatalog,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sink.order, ","); got != "groups,catalog" {
+		t.Fatalf("只应执行选中的能力，实际顺序 %q", got)
+	}
+	if len(res.Items) != 2 {
+		t.Fatalf("逐项结果数 = %d，期望 2", len(res.Items))
+	}
+	if res.Items[0].Capability != CapGroups || res.Items[1].Capability != CapModelCatalog {
+		t.Fatalf("逐项结果 = %+v", res.Items)
 	}
 }

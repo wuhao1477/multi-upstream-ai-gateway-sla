@@ -223,7 +223,7 @@ func (s *Server) importOne(
 		if strings.TrimRight(c.BaseURL, "/") != want {
 			continue
 		}
-		missing, err := s.incompleteParts(ctx, tx, c.ID, a)
+		missing, err := s.incompleteParts(ctx, tx, c.ID, c.SiteFamily, d.Family, a)
 		if err != nil {
 			return err
 		}
@@ -330,7 +330,8 @@ func (s *Server) importOne(
 // 可达路径是 createChannel 的 auto_detect=false，以及本轮之前 SaveDetected
 // 落库失败只 Warn 不回滚的那一支（同轮已改成事务）。
 func (s *Server) incompleteParts(
-	ctx context.Context, db store.DBTX, chID int64, a collector.HubAccount,
+	ctx context.Context, db store.DBTX, chID int64, existingFamily string,
+	detectedFamily collector.Family, a collector.HubAccount,
 ) ([]string, error) {
 	var accounts, creds, snaps int
 	if err := db.QueryRow(ctx, `
@@ -351,7 +352,16 @@ SELECT (SELECT count(*) FROM upstream_accounts WHERE channel_id=$1),
 	if snaps == 0 {
 		missing = append(missing, "探测快照")
 	}
+	if needsFamilyRepair(existingFamily, detectedFamily) {
+		missing = append(missing, "站型")
+	}
 	return missing, nil
+}
+
+func needsFamilyRepair(existing string, detected collector.Family) bool {
+	unknown := existing == "" || existing == string(collector.FamilyUnknown)
+	known := detected != "" && detected != collector.FamilyUnknown
+	return unknown && known
 }
 
 // repairChannel 给已存在但不完整的渠道补上缺的那几件。
@@ -398,6 +408,17 @@ func (s *Server) repairChannel(
 				ExternalUserID: a.UserID(),
 			}); err != nil {
 				return fmt.Errorf("补凭证: %w", err)
+			}
+		case "站型":
+			if err := store.UpdateChannel(ctx, db, store.Channel{
+				ID: chID, SiteFamily: string(d.Family),
+			}); err != nil {
+				return fmt.Errorf("补站型: %w", err)
+			}
+			if _, err := db.Exec(ctx, `
+UPDATE collector_credentials SET site_family=$2, updated_at=now()
+ WHERE channel_id=$1`, chID, string(d.Family)); err != nil {
+				return fmt.Errorf("补凭证站型: %w", err)
 			}
 		}
 	}

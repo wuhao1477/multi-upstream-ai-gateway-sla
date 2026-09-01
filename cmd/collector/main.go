@@ -8,23 +8,28 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 var version = "dev"
 
 func main() {
 	var (
-		// ⚠️ 一期这个标志**不改变任何行为**（下面没有循环可跑）。留着是因为
-		// verify/docker-compose.arm.yml 传了它，且 FR-116 的周期采集接上之后
-		// 它就是"跑一轮后退出"的那个开关。删它要连那个 compose 一起改，
-		// 换来的只是少两行。
-		once    = flag.Bool("once", false, "跑一轮后退出（一期无周期采集，故当前无行为差异）")
+		once    = flag.Bool("once", false, "跑一轮后退出")
+		dsn     = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
 		showVer = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
@@ -37,27 +42,62 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	snap := config.NewSnapshot(nil)
-	if err := snap.Validate(); err != nil {
-		logger.Error("配置校验失败", "err", err)
+	if err := run(*dsn, *once, logger); err != nil {
+		logger.Error("collector 退出", "err", err)
 		os.Exit(1)
 	}
+}
 
-	interval, err := snap.Int("collector_request_interval_ms")
-	if err != nil {
-		logger.Error("读取采集间隔失败", "err", err)
-		os.Exit(1)
+func run(dsn string, once bool, logger *slog.Logger) error {
+	if dsn == "" {
+		return errors.New("缺少 DSN：设 DATABASE_URL 或用 -dsn")
 	}
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelStart()
+	pool, err := store.NewPool(startCtx, dsn)
+	if err != nil {
+		return fmt.Errorf("连接 PG: %w", err)
+	}
+	defer pool.Close()
+
+	conn, release, err := pool.Acquire(startCtx)
+	if err != nil {
+		return err
+	}
+	boot, err := bootstrap.Run(startCtx, conn, logger)
+	release()
+	if err != nil {
+		return fmt.Errorf("初始化: %w", err)
+	}
+	snap := boot.Snapshot
+	requestInterval, err := snap.Int("collector_request_interval_ms")
+	if err != nil {
+		return err
+	}
+	periods, err := collection.IntervalsFromSnapshot(snap)
+	if err != nil {
+		return err
+	}
+	httpClient := collector.NewClient(time.Duration(requestInterval) * time.Millisecond)
+	runner := collection.NewRunner(pool, httpClient)
+	service := collection.NewService(pool, runner, collection.NewSchedule(periods), logger)
 
 	logger.Info("collector 启动",
-		"version", version, "phase", "P1", "once", *once,
-		"request_interval_ms", interval)
+		"version", version, "phase", "P1", "once", once,
+		"request_interval_ms", requestInterval,
+		"balance_interval", periods.Balance,
+		"keyquota_interval", periods.KeyQuota,
+		"price_interval", periods.Price,
+		"catalog_interval", periods.Catalog)
 
-	// ⚠️ 这行原先写的是"采集适配器尚未接入（#5/#6/#7）"，**已经不成立**：那三个
-	// issue 早已完成，`internal/collector` 的适配器齐全且在跑真站点。不成立的是
-	// **周期采集**（FR-116，P2 起）——一期只交付「按渠道手动触发立即刷新」
-	// （FR-128 / AC-38），编排在 sla-core 的管理面里（POST /admin/channels/{id}/sync）。
-	// 留着一句指向已关 issue 的话，会让人去翻三个已完成的 issue 找原因。
-	logger.Info("collector 本轮无操作：一期无周期采集（FR-116 属 P2 起），" +
-		"采集经管理面手动触发（FR-128，编排在 sla-core）")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if once {
+		return service.RunOnce(ctx)
+	}
+	if err := service.Run(ctx); errors.Is(err, context.Canceled) {
+		return nil
+	} else {
+		return err
+	}
 }

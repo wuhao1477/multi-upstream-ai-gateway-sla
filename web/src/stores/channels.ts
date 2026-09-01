@@ -37,6 +37,7 @@ export const useChannelsStore = defineStore('channels', () => {
   /** 同步失败且响应体里没有 items 时的兜底文案。 */
   const syncError = ref('')
   const syncing = ref(false)
+  let syncRequest = 0
 
   const count = computed(() => list.value.length)
 
@@ -94,9 +95,6 @@ export const useChannelsStore = defineStore('channels', () => {
         }
       }
       if (d.warning !== undefined && d.warning !== '') msg += `\n⚠️ ${d.warning}`
-      if (d.warning_persist !== undefined && d.warning_persist !== '') {
-        msg += `\n⚠️ ${d.warning_persist}`
-      }
       toast.show(msg, 'ok')
       await load()
       return true
@@ -123,11 +121,13 @@ export const useChannelsStore = defineStore('channels', () => {
 
   /** 选中一个渠道：清掉上一个渠道的采集结果，再拉总览。 */
   async function select(id: number, name: string): Promise<void> {
+    syncRequest++
     currentID.value = id
     currentName.value = name
     inventory.value = null
     syncResult.value = null
     syncError.value = ''
+    syncing.value = false
     await loadInventory()
   }
 
@@ -135,7 +135,8 @@ export const useChannelsStore = defineStore('channels', () => {
     const id = currentID.value
     if (id === null) return
     try {
-      inventory.value = await adminApi.channelInventory(id)
+      const next = await adminApi.channelInventory(id)
+      if (currentID.value === id) inventory.value = next
     } catch (e) {
       toast.fail('加载总览失败', e)
     }
@@ -144,13 +145,17 @@ export const useChannelsStore = defineStore('channels', () => {
   async function sync(): Promise<void> {
     const id = currentID.value
     if (id === null) return
+    const request = ++syncRequest
     syncing.value = true
     syncResult.value = null
     syncError.value = ''
     try {
-      syncResult.value = await adminApi.syncChannel(id)
+      const next = await adminApi.syncChannel(id)
+      if (currentID.value !== id || syncRequest !== request) return
+      syncResult.value = next
       await loadInventory()
     } catch (e) {
+      if (currentID.value !== id || syncRequest !== request) return
       // 429/409/422 都带结构化响应，一并展示 —— 运维要看到"哪一项被跳过了"，
       // 而不是只看到一句"采集失败"。
       const items = e instanceof ApiError ? itemsOf(e.body) : undefined
@@ -167,7 +172,7 @@ export const useChannelsStore = defineStore('channels', () => {
       }
       toast.fail('采集未成功', e)
     } finally {
-      syncing.value = false
+      if (currentID.value === id && syncRequest === request) syncing.value = false
     }
   }
 
