@@ -289,6 +289,36 @@ func TestSyncDegradedCarriesNote(t *testing.T) {
 	t.Error("未找到 pricing 项")
 }
 
+// 采到 0 行必须说出来 —— "ok + rows=0 + 无 note" 读起来与"采集成功且有内容"
+// 一模一样，那正是 AC-38 点名的静默留空。
+//
+// 靶子取真形态：2026-09-01 对真 Sub2API 站（upstream-b.invalid 0.1.183）跑 AC-38，
+// model_catalog 返回的就是 ok / 无 rows / 无 note —— 因为该族目录派生自
+// /api/v1/groups/available 的 available_models，而真站点一个都不返回。
+// 内网真库佐证：13 个 sub2api 渠道合计 0 行目录，同库 newapi 是 2905 行。
+func TestSyncNotesEmptyResultInsteadOfSilentOK(t *testing.T) {
+	sink := &fakeSink{}
+	// 全部声明 supported，但适配器什么都没采到（上游没给）
+	ad := &stubAdapter{caps: fullCaps()}
+	s := &Syncer{Adapter: ad, Sink: sink}
+	res, err := s.Sync(context.Background(), Credential{ChannelID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range res.Items {
+		if it.Capability == CapSubscriptionQuotas || it.Rows > 0 {
+			continue
+		}
+		if it.Status != StatusOK {
+			continue // 失败项有 Error，不归本条管
+		}
+		if it.Note == "" {
+			t.Errorf("%s 落 0 行却既无 rows 也无 note —— 与“采集成功且有内容”\n"+
+				"   在响应里完全无法区分（AC-38：不得静默留空）", it.Capability)
+		}
+	}
+}
+
 // 声明 degraded 却返回 ErrUnsupported 是实现 bug，必须被显式点出
 // 而不是当成"这个站不支持"（04 §3.4bis）。
 func TestSyncFlagsDegradedReturningUnsupported(t *testing.T) {

@@ -274,6 +274,23 @@ func (s *Syncer) run(
 		}
 	default:
 		item.Status = StatusOK
+		// 采到 0 行必须**说出来**（AC-38 的"不得静默留空"）。
+		//
+		// 这条原先只在 ⑤ 价格那一项里手写着（"采到 N 个、其中 M 个未登记"），
+		// 而 ⑥ 目录与 ③ 分组没有 —— 于是 2026-09-01 第一次对真 Sub2API 站跑
+		// AC-38 时，model_catalog 返回的是 `ok`、无 rows、无 note，读起来与
+		// "采集成功且有内容"一模一样。实测真因：Sub2API 的目录派生自
+		// /api/v1/groups/available 的 available_models，而真站点（0.1.183）
+		// 一个都不返回；内网真库 13 个 sub2api 渠道合计 0 行目录可佐证
+		// （同库 newapi 是 2905 行）。
+		//
+		// 收到 run() 一处而不是各项各写一遍：这是**每一项**都成立的规则，
+		// 而散着写必然漏 —— 它已经漏了两处。fn 自己给了 note 就不覆盖
+		// （价格那条更具体：它要说的是"采到了但没写"，不是"上游没给"）。
+		if rows == 0 && failed == 0 && item.Note == "" {
+			item.Note = "上游未返回任何数据 → 落 0 行。**采集成功，不是写入失败**；" +
+				"若该站型本应有此项数据，查上游端点或 Capabilities() 声明是否过度声明"
+		}
 	}
 	res.Items = append(res.Items, item)
 }
