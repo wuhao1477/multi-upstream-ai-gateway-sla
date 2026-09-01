@@ -69,7 +69,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          # 跟随 go.mod 声明，不锁死 patch（10 开放点 1）
+          # 跟随 go.mod 声明的安全补丁版本。
           go-version-file: go.mod
           cache: true
 
@@ -106,6 +106,10 @@ jobs:
       - name: go vet
         run: make vet
 
+      # 只阻断当前代码可达的 Go/标准库漏洞；固定扫描器版本保证结果可复现。
+      - name: Go 可达漏洞扫描
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
       # go vet 查不出死代码。首次接入时它就揪出两处从未被调用的实现，
       # 其中一处是 normalizeFamily —— 与 admin 里活着的 normalizeDeclared
       # 逐字相同，改了活的那份不会有人想起还有一份副本。
@@ -113,9 +117,9 @@ jobs:
       #
       # ⚠️ **版本必须跟得上 go.mod**：golangci-lint 只支持**不高于自身构建
       #    版本**的 Go。原先 pin 的 v1.62.2 是用 go1.23 构建的，而 go.mod
-      #    是 1.25.1，于是它直接拒绝启动：
+      #    是 1.25，于是它直接拒绝启动：
       #      can't load config: the Go language version (go1.23) used to build
-      #      golangci-lint is lower than the targeted Go version (1.25.1)
+      #      golangci-lint is lower than the targeted Go version (1.25)
       #    这不是告警而是 exit 3。2026-08-29 首次在 feat 分支跑 gate 才暴露。
       #    v2 起才有 go1.25 构建的版本，故一并升 action 到 v9（v6 不识别 v2）。
       #    升级后本机用 v2.13.2 实跑默认规则集：0 issues，无需加 .golangci.yml。

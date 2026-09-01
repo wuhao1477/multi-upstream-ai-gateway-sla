@@ -11,6 +11,7 @@ ac38=verify/ac38-sub2api.sh
 ui=verify/ui-stack.sh
 remote=verify/remote-stack.sh
 test_migrate=verify/test-migrate.sh
+test_compose=verify/test-compose.sh
 ddl=verify/ddl-extracted.sql
 data_model=docs/dev/02-data-model.md
 
@@ -67,5 +68,10 @@ grep -q 'TestCatalogStaleAfterReliableMissingRounds' "$test_migrate" ||
   fail "test-migrate.sh 必须纳入目录轮次真库测试"
 grep -q 'TestImportRepairUpdatesCredentialFamily' "$test_migrate" ||
   fail "test-migrate.sh 必须纳入凭证站型同步更新测试"
+
+# Bash 在 UTF-8 locale 下会把紧邻的全角括号视作变量名的一部分。
+# 必须用花括号明确 WANT_KEYS 的边界，否则 compose 冒烟稳定报 unbound variable。
+grep -Fq '${WANT_KEYS}（' "$test_compose" ||
+  fail "test-compose.sh 输出 WANT_KEYS 后接全角括号时必须使用花括号"
 
 echo "✅ verify 脚本静态检查通过"

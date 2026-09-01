@@ -113,6 +113,7 @@ try {
   // ── 6. 占位文件不可取，但真资源可取 ──
   const dot = await fetch(`${BASE}/admin/ui/.gitignore`);
   check('go:embed 占位文件不可通过 HTTP 取走', dot.status === 404, `HTTP ${dot.status}`);
+  await dot.body?.cancel();
   const html = await (await fetch(`${BASE}/admin/ui/`)).text();
   const asset = html.match(/\/admin\/ui\/assets\/[^"]+\.js/)?.[0];
   const assetResp = asset ? await fetch(BASE + asset) : null;
@@ -123,10 +124,12 @@ try {
   check('带 hash 的资源发不可变长缓存',
     assetResp?.headers.get('cache-control')?.includes('immutable') === true,
     assetResp?.headers.get('cache-control') ?? '无');
+  await assetResp?.body?.cancel();
   const idxResp = await fetch(`${BASE}/admin/ui`);
   check('index.html 不缓存（否则会引用已不存在的旧资源名）',
     idxResp.headers.get('cache-control') === 'no-store',
     idxResp.headers.get('cache-control') ?? '无');
+  await idxResp.body?.cancel();
 } finally {
   await browser.close();
 }

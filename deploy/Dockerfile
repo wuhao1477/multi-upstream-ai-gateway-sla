@@ -29,9 +29,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable pnpm
 
 # 先只拷清单：依赖没变时装依赖这一层直接命中缓存。
-# pnpm-workspace.yaml 必须一起拷 —— pnpm 11 起 overrides 落在这个文件里，
-# 少拷它就会装成 vue 3.5.x（peer 范围 ^3.5.11 不含预发布版）。
-COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+COPY web/package.json web/pnpm-lock.yaml ./
 # --frozen-lockfile 是 pnpm 的 npm ci：lockfile 与清单不一致就报错退出，
 # 而不是就地改写 lockfile。CI 环境下本就是默认值，这里显式写出来是因为
 # docker build 不被识别为 CI。
@@ -42,7 +40,7 @@ COPY web/ ./
 # 而不是产出一个"能跑但类型是错的"镜像。
 RUN pnpm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25 AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.13 AS build
 WORKDIR /src
 
 # 先只拷依赖清单，让 go mod download 能命中 Docker 层缓存

@@ -101,8 +101,20 @@ SELECT COALESCE(refresh_lock_key,'')
 	}
 	if changed {
 		fresh.RefreshLockKey = lockKey
-		if err := saveRefreshTx(ctx, tx, fresh); err != nil {
+		tag, err := tx.Exec(ctx, `
+UPDATE collector_credentials
+   SET access_token = NULLIF($2,''),
+       refresh_token = COALESCE(NULLIF($3,''), refresh_token),
+       token_expires_at = $4,
+       status = 'valid', updated_at = now()
+ WHERE refresh_lock_key = $1 AND site_family = $5`, lockKey, fresh.AccessToken,
+			fresh.RefreshToken, nullTime(fresh.TokenExpiresAt), string(fresh.Family))
+		if err != nil {
 			return current, fmt.Errorf("刷新后保存渠道 %d 凭证: %w", cred.ChannelID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return current, fmt.Errorf("刷新后保存渠道 %d 凭证: 刷新锁键 %q 没有关联凭证",
+				cred.ChannelID, lockKey)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -112,31 +124,6 @@ SELECT COALESCE(refresh_lock_key,'')
 		return fresh, nil
 	}
 	return current, nil
-}
-
-// saveRefreshTx writes the rotated token to every credential sharing the lock key.
-func saveRefreshTx(
-	ctx context.Context, db DBTX, cred collector.Credential,
-) error {
-	lockKey := collector.RefreshLockKey(cred)
-	if lockKey == "" {
-		return fmt.Errorf("渠道 %d 缺 refresh_lock_key", cred.ChannelID)
-	}
-	tag, err := db.Exec(ctx, `
-UPDATE collector_credentials
-   SET access_token = NULLIF($2,''),
-       refresh_token = COALESCE(NULLIF($3,''), refresh_token),
-       token_expires_at = $4,
-       status = 'valid', updated_at = now()
- WHERE refresh_lock_key = $1 AND site_family = $5`, lockKey, cred.AccessToken,
-		cred.RefreshToken, nullTime(cred.TokenExpiresAt), string(cred.Family))
-	if err != nil {
-		return fmt.Errorf("保存刷新凭证: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("刷新锁键 %q 没有关联凭证", lockKey)
-	}
-	return nil
 }
 
 // Load 读取某渠道的采集凭证。

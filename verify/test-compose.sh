@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # compose 全栈冒烟（#3 完成标准）：起栈 → /healthz 全绿 → 停一个实例仍可服务
-# （AC-27 的 M0/P1 形态）→ 确认 /admin/* 从宿主机不可达。
+# （AC-27 的 M0/P1 形态）→ 确认 Caddy 入口拒绝 /admin/*、本机回环入口可用。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export ADMIN_TOKEN="smoke-$(date +%s)"
 export POSTGRES_PASSWORD="smoke-pg"
+export ADMIN_PORT="${ADMIN_PORT:-18080}"
 COMPOSE=(docker compose -f deploy/docker-compose.yml)
 
 cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
@@ -111,7 +112,7 @@ GOT_KEYS=$("${COMPOSE[@]}" exec -T postgres psql -U sla -d sla -tAc \
 [ "$GOT_KEYS" = "$WANT_KEYS" ] || {
   echo "❌ 双实例启动后配置键数 = $GOT_KEYS，期望 $WANT_KEYS"
   exit 1; }
-echo "   ✅ 配置键数 $WANT_KEYS（双实例并发灌种子后仍准确）"
+echo "   ✅ 配置键数 ${WANT_KEYS}（双实例并发灌种子后仍准确）"
 
 # collector 容器必须真的跑 collector。
 # ⚠️ 抓到过：compose 用 command 覆盖，而 Dockerfile 的 ENTRYPOINT 是 /sla-core，
@@ -141,14 +142,29 @@ sleep 6
 "${CURL[@]}" https://localhost/healthz >/dev/null || { echo "❌ 恢复后不可达"; exit 1; }
 echo "   ✅ 实例恢复后自动纳入"
 
-echo "── 5/5 边界：/admin 与 /metrics 从宿主机不可达（06 §1）──"
-for p in /admin/config /metrics; do
+echo "── 5/5 边界：Caddy 入口拒绝管理面，本机回环入口可用（06 §1）──"
+for p in /admin/ui/ /admin/config /metrics; do
   C=$("${CURL[@]}" -o /dev/null -w "%{http_code}" "https://localhost$p" || echo "000")
   # 期望 404（Caddyfile 的 handle 兜底），绝不能是 200/401
   #（401 也意味着请求到了 sla-core —— 那说明代理了它）
   [ "$C" = "404" ] || { echo "❌ $p 返回 $C，应为 404（未代理）"; exit 1; }
   echo "   ✅ $p → 404（未代理）"
 done
+# 运维人员从宿主机打开管理 UI，不应依赖进入容器或改临时端口映射。
+LOCAL_BASE="http://127.0.0.1:${ADMIN_PORT}"
+UI_CODE=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "$LOCAL_BASE/admin/ui/")
+[ "$UI_CODE" = "200" ] || {
+  echo "❌ 本机管理界面返回 $UI_CODE，期望 200"
+  exit 1
+}
+API_CODE=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" "$LOCAL_BASE/admin/config")
+[ "$API_CODE" = "200" ] || {
+  echo "❌ 本机管理 API 返回 $API_CODE，期望 200"
+  exit 1
+}
+echo "   ✅ 本机回环入口可访问管理 UI 与 API"
+
 # 反向确认：管理面在容器网络内是可用的（否则上面的 404 可能只是服务挂了）
 IN=$("${COMPOSE[@]}" exec -T sla-core-b sh -c \
   'wget -qO- --header="Authorization: Bearer '"$ADMIN_TOKEN"'" http://localhost:8080/admin/config' \

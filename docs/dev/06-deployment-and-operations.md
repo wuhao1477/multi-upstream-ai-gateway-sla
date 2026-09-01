@@ -163,7 +163,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 **M0 门禁（P1 开工前必须全绿）**：
 
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
-- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。**须反向确认管理面在容器网络内可用**，否则"外部 404"可能只是服务挂了而非未代理。
+- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。管理界面仅经 `127.0.0.1:${ADMIN_PORT:-8080}` 访问；须确认回环入口与容器网络内管理 API 均可用。
 - [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110/AC-27）。⚠️ **M0/P1 阶段打 `/healthz`**（`/v1/*` 属 P2），P2 起改打 `/v1/chat/completions` 并**重跑 AC-27**（[14 AC-27](./14-acceptance-matrix.md)）。
 - [ ] 迁移与 `config_params` 种子幂等；**运维改过的值不被重启抹回**。
 - [ ] 双实例并发冷启动**只有一个执行迁移**（PG 咨询锁选主，§2.2）。
