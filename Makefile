@@ -123,3 +123,7 @@ dev-ui: ## 起常驻本地栈供人工点验管理界面（Ctrl-C 拆除）
 .PHONY: test-remote
 test-remote: ## 内网真库只读界面验收 35 项（需 DATABASE_URL + Chrome）
 	./verify/remote-stack.sh
+
+.PHONY: test-ac38-sub2api
+test-ac38-sub2api: ## AC-38 的 sub2api 一族：真 Sub2API 站 + 临时 PG（需 HUB_FILE）
+	./verify/ac38-sub2api.sh
