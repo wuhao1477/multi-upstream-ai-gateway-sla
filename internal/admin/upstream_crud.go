@@ -1,12 +1,9 @@
 package admin
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -302,120 +299,17 @@ func (s *Server) resolveKeyGroupPatch(
 	return &gid, true
 }
 
-func deleteKeyTokenKey(id int64) string {
-	return fmt.Sprintf("delete:key:%d", id)
-}
-
-func (s *Server) previewDeleteKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		k, err := store.GetKey(r.Context(), conn, id)
-		if err != nil {
-			s.mapNotFound(w, err)
-			return
-		}
-		version, err := store.KeyVersion(r.Context(), conn, id)
-		if err != nil {
-			s.mapNotFound(w, err)
-			return
-		}
-		tok, err := s.tokens.issue(deleteKeyTokenKey(id), version, 0)
-		if err != nil {
-			s.fail(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		s.ok(w, map[string]any{
-			"key_id": id, "account_id": k.AccountID,
-			"secret_prefix":             k.SecretPrefix,
-			"confirm_token":             tok,
-			"confirm_token_ttl_seconds": int(confirmTTL.Seconds()),
-		})
-	})
-}
-
 func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.pathID(w, r)
 	if !ok {
 		return
 	}
-	var in struct {
-		ConfirmToken string `json:"confirm_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
-		s.fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
-	if in.ConfirmToken == "" {
-		s.fail(w, http.StatusBadRequest,
-			"删除 Key 必须先 POST /admin/keys/{id}/delete-preview 取 confirm_token")
-		return
-	}
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		version, err := store.KeyVersion(r.Context(), conn, id)
-		if err != nil {
-			if !s.tokens.consume(in.ConfirmToken, deleteKeyTokenKey(id), "", 0) {
-				s.fail(w, http.StatusBadRequest,
-					"confirm_token 无效、已过期或与本次删除不符，请重新预览")
-				return
-			}
-			s.mapNotFound(w, err)
-			return
-		}
-		if !s.tokens.consume(in.ConfirmToken, deleteKeyTokenKey(id), version, 0) {
-			s.fail(w, http.StatusBadRequest,
-				"confirm_token 无效、已过期或与本次删除不符，请重新预览")
-			return
-		}
-		if err := store.DeleteKey(r.Context(), conn, id, version); err != nil {
-			if errors.Is(err, store.ErrVersionConflict) {
-				s.fail(w, http.StatusConflict, err.Error())
-				return
-			}
+		if err := store.DeleteKey(r.Context(), conn, id); err != nil {
 			s.mapNotFound(w, err)
 			return
 		}
 		s.ok(w, map[string]any{"id": id, "deleted": true})
-	})
-}
-
-func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	var in struct {
-		Secret string `json:"secret"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-
-	newSecret := in.Secret
-	generated := false
-	if newSecret == "" {
-		// 未提供则生成一个 —— 便于"我就想换一个"的场景
-		buf := make([]byte, 24)
-		if _, err := rand.Read(buf); err != nil {
-			s.fail(w, http.StatusInternalServerError, "生成随机 secret 失败")
-			return
-		}
-		newSecret = "sk-" + hex.EncodeToString(buf)
-		generated = true
-	}
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		if err := store.RotateKey(r.Context(), conn, id, newSecret); err != nil {
-			s.mapNotFound(w, err)
-			return
-		}
-		s.Logger.Info("Key 已轮换", "id", id, "generated", generated)
-		resp := map[string]any{"id": id, "rotated": true}
-		if generated {
-			// **明文只在此处返回一次**（09 §5.0 / FR-094）
-			resp["secret"] = newSecret
-			resp["note"] = "明文只返回这一次，请立即保存"
-		}
-		s.ok(w, resp)
 	})
 }
 

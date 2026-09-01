@@ -75,9 +75,6 @@ func (s *stubAdapter) FetchKeys(context.Context, Session) ([]Key, error) { retur
 func (s *stubAdapter) FetchGroups(context.Context, Session) ([]Group, error) {
 	return s.groups, s.groupErr
 }
-func (s *stubAdapter) FetchSubscriptionQuotas(context.Context, Session) ([]SubscriptionQuota, error) {
-	return nil, ErrUnsupported
-}
 func (s *stubAdapter) FetchPricing(context.Context, Session) (Pricing, error) {
 	return s.pricing, nil
 }
@@ -89,7 +86,27 @@ func fullCaps() CapabilityMap {
 	return CapabilityMap{
 		CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
 		CapPricing: Supported, CapModelCatalog: Supported,
-		CapSubscriptionQuotas: Unsupported,
+	}
+}
+
+// P1 只返回当前阶段真正采集的五类数据。P4 订阅不应以 unsupported
+// 占位项混进 P1 响应，否则调用方仍被迫维护一个没有实现的未来能力。
+func TestSyncReturnsOnlyP1Capabilities(t *testing.T) {
+	ad := &stubAdapter{
+		caps:    fullCaps(),
+		account: Account{UserID: "u1"},
+		groups:  []Group{{GroupRef: "default"}},
+		keys:    []Key{{KeyRef: "k1"}},
+		pricing: Pricing{Models: []ModelPrice{{ModelName: "m1"}}},
+		catalog: []CatalogModel{{ModelName: "m1"}},
+	}
+	res, err := (&Syncer{Adapter: ad, Sink: &fakeSink{}}).Sync(
+		context.Background(), Credential{ChannelID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) != 5 {
+		t.Fatalf("P1 应只返回 5 个采集项，实际 %d：%+v", len(res.Items), res.Items)
 	}
 }
 
@@ -241,7 +258,6 @@ func TestSyncReportsUnsupportedExplicitly(t *testing.T) {
 	ad := &stubAdapter{caps: CapabilityMap{
 		CapAccount: Supported, CapKeys: Unsupported, CapGroups: Unsupported,
 		CapPricing: Degraded, CapModelCatalog: Degraded,
-		CapSubscriptionQuotas: Unsupported,
 	}}
 	s := &Syncer{Adapter: ad, Sink: sink}
 	res, err := s.Sync(context.Background(), Credential{ChannelID: 1})
@@ -253,7 +269,7 @@ func TestSyncReportsUnsupportedExplicitly(t *testing.T) {
 	for _, it := range res.Items {
 		byCap[it.Capability] = it
 	}
-	for _, cap := range []Capability{CapKeys, CapGroups, CapSubscriptionQuotas} {
+	for _, cap := range []Capability{CapKeys, CapGroups} {
 		it, ok := byCap[cap]
 		if !ok {
 			t.Errorf("%s 声明 unsupported，但 items 里没有它 —— "+
@@ -320,7 +336,7 @@ func TestSyncSupportedEmptyResultFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, it := range res.Items {
-		if it.Capability == CapSubscriptionQuotas || it.Rows > 0 {
+		if it.Rows > 0 {
 			continue
 		}
 		if it.Support != Supported {

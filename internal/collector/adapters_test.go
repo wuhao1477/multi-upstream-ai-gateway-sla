@@ -33,12 +33,10 @@ func TestCapabilitiesMatchDocMatrix(t *testing.T) {
 		FamilyNewAPI: {
 			CapAccount: Supported, CapKeys: Supported, CapGroups: Supported,
 			CapPricing: Supported, CapModelCatalog: Supported,
-			CapSubscriptionQuotas: Unsupported,
 		},
 		FamilySub2API: {
 			CapAccount: Supported, CapKeys: Supported, CapGroups: Degraded,
 			CapPricing: Degraded, CapModelCatalog: Degraded,
-			CapSubscriptionQuotas: Unsupported,
 		},
 	}
 	for fam, ad := range allAdapters(nil) {
@@ -94,10 +92,6 @@ func TestUnsupportedDeclarationsReturnErrUnsupported(t *testing.T) {
 
 		check(CapKeys, func() error { _, err := ad.FetchKeys(ctx, s); return err })
 		check(CapGroups, func() error { _, err := ad.FetchGroups(ctx, s); return err })
-		check(CapSubscriptionQuotas, func() error {
-			_, err := ad.FetchSubscriptionQuotas(ctx, s)
-			return err
-		})
 	}
 }
 

@@ -188,11 +188,8 @@ func TestSecretPrefixExprTruncates(t *testing.T) {
 	}
 }
 
-// TestPlaintextResponseOnlyInRotate 明文只允许出现在 rotate 的响应里，且只一次。
-//
-// FR-094 / 09 §5.0：轮换生成新 secret 时明文返回一次（"请立即保存"），
-// 这是**唯一**允许的回显点。多一处就是多一条泄漏路径，而它不会报错。
-func TestPlaintextResponseOnlyInRotate(t *testing.T) {
+// TestAdminResponsesNeverIncludePlaintext 管理接口不得回显完整 secret。
+func TestAdminResponsesNeverIncludePlaintext(t *testing.T) {
 	var src string
 	for name, body := range readSource(t) {
 		if strings.HasPrefix(name, "../admin/") {
@@ -203,22 +200,9 @@ func TestPlaintextResponseOnlyInRotate(t *testing.T) {
 		t.Fatal("找不到 ../admin/*.go —— 路径错了？本断言已空转")
 	}
 	clean := stripComments(src)
-	// 往响应 map 里塞明文的形态：resp["secret"] = …
-	re := regexp.MustCompile(`(?m)\w+\["secret"\]\s*=`)
-	hits := re.FindAllStringIndex(clean, -1)
-	if len(hits) != 1 {
-		t.Errorf("响应体里写 secret 的地方有 %d 处，应恰好 1 处（rotate 生成时那次）",
-			len(hits))
-		return
-	}
-	// 那一处必须在 rotateKey 函数体内。
-	fn := regexp.MustCompile(`(?s)func \(s \*Server\) rotateKey\(.*?\n}`).
-		FindStringIndex(clean)
-	if fn == nil {
-		t.Fatal("找不到 rotateKey 函数 —— 改名了？本断言已空转")
-	}
-	if hits[0][0] < fn[0] || hits[0][1] > fn[1] {
-		t.Errorf("唯一那处明文回显不在 rotateKey 里（位置 %d，rotateKey 是 %d~%d）"+
-			" —— 09 §5.0 只允许轮换生成时回显一次", hits[0][0], fn[0], fn[1])
+	// 禁止 resp["secret"] = … 与 map[string]any{"secret": …} 两种响应写法。
+	re := regexp.MustCompile(`(?m)(\w+\["secret"\]\s*=|\{\s*"secret"\s*:)`)
+	if hits := re.FindAllString(clean, -1); len(hits) != 0 {
+		t.Errorf("管理响应体里写入完整 secret 的地方有 %d 处，应为 0", len(hits))
 	}
 }

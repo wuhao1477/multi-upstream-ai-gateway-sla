@@ -32,8 +32,6 @@ func (a *Sub2APIAdapter) Capabilities() CapabilityMap {
 		// **无独立模型价格表** → 目录里逐模型单价会缺失，用 MissingFields 标明。
 		CapPricing:      Degraded,
 		CapModelCatalog: Degraded,
-		// ⏭ P4：订阅制整体推迟，一期所有站型一律 unsupported
-		CapSubscriptionQuotas: Unsupported,
 	}
 }
 
@@ -269,11 +267,6 @@ func (a *Sub2APIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, e
 		out = append(out, g)
 	}
 	return out, nil
-}
-
-// FetchSubscriptionQuotas ⏭ P4（订阅制整体推迟，04 §1）。
-func (a *Sub2APIAdapter) FetchSubscriptionQuotas(context.Context, Session) ([]SubscriptionQuota, error) {
-	return nil, ErrUnsupported
 }
 
 // FetchPricing 取价格 —— **degraded**（04 §3.2）。

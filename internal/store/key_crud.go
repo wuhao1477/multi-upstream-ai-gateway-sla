@@ -103,21 +103,6 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
 	return k, nil
 }
 
-// KeyVersion 返回删除确认用的当前版本。
-func KeyVersion(ctx context.Context, conn *pgx.Conn, id int64) (string, error) {
-	var v string
-	err := conn.QueryRow(ctx,
-		`SELECT extract(epoch FROM updated_at)::text FROM upstream_keys WHERE id=$1`,
-		id).Scan(&v)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("%w: Key %d", ErrNotFound, id)
-	}
-	if err != nil {
-		return "", fmt.Errorf("查 Key %d 版本: %w", id, err)
-	}
-	return v, nil
-}
-
 // KeyPatch 是 Key 的局部更新。
 type KeyPatch struct {
 	ID               int64
@@ -172,44 +157,13 @@ func DisableKey(ctx context.Context, conn *pgx.Conn, id int64) error {
 	return nil
 }
 
-// RotateKey 轮换：写入新 secret，旧值被覆盖。
-//
-// 一期不做"宽限期双活"（09 里 rotate 标 M1/P2）：那需要同时持有两个 secret
-// 并按时间切换，而 P1 没有请求路径、无从判断"旧 key 是否还在被用"。
-// 这里的轮换语义是"换掉凭证"，明文只在响应里返回一次。
-func RotateKey(ctx context.Context, conn *pgx.Conn, id int64, newSecret string) error {
-	if newSecret == "" {
-		return fmt.Errorf("新 secret 不可为空")
-	}
-	tag, err := conn.Exec(ctx, `
-UPDATE upstream_keys SET secret=$2, status='active', updated_at=now() WHERE id=$1`,
-		id, newSecret)
-	if err != nil {
-		return fmt.Errorf("轮换 Key %d: %w", id, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: Key %d", ErrNotFound, id)
-	}
-	return nil
-}
-
-// DeleteKey 删除一把 Key。version 来自 preview 时的 updated_at。
-func DeleteKey(ctx context.Context, conn *pgx.Conn, id int64, version string) error {
-	tag, err := conn.Exec(ctx, `
-DELETE FROM upstream_keys
- WHERE id=$1 AND extract(epoch FROM updated_at)::text=$2`, id, version)
+// DeleteKey 删除一把 Key。
+func DeleteKey(ctx context.Context, conn *pgx.Conn, id int64) error {
+	tag, err := conn.Exec(ctx, `DELETE FROM upstream_keys WHERE id=$1`, id)
 	if err != nil {
 		return fmt.Errorf("删除 Key %d: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
-		var exists bool
-		if err := conn.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM upstream_keys WHERE id=$1)`, id).Scan(&exists); err != nil {
-			return fmt.Errorf("确认 Key %d 是否存在: %w", id, err)
-		}
-		if exists {
-			return fmt.Errorf("%w: Key %d 已变更", ErrVersionConflict, id)
-		}
 		return fmt.Errorf("%w: Key %d", ErrNotFound, id)
 	}
 	return nil

@@ -293,7 +293,7 @@ func (s *Server) importOne(
 			return fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
 		}
 		// 导入侧只可能带 token（导出里没有密码），不传账密一路
-		credType, err := reg.CredTypeFor(true, a.UserID() != "", false)
+		credType, err := reg.CredTypeFor(true, a.UserID() != "")
 		if err != nil {
 			// 报出来而不是存一份必然 401 的凭证：那种凭证要等到某次采集
 			// 才暴露，而那时已经分不清是站点挂了还是导入时就缺字段。
@@ -397,7 +397,7 @@ func (s *Server) repairChannel(
 			if !ok {
 				return fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
 			}
-			credType, err := reg.CredTypeFor(true, a.UserID() != "", false)
+			credType, err := reg.CredTypeFor(true, a.UserID() != "")
 			if err != nil {
 				return fmt.Errorf("导出里的凭证字段不足: %w", err)
 			}

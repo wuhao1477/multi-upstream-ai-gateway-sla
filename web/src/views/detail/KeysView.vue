@@ -49,21 +49,6 @@ async function showUsage(k: Key): Promise<void> {
   }
 }
 
-async function rotate(k: Key): Promise<void> {
-  if (!confirm('轮换会替换该 Key 的凭证，确定？')) return
-  try {
-    const d = await api<{ secret?: string }>(`/admin/keys/${k.id}/rotate`, {
-      method: 'POST',
-      body: {},
-    })
-    // 新凭证只在这一次响应里出现，之后任何接口都不再回显（FR-094）
-    toast.show(d.secret !== undefined ? `新凭证（只显示一次）：\n${d.secret}` : '已轮换', 'ok')
-    await load()
-  } catch (e) {
-    toast.fail('轮换失败', e)
-  }
-}
-
 async function disable(k: Key): Promise<void> {
   if (!confirm('停用后该 Key 不再可用，确定？')) return
   try {
@@ -133,7 +118,6 @@ async function disable(k: Key): Promise<void> {
             </td>
             <td style="white-space: nowrap">
               <button class="btn ghost sm" :data-usage="k.id" @click="showUsage(k)">用量</button>
-              <button class="btn ghost sm" :data-rot="k.id" @click="rotate(k)">轮换</button>
               <button class="btn ghost sm" :data-dis="k.id" @click="disable(k)">停用</button>
             </td>
           </tr>

@@ -95,9 +95,8 @@ func RefreshLockKey(cred Credential) string {
 //
 // **实现它就等于声明"本族要主动续期"**（collection.Runner 靠类型断言取，
 // registry_test 双向钉住它与 RefreshLead 一致），所以不要"顺手实现一个"。
-// 两条已知形态：令牌换令牌（Sub2API：POST /api/v1/auth/refresh，会轮换
-// refresh_token，故必须走账号锁）、账密重登（无令牌端点的站型只有这条路，
-// 见 Registration.PasswdCredType 与 04 §7bis）。
+// 已知形态：令牌换令牌（Sub2API：POST /api/v1/auth/refresh，会轮换
+// refresh_token，故必须走账号锁）。
 // NewAPI 刻意不实现：长期令牌，不变式 N-1 禁止重新生成。
 type Refresher interface {
 	// Refresh 用当前凭证换取新凭证。

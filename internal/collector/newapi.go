@@ -28,8 +28,6 @@ func (a *NewAPIAdapter) Capabilities() CapabilityMap {
 		CapGroups:       Supported,
 		CapPricing:      Supported, // /api/pricing 公开且完整
 		CapModelCatalog: Supported, // 同一端点已含全量模型与价格
-		// NewAPI 系**无订阅对象**（04 §3.1）
-		CapSubscriptionQuotas: Unsupported,
 	}
 }
 
@@ -214,11 +212,6 @@ func (a *NewAPIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, er
 		out = append(out, g)
 	}
 	return out, nil
-}
-
-// FetchSubscriptionQuotas ⏭ NewAPI 系无订阅对象（04 §3.1）。
-func (a *NewAPIAdapter) FetchSubscriptionQuotas(context.Context, Session) ([]SubscriptionQuota, error) {
-	return nil, ErrUnsupported
 }
 
 // FetchPricing 取模型价格（FR-010/012/013）。

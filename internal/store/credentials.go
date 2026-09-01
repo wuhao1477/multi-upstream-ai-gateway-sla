@@ -34,15 +34,13 @@ func (s *CredentialStore) SaveTx(ctx context.Context, db DBTX, cred collector.Cr
 	lockKey := collector.RefreshLockKey(cred)
 	_, err := db.Exec(ctx, `
 INSERT INTO collector_credentials (channel_id, site_family, cred_type,
-       access_token, refresh_token, username, password, external_user_id,
+       access_token, refresh_token, external_user_id,
        user_id_header_name, token_expires_at, refresh_lock_key, status, updated_at)
-VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),
-        NULLIF($8,''),NULLIF($9,''),$10,NULLIF($11,''),'valid',now())
+VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),
+        NULLIF($7,''),$8,NULLIF($9,''),'valid',now())
 ON CONFLICT (channel_id) DO UPDATE
    SET access_token       = COALESCE(NULLIF(EXCLUDED.access_token,''), collector_credentials.access_token),
        refresh_token      = COALESCE(NULLIF(EXCLUDED.refresh_token,''), collector_credentials.refresh_token),
-       username           = COALESCE(EXCLUDED.username, collector_credentials.username),
-       password           = COALESCE(EXCLUDED.password, collector_credentials.password),
        external_user_id   = COALESCE(EXCLUDED.external_user_id, collector_credentials.external_user_id),
        user_id_header_name = COALESCE(EXCLUDED.user_id_header_name, collector_credentials.user_id_header_name),
        token_expires_at   = EXCLUDED.token_expires_at,
@@ -50,8 +48,8 @@ ON CONFLICT (channel_id) DO UPDATE
        status             = 'valid',
        updated_at         = now()`,
 		cred.ChannelID, string(cred.Family), cred.CredType,
-		cred.AccessToken, cred.RefreshToken, cred.Username, cred.Password,
-		cred.ExternalUserID, cred.UserIDHeaderName, nullTime(cred.TokenExpiresAt), lockKey)
+		cred.AccessToken, cred.RefreshToken, cred.ExternalUserID,
+		cred.UserIDHeaderName, nullTime(cred.TokenExpiresAt), lockKey)
 	if err != nil {
 		return fmt.Errorf("保存渠道 %d 凭证: %w", cred.ChannelID, err)
 	}
@@ -136,7 +134,7 @@ func (s *CredentialStore) load(
 ) (collector.Credential, error) {
 	var cred collector.Credential
 	var family, credType string
-	var access, refresh, user, pass, extUID, hdrName, lockKey *string
+	var access, refresh, extUID, hdrName, lockKey *string
 	// ⚠️ 必须用指针接 token_expires_at：**NewAPI 的长期令牌没有到期时间**
 	// （04 §5.1），该列为 NULL。用 time.Time 直接扫会报
 	// "cannot scan NULL into *time.Time" —— 而那正是最常见的站型，
@@ -144,14 +142,14 @@ func (s *CredentialStore) load(
 	var expiresAt *time.Time
 
 	query := `
-SELECT site_family, cred_type, access_token, refresh_token, username, password,
-	       external_user_id, user_id_header_name, token_expires_at, refresh_lock_key
+SELECT site_family, cred_type, access_token, refresh_token, external_user_id,
+	       user_id_header_name, token_expires_at, refresh_lock_key
   FROM collector_credentials WHERE channel_id=$1`
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
 	err := conn.QueryRow(ctx, query, ch.ID).
-		Scan(&family, &credType, &access, &refresh, &user, &pass,
+		Scan(&family, &credType, &access, &refresh,
 			&extUID, &hdrName, &expiresAt, &lockKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return cred, fmt.Errorf("%w: 渠道 %d 未登记采集凭证", ErrNotFound, ch.ID)
@@ -166,8 +164,6 @@ SELECT site_family, cred_type, access_token, refresh_token, username, password,
 	cred.BaseURL = ch.BaseURL
 	cred.AccessToken = deref(access)
 	cred.RefreshToken = deref(refresh)
-	cred.Username = deref(user)
-	cred.Password = deref(pass)
 	cred.ExternalUserID = deref(extUID)
 	cred.UserIDHeaderName = deref(hdrName)
 	cred.RefreshLockKey = deref(lockKey)

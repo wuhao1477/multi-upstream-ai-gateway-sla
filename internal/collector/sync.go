@@ -258,18 +258,6 @@ func (s *Syncer) Sync(ctx context.Context, cred Credential) (*SyncResult, error)
 		})
 	}
 
-	// ── 订阅：P4，但**必须出现在 items 里** ──
-	// AC-38 要求"不支持的项返回明确的不支持而非静默留空"，
-	// 且须与 Capabilities() 声明一致。
-	if s.wants(CapSubscriptionQuotas) {
-		res.Items = append(res.Items, SyncItem{
-			Capability: CapSubscriptionQuotas,
-			Support:    Unsupported,
-			Status:     StatusUnsupported,
-			Note:       "订阅制属交付阶段 P4（ISSUE-005 §2）",
-		})
-	}
-
 	return res, nil
 }
 

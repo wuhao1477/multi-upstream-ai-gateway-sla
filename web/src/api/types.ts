@@ -30,7 +30,6 @@ export interface SiteFamilyInfo {
   aliases: string[]
   cred_type: string
   requires_external_user_id: boolean
-  allows_password: boolean
 }
 
 /** 采集能力项。 */
@@ -38,7 +37,6 @@ export type Capability =
   | 'account'
   | 'keys'
   | 'groups'
-  | 'subscription_quotas'
   | 'pricing'
   | 'model_catalog'
 
@@ -191,7 +189,6 @@ export interface CredentialItem {
   updated_at: string
   /** 只报"有没有"，不报内容。 */
   has_token: boolean
-  has_password: boolean
 }
 
 /**

@@ -127,8 +127,6 @@ export interface SaveCredentialInput {
   channel_id: number
   access_token?: string
   refresh_token?: string
-  username?: string
-  password?: string
   external_user_id?: string
   user_id_header_name?: string
 }

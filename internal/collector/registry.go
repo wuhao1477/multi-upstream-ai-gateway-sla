@@ -52,19 +52,11 @@ type Registration struct {
 
 	// ── 凭证形态（09 §5 的凭证登记与导入侧登记共用）──
 	// CredType 是有 access_token 时的凭证类型；RequiresUID 表示还必须有
-	// external_user_id；PasswdCredType 非空表示允许账密。
+	// external_user_id。
 	// CredNote 是校验失败时附在错误后的"为什么"，省得运维回查文档。
-	//
-	// PasswdCredType **当前无人声明**（现役两族都有令牌路径），留着是因为它是
-	// 自研站最可能落在的那一格：自建面板常只有登录表单、没有令牌端点，
-	// 唯一续期方式就是账密重登。这一格连着 Credential.Username/Password、
-	// CredTypeFor 的 hasPasswd 分支、库侧 cred_type 的 account_password
-	// 取值 —— 四处一起留才是一条通路，删掉任一处都要在接入时重新拉一遍。
-	// 接入清单见 04 §7bis。
-	CredType       string
-	RequiresUID    bool
-	PasswdCredType string
-	CredNote       string
+	CredType    string
+	RequiresUID bool
+	CredNote    string
 
 	// RefreshLead 是"到期前多久主动续期"。
 	// **0 = 永不主动续期**，且据此推导该站型不需要 Refresher。
@@ -145,7 +137,7 @@ func FamilyOfAlias(declared string) Family {
 //
 // 校验与选型**必须一处做完**：分开写时它们各有一个 switch，而漏改选型那处
 // 的后果是 cred_type 空串进库 —— 校验是绿的，采集时才炸。
-func (r *Registration) CredTypeFor(hasToken, hasUID, hasPasswd bool) (string, error) {
+func (r *Registration) CredTypeFor(hasToken, hasUID bool) (string, error) {
 	if hasToken {
 		if r.RequiresUID && !hasUID {
 			return "", fmt.Errorf("%s 需要 external_user_id（用户 ID 头的值）—— %s",
@@ -153,15 +145,9 @@ func (r *Registration) CredTypeFor(hasToken, hasUID, hasPasswd bool) (string, er
 		}
 		return r.CredType, nil
 	}
-	if r.PasswdCredType != "" && hasPasswd {
-		return r.PasswdCredType, nil
-	}
 	want := "access_token"
 	if r.RequiresUID {
 		want += " 与 external_user_id"
-	}
-	if r.PasswdCredType != "" {
-		want += "，或 username + password"
 	}
 	return "", fmt.Errorf("%s 需要 %s —— %s", r.DisplayName, want, r.CredNote)
 }

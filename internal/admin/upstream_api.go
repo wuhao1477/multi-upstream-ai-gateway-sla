@@ -41,9 +41,7 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
 	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
-	mux.Handle("POST /admin/keys/{id}/delete-preview", h(s.previewDeleteKey))
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
-	mux.Handle("POST /admin/keys/{id}/rotate", h(s.rotateKey))
 	mux.Handle("POST /admin/keys/{id}/disable", h(s.disableKey))
 	mux.Handle("GET /admin/keys/{id}/usage", h(s.keyUsage))
 	// 采集凭证（04 §5；一期明文 FR-113）
@@ -71,16 +69,13 @@ func (s *Server) listSiteFamilies(w http.ResponseWriter, r *http.Request) {
 		Aliases     []string `json:"aliases"`
 		CredType    string   `json:"cred_type"`
 		RequiresUID bool     `json:"requires_external_user_id"`
-		// AllowsPassword 为真表示可用账密登记（无 refresh 路径的站型）。
-		AllowsPassword bool `json:"allows_password"`
 	}
 	out := []item{}
 	for _, reg := range collector.All() {
 		out = append(out, item{
 			Family: string(reg.Family), DisplayName: reg.DisplayName,
 			Aliases: reg.Aliases, CredType: reg.CredType,
-			RequiresUID:    reg.RequiresUID,
-			AllowsPassword: reg.PasswdCredType != "",
+			RequiresUID: reg.RequiresUID,
 		})
 	}
 	s.ok(w, map[string]any{"count": len(out), "items": out})
@@ -717,8 +712,6 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 		ChannelID      int64  `json:"channel_id"`
 		AccessToken    string `json:"access_token"`
 		RefreshToken   string `json:"refresh_token"`
-		Username       string `json:"username"`
-		Password       string `json:"password"`
 		ExternalUserID string `json:"external_user_id"`
 		UserIDHeader   string `json:"user_id_header_name"`
 	}
@@ -751,7 +744,6 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 		credType, err := reg.CredTypeFor(
 			in.AccessToken != "",
 			in.ExternalUserID != "",
-			in.Username != "" && in.Password != "",
 		)
 		if err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())
@@ -766,7 +758,6 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 			ChannelID: in.ChannelID, Family: fam, CredType: credType,
 			BaseURL:     ch.BaseURL,
 			AccessToken: in.AccessToken, RefreshToken: in.RefreshToken,
-			Username: in.Username, Password: in.Password,
 			ExternalUserID: in.ExternalUserID, UserIDHeaderName: in.UserIDHeader,
 		}); err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
@@ -786,8 +777,7 @@ func (s *Server) listCredentials(w http.ResponseWriter, r *http.Request) {
 		rows, err := conn.Query(r.Context(), `
 SELECT channel_id, site_family, cred_type, status,
        token_expires_at, updated_at,
-       (access_token IS NOT NULL) AS has_token,
-       (password IS NOT NULL) AS has_password
+       (access_token IS NOT NULL) AS has_token
   FROM collector_credentials ORDER BY channel_id`)
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
@@ -795,20 +785,19 @@ SELECT channel_id, site_family, cred_type, status,
 		}
 		defer rows.Close()
 		type item struct {
-			ChannelID   int64      `json:"channel_id"`
-			SiteFamily  string     `json:"site_family"`
-			CredType    string     `json:"cred_type"`
-			Status      string     `json:"status"`
-			ExpiresAt   *time.Time `json:"token_expires_at,omitempty"`
-			UpdatedAt   time.Time  `json:"updated_at"`
-			HasToken    bool       `json:"has_token"`
-			HasPassword bool       `json:"has_password"`
+			ChannelID  int64      `json:"channel_id"`
+			SiteFamily string     `json:"site_family"`
+			CredType   string     `json:"cred_type"`
+			Status     string     `json:"status"`
+			ExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
+			UpdatedAt  time.Time  `json:"updated_at"`
+			HasToken   bool       `json:"has_token"`
 		}
 		out := []item{}
 		for rows.Next() {
 			var i item
 			if err := rows.Scan(&i.ChannelID, &i.SiteFamily, &i.CredType, &i.Status,
-				&i.ExpiresAt, &i.UpdatedAt, &i.HasToken, &i.HasPassword); err != nil {
+				&i.ExpiresAt, &i.UpdatedAt, &i.HasToken); err != nil {
 				s.fail(w, http.StatusInternalServerError, err.Error())
 				return
 			}

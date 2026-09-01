@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,6 +15,19 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
+
+type unavailableDB struct{}
+
+func (unavailableDB) Acquire(context.Context) (*pgx.Conn, func(), error) {
+	return nil, nil, errors.New("database unavailable")
+}
+
+func unavailableUpstreamHandler() http.Handler {
+	s := NewServer(unavailableDB{}, "test-admin-token", nil, nil)
+	mux := http.NewServeMux()
+	s.UpstreamRoutes(mux)
+	return mux
+}
 
 func newAccount(t *testing.T, h http.Handler, tok string, channelID int64) int64 {
 	t.Helper()
@@ -248,7 +262,15 @@ func TestCreateKeyRejectsUnknownGroupRef(t *testing.T) {
 	}
 }
 
-func TestDeleteKeyRequiresAndConsumesConfirmToken(t *testing.T) {
+func TestDeleteKeyDoesNotRequirePreviewToken(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token",
+		"DELETE", "/admin/keys/123", `{}`)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("DELETE 应直接进入数据库操作，期望数据库不可用的 503，得 %d：%s", code, body)
+	}
+}
+
+func TestDeleteKeyNeedsNoPreviewTokenIntegration(t *testing.T) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, testDSN(t))
 	if err != nil {
@@ -266,28 +288,8 @@ func TestDeleteKeyRequiresAndConsumesConfirmToken(t *testing.T) {
 	keyID := newKey(t, h, tok, accountID, "sk-delete-secret")
 
 	code, body := do(t, h, tok, "DELETE", fmt.Sprintf("/admin/keys/%d", keyID), `{}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("没有 confirm_token 的 DELETE 应 400，得 %d：%s", code, body)
-	}
-
-	code, body = do(t, h, tok, "POST", fmt.Sprintf("/admin/keys/%d/delete-preview", keyID), `{}`)
 	if code != http.StatusOK {
-		t.Fatalf("delete-preview 应 200，得 %d：%s", code, body)
-	}
-	var preview struct {
-		ConfirmToken string `json:"confirm_token"`
-	}
-	if err := json.Unmarshal([]byte(body), &preview); err != nil {
-		t.Fatalf("解析 delete-preview: %v（%s）", err, body)
-	}
-	if preview.ConfirmToken == "" {
-		t.Fatalf("delete-preview 未返回 confirm_token：%s", body)
-	}
-
-	code, body = do(t, h, tok, "DELETE", fmt.Sprintf("/admin/keys/%d", keyID),
-		fmt.Sprintf(`{"confirm_token":%q}`, preview.ConfirmToken))
-	if code != http.StatusOK {
-		t.Fatalf("带 confirm_token 的 DELETE 应 200，得 %d：%s", code, body)
+		t.Fatalf("ADMIN_TOKEN 已鉴权的 DELETE 应直接成功，得 %d：%s", code, body)
 	}
 	var n int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM upstream_keys WHERE id=$1`, keyID).
@@ -297,138 +299,13 @@ func TestDeleteKeyRequiresAndConsumesConfirmToken(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("Key DELETE 后仍有 %d 行", n)
 	}
-
-	code, body = do(t, h, tok, "DELETE", fmt.Sprintf("/admin/keys/%d", keyID),
-		fmt.Sprintf(`{"confirm_token":%q}`, preview.ConfirmToken))
-	if code != http.StatusBadRequest {
-		t.Fatalf("confirm_token 必须一次性消费，重放应 400，得 %d：%s", code, body)
-	}
 }
 
-func TestDeleteKeyTokenExpiresWhenKeyChanges(t *testing.T) {
-	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("连库: %v", err)
-	}
-	defer func() { _ = conn.Close(ctx) }()
-
-	_, h, tok := httpServer(t)
-	base := "https://delete-token-version.example.invalid"
-	wipeCRUD(ctx, t, conn, base)
-	defer wipeCRUD(context.Background(), t, conn, base)
-
-	channelID := newChannel(t, h, tok, "Key DELETE 版本靶子", base)
-	accountID := newAccount(t, h, tok, channelID)
-	keyID := newKey(t, h, tok, accountID, "sk-token-before")
-
-	code, body := do(t, h, tok, "POST", fmt.Sprintf("/admin/keys/%d/delete-preview", keyID), `{}`)
-	if code != http.StatusOK {
-		t.Fatalf("delete-preview 应 200，得 %d：%s", code, body)
-	}
-	var preview struct {
-		ConfirmToken string `json:"confirm_token"`
-	}
-	if err := json.Unmarshal([]byte(body), &preview); err != nil {
-		t.Fatalf("解析 delete-preview: %v（%s）", err, body)
-	}
-
-	code, body = do(t, h, tok, "PATCH", fmt.Sprintf("/admin/keys/%d", keyID),
-		`{"secret":"sk-token-after"}`)
-	if code != http.StatusOK {
-		t.Fatalf("修改 Key 应 200，得 %d：%s", code, body)
-	}
-
-	code, body = do(t, h, tok, "DELETE", fmt.Sprintf("/admin/keys/%d", keyID),
-		fmt.Sprintf(`{"confirm_token":%q}`, preview.ConfirmToken))
-	if code != http.StatusBadRequest {
-		t.Fatalf("Key 已修改后旧 token 不可删除，应 400，得 %d：%s", code, body)
-	}
-	var n int
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM upstream_keys WHERE id=$1`, keyID).
-		Scan(&n); err != nil {
-		t.Fatalf("数 Key: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("旧 token 删除后 Key 行数=%d，应仍为 1", n)
-	}
-}
-
-func TestDeleteKeyDoesNotDeleteConcurrentNewVersion(t *testing.T) {
-	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("连库: %v", err)
-	}
-	defer func() { _ = conn.Close(ctx) }()
-
-	_, h, tok := httpServer(t)
-	base := "https://delete-token-race.example.invalid"
-	wipeCRUD(ctx, t, conn, base)
-	defer wipeCRUD(context.Background(), t, conn, base)
-
-	channelID := newChannel(t, h, tok, "Key DELETE 竞争靶子", base)
-	accountID := newAccount(t, h, tok, channelID)
-	keyID := newKey(t, h, tok, accountID, "sk-race-before")
-
-	code, body := do(t, h, tok, "POST", fmt.Sprintf("/admin/keys/%d/delete-preview", keyID), `{}`)
-	if code != http.StatusOK {
-		t.Fatalf("delete-preview 应 200，得 %d：%s", code, body)
-	}
-	var preview struct {
-		ConfirmToken string `json:"confirm_token"`
-	}
-	if err := json.Unmarshal([]byte(body), &preview); err != nil {
-		t.Fatalf("解析 delete-preview: %v（%s）", err, body)
-	}
-
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		t.Fatalf("开竞争事务: %v", err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `
-UPDATE upstream_keys SET external_ref='raced', updated_at=now() WHERE id=$1`, keyID); err != nil {
-		t.Fatalf("竞争更新 Key: %v", err)
-	}
-
-	type result struct {
-		code int
-		body string
-	}
-	done := make(chan result, 1)
-	go func() {
-		code, body := do(t, h, tok, "DELETE", fmt.Sprintf("/admin/keys/%d", keyID),
-			fmt.Sprintf(`{"confirm_token":%q}`, preview.ConfirmToken))
-		done <- result{code: code, body: body}
-	}()
-
-	time.Sleep(150 * time.Millisecond)
-	select {
-	case got := <-done:
-		t.Fatalf("DELETE 没等待行锁就返回了：%d %s", got.code, got.body)
-	default:
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("提交竞争更新: %v", err)
-	}
-
-	var got result
-	select {
-	case got = <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("DELETE 等待竞争更新后未返回")
-	}
-	if got.code != http.StatusConflict {
-		t.Fatalf("旧 token 不可删除并发更新后的 Key，应 409，得 %d：%s", got.code, got.body)
-	}
-	var n int
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM upstream_keys WHERE id=$1`, keyID).
-		Scan(&n); err != nil {
-		t.Fatalf("数 Key: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("并发更新后旧 token 仍删除了 Key，行数=%d，应为 1", n)
+func TestRotateRouteIsNotRegistered(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token",
+		"POST", "/admin/keys/123/rotate", `{}`)
+	if code != http.StatusNotFound {
+		t.Fatalf("P1 不应注册 rotate 路由，期望 404，得 %d：%s", code, body)
 	}
 }
 

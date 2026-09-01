@@ -53,11 +53,7 @@ const (
 	CapAccount Capability = "account"
 	CapKeys    Capability = "keys"
 	CapGroups  Capability = "groups"
-	// CapSubscriptionQuotas ⏭ P4：一期**所有站型**一律 Unsupported
-	// （订阅制整体推迟）。此前有站型声明 supported 而实现返回
-	// ErrUnsupported —— 自相矛盾且 AC-28 必挂（04 §1 第 18 轮记录）。
-	CapSubscriptionQuotas Capability = "subscription_quotas"
-	CapPricing            Capability = "pricing"
+	CapPricing Capability = "pricing"
 	// CapModelCatalog 是 P1 新增（FR-126）。
 	CapModelCatalog Capability = "model_catalog"
 )
@@ -130,17 +126,10 @@ type DetectResult struct {
 type Credential struct {
 	ChannelID int64
 	Family    Family
-	// CredType 由 Registration.CredTypeFor 定，取值范围就是各注册的
-	// CredType 与 PasswdCredType（现役：newapi_access_token / sub2api_jwt，
-	// 另留 account_password 一格）。库侧 CHECK 与它同步，见 migrations/017。
+	// CredType 由 Registration.CredTypeFor 定。
 	CredType     string
 	AccessToken  string
 	RefreshToken string
-	// Username/Password 服务于**没有令牌端点的站**：唯一续期方式是账密重登。
-	// 全自研站常是这个形态（自建面板往往只有登录表单），所以这条路留着 ——
-	// 见 Registration.PasswdCredType 与 04 §7bis。现役两族都不用。
-	Username string
-	Password string
 	// ExternalUserID 是 NewAPI 的数字用户 ID（New-API-User 头必需）。
 	ExternalUserID string
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。
@@ -274,14 +263,6 @@ type ModelPrice struct {
 	BillingUnit string
 }
 
-// SubscriptionQuota ⏭ P4。一期所有站型的 FetchSubscriptionQuotas
-// 一律返回 ErrUnsupported，故本结构暂只保留占位定义。
-type SubscriptionQuota struct {
-	OwnerKey string
-	PlanRef  string
-	Meta     SourceMeta
-}
-
 // Adapter 是全部站型实现的统一契约（04 §1）。
 type Adapter interface {
 	// Detect 站型探测：公开、无鉴权，接入任何新站点的第一步（04 §2）。
@@ -298,9 +279,6 @@ type Adapter interface {
 
 	// FetchGroups 分组：倍率、可用模型、限流（FR-123/124）。
 	FetchGroups(ctx context.Context, s Session) ([]Group, error)
-
-	// FetchSubscriptionQuotas ⏭ P4：一期所有站型返回 ErrUnsupported。
-	FetchSubscriptionQuotas(ctx context.Context, s Session) ([]SubscriptionQuota, error)
 
 	// FetchPricing 模型价格（FR-010/012/013）。
 	FetchPricing(ctx context.Context, s Session) (Pricing, error)
