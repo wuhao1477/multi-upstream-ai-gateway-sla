@@ -6,7 +6,7 @@
 | 评估日期 | 2026-08-30 首版；2026-08-31 复评（`b2ba4ad`）；2026-08-29 修掉 §3.3 表定义缺陷与 §3.4 处置后再全跑（`7be34a7`→`340a048`）；2026-09-01 第一轮：sqlc 翻案落文档后整列重跑于 `a321e73`；**第二轮**：自审 + Codex 三次评审共六条缺陷全修后重跑于 `97fb4ab`，并把退出标准①从 ✅ 改判为"不可判定 → 未通过"；**第三轮**：审"有没有过度设计"（[附三](#附三2026-09-01-第三轮--这次审的是有没有过度设计)），删掉 −40 行后又撞出三条验证链缺陷，重跑于 `2b77241`；**第四轮**：AC-38 的 sub2api 一族**真跑了一次**（[附四](#附四2026-09-01-第四轮--ac-38-的-sub2api-那半跑起来了)），①改判回 ✅；补跑 §2 三格时又撞出一条脚本缺陷（附四⑧），基线 `b1c58f5`；**第五轮本地复验**：当前工作树新增周期采集、能力分级、真实轮次 stale、管理 CRUD、只读验收模式，并完成本地/fixture/DDL/迁移/前端、真 Sub2API AC-38 6/6 与真 NewAPI 浏览器 58/58 验证 |
 | 判定依据 | [00 §3 P1 行](../dev/00-overview-and-milestones.md) 的四条退出标准 · [#13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13) 退出清单 · [14 §3](../dev/14-acceptance-matrix.md) 规则 3「不可判定即不通过」 |
 | 证据 | [P1-evidence.md](P1-evidence.md)（本文件不重复举证，只做判定） |
-| **结论** | **当前工作树的 P1 技术验收通过，可以提交。远端 PR #14 仍不可合并**：本地修复尚未 commit/push，远端 HEAD 仍为 `a317c06`；PR 仍是 Draft，新 HEAD 尚无 CI。`remote-stack` 本轮因无 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35，不冒充当前证据。 |
+| **结论** | **P1 技术验收通过，满足合并条件**：本地全量门禁、真 NewAPI 浏览器 58/58、真 Sub2API AC-38 6/6 均通过；远端只需 PR 最新 HEAD 的 CI 全绿且不再是 Draft。`remote-stack` 本轮因无 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35，不冒充当前证据。 |
 
 > 这份文件此前不存在。2026-08-30 的 P1-evidence §5.13 记着一条我自己的记账错误：
 > 上一轮我声称写下并提交过 `P1-release-readiness.md`（commit `7c4c72f`），实测
@@ -155,7 +155,7 @@ DDL 真跑、迁移真库集成、前端 test/lint/typecheck/build、verify 脚�
 | --- | --- | --- |
 | `make check`（fmt / vet / **test -race** / 配置键生成 / 迁移一致）+ 本地 `golangci-lint`（**不含在 `make check` 里**，CI 的 `gate` 才跑） | ✅ | ✅ |
 | `verify/gate.sh`（文档 13 类 + 覆盖率分类自测 + DDL 真跑 pg16，109 条） | ✅ | ✅ |
-| `test-migrate.sh` **8/8**（第 6、7 步：站型注册表一致 + 两处 `billing_unit` 列定义一致；**第 8 步是渠道与导入写路径的 8 条真库 Go 测试**，两轮各一批，见[附一](#附codex-二次评审的两条-high2026-08-29)与[附二](#附二2026-09-01-自审--codex-三次评审的六条)） · `test-config-api.sh` 9+2 · `test-compose.sh` 5 步 | ✅ | ✅ |
+| `test-migrate.sh` **8/8**（第 6、7 步：站型注册表一致 + 两处 `billing_unit` 列定义一致；**第 8 步含 10 条渠道/导入与 8 条资产持久化真库 Go 测试**，见[附一](#附codex-二次评审的两条-high2026-08-29)与[附二](#附二2026-09-01-自审--codex-三次评审的六条)） · `test-config-api.sh` 9+2 · `test-compose.sh` 5 步 | ✅ | ✅ |
 | `ui-stack.sh`：SPA **14** + 浏览器 **58** + 日志 **1**（真上游取自探活：redacted-channel-03 API `upstream-a.invalid`，1370 个模型 / 倍率 1161 + 按次 209；当前导出 110 条 → 可入库 69 / 跳过 41 / 失败 0） | ✅ 当前工作树 58/58 | ❌ 需真上游令牌 |
 | **`ac38-sub2api.sh`**：AC-38 的 sub2api 一族 —— 真站点 `upstream-b.invalid` + 临时 PG。探测归族 / 能力分级 / 逐项带耗时 / 9 个分组 / Key 额度前进 / 第二次 sync 429 | ✅ 当前工作树 6/6 步 | ❌ 需真上游令牌 |
 | `remote-stack.sh`：内网真库只读 **35**（2026-08-31 从 32 增：停用态 3 条） | ⚠️ `b1c58f5` 历史 35/35；本轮无 `DATABASE_URL` 未重跑 | ❌ runner 到不了 <internal-db-host> |
@@ -401,7 +401,7 @@ no_shield / quota_per_unit），**不回原始响应体** —— 故它不是外
 | --- | --- |
 | 被消费的 | **7 个** —— `collector_request_interval_ms`、`collector_balance_interval_min`、`collector_keyquota_interval_min`、`collector_price_interval_h`、`collector_catalog_interval_h`、`catalog_missing_rounds`、`sync_min_interval_s` |
 | 未被消费的 | **65 个** —— 调度期限、探测预算、容量上限、余额安全垫、健康与冷却、计费容差、告警生命周期、账本批提交、debug 抓包…… 全部属 P2~P4 |
-| 判据 | 遍历 `params_gen.go` 的 72 个 `Key:`，在非生成、非测试的 Go 源里搜 `"<key>"`；68 个零命中 |
+| 判据 | 遍历 `params_gen.go` 的 72 个 `Key:`，在非生成、非测试的 Go 源里搜 `"<key>"`；65 个零命中 |
 | 现在的表现 | 运维改 `max_hops`：走完两步确认 → 落 `config_params` → 进版本历史 → **零行为变化**。接口与界面都不说这件事 |
 
 **为什么不删这 68 个键**：[09 §4bis](../dev/09-admin-api.md) 的设计就是"先登记其存在"
@@ -567,8 +567,8 @@ make 目标。同一个符号，底下垫的东西不同 —— 这正是 §1 �
 | ⑤ | 补齐半成品**不补探测快照** → 报 `imported` 而那个渠道一次都采不了 | 我 | — | 已修：`incompleteParts` 加查 `__detect__` 快照，`repairChannel` 能补 | `TestImportRepairAddsSnapshotAndKeepsWarning` |
 | ⑥ | 补齐分支**整句覆盖** `warning` → `shielded_sites` / `without_credential` 少计 | Codex | — | 已修：改成追加 | 同上（一条测两件） |
 
-八条真库测试挂在 `test-migrate.sh` 第 8 步（`EXPECT=8`，写死数目是刻意的：
-`-run` 正则打错一个字就少匹配几条，而日志里看不出来）。
+当时的八条真库测试挂在 `test-migrate.sh` 第 8 步；当前脚本按显式测试名数组动态计算
+`EXPECT`，既避免前缀正则牵连无关测试，也能在名字写错、少跑测试时失败。
 
 **反向自验：7 路，全部红在自己那句断言上**（`verify/break-review-fixes.py`，用完即删）。
 它自己的四个坑值得单独记，因为**每一个都会产出假绿**：

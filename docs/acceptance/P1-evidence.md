@@ -7,7 +7,7 @@
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
 | 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 58 项（见 §5） |
-| 结论 | 当前工作树的 P1 技术验收已通过：本地/fixture/DDL/迁移/前端门禁全绿，真 NewAPI 浏览器验收 58/58，真 Sub2API AC-38 6/6。`remote-stack` 本轮因未提供 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35；远端 PR 是否可合并另受未推送、Draft 与新 HEAD CI 约束。 |
+| 结论 | P1 技术验收已通过：本地/fixture/DDL/迁移/前端门禁全绿，真 NewAPI 浏览器验收 58/58，真 Sub2API AC-38 6/6。`remote-stack` 本轮因未提供 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35；PR 最新 HEAD 的 CI 全绿且切出 Draft 后即可合并。 |
 
 ---
 
