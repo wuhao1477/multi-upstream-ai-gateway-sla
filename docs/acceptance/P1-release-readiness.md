@@ -2,7 +2,7 @@
 
 | 项目 | 当前事实 |
 | --- | --- |
-| 评估对象 | 分支 `feat/p1-upstream-inventory`，提交 `107de5d`（远端 PR head 一致） |
+| 评估对象 | 分支 `feat/p1-upstream-inventory`（远端 PR head 与当前分支最新提交一致） |
 | 评估日期 | 2026-09-02 |
 | 一期范围 | 上游渠道采集与管理：渠道商列表与 CRUD、上游账号管理、Key 管理、渠道分组与倍率、模型目录、手动采集与资产总览 |
 | 明确不含 | 网关请求转发、账本、P3 调度/SLA/告警/压测、P4 订阅 |
@@ -60,4 +60,4 @@ git diff --check
 
 全部命令成功，PR 远端 `gate`、`build`、`arm64` 均为绿色；P1 当前满足合并条件。当前不需要轮换数据库密码。
 
-当前 PR #14 的远端 head 为 `107de5d`，状态 `OPEN`、非 Draft、`MERGEABLE`、`CLEAN`；可直接合并。
+当前 PR #14 的远端 head 与当前分支最新提交一致，状态 `OPEN`、非 Draft、`MERGEABLE`、`CLEAN`；可直接合并。
