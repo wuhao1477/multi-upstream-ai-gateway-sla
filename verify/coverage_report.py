@@ -202,8 +202,7 @@ def main():
     print("=" * 74)
 
     print("\n【逐家族 × 能力的采集成功率】")
-    caps_order = ["account", "groups", "keys", "pricing",
-                  "model_catalog", "subscription_quotas"]
+    caps_order = ["account", "groups", "keys", "pricing", "model_catalog"]
     fams = sorted({f for f, _ in matrix})
     for fam in fams:
         print(f"\n  {fam}:")

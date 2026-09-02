@@ -3,11 +3,11 @@
 | 项目 | 内容 |
 | --- | --- |
 | 阶段 | **P1：多上游渠道采集与管理**（[PRD §2.1.0](../PRD.md)、[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
-| 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit`；2026-09-01 校正当前工作树证据状态 |
+| 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit`；2026-09-02 更新当前工作树证据状态 |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
 | 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 58 项（见 §5） |
-| 结论 | P1 技术验收已通过：本地/fixture/DDL/迁移/前端门禁全绿，真 NewAPI 浏览器验收 58/58，真 Sub2API AC-38 6/6。`remote-stack` 本轮因未提供 `DATABASE_URL` 未重跑，仍引用 `b1c58f5` 的历史 35/35；PR 最新 HEAD 的 CI 全绿且切出 Draft 后即可合并。 |
+| 结论 | 真 NewAPI 浏览器验收已在当前 HEAD 重跑 `62/62`；2026-09-02 两个显式授权的真 Sub2API 站点均完成 AC-38。当前发布判定以 [P1-release-readiness](P1-release-readiness.md#当前结论) 为准。 |
 
 ---
 
@@ -17,10 +17,10 @@
 
 | 断言 | 实测 |
 | --- | --- |
-| 渠道下 2 账号、2 Key | ✅ `Key 数 = 2`，`acct=1`/`acct=2` |
-| 各 Key 分属不同分组 | ✅ `id=1 group=2`（vip）、`id=2 group=1`（default） |
+| 渠道下 2 账号、4 Key | ✅ 当前验收脚本创建 2 个账号、每账号 2 把 Key |
+| 各 Key 分属不同分组 | ✅ 管理界面支持选择同渠道分组并回显 `group_ref` 与 `rate_multiplier` |
 | **明文一律不回显** | ✅ 列表只见 `sk-ui-se…`/`sk-secon…`；**并断言整个页面 DOM 里搜不到完整明文**（登记时用可识别 secret 后 grep 整份 HTML） |
-| Key 生命周期 | ✅ `disable` 后 `status=revoked`；`rotate` 返回新明文且**只返回一次** |
+| Key 生命周期 | ✅ `disable` 后 `status=revoked`；Key 可编辑、删除，明文更新后仍不回显 |
 
 > **FR-094 的验证方式**是刻意选的：只看"列表显示前缀"不足以证明不泄露 —— 明文可能出现在别处（错误信息、隐藏字段、JS 变量）。故断言整份 DOM。
 > 脱敏用 SQL 表达式 `left(secret,8)||'…'` 而非 Go 侧截断，**完整 secret 根本不出库**，少一条可能被日志带出去的路径。
@@ -37,19 +37,17 @@ pricing              ok    rows=0   「采到 9 个模型价格，其中 9 个�
                                      模型（models 表无对应行）→ 不写 price_versions，
                                      价格已存入模型目录备查」
 model_catalog        ok    rows=9
-subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 ```
 
-> 当前能力分级口径（2026-09-01 校正）：`supported` 必须产出数据，空结果判失败；`degraded` 必须带 `note` 说明缺失字段或上游未提供的数据；`unsupported` 必须显式出现在 items。Sub2API 的 `groups` / `model_catalog` 当前声明为 `degraded`，不能伪造完整成功。
+> 当前能力分级口径（2026-09-01 校正）：`supported` 必须产出数据，空结果判失败；`degraded` 必须带 `note` 说明缺失字段或上游未提供的数据。P1 范围外能力不作为采集项。Sub2API 的 `groups` / `model_catalog` 当前声明为 `degraded`，不能伪造完整成功。
 
 | 断言 | 实测 |
 | --- | --- |
-| 逐项结果与耗时 | ✅ 6 项各有 status/rows/elapsed_ms |
+| 逐项结果与耗时 | ✅ P1 采集项各有 status/rows/elapsed_ms |
 | NewAPI 历史四类数据均更新 | ✅ `channel_groups` 3 行、`group_models` 24 行、`channel_model_catalog` 9 行、`upstream_keys.quota_synced_at` 前进；这不是所有家族的统一要求，当前按能力分级验收 |
-| **不支持项显式上报** | ✅ `subscription_quotas` 出现在 items 里且标 `unsupported`，**不静默省略** |
 | 声明与实现一致 | ✅ 当前工作树已由 `go test -race ./...` 覆盖 `TestCapabilitiesMatchDocMatrix` / `TestUnsupportedDeclarationsReturnErrUnsupported` |
 | 限流生效 | ✅ 60s 内重复调用返回 **429** 且 `items` 全 `skipped`，**不打上游** |
-| **每一个已注册家族都跑过**（AC-38 新判定基准） | ✅ 当前工作树已重跑：真 Sub2API 站 `upstream-b.invalid` 上 `account/keys=supported` 且各 1 行，`groups=degraded` 9 行，`pricing/model_catalog=degraded` 0 行且均有说明，`subscription_quotas=unsupported`，第二次 sync 返回 429；真 NewAPI 站由浏览器套件完成 58/58。此前曲折留在下方历史段落 |
+| **每一个已注册家族都跑过**（AC-38 新判定基准） | ✅ 真 NewAPI 浏览器验收 `62/62` 已通过；2026-09-02 两个显式授权的 Sub2API 站点均完成 AC-38。最新一次：账号 1 行、Key 3 行、分组 24 行、`quota_synced_at` 前进；模型目录和分组模型为 0 行时均标 `degraded` 且附说明，第二次 sync 为 429。 |
 
 > AC-38 的判定基准已从"三个家族"改为**"每一个已注册家族"**（2026-08-29，见 [PRD AC-38](../PRD.md) 那条 ⚠️）。原文写死族数，而其中一族已整族移出支持范围（§3.1）—— 写死会让这条 AC 变成不可满足，而不是让它随代码走。改后判定基准是 `collector.All()`，**加一族自动纳入本条**，那正是留着适配器架构的意义（[04 §7bis](../dev/04-collector-adapter.md)）。
 
@@ -87,7 +85,7 @@ subscription_quotas  unsupported  「订阅制属交付阶段 P4」
 > 那 13 个渠道的处置**全都不动**。
 >
 > 代价随之明确：**本次发版退出标准①按本仓库自己的规则未满足**，发不发是运营决定
-> （[P1-release-readiness §1](P1-release-readiness.md#1-四条退出标准的判定)、§5）。
+> （[P1-release-readiness 退出标准](P1-release-readiness.md#退出标准)）。
 > 判定基准（`collector.All()`）**一个字不动** —— 将来接入任一 sub2api 站点，
 > 本条自动重新可验，不需要再改文档。
 >
@@ -116,8 +114,8 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 **一句写错的恢复条件，比缺口本身更能挡住修复。** 它挡了一天，因为有人问了一句
 "这话什么意思"。判定基准（`collector.All()`）从头到尾一个字没动，这一点上面那段是对的。
 
-复跑与逐条判据见
-[P1-release-readiness 附四](P1-release-readiness.md#附四2026-09-01-第四轮--ac-38-的-sub2api-那半跑起来了)。
+这次历史复跑的细节保留在本节；当前复验状态见
+[P1-release-readiness 当前结论](P1-release-readiness.md#当前结论)。
 
 ### AC-39 目录容纳大量模型且不产生可路由模型行
 
@@ -144,10 +142,10 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 
 | 标准 | 状态 |
 | --- | --- |
-| AC-37~40 全绿 | ✅ 当前工作树已通过 fixture、真 NewAPI 浏览器 58/58 与真 Sub2API AC-38 6/6 |
+| AC-37~40 全绿 | ⏳ 真 NewAPI 浏览器 `62/62` 和两个真 Sub2API AC-38 均通过；等待本轮完整本地门禁 |
 | #1~#11 全部关闭 | ✅ 12 个 issue 全关（#13 EPIC 收尾） |
 | 证据留档 | ✅ 本文件 + [P1-manual-channels.md](P1-manual-channels.md)（人工清单）+ 四轮覆盖率报告归档在 [`coverage/`](coverage/)。截图仍只在 `/tmp/sla-ui-shots/`（8 张 + `results.json`，含 fullPage）—— **未入库**，因为含真实站名与额度，且每轮覆写 |
-| 门禁全绿 | ✅ 当前工作树已通过 `go test -race -p=1 ./...`、`go vet ./...`、fmt/gen/migration 文档检查、前端 test/lint/typecheck/build、verify 脚本检查、DDL 真跑、迁移真库集成、`git diff --check`、collector once、真 Sub2API AC-38 6/6、真 NewAPI 浏览器 58/58；`remote-stack` 本轮因无 `DATABASE_URL` 未重跑，保留历史 35/35，不计入本轮本地门禁 |
+| 门禁全绿 | ⏳ Sub2API 真实站点阻塞已解除；等待本轮完整本地门禁，详见 [P1-release-readiness 当前结论](P1-release-readiness.md#当前结论) |
 | 全渠道 sync 覆盖率报告 | ✅ 见 §2.1（四轮已归档进仓库；末轮的分母是 45 在纳管渠道，见 §2.1ter） |
 | 采不到的渠道列出人工维护责任人（#12 第 4 项） | ✅ **已结清（2026-08-31），但方式是"不再纳管"而非"指定了人"** —— 运营决定三类（需人工重登 11 / 凭证失效 6 / 形态不符 3）全部放弃，20 个渠道已 `status=disabled` + 停用原因，[P1-manual-channels.md](P1-manual-channels.md) 从"待指派清单"改成"放弃记录"。责任人一列失去对象：没有需要人去维护的站了。<br>⚠️ 与 §3.1 那次「第三族被移除而非填上」同类 —— **放弃是一个决定，不是一次修复**：那 20 个站的可采集性至今未被恢复，只是不再由本系统承担。执行细节与顺带修掉的「停用不影响采集」见 [§5.18](#518-放弃-20-个采不到的站并修掉停用不影响采集2026-08-31) |
 
@@ -507,7 +505,7 @@ mock 是故意两种混排的，这正是它掩盖掉的现实。
 
 | AC | 哪部分与上游形态无关（仍有效） | 哪部分的数字出自 mock（已由 §5.2 重测） |
 | --- | --- | --- |
-| AC-37 | 明文不回显、`disable`→`revoked`、`rotate` 只返回一次 —— 都是我方行为。且 14 判定它为 **FIXTURE**：账号/Key/分组是我方库行，真上游产不出"恰好 2 账号 2 Key 分属不同分组" | `group=2（vip）`/`group=1（default）` 的**分组名**来自 mock 的 groups 采集。§5.2 那轮真站点给的是 6 个真实分组（5 个非空，最大 1354 模型） |
+| AC-37 | 明文不回显、`disable`→`revoked`、PATCH 替换 secret 完成轮换 —— 都是我方行为。且 14 判定它为 **FIXTURE**：账号/Key/分组是我方库行，真上游产不出"恰好 2 账号 2 Key 分属不同分组" | `group=2（vip）`/`group=1（default）` 的**分组名**来自 mock 的 groups 采集。§5.2 那轮真站点给的是 6 个真实分组（5 个非空，最大 1354 模型） |
 | AC-38 | 逐项 status/rows/elapsed_ms 的**结构**、`unsupported` 显式上报、限流 429、声明与实现一致（包级测试） | `groups rows=3`/`group_models 24`/`model_catalog 9` 全是 mock 的数据量。§5.2 真站点：6 分组 / 1369 目录模型 |
 | AC-39 | 核心断言（`models`=0、`channel_models`=0、目录无 token 上界）由**真库 65 渠道 2782 行**兑现 | 已删的"mock 9 个模型"举例（§1 已划掉） |
 | AC-40 | 阈值判定逻辑与 `?stale=true` 筛选 | `deepseek-v4` 这个模型名来自 mock 目录。当前实现判定用 `catalog_sync_seq - last_seen_seq` 的真实连续可靠轮次，旧的 `last_seen_at` 回拨只算历史证据 |

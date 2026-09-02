@@ -12,6 +12,7 @@ const toast = useToastStore()
 
 const groups = ref<ChannelGroup[]>([])
 const loaded = ref(false)
+let modelRequest = 0
 /** 展开的分组：名称用**上游分组名**，见下方注释。 */
 const expanded = ref<{ name: string; count: number; models: string[] } | null>(null)
 
@@ -29,8 +30,10 @@ onMounted(async () => {
 })
 
 async function openModels(g: ChannelGroup): Promise<void> {
+  const request = ++modelRequest
   try {
     const m = await adminApi.groupModels(g.id)
+    if (modelRequest !== request || channels.currentID === null) return
     // 标题用**上游分组名**而非内部 id：id 逐次采集会变（实测两次运行里
     // 同一个 id 指向了不同分组），运维看"分组 2"无从对应到上游的 vip/default。
     expanded.value = { name: g.group_ref, count: m.count, models: m.models }

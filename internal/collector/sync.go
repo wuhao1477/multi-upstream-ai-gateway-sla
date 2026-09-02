@@ -15,7 +15,7 @@ type ItemStatus string
 
 const (
 	StatusOK          ItemStatus = "ok"
-	StatusPartial     ItemStatus = "partial" // 仅 keys 可能：部分 Key 失败
+	StatusPartial     ItemStatus = "partial" // 多账号采集部分成功
 	StatusFailed      ItemStatus = "failed"
 	StatusUnsupported ItemStatus = "unsupported"
 	StatusSkipped     ItemStatus = "skipped" // 被限流跳过
@@ -54,8 +54,8 @@ type Sink interface {
 	// SaveKey 写一把 Key 的用量（每把一个事务）。
 	// 返回 ErrKeyNotRegistered 表示上游有、库中无 —— 计入异常项而非失败。
 	SaveKey(ctx context.Context, channelID, accountID int64, k Key) error
-	// SavePricing 写价格版本。
-	SavePricing(ctx context.Context, channelID int64, p Pricing) (int, error)
+	// SavePricing 写价格快照、目录价格与已登记模型的价格版本。
+	SavePricing(ctx context.Context, channelID int64, p Pricing) (PricingWriteResult, error)
 	// SaveCatalog 写模型目录（upsert，first_seen_at 不覆盖）。
 	SaveCatalog(ctx context.Context, channelID int64, cs []CatalogModel) (int, error)
 }
@@ -133,6 +133,11 @@ func (s *Syncer) SyncMany(ctx context.Context, creds []Credential) (*SyncResult,
 		StartedAt: time.Now(),
 	}
 	defer func() { res.ElapsedMs = time.Since(res.StartedAt).Milliseconds() }()
+	for _, cred := range creds[1:] {
+		if cred.ChannelID != creds[0].ChannelID || cred.Family != creds[0].Family {
+			return res, fmt.Errorf("%w: SyncMany 只接受同一渠道、同一站型的凭证", ErrPrecondition)
+		}
+	}
 
 	caps := s.Adapter.Capabilities()
 	accounts, authErrs := s.authenticate(ctx, creds)
@@ -230,6 +235,11 @@ func (s *Syncer) syncGroups(
 		all = append(all, groups...)
 	}
 	groups := mergeGroups(all)
+	if len(errs) > 0 {
+		for i := range groups {
+			groups[i].Meta.Partial = true
+		}
+	}
 	n, err := s.Sink.SaveGroups(ctx, accounts[0].cred.ChannelID, groups)
 	if err != nil {
 		return 0, 0, "", err
@@ -286,20 +296,21 @@ func (s *Syncer) syncPricing(
 		all = append(all, pricing)
 	}
 	pricing := mergePricing(all)
-	n, err := s.Sink.SavePricing(ctx, accounts[0].cred.ChannelID, pricing)
+	if len(errs) > 0 {
+		pricing.Meta.Partial = true
+	}
+	written, err := s.Sink.SavePricing(ctx, accounts[0].cred.ChannelID, pricing)
 	if err != nil {
 		return 0, 0, "", err
 	}
 	note := degradedNote(pricing.Meta)
-	if skipped := len(pricing.Models) - n; skipped > 0 {
+	if written.CatalogUpdates > 0 || written.PriceVersions > 0 || written.UnregisteredModels > 0 {
 		note = joinNotes(note, fmt.Sprintf(
-			"采到 %d 个模型价格，其中 %d 个未登记为可路由模型（models 表无对应行）→ "+
-				"不写 price_versions，价格已存入模型目录备查", len(pricing.Models), skipped))
-		if n == 0 {
-			n = len(pricing.Models)
-		}
+			"价格快照=%d，目录价格更新=%d，price_versions=%d，未登记为可路由模型=%d",
+			written.Snapshots, written.CatalogUpdates, written.PriceVersions,
+			written.UnregisteredModels))
 	}
-	return capabilityResult(n, errs, note)
+	return capabilityResult(written.Snapshots, errs, note)
 }
 
 func (s *Syncer) syncCatalog(
@@ -316,6 +327,14 @@ func (s *Syncer) syncCatalog(
 		all = append(all, catalog...)
 	}
 	catalog := mergeCatalog(all)
+	if len(errs) > 0 {
+		// 多账号渠道的目录是各账号结果的并集；任一账号失败时不能把
+		// 成功账号的部分结果当成完整轮次，否则失败账号独有的模型会被
+		// 连续缺席判定误标为下架。仍保存已采到的模型，但不推进可靠轮次。
+		for i := range catalog {
+			catalog[i].Meta.Partial = true
+		}
+	}
 	n, err := s.Sink.SaveCatalog(ctx, accounts[0].cred.ChannelID, catalog)
 	if err != nil {
 		return 0, 0, "", err
@@ -345,12 +364,7 @@ func mergeGroups(all []Group) []Group {
 	byRef := map[string]Group{}
 	for _, group := range all {
 		if current, ok := byRef[group.GroupRef]; ok {
-			for _, model := range group.AvailableModels {
-				if !slices.Contains(current.AvailableModels, model) {
-					current.AvailableModels = append(current.AvailableModels, model)
-				}
-			}
-			byRef[group.GroupRef] = current
+			byRef[group.GroupRef] = mergeGroup(current, group)
 			continue
 		}
 		group.AvailableModels = append([]string{}, group.AvailableModels...)
@@ -365,18 +379,30 @@ func mergeGroups(all []Group) []Group {
 	return out
 }
 
+func mergeGroup(current, candidate Group) Group {
+	merged := current
+	if merged.RateMultiplier == 0 {
+		merged.RateMultiplier = candidate.RateMultiplier
+	}
+	merged.AvailableModels = appendUnique(append([]string{}, merged.AvailableModels...), candidate.AvailableModels...)
+	merged.Meta = mergeSourceMeta(current.Meta, candidate.Meta)
+	return merged
+}
+
 func mergePricing(all []Pricing) Pricing {
 	out := Pricing{GroupRatios: map[string]float64{}}
 	models := map[string]ModelPrice{}
 	for _, pricing := range all {
-		if out.Meta.FetchedAt.IsZero() {
-			out.Meta = pricing.Meta
-		}
+		out.Meta = mergeSourceMeta(out.Meta, pricing.Meta)
 		for group, ratio := range pricing.GroupRatios {
-			out.GroupRatios[group] = ratio
+			if current, exists := out.GroupRatios[group]; !exists || current == 0 {
+				out.GroupRatios[group] = ratio
+			}
 		}
 		for _, model := range pricing.Models {
-			if _, exists := models[model.ModelName]; !exists {
+			if current, exists := models[model.ModelName]; exists {
+				models[model.ModelName] = mergeModelPrice(current, model)
+			} else {
 				models[model.ModelName] = model
 			}
 		}
@@ -391,7 +417,9 @@ func mergePricing(all []Pricing) Pricing {
 func mergeCatalog(all []CatalogModel) []CatalogModel {
 	models := map[string]CatalogModel{}
 	for _, model := range all {
-		if _, exists := models[model.ModelName]; !exists {
+		if current, exists := models[model.ModelName]; exists {
+			models[model.ModelName] = mergeCatalogModel(current, model)
+		} else {
 			models[model.ModelName] = model
 		}
 	}
@@ -401,6 +429,121 @@ func mergeCatalog(all []CatalogModel) []CatalogModel {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ModelName < out[j].ModelName })
 	return out
+}
+
+func mergeModelPrice(current, candidate ModelPrice) ModelPrice {
+	best, other := current, candidate
+	if modelPriceScore(candidate) > modelPriceScore(current) {
+		best, other = candidate, current
+	}
+	if best.InputPrice == 0 {
+		best.InputPrice = other.InputPrice
+	}
+	if best.OutputPrice == 0 {
+		best.OutputPrice = other.OutputPrice
+	}
+	if best.CachePrice == 0 {
+		best.CachePrice = other.CachePrice
+	}
+	if best.BillingUnit == "" {
+		best.BillingUnit = other.BillingUnit
+	}
+	return best
+}
+
+func modelPriceScore(m ModelPrice) int {
+	score := 0
+	if m.InputPrice != 0 {
+		score++
+	}
+	if m.OutputPrice != 0 {
+		score++
+	}
+	if m.CachePrice != 0 {
+		score++
+	}
+	if m.BillingUnit != "" {
+		score++
+	}
+	return score
+}
+
+func mergeCatalogModel(current, candidate CatalogModel) CatalogModel {
+	best, other := current, candidate
+	if catalogModelScore(candidate) > catalogModelScore(current) ||
+		(catalogModelScore(candidate) == catalogModelScore(current) &&
+			betterMeta(candidate.Meta, current.Meta)) {
+		best, other = candidate, current
+	}
+	if best.InputPrice == 0 {
+		best.InputPrice = other.InputPrice
+	}
+	if best.OutputPrice == 0 {
+		best.OutputPrice = other.OutputPrice
+	}
+	if best.BillingUnit == "" {
+		best.BillingUnit = other.BillingUnit
+	}
+	best.Meta = mergeSourceMeta(current.Meta, candidate.Meta)
+	return best
+}
+
+func catalogModelScore(m CatalogModel) int {
+	return modelPriceScore(ModelPrice{
+		InputPrice: m.InputPrice, OutputPrice: m.OutputPrice,
+		BillingUnit: m.BillingUnit,
+	})
+}
+
+func betterMeta(a, b SourceMeta) bool {
+	if sourceMetaScore(a) != sourceMetaScore(b) {
+		return sourceMetaScore(a) > sourceMetaScore(b)
+	}
+	return a.FetchedAt.After(b.FetchedAt)
+}
+
+func mergeSourceMeta(current, candidate SourceMeta) SourceMeta {
+	merged := current
+	if sourceMetaEmpty(current) || betterMeta(candidate, current) {
+		merged = candidate
+	}
+	merged.Degraded = current.Degraded || candidate.Degraded
+	merged.Partial = current.Partial || candidate.Partial
+	merged.Stale = current.Stale || candidate.Stale
+	merged.MissingFields = appendUnique(
+		append([]string{}, current.MissingFields...), candidate.MissingFields...)
+	sort.Strings(merged.MissingFields)
+	return merged
+}
+
+func sourceMetaEmpty(meta SourceMeta) bool {
+	return meta.Source == "" && meta.Endpoint == "" && meta.FetchedAt.IsZero() &&
+		meta.ValidUntil.IsZero() && !meta.Stale && !meta.Degraded &&
+		len(meta.MissingFields) == 0 && !meta.Partial
+}
+
+func sourceMetaScore(meta SourceMeta) int {
+	score := 0
+	if !meta.Partial {
+		score += 4
+	}
+	if !meta.Degraded {
+		score += 2
+	}
+	score -= len(meta.MissingFields)
+	if !meta.FetchedAt.IsZero() {
+		score++
+	}
+	return score
+}
+
+func appendUnique(dst []string, values ...string) []string {
+	for _, value := range values {
+		if value != "" && !slices.Contains(dst, value) {
+			dst = append(dst, value)
+		}
+	}
+	return dst
 }
 
 // run 执行一项采集并记录结果。
@@ -429,7 +572,7 @@ func (s *Syncer) run(
 	}
 	switch {
 	case err != nil && failed > 0:
-		// 部分成功（只有 keys 会到这里）
+		// 多账号采集部分成功：已保存可用账号的结果，同时保留失败信息。
 		item.Status = StatusPartial
 		item.Error = err.Error()
 	case err != nil:

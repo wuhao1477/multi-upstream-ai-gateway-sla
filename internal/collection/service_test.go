@@ -123,6 +123,33 @@ func TestRunOnceReleasesLockAfterFailure(t *testing.T) {
 	}
 }
 
+func TestRunOnceKeepsFailedCapabilitiesDueForRetry(t *testing.T) {
+	now := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	schedule := NewSchedule(Intervals{
+		Balance: time.Minute, KeyQuota: time.Minute,
+		Price: time.Hour, Catalog: time.Hour,
+	})
+	svc := &Service{
+		Schedule: schedule,
+		Now:      func() time.Time { return now },
+		ListChannels: func(context.Context) ([]store.Channel, error) {
+			return []store.Channel{{ID: 1, Status: "enabled"}}, nil
+		},
+		Sync: func(context.Context, store.Channel, []collector.Capability) (*collector.SyncResult, error) {
+			return nil, errors.New("上游暂时不可用")
+		},
+		TryLock: func(context.Context, int64) (func(), bool, error) {
+			return func() {}, true, nil
+		},
+	}
+	if err := svc.RunOnce(context.Background()); err == nil {
+		t.Fatal("采集失败应返回 error")
+	}
+	if got := schedule.Due(now); len(got) != len(capabilityOrder) {
+		t.Fatalf("失败能力必须继续保持到期以便重试，得到 %v", got)
+	}
+}
+
 func TestRunOnceReportsFailedItems(t *testing.T) {
 	svc := &Service{
 		Schedule: NewSchedule(Intervals{

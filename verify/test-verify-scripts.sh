@@ -27,6 +27,16 @@ fi
 if grep -Eq '"token"[[:space:]]*:' "$ac38"; then
   fail "ac38-sub2api.sh 的选站结果不得包含上游 token"
 fi
+grep -q '/api/v1/settings/public' "$ac38" ||
+  fail "ac38-sub2api.sh 选站必须验证 Sub2API 公开指纹"
+grep -q 'turnstile-enabled' "$ac38" ||
+  fail "ac38-sub2api.sh 选站必须排除开启人机验证的站点"
+grep -q 'AC38_ACCESS_TOKEN_FILE' "$ac38" ||
+  fail "ac38-sub2api.sh 必须只通过私有文件接收显式验收令牌"
+grep -q 'turnstile_enabled") is True and not explicit' "$ac38" ||
+  fail "ac38-sub2api.sh 只可在显式授权验收时接受开启人机验证的站点"
+grep -q 'auth-not-profile' "$ac38" ||
+  fail "ac38-sub2api.sh 不得把 HTTP 200 的非账号响应当作鉴权成功"
 
 for name in resp sync cred key acc keyreq; do
   if grep -q "/tmp/ac38-${name}\\.json" "$ac38"; then
@@ -38,9 +48,15 @@ grep -q '"capability","support","status"' "$ac38" ||
 grep -q 'supported 能力必须产生数据' "$ac38" || fail "ac38-sub2api.sh 必须断言 supported 有数据"
 grep -q '零行只允许 degraded/unsupported 且必须有说明' "$ac38" ||
   fail "ac38-sub2api.sh 必须断言零行规则"
-if grep -q 'cap!="subscription_quotas" and st=="unsupported"' "$ac38"; then
-  fail "ac38-sub2api.sh 不得写死除 subscription 外不能 unsupported"
-fi
+# 凭证接口按账号关联；账号必须先建好并把 account_id 写入凭证请求。
+acc_create_line=$(grep -n 'POST "\$A/accounts"' "$ac38" | head -1 | cut -d: -f1 || true)
+cred_submit_line=$(grep -n 'POST "\$A/collector/credentials"' "$ac38" | head -1 | cut -d: -f1 || true)
+[ -n "$acc_create_line" ] && [ -n "$cred_submit_line" ] ||
+  fail "ac38-sub2api.sh 必须同时创建账号并登记凭证"
+[ "$acc_create_line" -lt "$cred_submit_line" ] ||
+  fail "ac38-sub2api.sh 必须先创建账号，再登记凭证"
+grep -Eq "json\.dump\(\{'account_id':int\(sys\.argv\[1\]\)" "$ac38" ||
+  fail "ac38-sub2api.sh 凭证请求必须使用 account_id"
 
 grep -Eq 'sla-core .* -read-only([[:space:]]|$)' "$remote" ||
   fail "remote-stack.sh 必须用 -read-only 启动 sla-core"

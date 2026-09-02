@@ -112,15 +112,15 @@ func TestSavePricingStoresSnapshotBeforeCountingRow(t *testing.T) {
 	}
 	cleanupTrigger := installSnapshotFailureTrigger(t, ctx, conn, "pricing_snapshot_fail")
 	defer cleanupTrigger()
-	n, err := NewCollectorSink(pool).SavePricing(ctx, channelID, collector.Pricing{
+	result, err := NewCollectorSink(pool).SavePricing(ctx, channelID, collector.Pricing{
 		Models: []collector.ModelPrice{{ModelName: "pricing-model", InputPrice: 2, OutputPrice: 3,
 			BillingUnit: "per_call"}}, Meta: collector.SourceMeta{FetchedAt: time.Now()},
 	})
 	if err == nil {
 		t.Fatal("快照写入失败时 SavePricing 应返回错误")
 	}
-	if n != 0 {
-		t.Fatalf("快照失败时不应报告已持久化行数，得到 %d", n)
+	if result.Snapshots != 0 {
+		t.Fatalf("快照失败时不应报告已持久化行数，得到 %d", result.Snapshots)
 	}
 	var input float64
 	if err := conn.QueryRow(ctx, `

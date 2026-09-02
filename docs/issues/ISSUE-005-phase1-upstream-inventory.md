@@ -24,7 +24,7 @@
 | D4 | 渠道模型目录 | 新增 `channel_model_catalog`（**6 列**，砍掉能力位与启用关联） | ✅ 采纳 |
 | D5 | Key 级限流 | P1 **只采集存储**（`upstream_keys.rpm_limit`/`concurrency_limit` 两列），不做派生、不做判闸——判闸属容量保留，是网关的事 | ✅ 采纳 |
 | D6 | 「实时更新」语义 | 上游无 webhook → 不做推送式实时。`POST /admin/channels/{id}/sync` 手动立即刷新 + 周期采集（FR-116），界面显示 `synced_at` 与陈旧标记 | ✅ 采纳 |
-| D7 | 密钥管理边界 | P1 做**上游 Key** 的 CRUD＋轮换＋停用＋脱敏展示。入站凭证 `gateway_clients` 属网关，**P1 不做** | ✅ 采纳 |
+| D7 | 密钥管理边界 | P1 做**上游 Key** 的 CRUD＋停用＋脱敏展示；轮换通过 `PATCH /admin/keys/{id}` 替换 `secret` 完成，不设独立 rotate/grace 路由。入站凭证 `gateway_clients` 属网关，**P1 不做** | ✅ 采纳 |
 | N1 | 新增 FR | FR-122~FR-128（7 条，§4） | ✅ 采纳 |
 | N2 | 新增 AC | AC-37~AC-40（4 条，§4） | ✅ 采纳 |
 
@@ -98,8 +98,8 @@ CREATE TABLE channel_groups (
 | 砍掉 | 理由 |
 | --- | --- |
 | `display_name` | `group_ref` 本身就是可读的（如 `default`/`vip`），P1 无二次命名需求 |
-| `peak_enabled`/`peak_start`/`peak_end`/`peak_rate_multiplier` | 高峰倍率只有 Sub2API 系有，且**消费者是成本排序**（P2）。P1 采回来没人读 → 需要时再加列（`ALTER ADD COLUMN` 无损） |
-| `is_exclusive`/`platform` | 同上，调度用字段，P1 无消费者 |
+| `peak_enabled`/`peak_start`/`peak_end`/`peak_rate_multiplier` | 高峰倍率只有 Sub2API 系有，且**消费者是成本排序**（P2）。P1 不采集；需要时再加字段和采集逻辑 |
+| `is_exclusive`/`platform` | 同上，调度用字段，P1 不采集 |
 | `valid_until` | 陈旧性由 `fetched_at` + 配置阈值查询期计算即可，与 `collector_snapshots` 同一做法（那里已刻意不存 `is_stale`） |
 
 ### 3.2 新增 `group_models`（3 列）
@@ -182,7 +182,7 @@ ALTER TABLE upstream_keys
 
 | 编号 | 优先级 | 需求 |
 | --- | --- | --- |
-| FR-122 | P0 | 上游 Key 全生命周期管理：新增、编辑、停用、轮换、删除。明文仅在登记时接收，展示与日志一律脱敏（承 FR-094/113）。一个渠道可挂多个账号、一个账号可挂多个 Key。 |
+| FR-122 | P0 | 上游 Key 全生命周期管理：新增、编辑、停用、删除；轮换通过 `PATCH /admin/keys/{id}` 替换 `secret` 完成，不设独立 rotate/grace 路由。明文仅在登记时接收，展示与日志一律脱敏（承 FR-094/113）。一个渠道可挂多个账号、一个账号可挂多个 Key。 |
 | FR-123 | P0 | 采集并维护**渠道分组**及其倍率，并记录每把 Key 所属分组。 |
 | FR-124 | P0 | 采集并维护**每个分组可获取的模型清单**，支持按分组查询"这把 Key 能用哪些模型"。 |
 | FR-125 | P0 | 同步并展示每把 Key 在上游的**使用情况**：剩余额度、已用额度、同步时刻；历史用量落采集快照以支持消耗速度估算。 |
@@ -213,8 +213,8 @@ ALTER TABLE upstream_keys
 | `GET /admin/channels/{id}/inventory` | 资产总览：账号/Key/分组/模型数、额度合计、同步时刻、异常计数（FR-128 展示面） |
 | `POST /admin/channels/{id}/sync` | 手动立即刷新，返回逐项结果与 `unsupported` 标记（FR-128） |
 | `GET/POST/PATCH /admin/accounts` | 账号 CRUD |
-| `GET/POST/PATCH /admin/keys` | Key CRUD（FR-122）；列表**只回 `secret_prefix`** |
-| `POST /admin/keys/{id}/rotate`、`/disable` | Key 轮换与停用 |
+| `GET/POST/PATCH /admin/keys` | Key CRUD（FR-122）；列表**只回 `secret_prefix`**；PATCH 替换 `secret` 即完成轮换 |
+| `POST /admin/keys/{id}/disable` | Key 停用 |
 | `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（读 `collector_snapshots`，FR-125） |
 | `GET /admin/channel-groups?channel_id=` | 分组列表含倍率（FR-123） |
 | `GET /admin/channel-groups/{id}/models` | 分组可用模型（FR-124） |

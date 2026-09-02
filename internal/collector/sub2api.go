@@ -226,28 +226,12 @@ func (a *Sub2APIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, e
 		if t == nil {
 			continue
 		}
-		g := Group{
-			GroupRef:         asString(t["id"]),
-			SubscriptionType: asString(t["subscription_type"]),
-			Platform:         asString(t["platform"]),
-			IsExclusive:      asBool(t["is_exclusive"]),
-			// 高峰倍率等只进 payload，不落结构化列（ISSUE-005 §3.1）
-			PeakEnabled: asBool(t["peak_rate_enabled"]),
-			PeakStart:   asString(t["peak_start"]),
-			PeakEnd:     asString(t["peak_end"]),
-			Meta:        NewAPIMeta("/api/v1/groups/available", now),
-		}
+		g := Group{GroupRef: asString(t["id"]), Meta: NewAPIMeta("/api/v1/groups/available", now)}
 		if g.GroupRef == "" {
 			g.GroupRef = asString(t["name"])
 		}
 		if r, ok := asFloat(t["rate_multiplier"]); ok {
 			g.RateMultiplier = r
-		}
-		if r, ok := asFloat(t["peak_rate_multiplier"]); ok {
-			g.PeakMultiplier = r
-		}
-		if r, ok := asFloat(t["rpm_limit"]); ok {
-			g.RPMLimit = int(r)
 		}
 		// 分组可用模型（FR-124）：字段名各站略有差异，逐个尝试
 		for _, key := range []string{"available_models", "models", "supported_models"} {

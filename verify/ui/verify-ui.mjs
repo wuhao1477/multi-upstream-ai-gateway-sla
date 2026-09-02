@@ -61,11 +61,12 @@ try {
       n => document.querySelector('#pane-' + n)?.classList.contains('on'),
       { timeout: 5000 }, name);
   };
-  // fill()：选中渠道时会把渠道 ID 预填进登记表单（省手抄），
-  // 此时 type() 是**追加**而不是覆盖 —— 会把 "12" 填成 "1212"。先清空。
+  // fill()：选中渠道时会把渠道 ID 预填进登记表单。
+  // 用真实键盘事件更新 v-model，避免直接改 DOM 与 Vue 状态不同步。
   const fill = async (sel, val) => {
-    await page.$eval(sel, el => { el.value = ''; });
-    await page.type(sel, val);
+    await page.click(sel, { clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await page.type(sel, val, { delay: 2 });
   };
   // 取 body 背景的真实 sRGB 亮度：断言"深色模式真的是深的"，
   // 而不是只断言 class 名变了（那样把 .dark 里的色值写成白色也照样绿）。
@@ -83,6 +84,7 @@ try {
     if (m.type() === 'error') consoleErrors.push(m.text());
   });
   page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
+  page.on('dialog', dialog => dialog.accept());
 
   // ── 1. 打开管理界面 ──
   const resp = await page.goto(`${BASE}/admin/ui`, { waitUntil: 'domcontentloaded' });
@@ -226,31 +228,7 @@ try {
     preCredRows.some(r => r.includes('skipped')),
     preCredRows.length ? JSON.stringify(preCredRows[0]) : '无 items（旧 502 路径）');
 
-  // ── 6. 界面登记凭证 ──
-  await pane('creds');
-  await fill('#cr-channel', String(newChannelId));
-  // 真凭证:后面第 8 步的四能力采集要靠它去真上游取数据。
-  await fill('#cr-token', UP_TOKEN);
-  await fill('#cr-uid', UP_UID);
-  await page.click('#btn-cred');
-  await page.waitForFunction(
-    () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
-    { timeout: 10000 });
-  const credToast = await page.$eval('#toast', el => el.textContent);
-  check('界面登记采集凭证成功', /凭证已登记/.test(credToast),
-    credToast.replace(/\n/g, ' | ').slice(0, 80));
-  check('凭证类型判定为 newapi_access_token',
-    /newapi_access_token/.test(credToast));
-
-  // 凭证列表：只报"已存什么"，绝不回显内容
-  const credRow = await page.$$eval('#cred-list tbody tr',
-    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  // 用真令牌验这条比用假令牌更有意义:泄露了就是泄露了真东西。
-  check('凭证列表已渲染且不含令牌内容',
-    credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
-    credRow.length ? credRow[0].join(' / ') : '空');
-
-  // ── 7. 界面登记账号与 Key，并验证明文不回显 ──
+  // ── 6. 界面登记两个账号与四把 Key，并验证明文不回显（AC-37）──
   await pane('register');
   await fill('#acc-channel', String(newChannelId));
   // 必须填**真的**上游用户 ID：SaveAccount 先按 external_user_id 匹配账号行，
@@ -262,33 +240,97 @@ try {
     () => /账号已创建/.test(document.querySelector('#toast').textContent),
     { timeout: 8000 });
 
-  // 这把 Key 是**假的**,而且必须是假的 —— CLAUDE.md §1 允许的唯一例外:
+  await fill('#acc-uid', UP_UID);
+  await page.click('#btn-acc');
+  await page.waitForFunction(
+    () => /账号已创建/.test(document.querySelector('#toast').textContent),
+    { timeout: 8000 });
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pane-register tr[data-account-row]').length >= 2,
+    { timeout: 8000 });
+  const accountIDs = await page.$$eval('#pane-register tr[data-account-row] td:first-child',
+    ts => ts.map(t => t.textContent.trim().replace('#', '')));
+  check('界面登记两个账号（AC-37）', accountIDs.length >= 2, accountIDs.join(', '));
+
+  // 账号编辑与停用/启用必须在同一条真实管理路径中可用。
+  const secondAccount = accountIDs[1];
+  await page.click(`[data-account-edit="${secondAccount}"]`);
+  await page.waitForSelector(`#account-edit-uid-${secondAccount}`, { timeout: 5000 });
+  await fill(`#account-edit-uid-${secondAccount}`, `${UP_UID}-edited`);
+  await page.click(`[data-account-save="${secondAccount}"]`);
+  await page.waitForFunction(
+    (id, uid) => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes(uid),
+    { timeout: 8000 }, secondAccount, `${UP_UID}-edited`);
+  await page.click(`[data-account-disable="${secondAccount}"]`);
+  await page.waitForSelector(`#account-disable-reason-${secondAccount}`, { timeout: 5000 });
+  await fill(`#account-disable-reason-${secondAccount}`, '验收脚本停用测试');
+  await page.click(`[data-account-disable-ok="${secondAccount}"]`);
+  await page.waitForFunction(
+    id => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes('disabled'),
+    { timeout: 8000 }, secondAccount);
+  await page.click(`[data-account-enable="${secondAccount}"]`);
+  await page.waitForFunction(
+    id => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes('active'),
+    { timeout: 8000 }, secondAccount);
+  check('账号编辑、停用与启用可用（AC-37）', true);
+
+  // 凭证现在按账号登记：真实上游令牌挂在第一个账号上。
+  await pane('creds');
+  await page.waitForFunction(
+    id => document.querySelector(`#cr-account option[value="${id}"]`) !== null,
+    { timeout: 8000 }, accountIDs[0]);
+  await page.select('#cr-account', accountIDs[0]);
+  await fill('#cr-token', UP_TOKEN);
+  await page.click('#btn-cred');
+  await page.waitForFunction(
+    () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
+    { timeout: 10000 });
+  const credToast = await page.$eval('#toast', el => el.textContent);
+  check('界面登记采集凭证成功', /凭证已登记/.test(credToast),
+    credToast.replace(/\n/g, ' | ').slice(0, 80));
+  check('凭证类型判定为 newapi_access_token', /newapi_access_token/.test(credToast));
+  const credRow = await page.$$eval('#cred-list tbody tr',
+    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  check('凭证列表已渲染且不含令牌内容',
+    credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
+    credRow.length ? credRow[0].join(' / ') : '空');
+
+  await pane('register');
+  const keySecrets = [
+    'sk-ui-account1-key1-never-echoed', 'sk-ui-account1-key2-never-echoed',
+    'sk-ui-account2-key1-never-echoed', 'sk-ui-account2-key2-never-echoed',
+  ];
+  const keyRefs = [UP_KEYREF, `${UP_KEYREF}-2`, `${UP_KEYREF}-3`, `${UP_KEYREF}-4`];
+  for (let i = 0; i < keySecrets.length; i++) {
+    await fill('#key-account', accountIDs[i < 2 ? 0 : 1]);
+    await fill('#key-secret', keySecrets[i]);
+    await fill('#key-ref', keyRefs[i]);
+    await page.click('#btn-key');
+    await page.waitForFunction(
+      () => /Key 已登记/.test(document.querySelector('#toast').textContent),
+      { timeout: 8000 });
+  }
+  check('界面登记四把 Key（AC-37）', true);
+
+  // 这些 Key 是**假的**,而且必须是假的 —— CLAUDE.md §1 允许的唯一例外:
   // 被造的东西本身就是测试输入。这里要验的是"明文不回显",拿真 Key 试等于
   // 把真凭证写进 DOM 快照和 CI 日志,失败时反而漏得更彻底。
   //
   // 由 ui-stack.sh 用 UI_KEY_SECRET 传进来:P1 退出标准③ 要求明文在"响应/
   // 日志/抓包"里一处都不出现,而日志那一端只有 shell 侧看得到
   // (/tmp/sla-ui-core.log)。两边各写一份字面量必然哪天漂掉,故只留一处来源。
-  const SECRET = process.env.UI_KEY_SECRET || 'sk-ui-secret-should-never-be-echoed-9f3a';
-  await fill('#key-secret', SECRET);
-  // external_ref 必须是上游 /api/token 里真实存在的 id：SaveKey 只 UPDATE
-  // 不 INSERT,对不上就只计"未登记"异常项 —— keys 项仍报 ok,额度列却永远空。
-  await fill('#key-ref', UP_KEYREF);
-  await page.click('#btn-key');
-  await page.waitForFunction(
-    () => /Key 已登记/.test(document.querySelector('#toast').textContent),
-    { timeout: 8000 });
-  check('界面登记 Key 成功', true);
+  const SECRET = process.env.UI_KEY_SECRET || keySecrets[0];
+  keySecrets[0] = SECRET;
 
   // 关键安全断言：整个页面 DOM 里不得出现完整明文（FR-094）
   const dom = await page.content();
   check('页面任何位置都不回显 Key 明文（FR-094）',
-    !dom.includes(SECRET),
-    dom.includes(SECRET) ? '⚠️ DOM 中发现明文' : 'DOM 已确认无明文');
+    !keySecrets.some(secret => dom.includes(secret)),
+    keySecrets.some(secret => dom.includes(secret)) ? '⚠️ DOM 中发现明文' : 'DOM 已确认无明文');
 
   await page.screenshot({ path: `${SHOT}/04-key-registered.png` });
 
-  // ── 8. 界面触发采集，验证逐项结果表 ──
+  // ── 7. 界面触发采集，验证逐项结果表 ──
   //
   // 注意这是本次会话的**第二次**点采集（5bis 缺凭证失败过一次）。
   // 它能成功本身就是断言：前置失败没有起算最小间隔窗口。
@@ -298,7 +340,7 @@ try {
     () => document.querySelector('#sync-result table') !== null, { timeout: 90000 });
   const syncRows = await page.$$eval('#sync-result tbody tr',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('采集结果表已渲染', syncRows.length >= 6, `${syncRows.length} 项`);
+  check('采集结果表已渲染', syncRows.length >= 5, `${syncRows.length} 项`);
 
   const byCap = Object.fromEntries(syncRows.map(r => [r[0], r[2]]));
   check('account 采集成功', byCap['account'] === 'ok', byCap['account']);
@@ -306,13 +348,9 @@ try {
   check('keys 采集成功', byCap['keys'] === 'ok', byCap['keys']);
   check('model_catalog 采集成功', byCap['model_catalog'] === 'ok',
     byCap['model_catalog']);
-  // AC-38：不支持的项必须显式出现，不能静默省略
-  check('subscription_quotas 显式标 unsupported（AC-38）',
-    byCap['subscription_quotas'] === 'unsupported', byCap['subscription_quotas']);
-
   await page.screenshot({ path: `${SHOT}/05-sync.png`, fullPage: true });
 
-  // ── 9. 查看分组、目录、Key ──
+  // ── 8. 查看分组、目录、Key ──
   await page.click('#btn-groups');
   await page.waitForFunction(
     () => /可用模型/.test(document.querySelector('#detail-body')?.textContent || ''),
@@ -412,16 +450,42 @@ try {
   await page.waitForFunction(
     () => /前缀/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
-  const keyCells = await page.$$eval('#detail-body tbody tr',
+  const keyCells = await page.$$eval('#detail-body tbody tr[data-key-row]',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('Key 列表已渲染', keyCells.length >= 1, `${keyCells.length} 把`);
+  check('Key 列表已渲染', keyCells.length >= 4, `${keyCells.length} 把`);
   // 列表只显示前缀
-  const prefixOK = keyCells.every(c => c[1].includes('…'));
-  check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c[1]).join(' '));
+  const prefixOK = keyCells.every(c => c[2].includes('…'));
+  check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c[2]).join(' '));
+
+  const groupData = await page.evaluate(async cid => {
+    const token = document.querySelector('#token').value;
+    const resp = await fetch(`/admin/channel-groups?channel_id=${cid}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return (await resp.json()).items ?? [];
+  }, newChannelId);
+  check('Key 可选择至少两个上游分组（AC-37）', groupData.length >= 2,
+    `${groupData.length} 个分组`);
+  for (let i = 0; i < keyCells.length && groupData.length >= 2; i++) {
+    const keyID = keyCells[i][0];
+    const group = groupData[i % 2];
+    await page.click(`[data-key-edit="${keyID}"]`);
+    await page.waitForSelector(`#key-edit-group-${keyID}`, { timeout: 5000 });
+    await page.select(`#key-edit-group-${keyID}`, String(group.id));
+    await page.click(`[data-key-save="${keyID}"]`);
+    await page.waitForFunction(
+      (id, ref) => document.querySelector(`[data-key-row="${id}"]`)?.textContent.includes(ref),
+      { timeout: 8000 }, keyID, group.group_ref);
+  }
+  const groupedKeys = await page.$$eval('#detail-body tbody tr[data-key-row]',
+    rs => rs.map(r => [...r.querySelectorAll('td')].slice(4, 6).map(t => t.textContent.trim())));
+  check('四把 Key 均显示分组与倍率（AC-37）',
+    groupedKeys.length >= 4 && groupedKeys.every(c => c[0] !== '—' && c[1] !== '未知'),
+    JSON.stringify(groupedKeys));
   // 采集后应有剩余额度（归一为美元）
-  const hasQuota = keyCells.some(c => c[3].startsWith('$'));
+  const hasQuota = keyCells.some(c => c[6].startsWith('$'));
   check('Key 剩余额度已归一为美元显示', hasQuota,
-    keyCells.map(c => c[3]).join(' '));
+    keyCells.map(c => c[6]).join(' '));
   // FR-127「登记与展示」的展示端。**不能断言"有数字"**—— 实测 newapi 的
   // /api/token 不给 Key 级 RPM/并发，真站点就是「—」。断言有数字就只能靠 mock
   // 才绿，那正是 CLAUDE.md §1 禁的。
@@ -432,7 +496,7 @@ try {
   // 真的两个都报时才炸，而那时没人记得是空格的事。数字、单位、分隔符、
   // 有无值这些**真内容**剥空白后一个不少。
   const squash = s => s.replace(/\s+/g, '');
-  const rlCells = await page.$$eval('#detail-body tbody tr td[data-rl]',
+  const rlCells = await page.$$eval('#detail-body tbody tr[data-key-row] td[data-rl]',
     ts => ts.map(t => t.textContent.trim()));
   check('Key 上游限流列已渲染（FR-127 展示端）',
     rlCells.length === keyCells.length && rlCells.every(t => t.length > 0),
@@ -460,6 +524,13 @@ try {
     rlCells.length === rlWant.length
       && rlCells.every((t, i) => squash(t) === squash(rlWant[i])),
     `期望=${JSON.stringify(rlWant)} 实际=${JSON.stringify(rlCells)}`);
+
+  const deletedKeyID = keyCells[keyCells.length - 1][0];
+  await page.click(`[data-key-delete="${deletedKeyID}"]`);
+  await page.waitForFunction(
+    id => !document.querySelector(`[data-key-row="${id}"]`),
+    { timeout: 8000 }, deletedKeyID);
+  check('Key 编辑与删除可用（AC-37）', true);
 
   await page.screenshot({ path: `${SHOT}/08-keys.png`, fullPage: true });
 

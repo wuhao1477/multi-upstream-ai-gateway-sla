@@ -17,6 +17,8 @@ type Key struct {
 	SecretPrefix     string     `json:"secret_prefix"`
 	ExternalRef      string     `json:"external_ref,omitempty"`
 	ChannelGroupID   *int64     `json:"channel_group_id,omitempty"`
+	GroupRef         string     `json:"group_ref,omitempty"`
+	RateMultiplier   *float64   `json:"rate_multiplier,omitempty"`
 	RemainQuotaUSD   *float64   `json:"remain_quota_usd,omitempty"`
 	UsedQuotaUSD     *float64   `json:"used_quota_usd,omitempty"`
 	RPMLimit         *int       `json:"rpm_limit,omitempty"`
@@ -56,10 +58,12 @@ func ListKeys(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Key, erro
 	rows, err := conn.Query(ctx, `
 SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(k.external_ref,''), k.channel_group_id,
+       COALESCE(g.group_ref,''), g.rate_multiplier,
        k.remain_quota_usd, k.used_quota_usd, k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
   FROM upstream_keys k
   JOIN upstream_accounts a ON a.id = k.account_id
+  LEFT JOIN channel_groups g ON g.id = k.channel_group_id
  WHERE ($1 <= 0 OR a.channel_id = $1)
  ORDER BY k.id`, channelID)
 	if err != nil {
@@ -70,7 +74,8 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
 	for rows.Next() {
 		var k Key
 		if err := rows.Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
-			&k.ExternalRef, &k.ChannelGroupID, &k.RemainQuotaUSD, &k.UsedQuotaUSD,
+			&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
+			&k.RemainQuotaUSD, &k.UsedQuotaUSD,
 			&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 			&k.QuotaSyncedAt, &k.CreatedAt); err != nil {
 			return nil, err
@@ -86,12 +91,15 @@ func GetKey(ctx context.Context, conn *pgx.Conn, id int64) (Key, error) {
 	err := conn.QueryRow(ctx, `
 SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(k.external_ref,''), k.channel_group_id,
+       COALESCE(g.group_ref,''), g.rate_multiplier,
        k.remain_quota_usd, k.used_quota_usd, k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
   FROM upstream_keys k
   JOIN upstream_accounts a ON a.id = k.account_id
+  LEFT JOIN channel_groups g ON g.id = k.channel_group_id
  WHERE k.id = $1`, id).Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
-		&k.ExternalRef, &k.ChannelGroupID, &k.RemainQuotaUSD, &k.UsedQuotaUSD,
+		&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
+		&k.RemainQuotaUSD, &k.UsedQuotaUSD,
 		&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 		&k.QuotaSyncedAt, &k.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -105,16 +113,17 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
 
 // KeyPatch 是 Key 的局部更新。
 type KeyPatch struct {
-	ID               int64
-	Secret           *string
-	ExternalRef      *string
-	ChannelGroupID   *int64
-	RemainQuotaUSD   *float64
-	UsedQuotaUSD     *float64
-	RPMLimit         *int
-	ConcurrencyLimit *int
-	Status           *string
-	ExpiredTime      *time.Time
+	ID                int64
+	Secret            *string
+	ExternalRef       *string
+	ChannelGroupID    *int64
+	ChannelGroupIDSet bool
+	RemainQuotaUSD    *float64
+	UsedQuotaUSD      *float64
+	RPMLimit          *int
+	ConcurrencyLimit  *int
+	Status            *string
+	ExpiredTime       *time.Time
 }
 
 // UpdateKey 更新 Key 可变字段。读路径仍只暴露脱敏前缀。
@@ -122,16 +131,16 @@ func UpdateKey(ctx context.Context, conn *pgx.Conn, p KeyPatch) error {
 	tag, err := conn.Exec(ctx, `
 UPDATE upstream_keys
    SET secret = COALESCE($2, secret),
-       external_ref = COALESCE($3, external_ref),
-       channel_group_id = COALESCE($4, channel_group_id),
-       remain_quota_usd = COALESCE($5, remain_quota_usd),
-       used_quota_usd = COALESCE($6, used_quota_usd),
-       rpm_limit = COALESCE($7, rpm_limit),
-       concurrency_limit = COALESCE($8, concurrency_limit),
-       status = COALESCE($9, status),
-       expired_time = COALESCE($10, expired_time),
+	       external_ref = CASE WHEN $3::text IS NULL THEN external_ref ELSE NULLIF($3,'') END,
+	       channel_group_id = CASE WHEN $4 THEN $5 ELSE channel_group_id END,
+	       remain_quota_usd = COALESCE($6, remain_quota_usd),
+	       used_quota_usd = COALESCE($7, used_quota_usd),
+	       rpm_limit = COALESCE($8, rpm_limit),
+	       concurrency_limit = COALESCE($9, concurrency_limit),
+	       status = COALESCE($10, status),
+	       expired_time = COALESCE($11, expired_time),
        updated_at = now()
- WHERE id = $1`, p.ID, p.Secret, p.ExternalRef, p.ChannelGroupID,
+	 WHERE id = $1`, p.ID, p.Secret, p.ExternalRef, p.ChannelGroupIDSet, p.ChannelGroupID,
 		p.RemainQuotaUSD, p.UsedQuotaUSD, p.RPMLimit, p.ConcurrencyLimit,
 		p.Status, p.ExpiredTime)
 	if err != nil {

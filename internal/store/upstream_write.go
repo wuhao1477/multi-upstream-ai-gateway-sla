@@ -21,8 +21,6 @@ type GroupRow struct {
 	PreserveModels bool
 	DataSource     string // auto_collect | manual
 	FetchedAt      time.Time
-	// Payload 是不落结构化列的字段（高峰倍率/独占/平台等，ISSUE-005 §3.1）。
-	Payload map[string]any
 }
 
 // UpsertGroups 写入分组与其可用模型，并自行提交一个事务。
@@ -87,6 +85,21 @@ VALUES ($1,$2,$3)
 ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
 					gid, name, g.FetchedAt); err != nil {
 					return n, fmt.Errorf("写分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+				}
+			}
+		} else {
+			// 部分账号结果只表示“这些模型仍可见”，不能删除未返回的
+			// 模型；成功账号的新模型仍需并入现有清单。
+			for _, name := range g.AvailableModels {
+				if name == "" {
+					continue
+				}
+				if _, err := db.Exec(ctx, `
+INSERT INTO group_models (channel_group_id, model_name, fetched_at)
+VALUES ($1,$2,$3)
+ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
+					gid, name, g.FetchedAt); err != nil {
+					return n, fmt.Errorf("追加分组 %s 的模型 %s: %w", g.GroupRef, name, err)
 				}
 			}
 		}

@@ -264,8 +264,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / **异常项计数**（FR-128 展示面、FR-129 并入）。<br>**异常项的构成（第 45 轮定义——它被三处引用却从未定义）**：① 数据陈旧（`fetched_at` 超对应 `collector_*_interval` 的 2 倍）；② `Degraded` 结果的 `MissingFields` 待人工补录（[04 §3.4bis](./04-collector-adapter.md)）；③ 上游存在但库中未登记的 Key（[02 §1.3bis](./02-data-model.md)）；④ 疑似下架模型（`catalog_missing_rounds` 已达阈值）；⑤ 凭证状态非 `valid`（`collector_credentials.status`）；⑥ Key 状态非 `active` 或已过期。**逐类给出计数与可下钻的列表**，不合并为一个总数——否则运维看到"异常 7"却不知道该修什么 | **P1** |
 | `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现；与周期采集共用同一 Runner | **P1** |
 | `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
-| `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；可设 `channel_group_id` | **P1** |
-| `POST /admin/keys/{id}/rotate`、`POST /admin/keys/{id}/disable` | Key 轮换与停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
+| `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；PATCH 替换 `secret` 即完成轮换；可设 `channel_group_id` | **P1** |
+| `POST /admin/keys/{id}/disable` | Key 停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
 | `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（FR-125）：读 `collector_snapshots(scope_type='key')` 的 payload 时序，返回剩余/已用/请求数曲线 | **P1** |
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
@@ -315,14 +315,13 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
     {"capability":"keys","status":"partial","elapsed_ms":900,"rows":3,
      "failed":1,"error":"key 12: 401 unauthorized"},
     {"capability":"pricing","status":"ok","elapsed_ms":760,"rows":214},
-    {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214},
-    {"capability":"subscription_quotas","status":"unsupported"}
+    {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214}
   ]
 }
 ```
 
-- `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
-- **`unsupported` 必须出现在 `items` 里**，不能省略该项——AC-38 要求"不支持的项返回明确的不支持而非静默留空"，且须与 `Capabilities()` 声明一致。
+- `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
+- P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
 - **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 
 **限流与并发**：

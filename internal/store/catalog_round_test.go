@@ -25,6 +25,9 @@ func TestCatalogPresenceReliable(t *testing.T) {
 				Degraded: true, MissingFields: []string{"input_price", "output_price"},
 			},
 		}}, want: true},
+		{name: "partial account result is unreliable", models: []collector.CatalogModel{{
+			ModelName: "m", Meta: collector.SourceMeta{Partial: true},
+		}}, want: false},
 		{name: "missing model list is unreliable", models: []collector.CatalogModel{{
 			ModelName: "m", Meta: collector.SourceMeta{
 				Degraded: true, MissingFields: []string{"available_models"},

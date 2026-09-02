@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
 import UiField from '@/components/ui/UiField.vue'
+import * as adminApi from '@/api/admin'
+import type { Account } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
 import { useCredentialsStore } from '@/stores/credentials'
 import { useToastStore } from '@/stores/toast'
@@ -12,29 +14,53 @@ const channels = useChannelsStore()
 const creds = useCredentialsStore()
 const toast = useToastStore()
 
-const channel = ref(channels.currentID === null ? '' : String(channels.currentID))
+const accountID = ref('')
 const token = ref('')
-const uid = ref('')
 const refresh = ref('')
+const accounts = ref<Account[]>([])
+const accountsLoaded = ref(false)
+let accountsRequest = 0
 
 watch(
   () => channels.currentID,
   (id) => {
-    channel.value = id === null ? '' : String(id)
+    accountsRequest++
+    accountID.value = ''
+    accounts.value = []
+    accountsLoaded.value = false
+    if (id !== null) void loadAccounts(id)
   },
 )
 
+onMounted(() => {
+  if (channels.currentID !== null) void loadAccounts(channels.currentID)
+})
+
+async function loadAccounts(channelID = channels.currentID): Promise<void> {
+  if (channelID === null) return
+  const request = ++accountsRequest
+  try {
+    const items = (await adminApi.listAccounts(channelID)).items
+    if (channels.currentID !== channelID || accountsRequest !== request) return
+    accounts.value = items
+    accountsLoaded.value = true
+    const [only] = accounts.value
+    if (only !== undefined && accounts.value.length === 1) accountID.value = String(only.id)
+  } catch (e) {
+    toast.fail('加载账号失败', e)
+  }
+}
+
 async function save(): Promise<void> {
-  const ch = Number(channel.value)
-  if (!Number.isFinite(ch) || ch <= 0) {
-    toast.show('请填渠道 ID', 'bad')
+  const acc = Number(accountID.value)
+  if (!Number.isFinite(acc) || acc <= 0) {
+    toast.show('请选择账号', 'bad')
     return
   }
   const ok = await creds.save({
-    channel_id: ch,
+    account_id: acc,
     access_token: token.value.trim(),
     refresh_token: refresh.value.trim(),
-    external_user_id: uid.value.trim(),
   })
   if (ok) {
     // 秘密字段用完即清。
@@ -52,8 +78,13 @@ async function save(): Promise<void> {
         <span class="badge warn">采集必须先有它</span>
       </template>
       <div class="grid">
-        <UiField label="渠道 ID" for="cr-channel">
-          <input id="cr-channel" v-model="channel" placeholder="从渠道列表取" />
+        <UiField label="账号" for="cr-account">
+          <select id="cr-account" v-model="accountID" :disabled="!accountsLoaded">
+            <option value="">请选择账号</option>
+            <option v-for="a in accounts" :key="a.id" :value="String(a.id)">
+              #{{ a.id }}（渠道 #{{ a.channel_id }}{{ a.external_user_id ? `，${a.external_user_id}` : '' }}）
+            </option>
+          </select>
         </UiField>
         <UiField label="访问令牌 / JWT" for="cr-token">
           <input
@@ -62,9 +93,6 @@ async function save(): Promise<void> {
             type="password"
             placeholder="NewAPI 系统令牌 或 JWT"
           />
-        </UiField>
-        <UiField label="上游用户 ID（NewAPI 必填）" for="cr-uid">
-          <input id="cr-uid" v-model="uid" placeholder="用户 ID 头的值" />
         </UiField>
         <UiField label="refresh_token（Sub2API 可选）" for="cr-refresh">
           <input
@@ -76,6 +104,7 @@ async function save(): Promise<void> {
         </UiField>
         <div class="endcap">
           <button class="btn" id="btn-cred" @click="save">登记凭证</button>
+          <button class="btn outline" id="btn-cred-accounts" @click="loadAccounts()">刷新账号</button>
         </div>
       </div>
       <p class="note">
@@ -100,6 +129,7 @@ async function save(): Promise<void> {
             <thead>
               <tr>
                 <th>渠道</th>
+                <th>账号</th>
                 <th>站型</th>
                 <th>类型</th>
                 <th>状态</th>
@@ -108,10 +138,13 @@ async function save(): Promise<void> {
               </tr>
             </thead>
             <tbody>
-              <!-- 一个渠道可能有多条凭证，key 用 channel_id + cred_type -->
-              <tr v-for="c in creds.list" :key="`${c.channel_id}-${c.cred_type}`">
+              <!-- 凭证按账号归属，同一渠道可有多个相同类型的账号凭证。 -->
+              <tr v-for="c in creds.list" :key="`${c.account_id}-${c.cred_type}`">
                 <td>
                   <code>{{ c.channel_id }}</code>
+                </td>
+                <td>
+                  <code>{{ c.account_id }}</code>
                 </td>
                 <td>
                   <span class="badge">{{ c.site_family }}</span>

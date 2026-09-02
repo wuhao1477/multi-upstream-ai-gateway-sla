@@ -12,21 +12,31 @@
 #   Sub2API 的 access_token 是短寿 JWT。2026-09-01 那份导出里 26 个 sub2api
 #   只有 1 个未过期，其余过期 65～3998 小时 —— 写死站名换来的是明天必红，
 #   且红的理由与被测代码无关。选法：遍历 site_type=sub2api 的条目，
-#   取第一个 /api/v1/auth/me 返 200 的。
+#   先确认公开指纹与无验证盾，再确认 /api/v1/auth/me 返回真实 JSON 账号；
+#   不能把 SPA 的 200 HTML 回退页误当成可采集站点。
 #
 # ⚠️ 库用**临时 PG**，不碰内网真库：AC-38 的验证环境是 REAL（14 §0），
 #   REAL 要求的是真**站点**，不是真库。而库里没有 DELETE 渠道的入口，
 #   往真库写一行只为跑一次验收，是不可逆的代价。
 #
 # 用法：HUB_FILE=~/Downloads/all-api-hub-backup-*.json verify/ac38-sub2api.sh
+# 显式授权站点：AC38_BASE_URL=https://... AC38_ACCESS_TOKEN_FILE=/private/token-file verify/ac38-sub2api.sh
+# 第二种模式只用于人工已取得凭证的验收；不会放宽批量导入对 Turnstile 的规则。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 umask 077
 
 HUB_FILE="${HUB_FILE:-}"
-[ -n "$HUB_FILE" ] && [ -f "$HUB_FILE" ] || {
+AC38_BASE_URL="${AC38_BASE_URL:-}"
+AC38_ACCESS_TOKEN_FILE="${AC38_ACCESS_TOKEN_FILE:-}"
+if [ -n "$AC38_BASE_URL$AC38_ACCESS_TOKEN_FILE" ]; then
+  [ -n "$AC38_BASE_URL" ] && [ -n "$AC38_ACCESS_TOKEN_FILE" ] && [ -f "$AC38_ACCESS_TOKEN_FILE" ] || {
+    echo "显式站点模式必须同时给 AC38_BASE_URL 与 AC38_ACCESS_TOKEN_FILE"
+    exit 2; }
+elif ! { [ -n "$HUB_FILE" ] && [ -f "$HUB_FILE" ]; }; then
   echo "需要 HUB_FILE 指向 all-api-hub 导出 JSON（真上游来源，CLAUDE.md §1 禁止 mock）"
-  exit 2; }
+  exit 2
+fi
 
 CT=ac38pg
 PORT=18435       # 184xx 段：554xx 在临时端口段里会被出站连接借走（见 test-migrate.sh 顶部）
@@ -60,10 +70,21 @@ KEYREQ_JSON="$AC38_TMP/keyreq.json"
 TOKEN_FILE="$AC38_TMP/access-token"
 
 echo "── 1/6 探活选一个真 Sub2API 站（不写死）──"
-PICK=$(HUB_FILE="$HUB_FILE" TOKEN_FILE="$TOKEN_FILE" python3 - <<'PY'
-import base64, json, os, sys, time, urllib.request
-d = json.load(open(os.environ["HUB_FILE"]))
-subs = [a for a in d["accounts"]["accounts"] if a.get("site_type") == "sub2api"]
+PICK=$(HUB_FILE="$HUB_FILE" TOKEN_FILE="$TOKEN_FILE" AC38_BASE_URL="$AC38_BASE_URL" \
+  AC38_ACCESS_TOKEN_FILE="$AC38_ACCESS_TOKEN_FILE" python3 - <<'PY'
+import base64, json, os, sys, time, urllib.error, urllib.request
+explicit_base = os.environ.get("AC38_BASE_URL", "").rstrip("/")
+if explicit_base:
+    token_file = os.environ["AC38_ACCESS_TOKEN_FILE"]
+    token = open(token_file).read().strip()
+    if not token:
+        print("显式站点令牌文件为空", file=sys.stderr)
+        sys.exit(2)
+    subs = [{"site_url": explicit_base, "site_name": explicit_base,
+             "account_info": {"access_token": token}, "explicit": True}]
+else:
+    d = json.load(open(os.environ["HUB_FILE"]))
+    subs = [a for a in d["accounts"]["accounts"] if a.get("site_type") == "sub2api"]
 def exp(t):
     try:
         p = t.split(".")[1]; p += "=" * (-len(p) % 4)
@@ -80,28 +101,57 @@ for a in subs:
     if not base or not tok:
         continue
     try:
+        public = urllib.request.Request(base + "/api/v1/settings/public",
+              headers={"Accept": "application/json", "User-Agent": "Go-http-client/2.0"})
+        with urllib.request.urlopen(public, timeout=15) as r:
+            settings = json.loads(r.read())
+        setting_data = settings.get("data") if isinstance(settings, dict) else None
+        if not isinstance(setting_data, dict) or not (
+                setting_data.get("site_name") or "turnstile_enabled" in setting_data):
+            tried.append(f"{base}: not-sub2api")
+            continue
+        explicit = bool(a.get("explicit"))
+        if setting_data.get("turnstile_enabled") is True and not explicit:
+            tried.append(f"{base}: turnstile-enabled")
+            continue
+
         req = urllib.request.Request(base + "/api/v1/auth/me",
               headers={"Authorization": "Bearer " + tok, "Accept": "application/json",
                        "User-Agent": "Go-http-client/2.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
-            if r.status == 200:
-                open(os.environ["TOKEN_FILE"], "w").write(tok)
-                print(json.dumps({"base": base, "name": a.get("site_name") or base,
-                                  "tried": len(tried)}))
-                sys.exit(0)
+            profile = json.loads(r.read())
+        profile_data = profile.get("data") if isinstance(profile, dict) else None
+        if not isinstance(profile_data, dict) or not profile_data.get("id"):
+            tried.append(f"{base}: auth-not-profile")
+            continue
+        open(os.environ["TOKEN_FILE"], "w").write(tok)
+        print(json.dumps({"base": base, "name": a.get("site_name") or base,
+                          "user_id": str(profile_data.get("id")),
+                          "tried": len(tried), "explicit": explicit}))
+        sys.exit(0)
+    except urllib.error.HTTPError as e:
+        tried.append(f"{base}: HTTP {e.code}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        tried.append(f"{base}: non-json")
     except Exception as e:
-        tried.append(f"{base}: {getattr(e,'code',type(e).__name__)}")
-print("导出里没有 access_token 仍然有效的 sub2api 站点：", file=sys.stderr)
+        tried.append(f"{base}: {type(e).__name__}")
+print("导出里没有同时满足 Sub2API 指纹、无验证盾且 access_token 有效的站点：", file=sys.stderr)
 for t in tried[:30]:
     print("   " + t, file=sys.stderr)
 sys.exit(2)
 PY
-) || { echo "❌ 选站失败 —— 这不是被测代码的问题，是导出里的 sub2api 令牌全过期了"; exit 2; }
+) || { echo "❌ 选站失败 —— 这不是被测代码的问题，是导出里没有可自动采集的 Sub2API 站点"; exit 2; }
 
 BASE=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['base'])" "$PICK")
 SITE=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['name'])" "$PICK")
+UP_UID=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['user_id'])" "$PICK")
 SKIP=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['tried'])" "$PICK")
-echo "   ✅ 选中 ${SITE} <${BASE}>（前面 ${SKIP} 个令牌已失效，跳过）"
+EXPLICIT=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])['explicit'])" "$PICK")
+if [ "$EXPLICIT" = "True" ]; then
+  echo "   ✅ 显式授权 ${SITE} <${BASE}>（已验证指纹与账号；仅验收，不改变导入规则）"
+else
+  echo "   ✅ 选中 ${SITE} <${BASE}>（前面 ${SKIP} 个候选未通过，跳过）"
+fi
 
 echo "── 2/6 起 PG 与 sla-core ──"
 docker run -d --name "$CT" -e POSTGRES_PASSWORD=x -e POSTGRES_DB=sla \
@@ -139,18 +189,10 @@ FAM=$(psql_ "SELECT site_family FROM channels WHERE id=$CHID")
 [ "$FAM" = "sub2api" ] || fail "探测归族为 '$FAM'，应为 sub2api（AC-28 同口径）"
 echo "   ✅ 渠道 #${CHID} 归族 sub2api"
 
-echo "── 4/6 登记凭证 + 那把真 Key（quota_synced_at 要有行才能前进）──"
-# ⚠️ 请求体一律写文件再 `-d @file`：内联 `$(python3 -c "…{'k':v,…}")` 会被 bash
-#    按逗号做大括号展开，python 收到的是被切碎的半截代码（实测过一次）。
-python3 -c "
-import json,sys;json.dump({'channel_id':int(sys.argv[1]),'access_token':open(sys.argv[2]).read()},
-open(sys.argv[3],'w'))" "$CHID" "$TOKEN_FILE" "$CRED_JSON"
-C=$(code "${auth[@]}" -X POST "$A/collector/credentials" -d @"$CRED_JSON")
-[ "$C" = "200" ] || fail "登记凭证应 200，得 $C"
-
 # 从上游取回那把真 Key 登记进来。**不是造数据**：值来自 /api/v1/keys 的真实响应。
 # 不这么做的话库里没有 upstream_keys 行，AC-38 的 quota_synced_at 那半就无从断言
 # （不变式 N-1：本系统运行期不建 Key，Key 由人工登记）。
+echo "── 4/6 建账号、登记凭证 + 那把真 Key（quota_synced_at 要有行才能前进）──"
 python3 - "$BASE" "$TOKEN_FILE" "$KEY_JSON" <<'PY'
 import json,sys,urllib.request
 token=open(sys.argv[2]).read()
@@ -166,8 +208,8 @@ PY
 SECRET=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['secret'])" "$KEY_JSON")
 [ -n "$SECRET" ] || fail "上游 /api/v1/keys 没有可登记的 Key —— AC-38 的 quota 那半跑不了"
 python3 -c "
-import json,sys;json.dump({'channel_id':int(sys.argv[1]),'external_user_id':'ac38'},
-open(sys.argv[2],'w'))" "$CHID" "$ACC_JSON"
+import json,sys;json.dump({'channel_id':int(sys.argv[1]),'external_user_id':sys.argv[2]},
+open(sys.argv[3],'w'))" "$CHID" "$UP_UID" "$ACC_JSON"
 C=$(code "${auth[@]}" -X POST "$A/accounts" -d @"$ACC_JSON")
 [ "$C" = "201" ] || fail "建账号应 201，得 $C"
 ACCID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$RESP_JSON")
@@ -175,6 +217,13 @@ python3 -c "
 import json,sys
 k=json.load(open(sys.argv[2]))
 # 首轮同步前 channel_groups 为空；同步会先写分组，再把 Key 关联到该分组。
+json.dump({'account_id':int(sys.argv[1]),'access_token':open(sys.argv[3]).read()},
+          open(sys.argv[4],'w'))" "$ACCID" "$KEY_JSON" "$TOKEN_FILE" "$CRED_JSON"
+C=$(code "${auth[@]}" -X POST "$A/collector/credentials" -d @"$CRED_JSON")
+[ "$C" = "200" ] || fail "登记凭证应 200，得 $C"
+python3 -c "
+import json,sys
+k=json.load(open(sys.argv[2]))
 json.dump({'account_id':int(sys.argv[1]),'secret':k['secret'],'external_ref':k['ref']},
           open(sys.argv[3],'w'))" "$ACCID" "$KEY_JSON" "$KEYREQ_JSON"
 C=$(code "${auth[@]}" -X POST "$A/keys" -d @"$KEYREQ_JSON")

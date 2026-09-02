@@ -6,6 +6,7 @@
  */
 import { api } from './client'
 import type {
+  Account,
   CatalogResp,
   Channel,
   ChannelGroup,
@@ -105,9 +106,67 @@ export function channelCatalog(id: number, q: CatalogQuery = {}): Promise<Catalo
 
 // ── 账号 / Key ───────────────────────────────────────────────────────────────
 
+export function listAccounts(channelID?: number): Promise<ListResp<Account>> {
+  const qs = channelID === undefined ? '' : `?channel_id=${channelID}`
+  return api<ListResp<Account>>(`/admin/accounts${qs}`)
+}
+
+export interface CreateAccountInput {
+  channel_id: number
+  external_user_id?: string
+  balance_group_key?: string
+}
+
+export function createAccount(input: CreateAccountInput): Promise<{ id: number }> {
+  return api<{ id: number }>('/admin/accounts', { method: 'POST', body: input })
+}
+
+export interface PatchAccountInput {
+  external_user_id?: string
+  balance_group_key?: string
+  status?: 'active' | 'disabled'
+  disabled_reason?: string
+  disabled_until?: string | null
+}
+
+export function patchAccount(id: number, input: PatchAccountInput): Promise<{ updated: boolean }> {
+  return api<{ updated: boolean }>(`/admin/accounts/${id}`, { method: 'PATCH', body: input })
+}
+
 export function listKeys(channelID?: number): Promise<ListResp<Key>> {
   const qs = channelID === undefined ? '' : `?channel_id=${channelID}`
   return api<ListResp<Key>>(`/admin/keys${qs}`)
+}
+
+export interface CreateKeyInput {
+  account_id: number
+  secret: string
+  external_ref?: string
+  group_ref?: string
+}
+
+export function createKey(input: CreateKeyInput): Promise<{ id: number }> {
+  return api<{ id: number }>('/admin/keys', { method: 'POST', body: input })
+}
+
+export interface PatchKeyInput {
+  secret?: string
+  external_ref?: string
+  channel_group_id?: number | null
+  group_ref?: string
+  status?: 'active' | 'revoked' | 'expired' | 'insufficient_perm'
+}
+
+export function patchKey(id: number, input: PatchKeyInput): Promise<{ updated: boolean }> {
+  return api<{ updated: boolean }>(`/admin/keys/${id}`, { method: 'PATCH', body: input })
+}
+
+export function deleteKey(id: number): Promise<{ deleted: boolean }> {
+  return api<{ deleted: boolean }>(`/admin/keys/${id}`, { method: 'DELETE', body: {} })
+}
+
+export function disableKey(id: number): Promise<{ status: string }> {
+  return api<{ status: string }>(`/admin/keys/${id}/disable`, { method: 'POST' })
 }
 
 // ── 分组 ─────────────────────────────────────────────────────────────────────
@@ -124,7 +183,7 @@ export function groupModels(groupID: number): Promise<GroupModelsResp> {
 // ── 采集凭证（04 §5，一期明文 FR-113）────────────────────────────────────────
 
 export interface SaveCredentialInput {
-  channel_id: number
+  account_id: number
   access_token?: string
   refresh_token?: string
   external_user_id?: string

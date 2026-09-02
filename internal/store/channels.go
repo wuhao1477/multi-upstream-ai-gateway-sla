@@ -212,13 +212,23 @@ SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key
 	return out, rows.Err()
 }
 
+// AccountPatch 是账号局部更新；非 nil 字段即使为空也会被清除。
+type AccountPatch struct {
+	ID              int64
+	ExternalUserID  *string
+	BalanceGroupKey *string
+	Status          *string
+	DisabledReason  *string
+	DisabledUntil   *time.Time
+}
+
 // UpdateAccount 更新账号可变字段。
-func UpdateAccount(ctx context.Context, conn *pgx.Conn, a Account) error {
+func UpdateAccount(ctx context.Context, conn *pgx.Conn, a AccountPatch) error {
 	tag, err := conn.Exec(ctx, `
 UPDATE upstream_accounts
-   SET external_user_id = COALESCE(NULLIF($2,''), external_user_id),
-       balance_group_key = COALESCE(NULLIF($3,''), balance_group_key),
-       status = COALESCE(NULLIF($4,''), status),
+   SET external_user_id = CASE WHEN $2::text IS NULL THEN external_user_id ELSE NULLIF($2,'') END,
+       balance_group_key = CASE WHEN $3::text IS NULL THEN balance_group_key ELSE NULLIF($3,'') END,
+       status = CASE WHEN $4::text IS NULL THEN status ELSE NULLIF($4,'') END,
        disabled_reason = CASE $4
                            WHEN 'disabled' THEN NULLIF($5,'')
                            WHEN 'active'   THEN NULL

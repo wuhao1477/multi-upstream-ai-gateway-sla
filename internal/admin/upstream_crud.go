@@ -65,27 +65,28 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ExternalUserID  string     `json:"external_user_id"`
-		BalanceGroupKey string     `json:"balance_group_key"`
-		Status          string     `json:"status"`
-		DisabledReason  string     `json:"disabled_reason"`
+		ExternalUserID  *string    `json:"external_user_id"`
+		BalanceGroupKey *string    `json:"balance_group_key"`
+		Status          *string    `json:"status"`
+		DisabledReason  *string    `json:"disabled_reason"`
 		DisabledUntil   *time.Time `json:"disabled_until"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.Status != "" && in.Status != "active" && in.Status != "disabled" {
+	if in.Status != nil && *in.Status != "active" && *in.Status != "disabled" {
 		s.fail(w, http.StatusBadRequest,
-			"status 只能是 active 或 disabled，收到："+in.Status)
+			"status 只能是 active 或 disabled，收到："+*in.Status)
 		return
 	}
-	if in.Status == "disabled" && strings.TrimSpace(in.DisabledReason) == "" {
+	if in.Status != nil && *in.Status == "disabled" &&
+		(in.DisabledReason == nil || strings.TrimSpace(*in.DisabledReason) == "") {
 		s.fail(w, http.StatusBadRequest, "停用账号必须填 disabled_reason（FR-095）")
 		return
 	}
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		err := store.UpdateAccount(r.Context(), conn, store.Account{
+		err := store.UpdateAccount(r.Context(), conn, store.AccountPatch{
 			ID: id, ExternalUserID: in.ExternalUserID,
 			BalanceGroupKey: in.BalanceGroupKey, Status: in.Status,
 			DisabledReason: in.DisabledReason, DisabledUntil: in.DisabledUntil,
@@ -133,21 +134,14 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		var gid *int64
 		if in.GroupRef != "" {
-			// 需要 channel_id 才能定位分组，先查账号
-			as, err := store.ListAccounts(r.Context(), conn, 0)
-			if err != nil {
-				s.fail(w, http.StatusInternalServerError, err.Error())
-				return
-			}
 			var channelID int64
-			for _, a := range as {
-				if a.ID == in.AccountID {
-					channelID = a.ChannelID
-					break
-				}
-			}
-			if channelID == 0 {
+			if err := conn.QueryRow(r.Context(),
+				`SELECT channel_id FROM upstream_accounts WHERE id=$1`, in.AccountID).
+				Scan(&channelID); errors.Is(err, pgx.ErrNoRows) {
 				s.fail(w, http.StatusBadRequest, "account_id 不存在")
+				return
+			} else if err != nil {
+				s.fail(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			id, found, err := store.GroupIDByRef(r.Context(), conn, channelID, in.GroupRef)
@@ -183,16 +177,16 @@ func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Secret           *string    `json:"secret"`
-		ExternalRef      *string    `json:"external_ref"`
-		ChannelGroupID   *int64     `json:"channel_group_id"`
-		GroupRef         string     `json:"group_ref"`
-		RemainQuotaUSD   *float64   `json:"remain_quota_usd"`
-		UsedQuotaUSD     *float64   `json:"used_quota_usd"`
-		RPMLimit         *int       `json:"rpm_limit"`
-		ConcurrencyLimit *int       `json:"concurrency_limit"`
-		Status           *string    `json:"status"`
-		ExpiredTime      *time.Time `json:"expired_time"`
+		Secret            *string         `json:"secret"`
+		ExternalRef       *string         `json:"external_ref"`
+		ChannelGroupIDRaw json.RawMessage `json:"channel_group_id"`
+		GroupRef          string          `json:"group_ref"`
+		RemainQuotaUSD    *float64        `json:"remain_quota_usd"`
+		UsedQuotaUSD      *float64        `json:"used_quota_usd"`
+		RPMLimit          *int            `json:"rpm_limit"`
+		ConcurrencyLimit  *int            `json:"concurrency_limit"`
+		Status            *string         `json:"status"`
+		ExpiredTime       *time.Time      `json:"expired_time"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		s.fail(w, http.StatusBadRequest, err.Error())
@@ -226,8 +220,17 @@ func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.withConn(w, r, func(conn *pgx.Conn) {
-		groupID := in.ChannelGroupID
-		if in.GroupRef != "" || groupID != nil {
+		var groupID *int64
+		groupIDSet := len(in.ChannelGroupIDRaw) > 0 || in.GroupRef != ""
+		if len(in.ChannelGroupIDRaw) > 0 && string(in.ChannelGroupIDRaw) != "null" {
+			var parsed int64
+			if err := json.Unmarshal(in.ChannelGroupIDRaw, &parsed); err != nil || parsed <= 0 {
+				s.fail(w, http.StatusBadRequest, "channel_group_id 必须是正整数或 null")
+				return
+			}
+			groupID = &parsed
+		}
+		if in.GroupRef != "" || groupIDSet {
 			var ok bool
 			groupID, ok = s.resolveKeyGroupPatch(w, r, conn, id, groupID, in.GroupRef)
 			if !ok {
@@ -236,7 +239,7 @@ func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
 		}
 		err := store.UpdateKey(r.Context(), conn, store.KeyPatch{
 			ID: id, Secret: in.Secret, ExternalRef: in.ExternalRef,
-			ChannelGroupID: groupID,
+			ChannelGroupID: groupID, ChannelGroupIDSet: groupIDSet,
 			RemainQuotaUSD: in.RemainQuotaUSD, UsedQuotaUSD: in.UsedQuotaUSD,
 			RPMLimit: in.RPMLimit, ConcurrencyLimit: in.ConcurrencyLimit,
 			Status: in.Status, ExpiredTime: in.ExpiredTime,

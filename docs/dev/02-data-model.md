@@ -2873,14 +2873,14 @@ CREATE TABLE balance_signals (
 
 #### 7.1 `collector_snapshots.payload` 的逐 scope_type 结构（**P1 必需**，第 45 轮补）
 
-> ⚠️ **此前只写了"归一后数值元数据"** —— 而 P1 的 [`GET /admin/keys/{id}/usage`](./09-admin-api.md) 被定义为"读该 payload 的时序"，[04 §4](./04-collector-adapter.md) 也要求把 Key 用量历史与分组的高峰倍率等字段写进 payload。**写入侧与读取侧都没有可实现的契约**（开发视角审查第 45 轮）。
+> ⚠️ **此前只写了"归一后数值元数据"** —— 而 P1 的 [`GET /admin/keys/{id}/usage`](./09-admin-api.md) 被定义为"读该 payload 的时序"，写入侧与读取侧都没有可实现的契约（开发视角审查第 45 轮）。
 >
 > **总则**：payload 只存**归一后的数值与枚举**（金额一律 `usd_amount` 数值、时间一律 ISO8601 字符串），**不存上游返回正文**（FR-112）。键名一律 snake_case。**未采到的字段一律省略该键**，不写 `null` —— 便于区分"没采到"与"采到的值是 0"。
 
 | `scope_type` | `scope_id` 填什么 | payload 必备键 | 可选键 |
 | --- | --- | --- | --- |
 | `key` | 已登记时为 `upstream_keys.id`（十进制字符串）；未登记时为上游 `external_ref` | 已登记：`remain_quota_usd`、`used_quota_usd`；未登记：`unregistered=true` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
-| `group` | `channel_groups.group_ref` | `rate_multiplier` | `peak_enabled`、`peak_start`、`peak_end`、`peak_rate_multiplier`、`is_exclusive`、`platform`、`subscription_type`、`rpm_limit` —— **这几项 P1 只进 payload、不落结构化列**（[§1.3](#13-上游分组与模型目录交付阶段-p1fr-123127) 的取舍表），P2/P3 需要时按本表回填 |
+| `group` | `channel_groups.group_ref` | `rate_multiplier` | —（P1 只保存分组、倍率和可用模型；调度字段留待后续阶段） |
 | `account` | `upstream_accounts.id` | `balance_usd` | `used_usd`、`external_user_id`、`quota_per_unit`（NewAPI 的额度换算基数，逐站不同、**不可写死**） |
 | `pricing` | `models.canonical_name` 或上游原始模型名 | `input_price`、`output_price` | `cache_price`、`billing_unit`、`group_ratio`、`completion_ratio` |
 | `subscription` | ⏭ P4 | — | 订阅制整体推迟，P1~P3 不写该 scope |

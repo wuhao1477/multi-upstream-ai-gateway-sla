@@ -142,6 +142,37 @@ SELECT COALESCE(external_user_id,''), COALESCE(balance_group_key,''),
 	}
 }
 
+func TestPatchAccountCanClearEditableFields(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	_, h, tok := httpServer(t)
+	base := "https://patch-account-clear.example.invalid"
+	wipeCRUD(ctx, t, conn, base)
+	defer wipeCRUD(context.Background(), t, conn, base)
+
+	channelID := newChannel(t, h, tok, "清空账号字段靶子", base)
+	accountID := newAccount(t, h, tok, channelID)
+	code, body := do(t, h, tok, "PATCH", fmt.Sprintf("/admin/accounts/%d", accountID),
+		`{"external_user_id":"","balance_group_key":""}`)
+	if code != http.StatusOK {
+		t.Fatalf("清空账号字段应 200，得 %d：%s", code, body)
+	}
+	var external, balance *string
+	if err := conn.QueryRow(ctx, `
+SELECT external_user_id, balance_group_key FROM upstream_accounts WHERE id=$1`, accountID).
+		Scan(&external, &balance); err != nil {
+		t.Fatalf("读清空后的账号: %v", err)
+	}
+	if external != nil || balance != nil {
+		t.Fatalf("账号字段未清空：external=%v balance=%v", external, balance)
+	}
+}
+
 func TestPatchKeyUpdatesSecretWithoutEchoingPlaintext(t *testing.T) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, testDSN(t))
@@ -182,6 +213,104 @@ SELECT secret, COALESCE(external_ref,''), status, rpm_limit, concurrency_limit
 			secret, ref, status, rpm, conc)
 	}
 }
+
+func TestListKeysIncludesGroupAndMultiplier(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	_, h, tok := httpServer(t)
+	base := "https://list-key-group.example.invalid"
+	wipeCRUD(ctx, t, conn, base)
+	defer wipeCRUD(context.Background(), t, conn, base)
+
+	channelID := newChannel(t, h, tok, "Key 分组列表靶子", base)
+	accountID := newAccount(t, h, tok, channelID)
+	if _, err := store.UpsertGroups(ctx, conn, []store.GroupRow{{
+		ChannelID: channelID, GroupRef: "vip", RateMultiplier: floatPtr(0.5),
+		DataSource: "manual", FetchedAt: time.Now(),
+	}}); err != nil {
+		t.Fatalf("建分组: %v", err)
+	}
+	keyID := newKey(t, h, tok, accountID, "sk-list-key-group")
+	groupID, found, err := store.GroupIDByRef(ctx, conn, channelID, "vip")
+	if err != nil || !found {
+		t.Fatalf("查分组: found=%v err=%v", found, err)
+	}
+	code, body := do(t, h, tok, "PATCH", fmt.Sprintf("/admin/keys/%d", keyID),
+		fmt.Sprintf(`{"channel_group_id":%d}`, groupID))
+	if code != http.StatusOK {
+		t.Fatalf("关联分组应 200，得 %d：%s", code, body)
+	}
+
+	code, body = do(t, h, tok, "GET", fmt.Sprintf("/admin/keys?channel_id=%d", channelID), "")
+	if code != http.StatusOK {
+		t.Fatalf("列 Key 应 200，得 %d：%s", code, body)
+	}
+	var out struct {
+		Items []struct {
+			GroupRef       string   `json:"group_ref"`
+			RateMultiplier *float64 `json:"rate_multiplier"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("解析 Key 列表: %v（%s）", err, body)
+	}
+	if len(out.Items) != 1 || out.Items[0].GroupRef != "vip" ||
+		out.Items[0].RateMultiplier == nil || *out.Items[0].RateMultiplier != 0.5 {
+		t.Fatalf("Key 列表缺少分组/倍率：%s", body)
+	}
+}
+
+func TestPatchKeyCanClearGroup(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	_, h, tok := httpServer(t)
+	base := "https://patch-key-clear-group.example.invalid"
+	wipeCRUD(ctx, t, conn, base)
+	defer wipeCRUD(context.Background(), t, conn, base)
+
+	channelID := newChannel(t, h, tok, "清空 Key 分组靶子", base)
+	accountID := newAccount(t, h, tok, channelID)
+	if _, err := store.UpsertGroups(ctx, conn, []store.GroupRow{{
+		ChannelID: channelID, GroupRef: "vip", DataSource: "manual", FetchedAt: time.Now(),
+	}}); err != nil {
+		t.Fatalf("建分组: %v", err)
+	}
+	groupID, found, err := store.GroupIDByRef(ctx, conn, channelID, "vip")
+	if err != nil || !found {
+		t.Fatalf("查分组: found=%v err=%v", found, err)
+	}
+	keyID := newKey(t, h, tok, accountID, "sk-clear-group")
+	code, body := do(t, h, tok, "PATCH", fmt.Sprintf("/admin/keys/%d", keyID),
+		fmt.Sprintf(`{"channel_group_id":%d}`, groupID))
+	if code != http.StatusOK {
+		t.Fatalf("关联分组应 200，得 %d：%s", code, body)
+	}
+	code, body = do(t, h, tok, "PATCH", fmt.Sprintf("/admin/keys/%d", keyID),
+		`{"channel_group_id":null}`)
+	if code != http.StatusOK {
+		t.Fatalf("清空 Key 分组应 200，得 %d：%s", code, body)
+	}
+	var got *int64
+	if err := conn.QueryRow(ctx,
+		`SELECT channel_group_id FROM upstream_keys WHERE id=$1`, keyID).Scan(&got); err != nil {
+		t.Fatalf("读清空后的 Key 分组: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Key 分组未清空：%d", *got)
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
 
 func TestPatchKeyRejectsGroupFromAnotherChannel(t *testing.T) {
 	ctx := context.Background()

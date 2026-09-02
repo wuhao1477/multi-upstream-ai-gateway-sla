@@ -374,6 +374,9 @@ TESTS=(
   TestChannelBaseURLNormalizedAndUnique
   TestCreateChannelRollsBackWhenSaveDetectedFails
   TestCreateKeyRejectsUnknownGroupRef
+  TestListKeysIncludesGroupAndMultiplier
+  TestPatchAccountCanClearEditableFields
+  TestPatchKeyCanClearGroup
 )
 PAT="^($(IFS='|'; echo "${TESTS[*]}"))\$"
 EXPECT=${#TESTS[@]}
@@ -398,6 +401,7 @@ if [ "${RAN:-0}" -ne "$EXPECT" ]; then
 fi
 echo "   ✅ 导入：凭证失败整体回滚 / 半成品能补齐 / 补齐补上探测快照且不覆盖 warning / 凭证站型同步更新 / 坏 base_url 被拒"
 echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 019 唯一约束 / 建渠道与探测快照同生共死"
+echo "   ✅ 编辑：账号字段可清空 / Key 可解除分组"
 
 STORE_TESTS=(
   TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey

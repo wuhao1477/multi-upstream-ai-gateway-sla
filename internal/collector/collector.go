@@ -96,6 +96,8 @@ type SourceMeta struct {
 	Degraded bool
 	// MissingFields 缺失的字段名，如 ["input_price","output_price"]。
 	MissingFields []string
+	// Partial 表示多账号合并结果只覆盖了部分账号，不能计入完整采集轮次。
+	Partial bool
 }
 
 // ManualValidity 是人工录入数据的有效期（FR-011：7 天后视为过期）。
@@ -209,17 +211,6 @@ type Group struct {
 	RateMultiplier float64
 	// AvailableModels 该分组可获取的模型（FR-124）→ group_models.model_name
 	AvailableModels []string
-	RPMLimit        int
-
-	// ── 以下字段 P1 采集但**不落结构化列**，只进 collector_snapshots.payload ──
-	// 理由（ISSUE-005 §3.1）：消费者都在 P2/P3 调度（高峰倍率影响成本排序、
-	// 独占与平台影响候选过滤），P1 无消费者。需要时按 payload 回填即可，不丢数据。
-	PeakEnabled        bool
-	PeakMultiplier     float64
-	PeakStart, PeakEnd string
-	SubscriptionType   string
-	Platform           string
-	IsExclusive        bool
 
 	Meta SourceMeta
 }
@@ -251,6 +242,14 @@ type Pricing struct {
 	// GroupRatios 分组倍率（NewAPI 的 group_ratio）。
 	GroupRatios map[string]float64
 	Meta        SourceMeta
+}
+
+// PricingWriteResult reports the distinct outcomes of persisting pricing data.
+type PricingWriteResult struct {
+	Snapshots          int
+	CatalogUpdates     int
+	PriceVersions      int
+	UnregisteredModels int
 }
 
 // ModelPrice 是一个模型的价格。

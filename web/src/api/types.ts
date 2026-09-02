@@ -40,7 +40,7 @@ export type Capability =
   | 'pricing'
   | 'model_catalog'
 
-/** 单项采集结果状态。partial 只可能出现在 keys；skipped 是被限流跳过。 */
+/** 单项采集结果状态。partial 表示多账号部分成功；skipped 是被限流跳过。 */
 export type ItemStatus = 'ok' | 'partial' | 'failed' | 'unsupported' | 'skipped'
 
 /** 能力矩阵：能力 → 支持程度。 */
@@ -61,6 +61,17 @@ export interface Channel {
   updated_at: string
 }
 
+export interface Account {
+  id: number
+  channel_id: number
+  external_user_id?: string
+  balance_group_key?: string
+  status: string
+  disabled_reason?: string
+  disabled_until?: string
+  created_at: string
+}
+
 export interface Key {
   id: number
   account_id: number
@@ -69,6 +80,8 @@ export interface Key {
   secret_prefix: string
   external_ref?: string
   channel_group_id?: number
+  group_ref?: string
+  rate_multiplier?: number
   remain_quota_usd?: number
   used_quota_usd?: number
   rpm_limit?: number
@@ -181,6 +194,7 @@ export interface CatalogResp {
 }
 
 export interface CredentialItem {
+  account_id: number
   channel_id: number
   site_family: SiteFamily
   cred_type: string

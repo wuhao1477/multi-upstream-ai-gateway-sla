@@ -69,9 +69,9 @@ func (s *runnerSink) SaveKey(
 
 func (s *runnerSink) SavePricing(
 	_ context.Context, _ int64, pricing collector.Pricing,
-) (int, error) {
+) (collector.PricingWriteResult, error) {
 	s.pricing = append(s.pricing, pricing)
-	return len(pricing.Models), nil
+	return collector.PricingWriteResult{Snapshots: len(pricing.Models)}, nil
 }
 
 func (s *runnerSink) SaveCatalog(

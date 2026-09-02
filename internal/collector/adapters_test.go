@@ -512,15 +512,11 @@ func TestSub2APIFetchGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := groups[0]
-	if g.RateMultiplier != 0.5 || g.RPMLimit != 60 {
-		t.Errorf("倍率/RPM = %v/%d", g.RateMultiplier, g.RPMLimit)
+	if g.RateMultiplier != 0.5 {
+		t.Errorf("倍率 = %v", g.RateMultiplier)
 	}
 	if len(g.AvailableModels) != 2 {
 		t.Errorf("可用模型 = %v", g.AvailableModels)
-	}
-	// 高峰倍率采到但只进 payload（ISSUE-005 §3.1），此处验证确实采到了
-	if !g.PeakEnabled || g.PeakMultiplier != 1.5 {
-		t.Errorf("高峰字段未采到: enabled=%v mult=%v", g.PeakEnabled, g.PeakMultiplier)
 	}
 }
 

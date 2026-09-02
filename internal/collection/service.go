@@ -181,16 +181,27 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		return err
 	}
 	var failures []error
+	attempted := make(map[collector.Capability]bool, len(due))
+	failed := make(map[collector.Capability]bool, len(due))
+	unattempted := make(map[collector.Capability]bool, len(due))
+	eligible := 0
 	for _, channel := range channels {
 		if collectionDisabled(channel, now) {
 			continue
 		}
+		eligible++
 		release, acquired, err := s.TryLock(ctx, channel.ID)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("渠道 %d 加锁: %w", channel.ID, err))
+			for _, capability := range due {
+				failed[capability] = true
+			}
 			continue
 		}
 		if !acquired {
+			for _, capability := range due {
+				unattempted[capability] = true
+			}
 			continue
 		}
 		var result *collector.SyncResult
@@ -202,20 +213,45 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		}()
 		if err != nil {
 			failures = append(failures, fmt.Errorf("渠道 %d: %w", channel.ID, err))
+			for _, capability := range due {
+				failed[capability] = true
+			}
 			continue
 		}
 		if result == nil {
+			for _, capability := range due {
+				unattempted[capability] = true
+			}
 			continue
 		}
+		seen := make(map[collector.Capability]bool, len(result.Items))
 		for _, item := range result.Items {
+			seen[item.Capability] = true
+			attempted[item.Capability] = true
 			if item.Status == collector.StatusFailed || item.Status == collector.StatusPartial {
+				failed[item.Capability] = true
 				failures = append(failures, fmt.Errorf(
 					"渠道 %d 的 %s 采集为 %s: %s",
 					channel.ID, item.Capability, item.Status, item.Error))
 			}
 		}
+		for _, capability := range due {
+			if !seen[capability] {
+				unattempted[capability] = true
+			}
+		}
 	}
-	s.Schedule.Mark(now, due)
+	if eligible == 0 {
+		s.Schedule.Mark(now, due)
+	} else {
+		var completed []collector.Capability
+		for _, capability := range due {
+			if attempted[capability] && !failed[capability] && !unattempted[capability] {
+				completed = append(completed, capability)
+			}
+		}
+		s.Schedule.Mark(now, completed)
+	}
 	return errors.Join(failures...)
 }
 

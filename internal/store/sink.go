@@ -109,7 +109,7 @@ func (s *CollectorSink) SaveGroups(
 		r := GroupRow{
 			ChannelID: channelID, GroupRef: g.GroupRef,
 			AvailableModels: g.AvailableModels,
-			PreserveModels:  slices.Contains(g.Meta.MissingFields, "available_models"),
+			PreserveModels:  g.Meta.Partial || slices.Contains(g.Meta.MissingFields, "available_models"),
 			DataSource:      "auto_collect", FetchedAt: g.Meta.FetchedAt,
 		}
 		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"
@@ -123,36 +123,10 @@ func (s *CollectorSink) SaveGroups(
 	if err != nil {
 		return n, err
 	}
-
-	// 不落结构化列的字段进快照（ISSUE-005 §3.1：P1 无消费者，需要时回填）
 	for _, g := range gs {
 		payload := map[string]any{}
 		if g.RateMultiplier > 0 {
 			payload["rate_multiplier"] = g.RateMultiplier
-		}
-		if g.PeakEnabled {
-			payload["peak_enabled"] = true
-			if g.PeakMultiplier > 0 {
-				payload["peak_rate_multiplier"] = g.PeakMultiplier
-			}
-			if g.PeakStart != "" {
-				payload["peak_start"] = g.PeakStart
-			}
-			if g.PeakEnd != "" {
-				payload["peak_end"] = g.PeakEnd
-			}
-		}
-		if g.IsExclusive {
-			payload["is_exclusive"] = true
-		}
-		if g.Platform != "" {
-			payload["platform"] = g.Platform
-		}
-		if g.SubscriptionType != "" {
-			payload["subscription_type"] = g.SubscriptionType
-		}
-		if g.RPMLimit > 0 {
-			payload["rpm_limit"] = g.RPMLimit
 		}
 		if len(payload) == 0 {
 			continue
@@ -164,6 +138,7 @@ func (s *CollectorSink) SaveGroups(
 			return n, err
 		}
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("提交分组事务: %w", err)
 	}
@@ -269,23 +244,23 @@ func (s *CollectorSink) SaveKey(
 // SavePricing 刷新已有目录价格，并为已登记模型追加价格版本。
 func (s *CollectorSink) SavePricing(
 	ctx context.Context, channelID int64, p collector.Pricing,
-) (int, error) {
+) (collector.PricingWriteResult, error) {
 	if len(p.Models) == 0 {
 		// degraded 站型只有分组倍率、无逐模型价格 —— 不是错误
-		return 0, nil
+		return collector.PricingWriteResult{}, nil
 	}
 	c, err := s.acquire(ctx)
 	if err != nil {
-		return 0, err
+		return collector.PricingWriteResult{}, err
 	}
 	defer c.Close()
 	tx, err := c.Conn.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("开启价格事务: %w", err)
+		return collector.PricingWriteResult{}, fmt.Errorf("开启价格事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var n int
+	var result collector.PricingWriteResult
 	for _, mp := range p.Models {
 		tag, err := tx.Exec(ctx, `
 UPDATE channel_model_catalog
@@ -294,9 +269,9 @@ UPDATE channel_model_catalog
 			channelID, mp.ModelName, nullFloat(mp.InputPrice), nullFloat(mp.OutputPrice),
 			mp.BillingUnit)
 		if err != nil {
-			return n, fmt.Errorf("刷新模型 %s 目录价格: %w", mp.ModelName, err)
+			return collector.PricingWriteResult{}, fmt.Errorf("刷新模型 %s 目录价格: %w", mp.ModelName, err)
 		}
-		_ = tag
+		result.CatalogUpdates += int(tag.RowsAffected())
 
 		payload := map[string]any{"input_price": mp.InputPrice, "output_price": mp.OutputPrice}
 		if mp.CachePrice != 0 {
@@ -309,9 +284,9 @@ UPDATE channel_model_catalog
 			ChannelID: channelID, ScopeType: "pricing", ScopeID: mp.ModelName,
 			Payload: payload, DataSource: "auto_collect", FetchedAt: p.Meta.FetchedAt,
 		}); err != nil {
-			return 0, fmt.Errorf("写模型 %s 价格快照: %w", mp.ModelName, err)
+			return collector.PricingWriteResult{}, fmt.Errorf("写模型 %s 价格快照: %w", mp.ModelName, err)
 		}
-		n++ // 价格快照成功后才计入持久化行数
+		result.Snapshots++
 
 		// 价格版本按 (channel, model) 作用域，需要 models.id。
 		// **不自动创建 models 行**：那张表要求 token 上界必填（02 §2bis
@@ -320,10 +295,11 @@ UPDATE channel_model_catalog
 		err = tx.QueryRow(ctx,
 			`SELECT id FROM models WHERE canonical_name=$1`, mp.ModelName).Scan(&modelID)
 		if errors.Is(err, pgx.ErrNoRows) {
+			result.UnregisteredModels++
 			continue
 		}
 		if err != nil {
-			return n, fmt.Errorf("查模型 %s: %w", mp.ModelName, err)
+			return collector.PricingWriteResult{}, fmt.Errorf("查模型 %s: %w", mp.ModelName, err)
 		}
 		// billing_unit 用 NULLIF 落空，与 SaveCatalog 同一条规则（02 §1.3bis）：
 		// 缺失表示上游未声明，补 'per_1m_token' 会把它伪装成"已知按 token 计价"，
@@ -341,13 +317,14 @@ VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),'USD',
         'auto_collect',$8,$8)`,
 			NewUUIDv7(), channelID, modelID, mp.InputPrice, mp.OutputPrice,
 			nullFloat(mp.CachePrice), mp.BillingUnit, p.Meta.FetchedAt); err != nil {
-			return n, fmt.Errorf("写模型 %s 价格版本: %w", mp.ModelName, err)
+			return collector.PricingWriteResult{}, fmt.Errorf("写模型 %s 价格版本: %w", mp.ModelName, err)
 		}
+		result.PriceVersions++
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("提交价格事务: %w", err)
+		return collector.PricingWriteResult{}, fmt.Errorf("提交价格事务: %w", err)
 	}
-	return n, nil
+	return result, nil
 }
 
 // SaveCatalog 写模型目录（upsert，**first_seen_at 不覆盖**，02 §1.3bis）。
@@ -415,6 +392,9 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 func catalogPresenceReliable(models []collector.CatalogModel) bool {
 	validModels := 0
 	for _, model := range models {
+		if model.Meta.Partial {
+			return false
+		}
 		if model.ModelName != "" {
 			validModels++
 		}
