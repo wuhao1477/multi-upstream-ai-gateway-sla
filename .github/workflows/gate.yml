@@ -43,6 +43,9 @@ jobs:
       - name: 门禁（文档一致性 + DDL 真跑）
         run: ./verify/gate.sh
 
+      - name: 公开仓库安全基线
+        run: ./verify/test-public-safety.sh
+
       # ⚠️ 刻意不上传 ddl-extracted.sql 为 artifact（第 45 轮删除）：
       #    该文件**已入库**，且随时可由 `python3 verify/extract_ddl.py` 从
       #    02 重新生成 —— artifact 是第三份副本，纯冗余，还多引一个
