@@ -116,9 +116,10 @@ async function createAccount(): Promise<void> {
       balance_group_key: accWallet.value.trim(),
     })
     toast.show(`账号已创建：#${d.id}`, 'ok')
-    await res.reload()
-    emit('created')
+    // 与登记 Key 同理：先关抽屉，再等重拉那一轮网络
     emit('close')
+    emit('created')
+    await res.reload()
   } catch (e) {
     toast.fail('创建账号失败', e)
   } finally {
@@ -145,11 +146,13 @@ async function createKey(): Promise<void> {
       group_ref: keyGroup.value,
     })
     toast.show(`Key 已登记：#${d.id}（明文不回显）`, 'ok')
-    // 明文用完即清：留在输入框里等于把它留在 DOM 上（FR-094）
+    // 明文用完即清：留在输入框里等于把它留在 DOM 上（FR-094）。
+    // **先关抽屉再重拉**：reload 要等一轮网络，那段时间里明文输入框还挂在
+    // DOM 上，而它已经没有任何用处了。关抽屉是 v-if，元素当场移除。
     keySecret.value = ''
-    await res.reload()
-    emit('created')
     emit('close')
+    emit('created')
+    await res.reload()
   } catch (e) {
     toast.fail('登记 Key 失败', e)
   } finally {

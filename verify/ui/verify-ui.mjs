@@ -249,12 +249,23 @@ try {
       && !statLabels.includes('额度合计'),
     statLabels.join(' | '));
 
-  const anomText = await page.$eval('#inv-anomalies', el => el.textContent);
   // 新渠道还没登记凭证与 Key，**必须**报出"缺凭证" ——
   // 首版这条允许"无异常"通过，于是掩盖了一个真缺口：
   // 最常见的"为什么不工作"（没凭证）恰恰是唯一没被 inventory 覆盖的情形。
+  //
+  // ⚠️ 判据是 **data-anom 属性**，不是可见文案。异常项现在渲染成中文标签
+  // （「未登记采集凭证」），原始 kind 不再出现在文本里 —— 拿
+  // /credential_missing/ 去 grep textContent 会永远为假，而那看起来像功能坏了。
+  // 属性是给机器读的稳定契约，文案是给人读的，两者本就该分开。
+  const anomKinds = await page.$$eval('#inv-anomalies [data-anom]',
+    els => els.map(e => e.getAttribute('data-anom')));
+  const anomText = await page.$eval('#inv-anomalies', el => el.textContent);
   check('新渠道明确报出缺少采集凭证',
-    /credential_missing/.test(anomText),
+    anomKinds.includes('credential_missing'),
+    `kinds=${JSON.stringify(anomKinds)}`);
+  // 光有属性不够：运维读的是文案。属性对而文案没渲染出来同样是缺陷。
+  check('缺凭证异常同时给出可读文案与处置动作',
+    /未登记采集凭证/.test(anomText) && /登记凭证/.test(anomText),
     anomText.replace(/\s+/g, ' ').slice(0, 110));
 
   await page.screenshot({ path: `${SHOT}/03-detail.png` });
@@ -421,8 +432,13 @@ try {
 
   // 登记抽屉关闭后，明文输入框必须**从 DOM 上消失**而不只是隐藏。
   // 留在 DOM 里等于把它留在页面上 —— 与 FR-094 是同一条理由。
-  const secretGone = await page.evaluate(() =>
-    document.querySelector('#key-secret') === null);
+  //
+  // 给它一个短等待而不是当场断言：上面等的是 toast，而 toast 在关抽屉之前
+  // 就出现了。当场读必然读到还没被移除的那一帧 —— 那是断言写错，不是产品
+  // 没关。给 3 秒：真没关的话照样红，只是不会红在时序上。
+  const secretGone = await page.waitForFunction(
+    () => document.querySelector('#key-secret') === null,
+    { timeout: 3000 }).then(() => true).catch(() => false);
   check('登记抽屉关闭后明文输入框离开 DOM（FR-094）', secretGone,
     secretGone ? '已移除' : '⚠️ #key-secret 仍在 DOM 中');
 
@@ -925,7 +941,10 @@ try {
   await page.click('#btn-reload');
   await sleep(600);
 
+  // 编辑 / 停用 / 启用都收进了行内「更多」菜单（低频且后果重的操作不与
+  // 「详情」并排），所以每次都要先把那个 <details> 打开。
   const renamed = `${uniq}-改名`;
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
   await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
   await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
@@ -940,24 +959,32 @@ try {
     `期望 ${renamed}，实际 ${nameAfter}`);
 
   // 停用：原因必填。先试空原因 —— 应被拦住且状态不变，否则"必填"是句空话。
+  //
+  // 停用改走统一确认框（原来是行内展开 + #btn-ch-disable-ok）：确认框里能写下
+  // 影响范围，而"确定？"三个字写不下。状态文案也从库里的枚举值改成了中文，
+  // 所以下面比的是「启用 / 停用」而不是 enabled / disabled。
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-disable="${newChannelId}"]`);
   await page.waitForSelector('#ch-dis-reason', { timeout: 5000 });
-  await page.click('#btn-ch-disable-ok');
+  const chImpact = await page.$eval('.confirm-i', el => el.textContent.trim());
+  check('停用渠道的确认框写明影响的账号与 Key 数',
+    /账号/.test(chImpact) && /Key/.test(chImpact), chImpact.slice(0, 70));
+  await confirmOK();
   await sleep(800);
   const statusAfterEmpty = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   check('停用不填原因被拦下且状态未变（FR-095）',
-    /enabled/.test(statusAfterEmpty), `状态=${statusAfterEmpty}`);
+    /启用/.test(statusAfterEmpty), `状态=${statusAfterEmpty}`);
 
   const reason = '验收脚本停用测试-站点余额耗尽';
   await page.type('#ch-dis-reason', reason);
-  await page.click('#btn-ch-disable-ok');
+  await confirmOK();
   await page.waitForFunction(
-    id => /disabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    id => /停用/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
     { timeout: 8000 }, newChannelId).catch(() => {});
   const statusAfter = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
-  check('停用后列表状态变为 disabled', /disabled/.test(statusAfter), statusAfter);
+  check('停用后列表状态变为「停用」', /停用/.test(statusAfter), statusAfter);
   // 原因必须显示出来 —— 停用是要人来解除的，看不到原因就无从判断能不能解
   const reasonShown = await page.$eval(`[data-ch-reason="${newChannelId}"]`,
     el => el.textContent.trim()).catch(() => '');
@@ -969,6 +996,7 @@ try {
   // 原因清成 NULL —— 留下一个"已停用但没人知道为什么"的渠道，而库里没有 CHECK
   // 拦这个状态。改成随 status 变更才动之后，这条断言守着它。
   const renamed2 = `${uniq}-停用中改名`;
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
   await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
   await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
@@ -982,19 +1010,20 @@ try {
   const stillDisabled = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   check('停用态下只改名，停用原因与状态都不受影响',
-    reasonKept === reason && /disabled/.test(stillDisabled),
+    reasonKept === reason && /停用/.test(stillDisabled),
     `原因=${reasonKept || '（被抹掉了）'} 状态=${stillDisabled}`);
 
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-enable="${newChannelId}"]`);
   await page.waitForFunction(
-    id => /enabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    id => /启用/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
     { timeout: 8000 }, newChannelId).catch(() => {});
   const backOn = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   // 启用后原因必须一并清掉：留着上次的原因，界面上就是"已启用"却带着停用理由
   const reasonGone = await page.$$eval(`[data-ch-reason="${newChannelId}"]`,
     els => els.length === 0);
-  check('启用后状态恢复且停用原因被清空', /enabled/.test(backOn) && reasonGone,
+  check('启用后状态恢复且停用原因被清空', /启用/.test(backOn) && reasonGone,
     `状态=${backOn}，原因元素${reasonGone ? '已消失' : '仍在'}`);
 
   await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });
