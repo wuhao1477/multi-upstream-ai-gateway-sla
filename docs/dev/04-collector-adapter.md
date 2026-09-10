@@ -4,13 +4,13 @@
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |
 | 日期 | 2026-07-23 |
-| 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 三家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
+| 定位 | 采集侧（异步控制路径）契约。承接 [ISSUE-002 §2 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)，落成 Go 接口签名 + 逐家族实现要点 + 凭证生命周期状态机 + 写入 [02 数据模型](./02-data-model.md) 的目标表。**不涉及请求链路**（TTFT/接管/取消/隐藏重试属 `executor`/`ledger`，见 [01 架构](./01-architecture.md)）。 |
 | 输入 | [PRD v1.4](../PRD.md)、[DECISIONS](../DECISIONS.md)、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)、[ISSUE-002 采集适配器设计](../issues/ISSUE-002-collector-adapter-design.md)、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)、[00 总览](./00-overview-and-milestones.md)、[01 架构](./01-architecture.md) |
 | 覆盖 FR | FR-010/011/012/013/017/018、FR-020～032、FR-116（⏭ FR-033～039 订阅采集移入二期，[15 §1.2](./15-scope-and-preflight.md)） |
 | 覆盖 AC | AC-17、AC-28、AC-29（⏭ AC-20～24 订阅制维持二期） |
-| 里程碑 | M3 元数据采集（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
+| 里程碑 | P1 上游采集与管理已实现采集与管理面；P3 继续消费价格、告警与调度数据（见 [00 §3](./00-overview-and-milestones.md#3-里程碑)） |
 
-> **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；ASXS 是闭源自建平台，**一站一适配器，不可复用、不作探测基准**。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
+> **一条总原则（承接 ISSUE-002 前置结论）**：上游站点异构程度高，**必须按站型分流**。NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；**全自研站**（闭源面板、自建平台）**一站一适配器，不可复用、不作探测基准** —— 接入路径见 §7bis「全自研站怎么接」。任何不支持的字段返回 `unsupported`，**不静默留空**（与上游对接层的能力声明原则一致，[03](./03-upstream-layer.md)）。
 
 ---
 
@@ -30,9 +30,9 @@ import (
 type SupportLevel string
 
 const (
-	Supported   SupportLevel = "supported"   // 有该对象且可自动采集
-	Degraded    SupportLevel = "degraded"    // 部分可采 / 需人工补全 / 数据陈旧
-	Unsupported SupportLevel = "unsupported" // 该站型无此对象（如 NewAPI 无订阅）
+	Supported   SupportLevel = "supported"   // 有该对象且可自动采集；空结果是失败
+	Degraded    SupportLevel = "degraded"    // 部分可采 / 需人工补全 / 数据陈旧；必须带 note 说明
+	Unsupported SupportLevel = "unsupported" // 该站型无此对象（如 NewAPI 无订阅）；必须显式返回
 )
 
 // ── 站型家族 ──
@@ -41,23 +41,19 @@ type Family string
 const (
 	FamilyNewAPI  Family = "newapi"
 	FamilySub2API Family = "sub2api"
-	FamilyASXS    Family = "asxs"
 	FamilyUnknown Family = "unknown"
+	// 加一族的落点只有两处：这里一个常量 + 一份 Registration（§7bis）
 )
 
-// Capability 即接口里除 detect/authenticate/capabilities 外的每个 fetch 能力
+// Capability 即 P1 接口里除 detect/authenticate/capabilities 外的每个 fetch 能力
 type Capability string
 
 const (
 	CapAccount            Capability = "account"
 	CapKeys               Capability = "keys"
 	CapGroups             Capability = "groups"
-	CapSubscriptionQuotas Capability = "subscription_quotas"
-	// ⏭ 一期**所有站型**一律返回 unsupported（订阅制整体移入二期，[15 §1.2](./15-scope-and-preflight.md)）。
-	//    此前 Sub2API/ASXS 的 Capabilities() 标 supported 而 FetchSubscriptionQuotas 又返回
-	//    ErrUnsupported —— 自相矛盾，且 M3 的 AC-28 要求「能力矩阵与实现一致」，照原文必挂（第 18 轮 [high]）。
-	CapPricing            Capability = "pricing"
-	CapModelCatalog       Capability = "model_catalog"   // FR-126（P1 新增）
+	CapPricing      Capability = "pricing"
+	CapModelCatalog Capability = "model_catalog" // FR-126（P1 新增）
 )
 
 type CapabilityMap map[Capability]SupportLevel
@@ -90,12 +86,8 @@ type CollectorAdapter interface {
 	// Key 级：额度、有效期、限流、模型权限（FR-003/028/031）
 	FetchKeys(ctx context.Context, s Session) ([]Key, error)
 
-	// 分组/倍率：分组倍率、订阅类型、周期上限、高峰倍率（FR-010/033）
+	// 分组/倍率：分组倍率与可用模型（FR-010/123/124）
 	FetchGroups(ctx context.Context, s Session) ([]Group, error)
-
-	// 订阅周期额度（FR-033～039）。⏭ **一期不实现**（[15 §1.2](./15-scope-and-preflight.md)）：
-	// 一期所有站型统一返回 ErrUnsupported；二期按站型实现。
-	FetchSubscriptionQuotas(ctx context.Context, s Session) ([]SubscriptionQuota, error)
 
 	// 渠道可用模型目录（FR-126，**P1 新增**）：上游声称可用的**全部**模型。
 	// 与 FetchPricing 的区别：Pricing 产出权威价格版本（FR-012 不可覆盖），
@@ -110,21 +102,23 @@ type CollectorAdapter interface {
 	Capabilities() CapabilityMap
 }
 
-// 不支持的 fetch 统一返回该哨兵错误；调用方据此登记 Unsupported，不留空
+// 不支持的 P1 fetch 统一返回该哨兵错误；调用方据此登记 Unsupported，不留空
 var ErrUnsupported = errors.New("collector: capability unsupported by this family")
 
-// ── 接口引用但此前未定义的类型（第 29 轮 [P0] 补齐）──
-// 开发按原文档写到 Authenticate() 就卡住：Credential/Session 只有名字没有结构。
-
-// Credential：运维登记的采集凭证，落 collector_credentials（[02 §7](./02-data-model.md)，一期明文）
+// Credential：运维登记的采集凭证（P1 只接收 access/refresh token，明文仅用于采集）。
 type Credential struct {
-    ChannelID  int64
-    BaseURL    string
-    Kind       string // 'password' | 'access_token' | 'api_key'
-    Username   string // Kind='password' 时用
-    Password   string
-    Token      string // Kind='access_token'/'api_key' 时用
-    ExtraHeaders map[string]string // 如 NewAPI 二开的 New-API-User
+    AccountID        int64
+    ChannelID        int64
+    Family           Family
+    CredType         string
+    AccessToken      string
+    RefreshToken     string
+    ExternalUserID   string
+    UserIDHeaderName string
+    TokenExpiresAt   time.Time
+    RefreshLockKey   string
+    BaseURL          string
+    QuotaPerUnit     float64
 }
 
 // Session：Authenticate 的产出，含续期所需的一切。**内存态，不落库**（含明文令牌）
@@ -132,9 +126,9 @@ type Session struct {
     Family      Family
     BaseURL     string
     AccessToken string
-    RefreshToken string    // 仅 Sub2API 有；ASXS 无 refresh，到期须账密重登（§5）
+    RefreshToken string    // 仅有 refresh 路径的站型有
     UserID      string     // NewAPI 的数字用户 ID，用于 New-API-User 头
-    ExpiresAt   time.Time  // 令牌到期；提前 ExpiryGrace 续期
+    ExpiresAt   time.Time  // 令牌到期；提前阈值续期
     Headers     map[string]string // 每次请求都要带的固定头
 }
 
@@ -169,7 +163,7 @@ type ManualReserve struct {
 }
 ```
 
-**分页、限流与重试（三家族统一约定）**：
+**分页、限流与重试（全家族统一约定）**：
 
 | 项 | 约定 |
 | --- | --- |
@@ -213,17 +207,6 @@ type Group struct {
 	GroupRef        string   // → channel_groups.group_ref（P1 落库）
 	RateMultiplier  float64  // 分组倍率 → channel_groups.rate_multiplier（P1 落库）
 	AvailableModels []string // 该分组可获取的模型（FR-124）→ group_models.model_name（P1 落库）
-	RPMLimit        int      // → 与 Key 级限流一并登记（FR-127）
-	// ── 以下字段 P1 采集但**不落结构化列**，只进 collector_snapshots.payload ──
-	// 理由（[ISSUE-005 §3.1](../issues/ISSUE-005-phase1-upstream-inventory.md)）：它们的消费者
-	// 都在 P2/P3 调度（高峰倍率影响成本排序、独占与平台影响候选过滤），P1 无消费者。
-	// 需要时按 payload 回填结构化列即可，不丢数据。
-	PeakEnabled     bool
-	PeakMultiplier  float64
-	PeakStart, PeakEnd string
-	SubscriptionType string
-	Platform        string // openai / anthropic 等
-	IsExclusive     bool
 	Meta            SourceMeta
 }
 
@@ -238,7 +221,7 @@ type CatalogModel struct {
 }
 
 type SubscriptionQuota struct {
-	OwnerKey       string    // 共享额度归集键：Sub2API 为 (user,group)，ASXS 为 (user,plan)（FR-035）
+	OwnerKey       string    // 共享额度归集键：Sub2API 为 (user,group)；无 group 概念的站型按 (user,plan)（FR-035）
 	PlanRef        string
 	StartsAt, ExpiresAt time.Time
 	Status         string    // active / expired / suspended
@@ -251,9 +234,13 @@ type SubscriptionQuota struct {
 	FixedFeeUSD    float64   // 固定费用（算用满倍率，FR-057）
 	DurationDays   int       // 有效期天数（算用满倍率）
 	RateMultiplier float64
-	PrimarySource   string   // 额度来源优先级（ASXS primarySource，FR-033/8.5）
+	// ⏭ 下面三个字段（含 FixedFeeUSD/DurationDays）都是 P4 订阅制的形状，
+	//    取自一家**已移出支持范围**的自研站的实测（原 §3.3）。留着是因为 FR-033/036/057
+	//    还引用它们，但**做 P4 时必须按当时真实纳管的站型重新实测** —— 现役两族都没有
+	//    这些概念，照这个形状写会得到一组没有数据源的列（[02 §0.3](./02-data-model.md) 同理）。
+	PrimarySource   string   // 额度来源优先级（订阅先扣还是余额先扣，FR-033/8.5）
 	SecondarySource string
-	ManualResetPolicy *ManualReset // 可主动重置额度（ASXS dailyReset，FR-036 外生变量）
+	ManualResetPolicy *ManualReset // 可主动重置额度（FR-036 的外生变量）
 	Overage        *OverageRule // Sub2API 系恒为 nil（无超额）
 	Meta           SourceMeta
 }
@@ -269,14 +256,17 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- |
 | 1 | `GET /api/status` | 返回含 `quota_per_unit`、`turnstile_check`、`checkin_enabled` | **NewAPI 系** → 复用 `NewApiAdapter` |
 | 2 | `GET /api/v1/settings/public` | 返回含 `site_name`、`turnstile_enabled`、envelope `{code,message,data}` | **Sub2API 系** → 复用 `Sub2ApiAdapter` |
-| 3 | `GET /api/public/site-config` | 200 且 JWT `iss` 为 `ampmanager` | **ASXS 系** → 专属 `AsxsAdapter` |
-| 4 | 全未命中 | —— | **未知家族** → §7 接入流程，新建专属适配器 |
+| 3 | 全未命中 | —— | **未知家族** → §7 接入流程，新建专属适配器 |
+
+> 顺序即注册表切片的顺序：**判据越通用的放越前面**。新加的自研站放最后 —— 它的判据只认自己那一站，放前面只是让另外两族每次多一跳无谓的探测。
 
 **二开兼容要点**：NewAPI 系即使命中顺序 1，用户 ID 头名仍可能不同，探测阶段不确定，`Detect` 只归族；`UserIDHeader` 由 `Authenticate` 阶段 fan-out 试探（§3.1）。`quota_per_unit` 也逐站从 `/api/status` 读取，**不写死**（upstream-d.invalid 为 500000）。
 
+上表的顺序、端点与命中特征都来自 §7bis 的站型注册表 —— `Detect` 遍历注册表而非另有一张平行的探测表（那张表曾是"加站型要改九处"里的第 2 处）。
+
 ---
 
-## 3. 三家族实现要点与字段映射
+## 3. 现役家族实现要点与字段映射
 
 ### 3.1 NewAPI 系（upstream-d.invalid 已验证）— 无订阅对象
 
@@ -285,7 +275,7 @@ type SubscriptionQuota struct {
 | 鉴权 | `Authorization: <token>` 或 `Bearer <token>` **均可**；**必须同时带 `New-API-User: <数字用户ID>`**，只带 Cookie 会 401 |
 | 二开头名 fan-out | 首次鉴权对多头名逐一试探命中：`New-API-User` / `Veloera-User` / `X-Api-User` / `voapi-user` / `User-id` / `Rix-Api-User` / `neo-api-user`，命中后记入 `Session.UserIDHeader` |
 | 额度换算 | `金额(USD) = quota / quota_per_unit`（upstream-d.invalid `quota_per_unit=500000`，已实测与页面一致）。换算在适配器内完成（FR-018、AC-17） |
-| 订阅 | ❌ 无订阅对象。`FetchSubscriptionQuotas` 返回 `ErrUnsupported` |
+| 订阅 | P1 不采集；订阅台账属于后续阶段 |
 | 签到额度 | `/api/status.checkin_enabled=true`（upstream-d.invalid 本月签到 ¥160）。**一期不建模为额度来源**（FR-034 删签到句）；仅可作为 note 记录，接受该类站点额度预测系统性偏低 |
 
 **字段映射：**
@@ -294,16 +284,39 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- | --- |
 | `FetchAccount` | `/api/user/self` | `quota`、`used_quota`、`request_count`、`group` | `BalanceUSD=quota/qpu`、`UsedUSD=used_quota/qpu`、`UserID` | FR-020/024 |
 | `FetchKeys` | `/api/token` | `expired_time`、`remain_quota`、`unlimited_quota`、`used_quota`、`model_limits`、`model_limits_enabled`、`allow_ips`、`group` | `ExpiredAt`、`RemainQuotaUSD`、`Unlimited`、`ModelLimits`、`GroupRef` | FR-003/028/031 |
-| `FetchGroups` | 由 `/api/pricing.group_ratio` 派生 | `group_ratio` | `RateMultiplier` | FR-010 |
-| `FetchPricing` | `/api/pricing`（**公开**） | `model_ratio`、`group_ratio`、`cache_ratio`、`completion_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
-| `FetchSubscriptionQuotas` | —— | —— | `ErrUnsupported` | FR-034 |
+| `FetchGroups` | 由 `/api/pricing` 派生 | 顶层 `group_ratio` + 各模型 `enable_groups` **反转** | `RateMultiplier`、`AvailableModels`（FR-124） | FR-010/123/124 |
+| `FetchPricing` | `/api/pricing`（**公开**） | `quota_type`、`model_ratio`、`model_price`、`completion_ratio`、`cache_ratio`、顶层 `group_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
+| `FetchModelCatalog` | `/api/pricing` | `model_name` + 上列价格字段 | `channel_model_catalog`（含 `billing_unit`） | FR-126 |
+
+**`/api/pricing` 的真实响应形状**（第 46 轮实测 20 个可达站点，**20/20 为下述形状，0 个为旧形状**）
+
+```jsonc
+{
+  "data": [                        // ← **模型对象数组**，不是 {model_ratio:{...}} 字典
+    { "model_name": "gpt-4o",
+      "quota_type": 0,             // 0=倍率计价，1=按次固定价
+      "model_ratio": 2.5,          // quota_type=0 时取此（相对基准价的倍率）
+      "model_price": 0,            // quota_type=1 时取此（每次调用绝对美元价）
+      "completion_ratio": 4,       // 输出价 = model_ratio × completion_ratio
+      "cache_ratio": 0.5, "has_cache": true,
+      "enable_groups": ["default","vip"]   // ← 分组可用模型的**唯一**来源
+    }
+  ],
+  "group_ratio": { "default": 1, "vip": 0.8 },   // ← **顶层**，不在 data 内
+  "version": "..."
+}
+```
+
+> ⚠️ **历史陷阱（已修）**：早期文档记的是 `data.model_ratio` 为"模型名→倍率"字典。按字典解析时，43/44 个真实站点报"无 model_ratio"，`group_models` 更是**静默采到 0 行**却报 `ok`——因为 `model_ratio` 的键恒为空。适配器现同时兼容两种形状；命中旧字典形状时 `GroupModels` **留空而非虚构**"每个分组都有全部模型"。修复后价格覆盖率 2.3% → 86.4%，目录 2.3% → 100%，`group_models` 0 → 5546 行。
+
+> ⚠️ **`quota_type` 决定口径，不可省略**：`quota_type=1` 的 `model_price` 是**每次调用的绝对美元价**（`billing_unit=per_call`），与倍率**数值区间重叠**（实测按次 0.08~0.56，倍率 0.685~30），无法从数值反推。实测某站 1369 个模型中 208 个（15%）为按次计价。落库必须带 `billing_unit`（[02 §1.3bis](./02-data-model.md)）。
 
 > ⚠️ **`/api/user/token` 是"重新生成"而非"读取"** —— 实测每次调用都返回新令牌并**立即作废旧令牌**。本版本 `/api/user/self` 不回显 `access_token`，无法惰性"读不到再建"。采集器**只在初始化时调用一次并持久化**，运行时**禁止**重新生成（§5 状态机 N-1）。
 
 **Capabilities：**
 ```
 {account: supported, keys: supported, groups: supported, pricing: supported,
- model_catalog: supported, subscription_quotas: unsupported}
+ model_catalog: supported}
 ```
 
 ### 3.2 Sub2API 系（molifang + hyhawang 实测 + 源码级 ent schema 解析）
@@ -322,8 +335,7 @@ type SubscriptionQuota struct {
 | --- | --- | --- | --- |
 | `FetchAccount` | `/api/v1/auth/me` | 用户ID、邮箱、角色 | FR-020 |
 | `FetchKeys` | `/api/v1/keys` | `quota`、`quota_used`、`expires_at`、`rate_limit_5h/1d/7d`、`usage_5h/1d/7d`、`window_*_start`、`current_concurrency` | FR-020～032 |
-| `FetchGroups` | `/api/v1/groups/available` | `subscription_type`、`rate_multiplier`、`daily/weekly/monthly_limit_usd`、`peak_rate_enabled/peak_start/peak_end/peak_rate_multiplier`、`rpm_limit`、`is_exclusive`、`fallback_group_id` | FR-010/033 |
-| `FetchSubscriptionQuotas` | `/api/v1/user/platform-quotas`（+ `/api/v1/subscriptions[/active]`） | `platform`、`daily/weekly/monthly_limit_usd`、`*_usage_usd`、`*_window_resets_at` | FR-033～039 |
+| `FetchGroups` | `/api/v1/groups/available` | `id`、`rate_multiplier`、可用模型字段 | FR-010/123/124 |
 
 **源码级订阅模型（sub2api `63cef60`，ent schema 为准 —— 比空账号更完整）** — 4 张核心表逐字段确认 FR-033/034：
 
@@ -338,58 +350,44 @@ type SubscriptionQuota struct {
 
 **Capabilities：**
 ```
-{account: supported, keys: supported, groups: supported, pricing: degraded,
- model_catalog: supported, subscription_quotas: **unsupported（一期）**}
+{account: supported, keys: supported, groups: degraded, pricing: degraded,
+ model_catalog: degraded}
 ```
-（价格倍率经 `/api/v1/groups/available.rate_multiplier` 与分组耦合，非独立价格表，标 `degraded`。）
+（分组由 `/api/v1/groups/available` 取得，但真站点可能缺少分组可用模型字段，故标 `degraded` 并说明；价格倍率也经该端点与分组耦合，非独立价格表；模型目录依赖同端点，真站点缺少 `available_models`/`models`/`supported_models` 时同样标 `degraded`，不伪造完整成功。）
 
-### 3.3 ASXS Codex 系（upstream-f.invalid 已验证）— 订阅数据最完整，专属不可复用
+### 3.3 全自研站（**已无现役样本**，第 48 轮）
 
-| 项 | 结论 |
-| --- | --- |
-| 底层产品 | JWT `iss:"ampmanager"`、`aud:"ampmanager-users"` —— 闭源 AMP Manager，**非任何开源项目** |
-| 命名空间 | `/api/me/*`（用户数据，Bearer JWT）、`/api/public/*`（公开）、`/api/manage/auth/*`（登录）、`/api/auth/*`+`/api/user/*`（API-Key 代理，与仪表盘 JWT 不通用） |
-| 鉴权 | JWT `Authorization: Bearer`，localStorage 键 `token`；**有效期 168 小时（7 天）**，无 cookie |
-| 续期 | ❌ **无任何静默续期**（无 refresh_token、无 refresh claim、`/api/me/refresh` 等全 404、页面加载无 auth 调用）。唯一续法：`POST /api/manage/auth/login` **账号密码重登**换新 7 天 JWT（§5） |
-| 额度单位 | micros（`limitMicros:90000000`=$90）；`金额(USD)=micros/1e6` |
-| 专属性 | ⚠️ **本适配器专属，不可复用、不作探测基准**（命名空间/micros/JWT claim 均与 NewAPI/Sub2API 零重叠） |
+此前这里有一份闭源自建平台的逐字段实测表（专属适配器、micros 额度单位、7 天 JWT 无 refresh）。
+**该站已移出支持范围**（2026-08-29 决定，见 [00 §3bis](./00-overview-and-milestones.md)），
+适配器与注册一并删除，故本节不再有具体站点。
 
-**字段映射（`/api/me/billing/state` —— FR-033 要求字段几乎全覆盖）：**
+**但接入路径保留且已抽象成清单** —— 见 §7bis「全自研站怎么接」。那份清单里的每一条
+都来自这次实测：命名空间与开源项目零重叠、额度单位自成一套、指纹在 JWT claim 里而不在
+JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站的特例，而是"自建面板"这个类别
+的常见形态，所以清单值得留，样本不必留。
 
-| fetch | 端点 | 源字段 | → 字段 / FR |
-| --- | --- | --- | --- |
-| `FetchAccount` | `/api/me/balance`、`/api/me/profile` | `balanceUsd`（字符串）、`limitMicros` | `BalanceUSD`（FR-020） |
-| `FetchSubscriptionQuotas` | `/api/me/billing/state` | `planId`/`planName`、`startsAt`、`expiresAt`、`limits[].limitType`+`windowMode`、`limits[].limitMicros`、`limits[].fixedResetTime`、`status`、`usedMicros`/`leftMicros`、`remainingDays` | `PlanRef/StartsAt/ExpiresAt/Period/WindowMode=fixed/LimitUSD/ResetAt/Status/UsedUSD/LeftUSD`（FR-033～039） |
-| `FetchSubscriptionQuotas`（固定费用） | `/api/me/purchase/products`（16 套餐） | `priceCnyCent`、`durationDays`、`subscriptionPlanName`、`renewAllowed`、`renewalRule` | `FixedFeeUSD`（priceCnyCent 一期 1:1 归一美元）、`DurationDays` —— **双倍率用满倍率的全部输入**（FR-057/058、AC-24） |
+⚠️ **接新的自研站时不要照本节的历史结论写代码** —— 它描述的是另一家站。
+按 §7 的流程重新实测，按 §7bis 的清单落字段。历史探针记录仍在
+[ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 与
+[ISSUE-003](../issues/ISSUE-003-runtime-feedback-requirement-candidates.md)（保留原站名，
+那是当时用了什么方法的史实）。
 
-**两个关键额外字段（原 PRD 未预见，已并入 FR-033）：**
+### 3.4 能力矩阵总表
 
-- `primarySource:"subscription"` / `secondarySource:"balance"` → `PrimarySource/SecondarySource`，即平台**自身**的额度消耗优先级。不读会错判订阅额度是否真被消耗（FR-033、8.5）。
-- `dailyReset`（`usageThresholdPercent:90%`、`dailyLimit:4` 次/日）→ `ManualResetPolicy`，可主动争取的额外额度，是 FR-036 到期未用预测的**外生变量**。
+> 这张表**逐格**被 `adapters_test.go` 的 `TestCapabilitiesMatchDocMatrix` 对照（AC-28 的核心判据）。
+> 加一族要同时改这里与那张表 —— 那条断言对"没进表的家族"会报错而不是空过。
 
-> 实测当下即一个真实"额度浪费"案例：该订阅 2 天后到期、当日 $90 额度 `usedMicros=0` → 可直接作 FR-036/FR-039 验收用例（AC-20/AC-21）。
-
-**Capabilities：**
-```
-{account: supported, keys: unsupported, groups: unsupported, pricing: degraded,
- model_catalog: degraded, subscription_quotas: **unsupported（一期）**}
-```
-（ASXS 无独立 Key/分组管理视图；价格并入套餐 products，标 `degraded`。）
-
-### 3.4 三家族能力矩阵总表
-
-| Capability | NewAPI | Sub2API | ASXS |
-| --- | --- | --- | --- |
-| `account` | supported | supported | supported |
-| `keys` | supported | supported | unsupported |
-| `groups` | supported | supported | unsupported |
-| `subscription_quotas` | **unsupported** | **unsupported（一期）** | **unsupported（一期）** |  ⏭ 订阅制整体移入二期（[15 §1.2](./15-scope-and-preflight.md)）；`Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 返回 `ErrUnsupported` 一致，否则 [AC-28](./14-acceptance-matrix.md) 判不通过 |
-| `pricing` | supported（公开） | degraded | degraded |
-| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | supported（`/api/v1/groups/available` 带分组模型） | **degraded**（模型并入套餐 products，非独立目录端点） | 
-| 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 | JWT 7d，无 refresh，账密重登 |
-| 额度单位 | `quota/quota_per_unit` | USD 浮点 | `micros/1e6` |
-| 共享额度归集键 | Key 独立 | `(user,group)` | `(user,plan)` |
-| 超额计费 | N/A | **无超额**（用尽即阻断） | 有 `renewAllowed`/多订阅 |
+| Capability | NewAPI | Sub2API |
+| --- | --- | --- |
+| `account` | supported | supported |
+| `keys` | supported | supported |
+| `groups` | supported | degraded |
+| `pricing` | supported（公开） | degraded |
+| `model_catalog`（**P1 新增**） | supported（`/api/pricing` 已含全量模型与价格） | degraded（实现会读 `/api/v1/groups/available`；实测站点未返回 `available_models`/`models`/`supported_models` 时必须说明，不能伪造空成功） |
+| 令牌与续期 | 系统访问令牌，长期，初始化一次生成 | JWT 24h + refresh 无密码续期 |
+| 额度单位 | `quota/quota_per_unit` | USD 浮点 |
+| 共享额度归集键 | Key 独立 | `(user,group)` |
+| 超额计费 | N/A | **无超额**（用尽即阻断） |
 
 ### 3.4bis `Degraded` 的运行时行为（**P1 必需**，第 45 轮补）
 
@@ -404,11 +402,11 @@ type SubscriptionQuota struct {
 | 请求本身失败（网络/401/5xx） | `nil` + 真实 error | `failed` |
 | 该站型**根本没有这个对象** | `ErrUnsupported` | `unsupported` |
 
-- **判定口径（供 AC-28/38 执行）**：`Capabilities()` 声明 `degraded` ⟺ 该方法**不得**返回 `ErrUnsupported`。声明 `unsupported` ⟺ 必须返回 `ErrUnsupported`。声明 `supported` ⟺ 不得返回 `ErrUnsupported` 且必备字段齐全。
+- **判定口径（供 AC-28/38 执行）**：`Capabilities()` 声明 `supported` 时必须产出数据，空结果判 `failed`；声明 `degraded` 时该方法**不得**返回 `ErrUnsupported`，并必须用 `note`/`MissingFields` 说明缺失；声明 `unsupported` ⟺ 必须返回 `ErrUnsupported`，并在 sync items 里显式出现。
 - **三处 `degraded` 的具体含义**：
   - NewAPI `pricing`：无（它是 `supported`，`/api/pricing` 公开且完整）。
   - Sub2API `pricing`：倍率与分组耦合在 `/api/v1/groups/available`，**无独立模型价格表** → 目录里 `input_price`/`output_price` 可能为空，`MissingFields=["input_price","output_price"]`。
-  - ASXS `pricing` / `model_catalog`：模型与价格并入套餐 `products`，**非独立目录端点** → 只能取到套餐维度的模型名，逐模型单价缺失。
+  - 自研站的 `pricing` / `model_catalog` **多半也是 `degraded`**：自建面板常把模型与价格并入套餐页而没有独立目录端点 → 只能取到套餐维度的模型名，逐模型单价缺失。这一格该填什么由实测定，**不要照抄** —— 但要记得 `degraded` ≠ `unsupported`（判定口径见上一条）。
 - **`MissingFields` 的用途**：`inventory` 的异常项计数把它计入"待人工补录"（FR-011：采不到即人工录入 + 标来源 + 7 天有效期），而不是当成故障。
 
 ---
@@ -424,11 +422,11 @@ type SubscriptionQuota struct {
 | `price_change_log` | `FetchPricing` **同一事务** | 见下方「价格变更留痕」 | FR-014/017 |
 | `balance_signals` | `FetchAccount` | `last_confirmed_balance`、`confirmed_at`、`balance_state`、`quota_status`、`signal_kind`、`signal_evidence`。⚠️ **不写 `known_consumption_since` 与 `conservative_floor`**，见下方列归属 | FR-020/024/026 |
 | `upstream_keys` + `collector_snapshots` | `FetchKeys` | **P1 起写结构化列**：`remain_quota_usd`、`used_quota_usd`、`rpm_limit`、`concurrency_limit`、`quota_synced_at`、`expired_time`、`model_limits`、`channel_group_id`（[02 §1.3](./02-data-model.md)）；**用量历史**另写 `collector_snapshots(scope_type='key')` 的 payload。<br>⚠️ **第 44 轮修正**：上一版写"key 级 `remain_quota/...`"——`upstream_keys` **此前根本没有这些列**（既有错误，非笔误），采回的额度只能塞 payload，"这把 Key 还剩多少"查不出来。P1 补列后本行才成立 | FR-021/028/031、**FR-122/125/127** |
-| `channel_groups` + `group_models` | `FetchGroups` | `group_ref`、`rate_multiplier`（结构化列）；`AvailableModels` → `group_models.model_name`（FR-124）。**高峰倍率/独占/平台仍只进 payload**（P1 无消费者，见 §1 结构注释） | **FR-123/124** |
+| `channel_groups` + `group_models` | `FetchGroups` | `group_ref`、`rate_multiplier`（结构化列）；`AvailableModels` → `group_models.model_name`（FR-124） | **FR-123/124** |
 | `channel_model_catalog` | `FetchModelCatalog` | `model_name`、`input_price`、`output_price`、`first_seen_at`（首次采到时写入，之后不变）、`last_seen_at`（每轮刷新）。**无 token 上界**——那是 `models` 的必填项 | **FR-126** |
-| `subscription_plans`（含 `rate_multiplier`/`peak_*`） | `FetchGroups` + `FetchSubscriptionQuotas`（套餐维度） | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033、参数14 | ⏭ **二期** |
-| `user_subscriptions` + `subscription_quota_windows` | `FetchSubscriptionQuotas`（实例维度） | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule(no_overage_block for sub2api)` | FR-034/035/036、8.5 | ⏭ **二期** |
-| `collector_credentials` | `Authenticate` 副产物 | 令牌/refresh/账密（一期明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
+| `subscription_plans`（含 `rate_multiplier`/`peak_*`） | 后续阶段独立订阅采集 | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033 | ⏭ **二期** |
+| `user_subscriptions` + `subscription_quota_windows` | 后续阶段独立订阅采集 | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule` | FR-034/035/036 | ⏭ **二期** |
+| `collector_credentials` | `Authenticate` 副产物 | access/refresh 令牌（P1 明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
 | `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
 
 **`balance_signals` 的列级写入归属**（第 41 轮：采集器与余额下限 worker **都写 `conservative_floor`**，
@@ -466,7 +464,7 @@ type SubscriptionQuota struct {
 - **`decrease` 未确认期间照常使用新价**：保守方向是"按更贵的算"，而低价会让 selector 更倾向选它——
   故未确认的降价**不参与"低价优选"排序**（与 §1.1 序 6 价格陈旧的处置一致），只作保底。
 
-> **ASXS 归集键差异**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。ASXS 无 group 概念，其 `group_id` 列填**套餐标识**（ASXS 按 `(user, plan)` 聚合，见 §3.4）；采集器负责把家族差异映射到统一列。
+> **无 group 概念的站型怎么落归集键**：02 的 `user_subscriptions` 用 `(ext_user_id, group_id)` 表达共享额度。而自建面板常没有 group 这层，只有套餐 —— 那种站的 `group_id` 列填**套餐标识**（按 `(user, plan)` 聚合）；采集器负责把家族差异映射到统一列。⏭ 属 P4，做的时候按当时真实纳管的站型重新确认。
 
 > **双倍率落库分工**：`subscription_plan.用满倍率 = 固定费用÷周期额度×分组倍率`（调度排序，FR-057），`subscription_instance.实际倍率 = 固定费用÷实际消耗×倍率`（账务报表，FR-058）。采集器只提供两者的**原料**（`FixedFeeUSD`、`DurationDays`、`LimitUSD`、`UsedUSD`、`RateMultiplier`），倍率计算由 `steward`/账本完成，不在采集器内。
 
@@ -474,7 +472,7 @@ type SubscriptionQuota struct {
 
 ## 5. 凭证生命周期状态机（核心风险区）
 
-三家族**都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分三套状态机，均以 `collector_credential` 持久化为唯一真相。
+**任何家族都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分套状态机（现役两套 + 账密重登一套，§5.3），均以 `collector_credential` 持久化为唯一真相。
 
 **两列的持久化落点**（第 40 轮补：`collector_credentials.user_id_header_name` 与 `refresh_lock_key`
 建好后**零引用** —— §3.1 的 fan-out 结果只写进内存 `Session.UserIDHeader`，进程一重启就得重新试探
@@ -483,7 +481,7 @@ type SubscriptionQuota struct {
 | 列 | 谁写 | 谁读 |
 | --- | --- | --- |
 | `user_id_header_name` | `Authenticate` 完成 fan-out 后**立即持久化**命中的头名（§3.1 七选一） | 后续每次采集直接取用，**不再 fan-out**；命中失效（401）时清空该列并重试试探 |
-| `refresh_lock_key` | 凭证登记时按账号生成，**同一上游账号的多条凭证共用同一值**（如 `refresh:<site_family>:<external_user_id>`） | Sub2API 刷新前 `pg_advisory_xact_lock(hashtext(refresh_lock_key))` 串行化——并发刷新会互相作废（§5.2） |
+| `refresh_lock_key` | 凭证登记时按账号生成，**同一上游账号的多条凭证共用同一值**（`refresh:<site_family>:<normalized_base_url>:<external_user_id>`；缺少账号 ID 时使用 JWT `user_id`，再缺失才退回渠道键） | Sub2API 刷新前在事务内执行 `pg_advisory_xact_lock(hashtext(refresh_lock_key))`，锁内重读并保存轮换后的凭证——并发刷新会互相作废（§5.2） |
 
 - **为什么必须落库而非只在内存**：fan-out 是**七次带凭证的试探请求**，重启就重来一遍，
   既慢又平白给上游制造异常鉴权记录；而互斥锁若只在进程内，**多实例部署时完全失效**——
@@ -519,16 +517,57 @@ type SubscriptionQuota struct {
 设备绑定: 已确认 Sub2API 未开启 bnd 绑定, 服务端换 IP/UA 续期不被拒（风险解除）。
 ```
 
-### 5.3 ASXS JWT（7d，无 refresh，账密重登）
+### 5.3 账密重登
 
-```
-[持有 JWT] --正常采集 (Authorization: Bearer)--> [持有 JWT]
-[持有 JWT] --剩余有效期 < 阈值(建议 <1 天)--> [重登中] --POST /api/manage/auth/login {username,password}--> [持有新 7d JWT]
-[持有 JWT] --401--> [重登中]
+P1 不接收或存储上游账号密码，也不实现账密重登。新增站型必须提供可采集的
+access token（需要续期时同时提供 refresh token），否则应停用渠道并转人工处理。
 
-特性: 7 天有效期 → 重登频率极低(约每周 1 次), 风控压力小。
-约束: 必须持有账号密码才能续期（闭源平台固有约束, 无 refresh 路径）；账密一期明文存储(FR-113)。
+### 5.4 到期时间从哪来（`TokenExpiryFrom`，第 49 轮补，**修一个自锁缺陷**）
+
+上面三套状态机都以"剩余有效期 < `RefreshLead`"为触发条件，却没写**到期时间从哪读**。
+2026-08-30 全量采集实测暴露了后果：
+
+| 实测事实 | 值 |
+| --- | --- |
+| 65 渠道全量 sync 的续期动作 | **0 次** |
+| sub2api 渠道的鉴权结果 | **13/13 全 401** |
+| `collector_credentials.token_expires_at` 非空的行 | **0**（52 newapi + 13 sub2api 全为 NULL） |
+| 同表 `refresh_token` 非空的行 | **0** |
+| 这些 JWT 的 `exp` 声明 | 11 条可读出，**全部早已过期**（2026-03 ×6 / 04 ×1 / 06 ×1 / 07 ×1 / 08 ×2） |
+
+成因是三件事叠起来的：登记路径（`saveCredential`、导入侧）都不写
+`token_expires_at`，hub 导出里也没有这个字段；`NeedsRefresh` 见零值就返 `false`；
+而 401 没有被动恢复。于是 **`RefreshLead` 只在"已经续过一次之后"才生效** ——
+第一次续期永远等不到，这是个自锁。零值不等于"没有到期时间"，只等于"库里没记"。
+
+修法是让家族**自己声明到期时间能不能从令牌里读出来**：
+
+```go
+// Registration
+TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 ```
+
+- Sub2API 填 `jwtExpiry`：base64 解 payload 取 `exp`。**不验签**，读的是我方自己
+  库里已存的令牌，只用来决定"要不要提前刷"，**不能用来做任何授权决定**。
+- NewAPI 留 `nil`：长期令牌本就没有到期时间，且不变式 N-1 禁止重新生成。
+  `RefreshLead == 0` 在 `NeedsRefresh` 里先短路，所以即便令牌长得像 JWT 也不会刷
+  （`TestNewAPIStillNeverRefreshesEvenWithJWTLikeToken` 钉住）。
+- 两头都读不出时 **不猜默认值** —— 猜一个会让系统按凭空的节奏刷自己的令牌。
+  真库里就有 2 条 `cred_type` 写着 `sub2api_jwt` 而内容不是三段 JWT 的凭证。
+- `RefreshLead > 0 ⟺ TokenExpiryFrom != nil` 由 `registry_test.go` 双向钉住，
+  与上面 `Refresher` 那条同理：声明了阈值却没有到期时间来源 = 判定恒 false。
+
+**这个修复不会让那 13 条渠道自己好起来,要说清楚**：判定从 false 变 true 之后,
+`Refresh` 立刻发现 `refresh_token` 为空,返回 `ErrNeedsRelogin`。改善只在于
+**失败从静默变成具名** —— 修复前是"到期不续 → 上游 401 → 鉴权失败",看不出原因;
+修复后是"续期失败：无 refresh_token 可用（需人工重登）",直接指向处置动作。
+真正的恢复需要补登记有效的 `refresh_token` 或重新登记 access token；P1 不实现账密重登。
+
+⚠️ 缺 `refresh_token` 这一条**同时标 `ErrPrecondition`**：它在发出任何请求之前
+就返回了,与该哨兵注释里"凭证没登记"是同一类本地失败。不标的后果是上层按上游
+故障处理 —— 返 502 让运维去查别人家站点为什么挂了,还白起算 60s 限流窗口。
+401 那条**不标**（请求已经发出去了）,两条方向都有断言,防的是"给两条都加上"
+这种让前一条变绿的假修法。
 
 ---
 
@@ -536,12 +575,12 @@ type SubscriptionQuota struct {
 
 | 项 | 要求 | 来源 |
 | --- | --- | --- |
-| **限速** | 同站点请求强制最小间隔（参考 all-api-hub `minIntervalLimiter`），避免触发风控；查询频率默认见 PRD §11（价格 6h / 余额校对 5～15min / 订阅 1h），可配置 | FR-116、参数10 |
+| **限速** | 同站点请求强制最小间隔（参考 all-api-hub `minIntervalLimiter`），避免触发风控；查询频率默认见 PRD §11（价格 6h / 余额校对 5～15min / Key 额度与目录按 P1 配置），可配置 | FR-116、参数10 |
 | **无盾确认** | 接入前必须确认 `turnstile_check:false`（NewAPI）/ `turnstile_enabled:false`（Sub2API）。**开盾站点服务端采集不可行**，须转人工录入。已实测 upstream-d.invalid、molifang 均无盾 | ISSUE-002 §5 |
-| **凭证互斥作废** | 见 §5 三套状态机：NewAPI 令牌只生成一次、Sub2API 按账号串行刷新、ASXS 账密重登 | ISSUE-002 §4 |
-| **降级一致性** | 任何字段采集失败一律落 FR-011：人工录入 + 数据来源标注 + **7 天有效期** + 过期按"订阅数据未知"降级（订阅状态机进"数据未知"，PRD §9.3）。**不允许用陈旧数据驱动订阅倾斜** | FR-011、AC-28 |
+| **凭证互斥作废** | 见 §5 的状态机：NewAPI 令牌只生成一次、Sub2API 按账号串行刷新；P1 不接收账密凭证 | ISSUE-002 §4 |
+| **降级一致性** | 任何字段采集失败一律落 FR-011：人工录入 + 数据来源标注 + **7 天有效期** + 过期标记为陈旧。P1 不执行订阅策略 | FR-011、AC-28 |
 | **余额信号输入** | 采集器提供"账户/Key 余量是否归零"的判据，供 `steward` 的余额不足信号自适应识别框架（错误文案正则 + 失败信号 + 余量归零）判定资源置"耗尽" | FR-027、AC-29 |
-| **额度归一** | 三家族 `quota/quota_per_unit`、USD 浮点、`micros/1e6` 一律在适配器内归一为数值美元，一期各币种 1:1（币种仅名称） | FR-018、AC-17 |
+| **额度归一** | 各家族的额度单位（NewAPI `quota/quota_per_unit`、Sub2API USD 浮点，自建站还可能是 micros 之类自成一套的单位）**一律在适配器内归一为数值美元**，一期各币种 1:1（币种仅名称）。归一必须在适配器里做完 —— 让单位漏到上层，等于让每个消费方各猜一次换算基数 | FR-018、AC-17 |
 
 ---
 
@@ -549,12 +588,95 @@ type SubscriptionQuota struct {
 
 1. `Detect` 依次比对 `/api/status`、`/api/v1/settings/public`、`/api/public/site-config`，全未命中 → `FamilyUnknown`。
 2. 抓取前端实际调用的接口（`performance.getEntriesByType('resource')` 思路取样），人工确认字段语义后写专属适配器。
-3. 确无接口 → 按 FR-011 人工录入，标注来源、7 天有效期，过期按"订阅数据未知"降级。
+3. 确无接口 → 按 FR-011 人工录入，标注来源、7 天有效期，过期标记为陈旧。
+
+### 7bis 站型注册表（**加站型的唯一落点**，第 47 轮）
+
+> 上游站点异构程度高且**会继续增加**：除现役两族本身，实测已有魔改站（`veloera`/`rix-api` 是 NewAPI 的二开），也会遇到全自研平台（已实测过一家，虽已移出支持范围，但那类站还会有）。这一节定义"加一个站型要动哪里"。
+
+**此前散在九处**，每处漏改的后果不同：
+
+| # | 位置 | 漏掉的后果 |
+| --- | --- | --- |
+| 1 | `Family` 常量 | 编译错 —— 会被发现 |
+| 2 | `detectSteps` 探测表 | `Detect` 返回 unknown，站点接不进来 |
+| 3 | `adapterFor` 装配 | 采集报"无对应适配器" |
+| 4 | `authHeaders` 鉴权头 | **静默 401** —— 编译过、单测过，跑起来才发现一个头都没带 |
+| 5 | `NeedsRefresh` 续期阈值 | **静默过期** —— 不报错、不 401，某次采集突然全挂才被发现 |
+| 6 | 凭证必需字段校验 | 落到 default 分支，凭证登记被拒 |
+| 7 | 凭证登记的 `credType` 映射 | `cred_type` 空串进库 |
+| 8 | 导入侧的 `credType` 映射 | 同上，批量导入路径 |
+| 9 | 导入侧的别名表 | 导出声明认不出来，"声明与探测不符"的比对静默失效 |
+
+**收敛后：一份 `Registration` + 一个 `Adapter` 实现。** 判据是**只有逐家族真的不同的东西才进注册表** —— 各族一致的行为不是变化点而是常量，给它开字段只会让下一个站型以为自己必须填。据此第 4 处**被删掉而不是收进表**：收表当时的三个家族（含后来移出的那一族）鉴权头都是 `Bearer <token>` + 有头名则带用户 ID 头，那个 switch 表达的是零个变化点。
+
+| `Registration` 字段 | 取代原来的 | 备注 |
+| --- | --- | --- |
+| `Family` / `DisplayName` | 1 | `DisplayName` 同时是界面站型下拉的显示名（[09 §5.0](./09-admin-api.md) 的 `/admin/site-families`） |
+| `ProbePath` / `Match` / `Extract` | 2 | 切片顺序**就是**探测顺序（§2 的表）；不用各文件 `init()` 自注册——那会让顺序被一次重命名悄悄改掉 |
+| `Aliases` | 9 | ⚠️ **只准填实测见过的自称**（[CLAUDE.md](../../CLAUDE.md) §1）：凭想象加别名会让本该报出来的声明错变成静默采信 |
+| `CredType` / `RequiresUID` / `CredNote` | — | 校验与选型合成一次 `CredTypeFor()` 调用，两处消费点共用；P1 只允许 access/refresh token |
+| `RefreshLead` | 5 | `0` = 永不主动续期（NewAPI 的不变式 N-1，§5.1） |
+| `TokenExpiryFrom` | 5 | 从 access_token 自身读到期时间；`nil` = 读不出。**没有它，`RefreshLead` 是个自锁** —— 登记路径不写 `token_expires_at`，判定恒 false（§5.4 的实测） |
+| `New` | 3 | **是否支持续期不在注册表里声明** —— 由适配器有没有实现 `Refresher` 决定（类型断言），声明与实现因此不可能不一致 |
+
+#### 魔改站怎么接
+
+`veloera`/`rix-api` 改的是用户 ID 头名与分页信封，前者由 `Authenticate` 的 fan-out 试探（§3.1），后者 `unwrapDataList` 两个分支都吃 —— 所以魔改站 = **同一个 `New`，只加 `Aliases`**，不写新适配器。
+
+**先判断是魔改还是自研**：能命中 `/api/status` 或 `/api/v1/settings/public` 的就是魔改（顺着上面走），全未命中才是自研（走下一段）。判错的代价不对称 —— 把魔改站当自研站接会白写一个适配器，而把自研站当魔改站接会让字段映射整片错位，且**不报错**。
+
+#### 全自研站怎么接
+
+**落点只有两个文件**：`register_<族>.go`（一份 `Registration`）+ `<族>.go`（一个实现 `Adapter` 的类型）。
+`registry.go`、`detect.go`、`auth.go`、`httpx.go`、界面、库结构**都不用改** —— 下表逐格说明为什么不用改，
+以及每个决策点该落在哪个字段。
+
+> **刻意不留 stub 适配器。** 一个没有真站点的 `selfhosted.go` 骨架正是
+> [CLAUDE.md §1](../../CLAUDE.md) 那个坑：它编码的是"自研站长什么样"的猜测，
+> 而它永远不会推翻那个猜测。所以留清单不留骨架。
+
+| 决策点 | 落在哪 | 填错时哪道守卫会红 |
+| --- | --- | --- |
+| 判族用哪个公开端点 | `ProbePath` | 空 → `TestRegistrationsComplete`；探测不到不会红，**只会静默归 unknown**（所以要先手工 curl 确认） |
+| 指纹怎么认 | `Match(m, raw)` | 空 → 同上。指纹**不在 JSON 顶层**时读第二个参数 `raw`：解析失败时 `m` 为 nil 而 `raw` 仍有原文（`TestDetectPassesRawBodyToMatch` 钉住这条通路） |
+| 探测顺序 | 切片位置，**放最后** | 不红。判据只认自己一站，放前面只是让另外两族多一跳 |
+| 版本 / 无盾 / 额度换算基数 | `Extract` | 不填不红（都是可选信息），但无盾没确认就接入违反 §6 |
+| 导出数据里的自称 | `Aliases` | 重复或非小写 → `TestAliasesUniqueAcrossFamilies`。⚠️ **只填实测见过的值** |
+| 凭证形态 | `CredType` + `RequiresUID` + `CredNote` | 任一为空 → `TestRegistrationsComplete`。P1 只允许 access/refresh token |
+| 要不要主动续期 | `RefreshLead` + 适配器实现 `Refresher` | 单边 → `TestRefreshLeadMatchesRefresherImplementation`（双向）。`0` = 永不主动续期 |
+| 到期时间从哪读 | `TokenExpiryFrom` | 单边 → `TestRefreshLeadMatchesTokenExpirySource`（双向）。**留 nil 而阈值非零 = 永不触发**，这是 §5.4 修的那个自锁；读不出时**不许猜默认值** |
+| 额度单位（micros 之类） | 适配器内部，**归一为美元后再返回** | 不红。漏了会让上层每个消费方各猜一次换算基数（§6 末行） |
+| 采不到的对象 | `Capabilities()` 里标 `unsupported`，方法返回 `ErrUnsupported` | `TestUnsupportedDeclarationsReturnErrUnsupported`（双向）+ `TestCapabilitiesMatchDocMatrix`（要同时写进 §3.4 那张表，漏了会报"不在本表里"） |
+| 采得到但不全 | 标 `degraded`，返回数据 + `nil` + `SourceMeta.MissingFields` | 同上。⚠️ `degraded` **不得**返回 `ErrUnsupported`（§3.4bis 的判定口径） |
+| `Family` 常量 | `collector.go` 的常量块 | 加了常量忘了注册 → `TestEveryFamilyConstantIsRegistered`（它扫源码，所以不用维护清单） |
+
+**接入前必须先做的两件事**（顺序不能反）：
+
+1. **手工打一遍真站点**，把 `ProbePath` 的响应原文、余额端点的字段名与**类型**（数字还是字符串）记下来。
+   照文档或照想象写夹具是本仓库踩过两次的坑（[CLAUDE.md §1](../../CLAUDE.md)）。
+2. **确认无盾**（§6）。开盾站服务端采集不可行，要走 FR-011 人工录入，不是写适配器。
+
+> **上表的"哪道守卫会红"已逐格实测**（2026-08-30）：真往注册表注入一族 `probe`
+> 假家族，按每格各犯一次错，看点名的守卫是否真的红。六格全按表所述地红，
+> 且每条错误信息都点出后果（不只是"断言失败"）。**其中 `TestCapabilitiesMatchDocMatrix`
+> 在每种注入下都红** —— 注册一族而不写进 §3.4 矩阵是不可能的，它是最硬的一道。
+> 账密凭证字段已从 P1 注册表与 UI 合同移除；后续新增凭证形态时需重新设计并验收。
+>
+> 这段验证的必要性就在表本身：**"填错了会被 X 拦下"是个断言，没红过的断言不算断言。**
+> 表写好而守卫其实空转，比没有表更糟 —— 接站的人会照着表省掉自查。
+
+**"漏一处"的检出**（`registry_test.go`，全是对注册表的静态断言，不新增任何 mock）：
+
+1. **每个 `Family` 常量都注册了** —— 扫源码取常量而非手写清单，因为"忘了加清单"与"忘了加注册"一样静默；`unknown` 反向断言**不得**有注册（有适配器意味着会去猜家族）
+2. **每条注册的必填字段非空** —— `ProbePath`/`Match`/`CredType`/`CredNote`/`New`/`DisplayName`
+3. **`Aliases` 无跨家族重复、且全小写** —— 重复不报错而是让导入侧的声明比对随机偏向注册顺序在前的那个
+4. **`RefreshLead` 与 `Refresher` 实现双向一致** —— `>0` 无实现 = 到期即 401；`==0` 有实现 = 不变式 N-1 被破（每次采集前把自己的令牌作废）
 
 ---
 
 ## 8. 与其他篇章的边界
 
 - **不含**请求链路能力：内容感知 TTFT、动态期限接管、mid-stream 取消传播、`errorMessage` 归并对账、同资源隐藏重试补算 —— 均属 `executor`/`ledger`（[01 §2](./01-architecture.md#2-sla-core-内部模块)、[00 硬约束 4/5/7](./00-overview-and-milestones.md#2-硬约束清单开发期不可违反)），本篇不涉及。
-- **依赖** 02 定型上表结构；**被依赖** 于 `steward`（余额信号、订阅倾斜三道闸）与 `selector`（配额状态 unknown 默认排除 FR-118 —— 但采集器只负责采回状态，过滤在 selector 做）。
+- **依赖** 02 定型上表结构；后续阶段再由 `steward`/`selector` 消费采集到的余额、价格与限流元数据。
 - 采集器是异步控制路径，任何抖动不阻塞同步决策；数据经后台快照供请求路径只读（[01 §5](./01-architecture.md#5-数据面控制面切分)）。

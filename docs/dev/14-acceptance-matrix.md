@@ -15,10 +15,25 @@
 
 | 环境 | 用途 | 说明 |
 | --- | --- | --- |
-| **MOCK** | 可重复、零成本、CI 常跑 | `verify/mock_upstream.py` 场景集（role-only / 空 SSE / 慢首帧 / 心跳 / 500 / abort），[11 §3](./11-decision-full-selfbuilt.md) |
-| **REAL** | 真实上游，里程碑验收时手动跑 | NewAPI/Sub2API 中转站真实 `sk-` key（[07 §3bis](./07-axonhub-runtime-probes.md) 已有基线） |
+| **STREAM** | **造 SSE 流，不造站点**（[CLAUDE.md §1](../../CLAUDE.md) 例外表第二行）。真站点不肯按需在指定时刻断流，故流是被测输入；上游本身仍必须是真站点。<br>⚠️ 本标签 2026-08-29 由 `MOCK` 改名：叫 MOCK 就每处都得跟一句"这个不算 mock"，名字本身是误读的来源 | `verify/sse_stream_fixture.py` 场景集（role-only / 空 SSE / 慢首帧 / 心跳 / 500 / abort），[11 §3](./11-decision-full-selfbuilt.md) |
+| **REAL** | **默认环境**（2026-08-29 起，[CLAUDE.md §1](../../CLAUDE.md)）。此前写作"里程碑验收时手动跑" | 由 `verify/pick-upstream.mjs` 从 `HUB_FILE` 探活选站，不写死站点。真上游令牌**不进 GitHub secrets**，故要凭证的项只在本地跑（§0bis） |
 | **FIXTURE** | 构造数据 + 单元/集成测试 | 账本、台账、价格版本等纯数据逻辑 |
 | **LOAD** | 压测 | 100～1000 QPS（FR-114） |
+
+### 0bis. 哪些 REAL 项在 CI 里跑不了（2026-08-29）
+
+真上游令牌**不进 GitHub secrets** —— 那是别人家站点的真凭证，放进 CI 等于摊给
+每个能看 workflow 日志的人，以及每个能往仓库推分支的人。收益只是让三项验收
+在云上也绿，不值。于是：
+
+| 验收 | CI | 原因 |
+| --- | --- | --- |
+| detect / pricing / model_catalog | ✅ | `/api/status` 与 `/api/pricing` 免密 |
+| account / keys / groups | ❌ 只在本地 | 要 `Authorization` + 用户 ID 头 |
+| 真库只读验收（35 项） | ❌ 只在本地 | runner 到不了内网 <internal-db-host>；只读模式启动，不写测试行 |
+
+跑不了的在本地跑，结论写进 PR/提交说明。**不要因为 CI 跑不了就换回 mock** ——
+那样得到的绿是假的，真实覆盖仍然为零（[CLAUDE.md §1](../../CLAUDE.md)）。
 
 ---
 
@@ -51,10 +66,10 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| **AC-37** | 一个渠道挂 2 账号、每账号 2 把 Key、分属不同分组（FR-122/123） | FIXTURE | `GET /admin/channels/{id}/inventory` 返回 `accounts=2`/`keys=4`/`groups≥2`；`GET /admin/keys?channel_id=` 4 行各带 `channel_group_id` 非空与对应 `rate_multiplier`；**4 把 Key 的明文一律不回显**（响应中只有前缀，全文 grep 不到完整 secret）；库中 `upstream_keys.channel_group_id` 4 行非空。<br>**另断言 Key 生命周期**：`POST /admin/keys/{id}/disable` 后该 Key `status='revoked'`；`rotate` 后**新明文只返回一次**、旧 Key 进宽限期 |
-| **AC-38** | 对三个家族的站点各触发一次手动刷新（FR-128） | **REAL** | `POST /admin/channels/{id}/sync` 返回**逐项结果与耗时**；四类数据均更新——`channel_groups`/`group_models`/`channel_model_catalog` 有新行、`upstream_keys.quota_synced_at` 前进；该站型不支持的项返回 **`unsupported` 而非静默留空**（与 AC-28 同口径，且须与 `Capabilities()` 声明一致——声明 supported 而实现返回 `ErrUnsupported` 即判不通过）。<br>**另断言限流**：同渠道连续两次 sync 之间强制最小间隔（[04 §6](./04-collector-adapter.md)），第二次立即调用返回 429 或排队而非直接打上游 |
+| **AC-37** | 一个渠道挂 2 账号、每账号 2 把 Key、分属不同分组（FR-122/123） | FIXTURE | `GET /admin/channels/{id}/inventory` 返回 `accounts=2`/`keys=4`/`groups≥2`；`GET /admin/keys?channel_id=` 4 行各带 `channel_group_id`、`group_ref` 与对应 `rate_multiplier`；**4 把 Key 的明文一律不回显**（响应中只有前缀，全文 grep 不到完整 secret）；库中 `upstream_keys.channel_group_id` 4 行非空。账号可编辑、停用/启用；Key 可创建、编辑、删除并选择同渠道分组。<br>**另断言 Key 生命周期**：`POST /admin/keys/{id}/disable` 后该 Key `status='revoked'`。 |
+| **AC-38** | 对**每一个已注册站型家族**的站点各触发一次手动刷新（FR-128；判定基准是站型注册表 `collector.All()`，不是写死的族数——理由见 [PRD AC-38](../PRD.md) 那条 ⚠️） | **REAL** | `POST /admin/channels/{id}/sync` 返回**逐项结果与耗时**；`channel_groups`/`group_models`/`channel_model_catalog` 与 `upstream_keys.quota_synced_at` 按能力分级验收。`supported` 必须产出数据并更新对应存储，空结果为失败；`degraded` 允许部分或零数据，但必须用 `note` 说明缺失字段或上游未提供的数据；不支持的 P1 范围不作为采集项。<br>**另断言限流**：同渠道连续两次 sync 之间强制最小间隔（[04 §6](./04-collector-adapter.md)），第二次立即调用返回 429 或排队而非直接打上游 |
 | **AC-39** | 某渠道暴露 200 个以上模型（FR-126） | FIXTURE | `channel_model_catalog` 200+ 行**全部入库且无需任何 token 上界**；`GET /admin/channels/{id}/catalog` 可分页并按价格排序；**`models` 表行数不变**（目录与可路由模型是两层——这是本条的核心断言，若目录写进了 `models` 就等于要求 4000 行手填 token 上界）；`channel_models` 亦不产生行 |
-| **AC-40** | 上游下架某个模型（FR-126） | FIXTURE | 构造该模型在后续 N 轮（默认 3，`config_params` 可配）采集中消失 → 其 `last_seen_at` 停止前进、`GET /admin/channels/{id}/catalog?stale=true` 能筛出它；产生 **P3** `alert_events(category='model_capability')`（复用既有枚举，不新增 category）。<br>⚠️ **不断言"自动停用"**：P1 无路由，没有可停用的对象；`channel_models.enabled` 的联动属 P2（[ISSUE-005 §6 T-5](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
+| **AC-40** | 上游下架某个模型（FR-126） | FIXTURE | 构造该模型在后续 N 轮可靠采集中消失（默认 3，`config_params` 可配）→ `last_seen_seq` 停止前进，`channels.catalog_sync_seq - last_seen_seq >= N` 时 `stale=true`；`GET /admin/channels/{id}/catalog?stale=true` 能筛出它，目录 UI 标「疑似下架」，资产总览显示 `delisted_model` 异常。`alert_events(category='model_capability')` 持久化归 **P3**，不作为 P1 判定项。<br>⚠️ **不断言"自动停用"**：P1 无路由，没有可停用的对象；`channel_models.enabled` 的联动属 P2（[ISSUE-005 §6 T-5](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 
 > **P1 退出标准**（[ISSUE-005 §2](../issues/ISSUE-005-phase1-upstream-inventory.md)）：AC-37~40 全绿 **且** 对全部真实渠道跑一次全量 sync 并留存覆盖率报告——这提前完成了 [15 T6](./15-scope-and-preflight.md)「~20 个渠道的价格数据是否都采得到」的验证点。
 
@@ -62,7 +77,7 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-27 | 自研核心某一实例宕机 | FIXTURE | `docker stop sla-core-a` → 持续打 30 个请求，**全部成功、无一失败**；Caddy 日志显示已摘除该实例；恢复后自动重新纳入。<br>**打哪个端点**（第 45 轮补——此前未写，而 Caddy 只代理 `/v1/*` 与 `/healthz`，`/v1/*` 到 P2 才存在，开发无从确定）：**M0/P1 阶段打 `GET /healthz`**（当时唯一经 LB 的端点）；**P2 起改打 `/v1/chat/completions`**（mock 上游）并**在 P2 重跑本条**——`/healthz` 只能证明 LB 摘除生效，证明不了请求路径在实例宕机时不丢，而后者才是 FR-110「任一 core 宕机不影响服务」的实质。两次都须留存证据。 |
+| AC-27 | 自研核心某一实例宕机 | FIXTURE | `docker stop sla-core-a` → 持续打 30 个请求，**全部成功、无一失败**；Caddy 日志显示已摘除该实例；恢复后自动重新纳入。<br>**打哪个端点**（第 45 轮补——此前未写，而 Caddy 只代理 `/v1/*` 与 `/healthz`，`/v1/*` 到 P2 才存在，开发无从确定）：**M0/P1 阶段打 `GET /healthz`**（当时唯一经 LB 的端点）；**P2 起改打 `/v1/chat/completions`**（上游用 `sse_stream_fixture.py` 起流，本条测的是 LB 摘除而非上游）并**在 P2 重跑本条**——`/healthz` 只能证明 LB 摘除生效，证明不了请求路径在实例宕机时不丢，而后者才是 FR-110「任一 core 宕机不影响服务」的实质。两次都须留存证据。 |
 | **AC-33**（新增） | 入站鉴权：无凭证 / 已吊销 / 越权别名 / 超配额 | FIXTURE | ① 不带 `Authorization` → **401**；② 用已 `revoked` 凭证 → **401**；③ 用 `allowed_aliases` 外的别名 → **403**；④ 超 `rpm_limit` → **429**；⑤ 合法凭证正常 200；**㉔ 401/403 不得产生 `requests` 行**（它们从未进入调度；逐请求落账会让未鉴权流量变成写库放大），但 `auth_rejections` 的对应 `(窗口, 前缀, 原因)` 计数必须递增；㉕ 同一分钟内重复触发只增计数**不新增行**；㉖ `revoked`/`bad_secret` 超阈值触发 **P2** 告警。**跨实例并发**：⑥ 双 core 同时打，日费用累计到 `quota_daily_usd` 时**必然被拒**（不得因预留晚于检查而超限）；⑦ RPM 窗口跨实例共享（在 A 打满后 B 也拒）；⑧ core 重启后配额计数不清零。
 
 > **AC-33 分期拆分**（开发视角审查第 27 轮 [P0]）：本条整体被列在 M0，但 ⑨~㉗ 依赖 selector、`/admin/models`、日费用预留、`finalize`、`adjust`——这些属 M1。故拆为：
@@ -84,9 +99,9 @@
 | AC-01 | 配置 20 渠道/账号/Key/模型/故障域 | FIXTURE | 经 `/admin/bindings` 批量登记 20 渠道；`GET /admin/bindings` 返回 20 条且字段完整；`bindings` 表行数 = 20 |
 | AC-16 | 查询任一历史请求 | FIXTURE | 任取一个 `request_id`，`GET /admin/ledger/requests/{id}` 返回：全部 attempt、每跳 binding、状态、TTFT、usage、成本、决策快照；**字段无 NULL 缺失**（失败/取消的 usage 为空属预期） |
 | AC-26 | CC 与 Responses 两种协议、流式 + 工具调用 | **REAL** | 两协议各发 1 次流式 + 1 次带工具调用请求；**4 次全部 200**；工具调用字段在响应中**原样存在**（对比直连基线 diff 为空）。<br>**`/v1/models` 合成的 M1 判定**（A2 裁决，此前无处承载）：① `GET /v1/models` 返回该凭证 `allowed_aliases` 内的启用别名，**响应中不出现任何上游真实模型名**；② `x-models-etag` 由我方按别名表版本生成，改一次别名表后 etag 必变、未改则不变；③ 带 `If-None-Match: <上次 etag>` → **304 且无 body**；④ 用**非别名**模型名发请求 → **404**（不落 `requests` 行的鉴权前拒绝除外，见 AC-33）；⑤ 用**别名但越权**（不在 `allowed_aliases`）→ **403**。<br>⚠️ 实测已知（`verify/probe_codex_wire.py`）：Codex 不从该列表取模型名，故本组判定保护的是**别名策略不被绕过**，不是"Codex 能否刷新目录"。 |
-| AC-30 | 客户端断开 / 上游断流 / 内部超时三种中断 | MOCK | 三场景各构造 1 次；`attempts.cancel_reason` 分别为 `client_disconnect` / `upstream_disconnect` / `internal_timeout`；三者 `request_id` 关联正确。<br>**每种都须断言终结完整性**（`finalize_abort`，[02 §2bis](./02-data-model.md)）：①`requests.final_status` 分别为 `canceled`/`failed`/`failed`；②`attempt_status` 分别为 **`canceled_by_client`**/`failed`/`failed`；③`client_reservations.state ≠ 'reserved'` 且 `reserved_usd` 已扣回；④canary claim 已释放、`canary_inflight` 归零；⑤**客户端断开的请求不计入用户 SLA 失败、也不计入该 binding 成功率**；⑥其 `actual_usd` 按旁路已观测字节数估算（**不得**用整跳保守上界，那会严重高估把配额吃光）|
-| AC-31 | role-only 元事件后 0.5s 才发首内容 | MOCK | **七场景 × 双断言**（[03 §3.2](./03-upstream-layer.md) 拆为 `ShouldCommit`/`HasTTFTOutput`，须分别断言）：<br>`mock-normal` → commit=true@首 delta，ttft≈500ms<br>`mock-heartbeat` → 心跳不触发，ttft≈600ms+<br>`mock-tool-only` → commit=true@首 `function_call`/`tool_calls`，ttft=该时刻，**不得被接管取消**<br>`mock-refusal-only` → 同上<br>`mock-reasoning-summary-only` → 同上<br>`mock-empty-sse`（`response.completed` 无 delta）→ **commit=true（不取消）但 ttft=NULL**<br>`mock-error-terminal` → commit=true（按失败关单）、ttft=NULL<br>全场景**不得**出现 ttft≈0ms |
-| AC-32 | 已输出首字后中途取消 | MOCK | 客户端收 3 chunk 后断开 → mock 侧下一次写入 **EPIPE**、停止产出；`attempts.cancel_propagated = true`；上游连接关闭时刻 − 客户端断开时刻 **< 1s** |
+| AC-30 | 客户端断开 / 上游断流 / 内部超时三种中断 | STREAM | 三场景各构造 1 次；`attempts.cancel_reason` 分别为 `client_disconnect` / `upstream_disconnect` / `internal_timeout`；三者 `request_id` 关联正确。<br>**每种都须断言终结完整性**（`finalize_abort`，[02 §2bis](./02-data-model.md)）：①`requests.final_status` 分别为 `canceled`/`failed`/`failed`；②`attempt_status` 分别为 **`canceled_by_client`**/`failed`/`failed`；③`client_reservations.state ≠ 'reserved'` 且 `reserved_usd` 已扣回；④canary claim 已释放、`canary_inflight` 归零；⑤**客户端断开的请求不计入用户 SLA 失败、也不计入该 binding 成功率**；⑥其 `actual_usd` 按旁路已观测字节数估算（**不得**用整跳保守上界，那会严重高估把配额吃光）|
+| AC-31 | role-only 元事件后 0.5s 才发首内容 | STREAM | **七场景 × 双断言**（[03 §3.2](./03-upstream-layer.md) 拆为 `ShouldCommit`/`HasTTFTOutput`，须分别断言）：<br>`fx-normal` → commit=true@首 delta，ttft≈500ms<br>`fx-heartbeat` → 心跳不触发，ttft≈600ms+<br>`fx-tool-only` → commit=true@首 `function_call`/`tool_calls`，ttft=该时刻，**不得被接管取消**<br>`fx-refusal-only` → 同上<br>`fx-reasoning-summary-only` → 同上<br>`fx-empty-sse`（`response.completed` 无 delta）→ **commit=true（不取消）但 ttft=NULL**<br>`fx-error-terminal` → commit=true（按失败关单）、ttft=NULL<br>全场景**不得**出现 ttft≈0ms |
+| AC-32 | 已输出首字后中途取消 | STREAM | 客户端收 3 chunk 后断开 → 夹具侧下一次写入 **EPIPE**、停止产出；`attempts.cancel_propagated = true`；上游连接关闭时刻 − 客户端断开时刻 **< 1s** |
 
 | **AC-35** | 崩溃恢复：账本 + 配额 + 交付终态 | FIXTURE | 自动化在下列时点 `kill -9` core 并重启，**每个时点断言五项**：`attempt_status` / `requests.final_status` / `client_reservations.state` / `client_daily_spend.reserved_usd` / 下游实际收到的字节。判定表与 [03 §3.0](./03-upstream-layer.md) K1~K4、[02 §4.2bis](./02-data-model.md) ①／②／③b1／③b2／③c **逐行一致**：<br>① 调用前 → `failed`/`failed`/`abandoned`/预留归零<br>② 已发出未见首字（K1）→ `unknown_billing`/`failed`/`settled`+待核对+P2<br>③b1 首字已落库但**写出未确认**（K2）→ `interrupted`/**`failed`**（**不计流中断**；不断言下游物理零字节）<br>③b2 已写出部分、终帧前（K3）→ `interrupted`/`interrupted`（**计流中断**）<br>③c 终帧已落库但**字节未写完**（K4）→ attempt **由 `terminal_event` 决定**（error/incomplete 须为 `failed`，**不得**记成渠道成功）/ request `interrupted` / `settled` 用**实际用量**、无需人工核对<br>**「全部写完」不是恢复分支**——`finalize_delivery` 原子写列+终态，故不存在「列已非空、request 仍 pending」；该情形由**启动时先 drain outbox** 收口。须补用例："socket write 已返回、`downstream_write_completed` outbox 已写但未投递" 时 kill，重启后经 outbox 重放得到 `completed`（**不得**被恢复扫描误判为 ③c/`interrupted`）。<br>**K4 必须单独注入**（`finalize_upstream` 事务提交返回之后、socket write 之前 kill）——DB 提交与 socket 写出无法原子化，这个窗口**不可消除**，不得假设它不存在。<br>**共同断言**：无 `pending`/`committed` 残留、无 `reserved` 预留残留、跨午夜请求费用记在**预留那一天**；`ledger_outbox` 重放不产生重复效果（现枚举只含 `downstream_first_byte`/`downstream_write_completed`/`cancel`，**结算不经 outbox**，其幂等由 `settle_event_key` 保证）。<br>另须含 **⓪ 零 attempt 四分支用例**（按 `requests.stage` 区分，[02](./02-data-model.md)）：⓪a `no_candidates` → `unavailable` + P1；⓪b `reservation_rejected` → `failed`；⓪c **`authenticated`（C′ 之后、selector 之前崩溃）** → `failed` + P3；⓪d **`planned`（selector 之后、预留之前崩溃）** → `failed` + P3。四者外观相同（都是零 attempt、无预留），**必须靠 `stage` 区分**，不得混判。原用例：①全候选不可用的请求须在账本中可查（`final_status='unavailable'`、带事件编号、触发 P1），**不得**因无 attempt 而根本不落账；②D 阶段预留失败返回 429 的请求同样须落账（`final_status='failed'`），且两者都**不得**永久停留 `pending`（恢复扫描须用 LEFT JOIN 覆盖零 attempt 行）。<br>另须含 **①bis 多跳未发出用例**：hop1 已发出（已计费）、hop2 已插入但**未发出**时 kill →reservation **必须 `settled` 且 `actual_usd` 含 hop1 成本**，**不得** `abandoned`（那会把 hop1 已花的钱抹掉）；仅当该 request **全部** attempt 都未发出时才 `abandoned`。<br>另须含 **delivery／recovery 竞态用例**：①recovery 先把 request 关成 `interrupted`，随后迟到的 `downstream_write_completed` 投递 → 终态须被**纠正为 `completed`**（真实交付事实有权纠正保守推定，仅允许 `interrupted → completed/failed` 单向）；②反向：delivery 已把 request 关成 `completed` 后，recovery 扫到同一行 → **不得**改回 `interrupted`（`final_status='pending'` 闸门 + 事务内复核 outbox 未投递与租约）。<br>另须含**多跳崩溃用例**：hop1 被接管取消、hop2 执行中 kill，恢复后 hop1 须为 `canceled_by_sla`（**不得**被批量写成 hop2 的终态 → 那会把被取消的跳记成渠道成功）、hop2 按分流表定终态、两跳的 canary claim 全部释放且 `canary_inflight` 归零、费用按全跳汇总。<br>另须含**长流式续租用例**：90s 流式响应在续租正常时**不得**被恢复扫描终结 |
 
@@ -96,8 +111,8 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-06 | A 渠道 ~20s 低价、B 渠道 ~3s 较贵 | MOCK | **承诺档别名**（`is_committed=true`，M0 种子里是 `gpt-5.5-sla-1`；**判据读策略字段不读等级名**，A1 裁决）请求：首跳选 A，期限内未见有效首字 → 切 B；**最终 TTFT < 该档 `sla_targets` 目标**；账本含 2 条 attempt（#1 `canceled_by_sla`、#2 `committed`）。<br>**接管后的费用与占用**（[02 §2bis](./02-data-model.md) `closeout_attempt`）：①`actual_usd` 须**包含 hop1 的实际成本**（hop2 的 finalize 会释放整笔 RoutePlan 预留，只记 hop2 usage 会让 hop1 的钱凭空消失、settled_usd 系统性偏低）；②hop1 若是 canary，其 claim 须在**该跳结束时立即** `released`、`canary_inflight` 同步扣减，**不得依赖 60s 租约过期回收**；③hop1 的 `attempt_status='canceled_by_sla'` 且有对应 `attempt_usage` 行 |
-| AC-12 | 已输出首字后流中断（**两个分支，终态不同但 SLA 口径相同**） | MOCK | **A 上游断流（我们存活、观测得到）**：`mock-abort` → `attempts.stream_broken=true`、`attempt_status='failed'`、`requests.final_status='failed'`。**B 网关自身崩溃（无观测）**：**无统一终态**——按下方四个 kill 时点分别判定（[02 §4.2bis](./02-data-model.md) ②/③b1/③b2/③c）。<br>**B 分支（网关自身崩溃）须覆盖 [03 §3.0](./03-upstream-layer.md) 的**四个 kill 时点**，每个都断言 attempt 与 request 两层终态：K1 首字同步写提交前 → `unknown_billing`/`failed`；K2 首字已提交但**写出未确认** → `interrupted`/`failed`（**不**计流中断）；K3 `finalize_upstream` 提交前（已确认写出过首字节）→ `interrupted`/`interrupted`（计流中断）；**K4 `finalize_upstream` 已提交但字节未写出** → attempt **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`**，**不得**把上游失败记成渠道成功）、成本用实际用量无需人工核对；request `interrupted`（写出未确认 → 保守判失败、计流中断）。<br>**K4 必须单独注入**（在 `finalize_upstream` 提交返回之后、socket write 之前 kill）——这是 DB 提交与 socket 写出无法原子化导致的**不可消除**窗口，不得假设它不存在。<br>⚠️ **断言必须分两组**：一组断言**数据库终态**，另一组断言**下游实际观测到的字节**。两列是 write 返回后异步落库的，`IS NULL` 只代表「未确认写出」——**不得由数据库 NULL 推导物理零字节**（[03 §3.0](./03-upstream-layer.md)）。K2 用例只断言「数据库判 `failed` 且不计流中断」，不断言下游必然零字节。<br>**两分支共同断言**：①**不得**拼接第二个响应（下游字节在中断处结束）；②都计入用户 SLA **失败**（FR-071）；`stream_break_rate` 按**唯一判据**算——`stream_broken=true OR (final_status='interrupted' AND downstream_first_byte_written_at IS NOT NULL)`，故 A 与 K3/K4 计入、**K2 不计入**；另须断言**正常成功的流式请求一律不计入**（[02 §4.2bis](./02-data-model.md)）；③已记录的 `content_aware_ttft_ms` 照常保留计入。<br>`interrupted` 是**可区分的存储终态**而非另一种成功——它存在的唯一理由是把"我们崩了"与"上游断了"在排障与渠道健康归因上分开（B 不计入该 binding 成功率，A 计入） |
+| AC-06 | A 渠道 ~20s 低价、B 渠道 ~3s 较贵 | STREAM | **承诺档别名**（`is_committed=true`，M0 种子里是 `gpt-5.5-sla-1`；**判据读策略字段不读等级名**，A1 裁决）请求：首跳选 A，期限内未见有效首字 → 切 B；**最终 TTFT < 该档 `sla_targets` 目标**；账本含 2 条 attempt（#1 `canceled_by_sla`、#2 `committed`）。<br>**接管后的费用与占用**（[02 §2bis](./02-data-model.md) `closeout_attempt`）：①`actual_usd` 须**包含 hop1 的实际成本**（hop2 的 finalize 会释放整笔 RoutePlan 预留，只记 hop2 usage 会让 hop1 的钱凭空消失、settled_usd 系统性偏低）；②hop1 若是 canary，其 claim 须在**该跳结束时立即** `released`、`canary_inflight` 同步扣减，**不得依赖 60s 租约过期回收**；③hop1 的 `attempt_status='canceled_by_sla'` 且有对应 `attempt_usage` 行 |
+| AC-12 | 已输出首字后流中断（**两个分支，终态不同但 SLA 口径相同**） | STREAM | **A 上游断流（我们存活、观测得到）**：`fx-abort` → `attempts.stream_broken=true`、`attempt_status='failed'`、`requests.final_status='failed'`。**B 网关自身崩溃（无观测）**：**无统一终态**——按下方四个 kill 时点分别判定（[02 §4.2bis](./02-data-model.md) ②/③b1/③b2/③c）。<br>**B 分支（网关自身崩溃）须覆盖 [03 §3.0](./03-upstream-layer.md) 的**四个 kill 时点**，每个都断言 attempt 与 request 两层终态：K1 首字同步写提交前 → `unknown_billing`/`failed`；K2 首字已提交但**写出未确认** → `interrupted`/`failed`（**不**计流中断）；K3 `finalize_upstream` 提交前（已确认写出过首字节）→ `interrupted`/`interrupted`（计流中断）；**K4 `finalize_upstream` 已提交但字节未写出** → attempt **由 `terminal_event` 决定**（`completed`/`empty_completed` → `completed`；`error`/`incomplete` → **`failed`**，**不得**把上游失败记成渠道成功）、成本用实际用量无需人工核对；request `interrupted`（写出未确认 → 保守判失败、计流中断）。<br>**K4 必须单独注入**（在 `finalize_upstream` 提交返回之后、socket write 之前 kill）——这是 DB 提交与 socket 写出无法原子化导致的**不可消除**窗口，不得假设它不存在。<br>⚠️ **断言必须分两组**：一组断言**数据库终态**，另一组断言**下游实际观测到的字节**。两列是 write 返回后异步落库的，`IS NULL` 只代表「未确认写出」——**不得由数据库 NULL 推导物理零字节**（[03 §3.0](./03-upstream-layer.md)）。K2 用例只断言「数据库判 `failed` 且不计流中断」，不断言下游必然零字节。<br>**两分支共同断言**：①**不得**拼接第二个响应（下游字节在中断处结束）；②都计入用户 SLA **失败**（FR-071）；`stream_break_rate` 按**唯一判据**算——`stream_broken=true OR (final_status='interrupted' AND downstream_first_byte_written_at IS NOT NULL)`，故 A 与 K3/K4 计入、**K2 不计入**；另须断言**正常成功的流式请求一律不计入**（[02 §4.2bis](./02-data-model.md)）；③已记录的 `content_aware_ttft_ms` 照常保留计入。<br>`interrupted` 是**可区分的存储终态**而非另一种成功——它存在的唯一理由是把"我们崩了"与"上游断了"在排障与渠道健康归因上分开（B 不计入该 binding 成功率，A 计入） |
 | AC-15 | 全部合规资源不可用 | FIXTURE | 所有候选置不可用：**承诺档**（`is_committed=true`）请求按其 `no_resource_wait_ms`（种子默认 15000ms）排队后返回明确错误（含建议重试时间 + 事件编号）；**响应中无任何上游内容**；未旁路未降级模型。另断言零 attempt 请求仍落账（`final_status='unavailable'`、`stage='no_candidates'`、触发 P1） |
 | AC-25 | `gpt-5.5` vs `gpt-5.5-sla-1` 两个别名 | FIXTURE | 各发 100 次：两者**适用各自别名映射的策略**（一期为单一承诺等级 + 显式字段标记）；**测活资格差异属一期验证**：`gpt-5.5`（`canary_eligible=true` + `probe_allowed=true`）可被分配测活与 canary、`gpt-5.5-sla-1`（`is_committed=true`）**一次都不得**被分配（两条实验通道都不行——CHECK 约束 `NOT (is_committed AND (canary_eligible OR probe_allowed))` 已在库层焊死，断言须同时覆盖 canary 与 probe 两轨）。<br>**另断言 `/v1/models` 合成**（A2）：用只含 `gpt-5.5` 的 `allowed_aliases` 凭证请求 `GET /v1/models` → 返回**仅该别名**、不含任何上游真实模型名；`GET /v1/models/gpt-5.5-sla-1` → **403**；`GET /v1/models/gpt-5.5-turbo`（非别名）→ **404**；用上游真名（如 `gpt-5.5-2026-04-01`）发 `/v1/responses` → **404**。 |
 
@@ -112,8 +127,8 @@
 | AC-04 | 多 Key 共享账号余额且并发 | FIXTURE | 同 `balance_group_key` 的多 Key 并发：余额**只计一次**，不重复累加可用额度 |
 | AC-05 | 账号有余额但 Key 日额度耗尽 | FIXTURE | 该 Key 被排除出候选（决策快照原因 = Key 额度耗尽），同账号其他 Key 仍可用 |
 | AC-17 | 两渠道不同币种/计费单位 | FIXTURE | 统一美元口径比较（一期 1:1）；不同计费单位归一后可比 |
-| AC-19 | 余额耗尽 / Key 失效 / 错误预算快速消耗 | FIXTURE | 三场景各产生 P1 或 P2 `alert_events`；**P1 无延迟**（触发到落库 < 5s）；同因合并为一个持续事件（`dedup_key` + `uq_alert_active` 部分唯一索引：同键未关闭状态下只允许一行）。<br>**载体归属**（2026-07-26 裁决）：`alert_events` **写入路径已在 M3 交付**（原列 M4，与本条 M3 验收时序错位）；本条只验落库与合并，**不验外发** —— 最小 P1 webhook 属 M4（[06 §5bis](./06-deployment-and-operations.md)），其失败计数另在 M4 断言。 |
-| AC-28 | 三家族站点（NewAPI/Sub2API/闭源）接入采集 | **REAL** | 4 个实测站点：`Detect()` 正确归族；各自 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；不支持字段返回 `unsupported` 而非留空；**`subscription_quotas` 在一期须为全站型 `unsupported`**（订阅制移入二期），且 `Capabilities()` 的声明必须与 `FetchSubscriptionQuotas` 的实际返回一致——声明 supported 而实现返回 `ErrUnsupported` 即判不通过 |
+| AC-19 | 余额耗尽 / Key 失效 / 错误预算快速消耗 | FIXTURE | 三场景各产生告警候选；`alert_events` 持久化、查询与同因合并归 **P3**。本条不验外发 —— 最小 webhook 属 M4（[06 §5bis](./06-deployment-and-operations.md)），其失败计数另在 M4 断言。 |
+| AC-28 | **每一个已注册家族**的站点接入采集（现役 NewAPI / Sub2API；判定基准同 AC-38，是 `collector.All()` 而非族数） | **REAL** | 每族至少一个实测站点：`Detect()` 正确归族；各自 `Capabilities()` 与 [04 §3.4](./04-collector-adapter.md) 矩阵一致；P1 能力按 `supported`/`degraded` 规则返回，不支持的 P1 能力不得静默留空；订阅额度属于后续阶段，不纳入 P1 items |
 | AC-29 | 非标准方式返回"余额不足" | **REAL** | 构造/捕获该信号 → `balance_signals.balance_state = 'exhausted'`，停止向其发新付费请求。<br>**FR-026 保守下限**（[05 §1.1bis](./05-scheduling-and-operations.md)）：①`last_confirmed_balance` 有值但 `known_consumption_since` 为空 → 该 binding **被排除**，`decision_snapshot.excluded[]` 原因为 `balance_floor_unavailable`；②`conservative_floor` 为负 → 按 `balance_floor_exhausted` 排除；③floor 可形成且 >0 → 通过，且后续判定**用 floor 而非标称余额** |
 
 ### M4 经营与验收
@@ -125,7 +140,7 @@
 | AC-13 | 请求含不可重复的外部写入 | FIXTURE | 该请求**不被分配测活**、**不并发重试**（参数 6 默认全局禁并发重试） |
 | AC-14 | 渠道不满足租户数据许可但价格最低 | FIXTURE | ①开关默认 `false` 时该渠道正常入选（一期表现）；②置 `data_policy_enabled=true` 并录一条 `effect='deny'` 规则后，`POST /admin/data-policies/simulate` 与真实请求的 `decision_snapshot.excluded[]` **都**须给出该渠道 + 原因 `data_policy_denied`，且**排除发生在价格排序前**（断言最低价渠道未被选中）。③**伪造 `X-Data-Class: public` 请求头不得改变求值结果**（属性只认 `gateway_clients` 行）。载体：[02 §2ter](./02-data-model.md)、[09 §5](./09-admin-api.md) |
 | AC-18 | 单租户流量突增（容量隔离） | FIXTURE | **前置：测试 binding 必须登记 `rpm_limit`/`concurrency_limit`** —— 未登记时保留层直接放行（[05 §4.3](./05-scheduling-and-operations.md)），本条无从验证。<br> 单租户突增时**不占用接管保留容量**；受限流量按配置规则处理（排队/拒绝），其他租户不受影响 |
-| **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（mock 上游、90% 流式），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
+| **AC-36** | **峰值吞吐 1000 QPS**（FR-114 吞吐门禁） | **LOAD** | 按 §2bis 峰值阶段：**1000 QPS 持续 60 秒**（**本机流发生器**、90% 流式；6 万次请求打真站点等于攻击，见 [PRD AC-36](../PRD.md)），决策开销 **P99 ≤50ms**、错误率 **<0.1%**、无 OOM/FD 耗尽。⚠️ 与 AC-34 是**两个独立门禁**：并发门禁压「同时在线数」，吞吐门禁压「每秒请求数」，二者都必须过 |
 | **AC-34** | **1000 并发用户高强度持续使用**（程序自身抗压） | **LOAD** | 按 §2bis 冻结模型：① 1000 并发稳态 30 分钟，决策开销 **P99 ≤50ms**、错误率 <0.01%；② 内存不持续增长、结束后 goroutine/连接回落基线 ±10%、无 OOM/FD 耗尽；③ **另须完成上限探测并记录容量拐点** |
 
 ### 缓存切换损失预测（**一期**，FR-056）
@@ -140,7 +155,7 @@
 
 | AC | 场景 | 环境 | 判定方法（可执行） |
 | --- | --- | --- | --- |
-| AC-09 | 测活渠道首字超时 | MOCK | **两轨分别断言**（口径见 [PRD AC-09](../PRD.md)）：**A 主动测活**（`system-probe` + `probe_kind=probe`）→ 分配到慢渠道、期限到即接管；该次失败**不出现在用户 SLA 分母**（断言 `requests` 里 `probe_kind=probe` 的行被 SLA 聚合排除）、费用计入 `probe_budget_windows` 与实际成本。**B canary**（真实用户请求）→ **必须**计入用户 SLA：接管成功则用户侧不计失败但延迟计入；接管失败则用户侧失败成立、两边都计。<br>⚠️ 此前 PRD 写「延迟计入 SLA」而本矩阵写「计入探索预算而非用户错误预算」，两轨拆开后不再冲突。 |
+| AC-09 | 测活渠道首字超时 | STREAM | **两轨分别断言**（口径见 [PRD AC-09](../PRD.md)）：**A 主动测活**（`system-probe` + `probe_kind=probe`）→ 分配到慢渠道、期限到即接管；该次失败**不出现在用户 SLA 分母**（断言 `requests` 里 `probe_kind=probe` 的行被 SLA 聚合排除）、费用计入 `probe_budget_windows` 与实际成本。**B canary**（真实用户请求）→ **必须**计入用户 SLA：接管成功则用户侧不计失败但延迟计入；接管失败则用户侧失败成立、两边都计。<br>⚠️ 此前 PRD 写「延迟计入 SLA」而本矩阵写「计入探索预算而非用户错误预算」，两轨拆开后不再冲突。 |
 | AC-10 | 测活失败或费用超标 | FIXTURE | 达任一预算上限即**暂停新测活**；正常流量**不受影响**（对比暂停前后主流量成功率差 < 1%） |
 
 ### ⏭ 二期（订阅制适配，[15 §1.2](./15-scope-and-preflight.md)）
@@ -157,7 +172,7 @@
 
 ## 1bis. M1 验证夹具规范（第 28 轮 [P1]）
 
-> 原文只说"35 字段 diff"和"MOCK 场景集"，但**没说 diff 怎么做、mock 要有哪些场景** —— 开发只能自己发明，而发明出来的判据决定 AC-01/31/32 是否真的守住了字节透传。
+> 原文只说"35 字段 diff"和"MOCK 场景集"（当时的标签名），但**没说 diff 怎么做、流夹具要有哪些场景** —— 开发只能自己发明，而发明出来的判据决定 AC-01/31/32 是否真的守住了字节透传。
 
 **AC-26 的 Responses 保真 diff 规范**（⚠️ 此前误写为 AC-01——AC-01 是「登记 20 渠道」，与保真无关）：
 
@@ -170,31 +185,32 @@
 | artifact | 两路的完整事件序列 JSONL + diff 报告存 CI 产物，**失败时必须能看到具体是哪个字段** |
 | 跑几个站 | **两个基线站都跑**（[15 §1bis](./15-scope-and-preflight.md)），两站都通过才算过 |
 
-**mock 场景集**（`verify/mock_upstream.py` 须覆盖，当前只有 Chat 场景）：
+**SSE 流夹具场景集**（`verify/sse_stream_fixture.py` 须覆盖，当前只有 Chat 场景）。
+⚠️ 造的是**流**：上游站点本身仍必须是真的（[CLAUDE.md §1](../../CLAUDE.md)）：
 
 | 场景 | 协议 | 断言 |
 | --- | --- | --- |
-| `mock-normal` | 两协议各一份 | ttft≈500ms，commit 于首 delta |
-| `mock-heartbeat` | 两协议 | 心跳不触发 commit，ttft≈600ms+ |
-| `mock-empty-sse` | 两协议 | commit=true 但 ttft=NULL |
-| `mock-tool-only` | 两协议 | commit 于首个 tool_call，**不得被接管取消** |
-| `mock-refusal-only` | 两协议 | 同上 |
-| `mock-reasoning-summary-only` | Responses | 同上 |
-| `mock-error-terminal` | 两协议 | commit=true、按失败关单、ttft=NULL |
-| `mock-slow-first-token` | 两协议 | 期限到即接管（AC-32） |
-| `mock-abort` | 两协议 | 首字后断流 → `stream_broken=true` |
-| `mock-buffer-flood` | 两协议 | 持续发无内容元事件至 256KB → T2 强制提交（`commit_trigger='buffer_limit'`） |
-| `mock-usage-after-finish` | Chat | `finish_reason` 后单独 usage chunk → **不得**提前关账 |
-| `mock-no-event-line` | Responses | 省略 `event:` 行、只有 body `type` → 仍能正确判定 |
+| `fx-normal` | 两协议各一份 | ttft≈500ms，commit 于首 delta |
+| `fx-heartbeat` | 两协议 | 心跳不触发 commit，ttft≈600ms+ |
+| `fx-empty-sse` | 两协议 | commit=true 但 ttft=NULL |
+| `fx-tool-only` | 两协议 | commit 于首个 tool_call，**不得被接管取消** |
+| `fx-refusal-only` | 两协议 | 同上 |
+| `fx-reasoning-summary-only` | Responses | 同上 |
+| `fx-error-terminal` | 两协议 | commit=true、按失败关单、ttft=NULL |
+| `fx-slow-first-token` | 两协议 | 期限到即接管（AC-32） |
+| `fx-abort` | 两协议 | 首字后断流 → `stream_broken=true` |
+| `fx-buffer-flood` | 两协议 | 持续发无内容元事件至 256KB → T2 强制提交（`commit_trigger='buffer_limit'`） |
+| `fx-usage-after-finish` | Chat | `finish_reason` 后单独 usage chunk → **不得**提前关账 |
+| `fx-no-event-line` | Responses | 省略 `event:` 行、只有 body `type` → 仍能正确判定 |
 
-**AC-32 的取消可观测性**：mock 须**记录并暴露上游连接被关闭的时刻**（如写一个 `/„mock/last-abort` 端点或日志行），否则"取消是否传播到上游"无法断言——只看我们这边的 `cancel_propagated` 字段等于自证。
+**AC-32 的取消可观测性**：流夹具须**记录并暴露上游连接被关闭的时刻**（如写一个 `/__fixture/last-abort` 端点或日志行），否则"取消是否传播到上游"无法断言——只看我们这边的 `cancel_propagated` 字段等于自证。
 
 ---
 
 ## 2bis. AC-18 负载模型（**已冻结，开工前定**）
 
 > **核心原则（2026-07-25 负责人确认）**：**压的是程序本身，不是上游。**
-> 上游可以无限扩充（加渠道、加 Key、加账号），但**自研核心本身扛不住的话，多少上游都没意义**。因此压测一律用 **mock 上游**并把上游耗时从判定中剔除——本项验收衡量的是"这套程序的天花板在哪"，越高越好。
+> 上游可以无限扩充（加渠道、加 Key、加账号），但**自研核心本身扛不住的话，多少上游都没意义**。因此压测一律用 **本机流发生器**（`sse_stream_fixture.py --load-mode`）并把上游耗时从判定中剔除——本项验收衡量的是"这套程序的天花板在哪"，越高越好。
 >
 > 对抗性审查另指出：只写"100~1000 QPS"无法判定——同样 QPS 可以打得很轻也可以很重，团队能用低压力模型"通过"P99≤50ms 而 PM 无法复现。故冻结为**唯一可复现配置**。
 
@@ -204,13 +220,13 @@
 | --- | --- | --- |
 | **并发用户** | **1000 个并发会话持续活跃** | 负责人定的最低门槛："能扛住 1k 人同时高强度使用" |
 | **单用户强度** | 每用户持续发流式请求，一轮结束立即发下一轮（**无思考间隔**） | "高强度"= 不留空闲，逼出连接与 goroutine 峰值 |
-| **由此得到的 QPS** | 视单请求时长自然产生（mock 上游约 2s/请求 → **约 500 QPS 稳态**）；**QPS 是结果不是输入** | 真实压力来自"1000 条并发流同时占用资源"，而非请求速率 |
+| **由此得到的 QPS** | 视单请求时长自然产生（流发生器约 2s/请求 → **约 500 QPS 稳态**）；**QPS 是结果不是输入** | 真实压力来自"1000 条并发流同时占用资源"，而非请求速率 |
 | **预热** | 2 分钟，结果不计入统计 | 排除连接池/快照冷启动噪声 |
 | **稳态时长** | **30 分钟** | 足以暴露内存增长、FD 泄漏、分区写入劣化 |
 | **峰值吞吐门禁** | **1000 QPS 持续 60 秒**（独立于并发门禁，AC-36） | 直接对应 FR-114 的峰值 1000 QPS；并发门禁压同时在线数、吞吐门禁压每秒请求数，**两者不可互相替代** |
 | **流式占比** | **90% 流式 / 10% 非流式** | 主力 Codex CLI 几乎全流式；流式持续占住 goroutine 与连接，是真正压力源 |
 | **请求长度** | input ≈ **4000 token**（贴近真实基线 4401），output ≈ **200 token** | 取自 [07 §3bis](./07-axonhub-runtime-probes.md) 真实响应 |
-| **上游** | **MOCK**（`verify/mock_upstream.py` 扩展为可控延迟版，可配 TTFT 与产出速率） | 消除中转站 401/520 波动（[15 T4](./15-scope-and-preflight.md)）；**上游不是被测对象** |
+| **上游** | **本机流发生器**（`verify/sse_stream_fixture.py` 扩展为可控延迟版，可配 TTFT 与产出速率） | 消除中转站 401/520 波动（[15 T4](./15-scope-and-preflight.md)）；**上游不是被测对象** |
 | **到达分布** | 泊松到达（非匀速） | 匀速会掩盖排队与抖动 |
 
 ### 压力上限探测（**不设通过门槛，但必须做并记录**）
@@ -231,18 +247,18 @@
 | 项 | 冻结选择 | 理由 |
 | --- | --- | --- |
 | 压测工具 | **k6**（`grafana/k6` 容器） | 脚本化、原生支持 SSE 消费与自定义指标、可输出 JSON summary 供归档 |
-| 负载脚本 | `verify/load/sla_load.js` | 与 mock 上游一起进仓库，压测可一键复跑 |
-| Mock 上游 | `verify/mock_upstream.py --load-mode` | **须扩展**：可控 TTFT、可控产出速率、可控流式比例（见下） |
+| 负载脚本 | `verify/load/sla_load.js`（**尚未创建**） | 与流发生器一起进仓库，压测可一键复跑 |
+| 流发生器 | `verify/sse_stream_fixture.py --load-mode`（`--load-mode` **尚未实现**） | **须扩展**：可控 TTFT、可控产出速率、可控流式比例（见下） |
 | 产物 | `verify/load/out/<ts>/{summary.json,metrics.txt,pg_stats.txt}` | `summary.json` 出 k6 指标；`metrics.txt` 抓压测末尾的 `/metrics`；`pg_stats.txt` 出 `pg_stat_statements` Top20 |
 
-**mock 上游的 LOAD 模式参数**（现有 mock 只有固定场景，须补）：
+**流发生器的 LOAD 模式参数**（现有夹具只有固定场景，须补）：
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--ttft-ms` | 800 | 首字延迟；压测要的是**稳定可控**而非真实抖动 |
 | `--output-tokens` | 300 | 每响应产出 token 数 |
 | `--token-interval-ms` | 5 | 产出间隔 → 决定单响应总时长 ≈ 800 + 300×5 = 2.3s |
-| `--stream-ratio` | 0.9 | 流式请求占比（[§2bis](#2bis-冻结的负载模型) 冻结的 90%） |
+| `--stream-ratio` | 0.9 | 流式请求占比（[§2bis](#2bis-ac-18-负载模型已冻结开工前定) 冻结的 90%） |
 | `--protocol-mix` | `responses:0.8,chat:0.2` | 两协议混合 |
 
 **命令**（M4 验收照此执行并留档）：
@@ -289,7 +305,7 @@ docker run --rm -v "$PWD/verify/load:/l" grafana/k6 run /l/sla_load.js \
 
 - **P99 ≤50ms 测的是"决策/网关自身开销"，不是端到端延迟**：
   `开销 = 总延迟 − 上游耗时`（[02 `attempts.full_latency_ms − upstream_latency_ms`](./02-data-model.md)、[06 §6](./06-deployment-and-operations.md)）。
-  → 直接对应 FR-110 原文"**决策过程给每个请求增加的时延** P99 ≤50 毫秒"。用端到端会把 mock 上游的固有延迟算进来，测不出程序真实开销。
+  → 直接对应 FR-110 原文"**决策过程给每个请求增加的时延** P99 ≤50 毫秒"。用端到端会把流发生器的固有延迟算进来，测不出程序真实开销。
 - ⚠️ **`总延迟 − 上游耗时` 观测不到同步写的延迟**（第 11 轮 [high]）：[01 §5.1](./01-architecture.md) 冻结的**首字同步写发生在上游流仍存活期间**，其耗时落在 `upstream_latency_ms` 里，被减法整个抵消；1000 QPS 下光首字+终帧就是 **≈2000 次同步事务/秒**，连接池排队会直接推高用户可感的首字延迟，而现有门禁**照样能通过**。故必须**另立两个专用指标**：
 
   | 指标 | 定义 | 门禁 |
@@ -319,7 +335,7 @@ docker run --rm -v "$PWD/verify/load:/l" grafana/k6 run /l/sla_load.js \
 ## 3. 验收执行规则
 
 1. **逐里程碑闭环**：该里程碑的 AC **全部通过**才算完成；未通过项必须记录原因与处置（修复 / 降级 / 延期），不得默认通过。
-2. **MOCK 类进 CI**：M1/M2 的 MOCK 判定应做成自动化测试，每次提交跑；REAL/LOAD 类在里程碑验收时手动执行并留存证据。
+2. **STREAM 类进 CI**：M1/M2 的 STREAM 判定应做成自动化测试，每次提交跑；REAL/LOAD 类在里程碑验收时手动执行并留存证据。
 3. **证据留存**：每条 AC 通过时记录证据（命令输出 / 账本查询结果 / diff 结果），存 `docs/acceptance/M{n}-evidence.md`。
 4. **不可判定即不通过**：出现"基本正常""大致达标"等表述视为未通过，须给出具体数值或 diff。
 

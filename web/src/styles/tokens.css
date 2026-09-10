@@ -1,0 +1,55 @@
+/* 设计系统对齐 claude-code-hub（live-demo.cch-plus.com/app）：
+   色值逐个取自该仓库 src/app/globals.css 的 oklch token，不是目测近似值。
+   手写 CSS 变量而不是引组件库/Tailwind —— 管理面要在内网/离线环境能开，
+   外链一挂就是白屏；而这套观感已经过真浏览器验收，没有重做的理由。 */
+:root {
+  --radius: 0.65rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.141 0.005 285.823);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.141 0.005 285.823);
+  --primary: oklch(0.705 0.213 47.604);
+  --primary-foreground: oklch(0.98 0.016 73.684);
+  --muted: oklch(0.967 0.001 286.375);
+  --muted-foreground: oklch(0.552 0.016 285.938);
+  --accent: oklch(0.967 0.001 286.375);
+  --accent-foreground: oklch(0.21 0.006 285.885);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.92 0.004 286.32);
+  --input: oklch(0.92 0.004 286.32);
+  --ring: oklch(0.705 0.213 47.604);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-border: oklch(0.92 0.004 286.32);
+  /* 参考仓库只有 destructive，没有 success/warning。采集结果有
+     ok/partial/failed 三态必须能一眼分开，故按同色系补两个。 */
+  --success: oklch(0.596 0.145 163.225);
+  --warning: oklch(0.666 0.179 58.318);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* 深色不用 media query 而用 .dark 类：参考仓库是
+   @custom-variant dark (&:is(.dark *))，且要支持"跟随系统"之外的手动切换。
+   类由 index.html 里的同步内联脚本在上色前打上，避免深色用户看到一帧白屏。 */
+.dark {
+  --background: oklch(0.141 0.005 285.823);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.21 0.006 285.885);
+  --card-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.646 0.222 41.116);
+  --primary-foreground: oklch(0.98 0.016 73.684);
+  --muted: oklch(0.274 0.006 286.033);
+  --muted-foreground: oklch(0.705 0.015 286.067);
+  --accent: oklch(0.274 0.006 286.033);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.646 0.222 41.116);
+  --sidebar: oklch(0.21 0.006 285.885);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --success: oklch(0.696 0.17 162.48);
+  --warning: oklch(0.769 0.188 70.08);
+}

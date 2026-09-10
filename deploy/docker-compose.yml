@@ -9,7 +9,7 @@
 name: sla-gateway
 
 x-core-env: &core-env
-  DATABASE_URL: postgres://sla:${POSTGRES_PASSWORD:-changeme}@postgres:5432/sla?sslmode=disable
+  DATABASE_URL: postgres://sla:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置——数据库没有安全默认值}@postgres:5432/sla?sslmode=disable
   ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置——管理平面没有它会拒绝全部请求}
   SLA_ADDR: ":8080"
 
@@ -18,7 +18,7 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: sla
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置——数据库没有安全默认值}
       POSTGRES_DB: sla
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -41,10 +41,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # ⚠️ 不映射 8080 到宿主机：/admin/* 与 /metrics 只能从容器网络访问
-    #    （06 §1 边界）。要访问管理面用
-    #    `docker compose exec sla-core-a curl localhost:8080/admin/config`
-    #    或临时 `docker compose port`。
+    # 管理面只发布到宿主机回环地址，不经过 Caddy，也不接受远程访问。
+    # 本机打开 http://127.0.0.1:${ADMIN_PORT:-8080}/admin/ui/。
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "/sla-core", "-version"]
       interval: 10s
@@ -54,6 +54,8 @@ services:
 
   sla-core-b:
     <<: *core
+    # 仅 A 实例发布本机管理端口；B 不能继承 anchor 中的端口映射。
+    ports: []
 
   caddy:
     image: caddy:2
@@ -72,6 +74,8 @@ services:
   # 06 开放点 3 已定一期同二进制子命令；这里作为独立服务起，便于单独观察日志。
   collector:
     <<: *core
+    # collector 继承 core 配置，但不能发布或占用管理端口。
+    ports: []
     # ⚠️ 必须用 entrypoint 而非 command：Dockerfile 的 ENTRYPOINT 是 /sla-core，
     #    command 只覆盖 CMD → 实际会执行 `/sla-core /collector`，sla-core 忽略
     #    多余参数照常启动。CI 日志里 collector 容器打出"sla-core 启动"就是这个

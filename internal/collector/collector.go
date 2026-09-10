@@ -5,7 +5,8 @@
 //
 // 一条总原则（04 开头）：上游站点异构程度高，**必须按站型分流**。
 // NewAPI/Sub2API 是通用开源项目，同族站点复用同一适配器但接入前必须先探测确认；
-// ASXS 是闭源自建平台，一站一适配器、不可复用、不作探测基准。
+// **全自研站**（闭源面板、自建平台）一站一适配器、不可复用、不作探测基准 ——
+// 接入清单见 04 §7bis「全自研站怎么接」。
 // 任何不支持的字段返回 unsupported，**不静默留空**。
 package collector
 
@@ -33,12 +34,15 @@ const (
 )
 
 // Family 是站型家族。
+//
+// 加一族的落点只有两处：这里一个常量 + 一份 Registration（04 §7bis）。
+// registry_test.go 的第一条断言扫本文件的常量并逐个查注册表，所以
+// "加了常量忘了注册"会红，反之 unknown 有注册也会红。
 type Family string
 
 const (
 	FamilyNewAPI  Family = "newapi"
 	FamilySub2API Family = "sub2api"
-	FamilyASXS    Family = "asxs"
 	FamilyUnknown Family = "unknown"
 )
 
@@ -49,11 +53,7 @@ const (
 	CapAccount Capability = "account"
 	CapKeys    Capability = "keys"
 	CapGroups  Capability = "groups"
-	// CapSubscriptionQuotas ⏭ P4：一期**所有站型**一律 Unsupported
-	// （订阅制整体推迟）。此前 Sub2API/ASXS 声明 supported 而实现返回
-	// ErrUnsupported —— 自相矛盾且 AC-28 必挂（04 §1 第 18 轮记录）。
-	CapSubscriptionQuotas Capability = "subscription_quotas"
-	CapPricing            Capability = "pricing"
+	CapPricing Capability = "pricing"
 	// CapModelCatalog 是 P1 新增（FR-126）。
 	CapModelCatalog Capability = "model_catalog"
 )
@@ -66,6 +66,15 @@ type CapabilityMap map[Capability]SupportLevel
 // 调用方据此登记 Unsupported，**不留空**（04 §1）。
 // 与 Degraded 的区别见 04 §3.4bis：degraded 不返回本错误。
 var ErrUnsupported = errors.New("collector: 该站型不支持此能力")
+
+// ErrPrecondition 标记"一次采集在发出第一个上游请求之前就失败了"。
+//
+// 站型未知、连接池取不到连接、凭证没登记 —— 这三类都是纯本地失败。
+// 单独立哨兵是为了让调用方能区分"没打上游"和"打了上游但失败"：
+// sync 的最小间隔限流意在保护上游，本地失败不该消耗这个窗口，
+// 否则「建渠道 → 采集 → 提示缺凭证 → 登记 → 再采集」这条首跑路径
+// 会被自己的失败挡 60 秒（P1-evidence §4 第 15 项）。
+var ErrPrecondition = errors.New("collector: 采集前置条件不满足（未触达上游）")
 
 // SourceMeta 是每份数据的来源元信息（FR-011/012/116）。
 type SourceMeta struct {
@@ -87,6 +96,8 @@ type SourceMeta struct {
 	Degraded bool
 	// MissingFields 缺失的字段名，如 ["input_price","output_price"]。
 	MissingFields []string
+	// Partial 表示多账号合并结果只覆盖了部分账号，不能计入完整采集轮次。
+	Partial bool
 }
 
 // ManualValidity 是人工录入数据的有效期（FR-011：7 天后视为过期）。
@@ -115,18 +126,20 @@ type DetectResult struct {
 
 // Credential 是登记的采集凭证（明文，FR-113）。
 type Credential struct {
-	ChannelID    int64
-	Family       Family
-	CredType     string // newapi_access_token | sub2api_jwt | asxs_jwt | account_password
+	AccountID int64
+	ChannelID int64
+	Family    Family
+	// CredType 由 Registration.CredTypeFor 定。
+	CredType     string
 	AccessToken  string
 	RefreshToken string
-	Username     string
-	Password     string
 	// ExternalUserID 是 NewAPI 的数字用户 ID（New-API-User 头必需）。
 	ExternalUserID string
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。
 	UserIDHeaderName string
 	TokenExpiresAt   time.Time
+	// RefreshLockKey identifies credentials for the same upstream account.
+	RefreshLockKey string
 	// BaseURL 是该渠道的站点地址（随渠道登记而来）。
 	BaseURL string
 	// QuotaPerUnit 是 NewAPI 系的额度换算基数，来自 Detect。
@@ -178,8 +191,8 @@ type WindowUsage struct {
 type Key struct {
 	// KeyRef 是脱敏引用，**不含明文**（FR-094）。
 	KeyRef         string
-	RemainQuotaUSD float64
-	UsedQuotaUSD   float64
+	RemainQuotaUSD *float64
+	UsedQuotaUSD   *float64
 	Unlimited      bool
 	ExpiredAt      *time.Time
 	ModelLimits    []string
@@ -198,17 +211,6 @@ type Group struct {
 	RateMultiplier float64
 	// AvailableModels 该分组可获取的模型（FR-124）→ group_models.model_name
 	AvailableModels []string
-	RPMLimit        int
-
-	// ── 以下字段 P1 采集但**不落结构化列**，只进 collector_snapshots.payload ──
-	// 理由（ISSUE-005 §3.1）：消费者都在 P2/P3 调度（高峰倍率影响成本排序、
-	// 独占与平台影响候选过滤），P1 无消费者。需要时按 payload 回填即可，不丢数据。
-	PeakEnabled        bool
-	PeakMultiplier     float64
-	PeakStart, PeakEnd string
-	SubscriptionType   string
-	Platform           string
-	IsExclusive        bool
 
 	Meta SourceMeta
 }
@@ -221,6 +223,15 @@ type CatalogModel struct {
 	ModelName   string
 	InputPrice  float64
 	OutputPrice float64
+	// BillingUnit 是 InputPrice/OutputPrice 的口径，**不可省略**。
+	//
+	// 实测（第 46 轮，65 个真实站点）：NewAPI 同一个 /api/pricing 里
+	// 混着两种口径，1369 个模型中 208 个（15%）是 per_call 绝对价，
+	// 其余是 per_1m_token 倍率；而两者数值区间**重叠**
+	// （按次 0.08~0.56 vs 倍率 0.685~30）。
+	// 于是"看数值猜口径"不成立 —— 没有这个字段，目录里的价格就是个
+	// 无单位的数字，把 $0.15/次 当倍率 0.15 排序会让最贵的模型显得最便宜。
+	BillingUnit string
 	Meta        SourceMeta
 }
 
@@ -233,6 +244,14 @@ type Pricing struct {
 	Meta        SourceMeta
 }
 
+// PricingWriteResult reports the distinct outcomes of persisting pricing data.
+type PricingWriteResult struct {
+	Snapshots          int
+	CatalogUpdates     int
+	PriceVersions      int
+	UnregisteredModels int
+}
+
 // ModelPrice 是一个模型的价格。
 type ModelPrice struct {
 	ModelName   string
@@ -242,14 +261,6 @@ type ModelPrice struct {
 	// BillingUnit 如 per_1m_token。⚠️ 成本计算必须按它缩放
 	// （02 §3：漏缩放会把成本放大 100 万倍）。
 	BillingUnit string
-}
-
-// SubscriptionQuota ⏭ P4。一期所有站型的 FetchSubscriptionQuotas
-// 一律返回 ErrUnsupported，故本结构暂只保留占位定义。
-type SubscriptionQuota struct {
-	OwnerKey string
-	PlanRef  string
-	Meta     SourceMeta
 }
 
 // Adapter 是全部站型实现的统一契约（04 §1）。
@@ -268,9 +279,6 @@ type Adapter interface {
 
 	// FetchGroups 分组：倍率、可用模型、限流（FR-123/124）。
 	FetchGroups(ctx context.Context, s Session) ([]Group, error)
-
-	// FetchSubscriptionQuotas ⏭ P4：一期所有站型返回 ErrUnsupported。
-	FetchSubscriptionQuotas(ctx context.Context, s Session) ([]SubscriptionQuota, error)
 
 	// FetchPricing 模型价格（FR-010/012/013）。
 	FetchPricing(ctx context.Context, s Session) (Pricing, error)

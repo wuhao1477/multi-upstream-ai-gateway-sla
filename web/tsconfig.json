@@ -1,0 +1,35 @@
+{
+  // 应用侧（浏览器）配置。构建脚本侧（vite.config.ts）单独放 tsconfig.node.json：
+  // 分开的目的是 types 只给 vite/client，应用代码里写出 process.env 会直接报错，
+  // 而不是编译通过、到浏览器里才 undefined。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    // bundler + force：只走 ESM 解析，且每个文件都当模块（没有意外的全局脚本）。
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    // 类型导入必须写 import type —— 打包器据此安全擦除，不会把只用于类型的
+    // 模块留在产物里（也是 Vapor 编译期分析的前提）。
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    // 禁掉 enum / namespace / 构造器参数属性这些"需要生成运行时代码"的语法：
+    // 它们不是纯类型擦除，与 ESM-only + rolldown 的假设冲突。用字面量联合替代。
+    "erasableSyntaxOnly": true,
+
+    "strict": true,
+    // 索引访问带上 undefined。本项目的后端字段大量是 *T（omitempty），
+    // units[seg] 这种查表天然可能缺段 —— 已经因为漏判空值出过一次线上缺陷。
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["vite/client"],
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue"]
+}

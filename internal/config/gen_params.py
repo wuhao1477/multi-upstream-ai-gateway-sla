@@ -2,7 +2,7 @@
 """从 docs/dev/09-admin-api.md §4bis 生成 params_gen.go。
 
 为什么生成而不手写：§4bis 那张表是 config_params 种子与 /admin/config 白名单的
-**唯一真相源**（09 §4bis 原文）。手抄 72 行必然漂移，而漂移的后果是运行时
+**唯一真相源**（09 §4bis 原文）。手抄必然漂移，而漂移的后果是运行时
 静默取零值 —— catalog_missing_rounds=0 就会让每轮采集都判模型下架。
 
 用法：make gen-params（或 python3 internal/config/gen_params.py）
@@ -40,7 +40,7 @@ def clean_default(cell: str) -> str:
 
 
 seg_all = SRC.read_text()
-seg = seg_all[seg_all.index("## 4bis."): seg_all.index("## 5.")]
+seg = seg_all[seg_all.index("## 4bis."): seg_all.index("## 4ter.")]
 
 rows, group = [], None
 for line in seg.split("\n"):

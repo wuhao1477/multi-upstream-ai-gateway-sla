@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PM 文档一致性门禁（机器可判定部分）。
 
-覆盖六类在本项目反复出现的缺陷：
+覆盖在本项目反复出现的缺陷（编号沿用历史，实际检查项见运行输出）：
   1 坏链
   2 ```sql 块内混入 Markdown（DDL 抽取会失败）
   3 DDL 顺序（前向外键 / 索引早于表）
@@ -9,6 +9,7 @@
   5 **FR/AC 的一期二期标注互斥**  ← 传播遗漏的高发区
   6 一期/二期 AC 计数与里程碑表自洽
   7 **DDL 定义了但没有任何规则读写的列**  ← 与第 4 类方向相反
+ 13 **`#锚点` 指向真实标题**  ← 第 1 类的补集，见该段注释
 
 第 5 类是本项目最高频的缺陷模式：改了主表、漏了引用它的其它文档。
 
@@ -16,6 +17,9 @@
 从没查过反方向「建了的列必须有人用」。DDL 跑在规则前面 —— 列建好了、
 索引建好了、保留策略也写了，但没有任何事务、worker 或端点碰它。
 悬空读（读一张没人写的表）比列不存在更危险：它不报错，只是永远读到空。
+
+第 13 类同理：第 1 类只查文件在不在、把 `#片段` 丢掉，于是「文件在、
+章节改了名」免检了 —— 加这段时实测 15 处指不到任何标题（2026-08-31 已修）。
 """
 import glob
 import os
@@ -43,13 +47,41 @@ DEV = sorted(glob.glob("docs/dev/*.md")) + ["docs/PRD.md"]
 
 
 # ── 1 坏链 ──────────────────────────────────────────────
+# ⚠️ 原正则要求路径以 `./` 或 `../` 开头（`(\.\.?/[^)#]+)`），于是**同目录裸相对
+#    链接** `[x](P1-evidence.md#y)` 一条都没查过 —— 实测 31 条这样的链接，
+#    全在 docs/acceptance/ 下，即我自己写的那三份。加第 13 类时用"改坏锚点"
+#    破坏性验证，它居然还是绿的，才发现是这里漏了它。
+#    判据改成"排除法"：不是 URL、不是纯锚点、不是绝对路径，就是相对链接。
+def iter_links(path):
+    """产出 (相对路径 or None, 锚点 or None)。None 路径 = 指向本文。
+
+    剥**行内代码**：`` `[文字](URL)` `` 是在讲链接语法，不是一条链接
+    （P1-evidence §5.19 就有三处这样的举例，加门禁时它们自己红了）。
+    只剥完整的成对反引号，故 ``[`path`](url)`` 这种"链接文字里带代码"
+    剥完剩 `[](url)`，路径仍在、仍受检（全仓约 50 条是这个写法）。
+
+    ⚠️ **不剥围栏代码块**：SQL 注释里有 38 条 `-- 见 [02 §1.3](./02-data-model.md)`
+    这样的互引。它们在 GitHub 上不可点，但**是读者要手动跟过去的引用**，
+    目标没了同样是失效引用，而第 1 类原本一直在查它们。一并剥掉会让门禁
+    覆盖面反而缩小 38 条 —— 加固时先剥了，数出来才发现。
+    （`_anchors_of` 那边**必须**剥围栏块：那是在找标题，SQL 里的 `#` 不是标题。）
+    """
+    text = re.sub(r"`[^`\n]*`", "", open(path).read())
+    for m in re.finditer(r"\]\(([^)\s]*?)(#[^)\s]*)?\)", text):
+        rel, frag = m.group(1), m.group(2)
+        if rel.startswith(("http://", "https://", "mailto:", "/")):
+            continue
+        yield (rel or None, frag[1:] if frag else None)
+
+
 bad = []
 for f in DOCS:
     d = os.path.dirname(f)
-    for m in re.finditer(r"\]\((\.\.?/[^)#]+)(#[^)]*)?\)", open(f).read()):
-        t = os.path.normpath(os.path.join(d, m.group(1)))
-        if not os.path.exists(t):
-            bad.append(f"{f} -> {m.group(1)}")
+    for rel, _frag in iter_links(f):
+        if rel is None:
+            continue
+        if not os.path.exists(os.path.normpath(os.path.join(d, rel))):
+            bad.append(f"{f} -> {rel}")
 report("坏链", bad)
 
 
@@ -460,6 +492,53 @@ for t in sorted(read & ALL_TABLES):
         continue
     dangle.append(f"{t} —— 被 SQL 读取，但全库没有任何 INSERT/UPDATE 写它")
 report("无悬空读（读到的表都有人写）", dangle)
+
+
+# ── 13 坏锚点 ───────────────────────────────────────────
+# 第 1 类只查文件存在、**把 `#片段` 整段丢掉**（本文件原第 49 行的 `[^)#]+`）。
+# 于是「文件在、章节早改名」这一类坏链一直是免检的：实测 54 个锚点引用里
+# 15 个指不到任何标题，最老的一处指向转向自研时就删掉的「PG 共库分 schema」。
+# 点开只是不跳转（GitHub 静默停在原地），所以没人发现 —— 和悬空读同一种病：
+# 不报错，只是永远到不了。
+#
+# ⚠️ slug 算法有个坑：`_` 属于 \w，GitHub **保留**它。写这段时先删了 `_`，
+#    于是 `billing_unit` 被算成 billingunit，一个正确的锚点被判成坏的 ——
+#    差点照着这个错误结论去改文档。
+def _slug(heading):
+    h = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.strip())  # [文字](URL) -> 文字
+    h = re.sub(r"[`*~]", "", h)                                   # 行内代码/粗体/删除线
+    h = re.sub(r"[^\w\s-]", "", h.lower(), flags=re.UNICODE)
+    return h.strip().replace(" ", "-")
+
+
+def _anchors_of(path):
+    seen, out = {}, set()
+    text = re.sub(r"```.*?```", "", open(path).read(), flags=re.S)  # 代码块里的 # 不是标题
+    for m in re.finditer(r"^#{1,6}\s+(.+?)\s*$", text, re.M):
+        s = _slug(m.group(1))
+        if not s:
+            continue
+        n = seen.get(s, 0)
+        seen[s] = n + 1
+        out.add(s if n == 0 else f"{s}-{n}")   # GitHub 的重名 -1/-2 规则
+    return out
+
+
+ANCH = {}
+bad_anchor = []
+for f in DOCS:
+    d = os.path.dirname(f)
+    for rel, frag in iter_links(f):             # 与第 1 类共用提取器
+        if not frag:
+            continue
+        tgt = os.path.normpath(os.path.join(d, rel)) if rel else f
+        if not tgt.endswith(".md") or not os.path.exists(tgt):
+            continue                            # 文件不存在归第 1 类管
+        if tgt not in ANCH:
+            ANCH[tgt] = _anchors_of(tgt)
+        if frag not in ANCH[tgt]:
+            bad_anchor.append(f"{f} -> {rel or '(本文)'}#{frag}")
+report("锚点指向真实标题", bad_anchor)
 
 
 print()

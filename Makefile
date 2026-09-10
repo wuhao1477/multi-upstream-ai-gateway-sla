@@ -11,26 +11,51 @@ help: ## 列出可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: web
+web: ## 编前端（web/ → internal/admin/webdist，供 go:embed）
+	@[ -d web/node_modules ] || (cd web && pnpm install --frozen-lockfile)
+	cd web && pnpm run build
+
 .PHONY: build
-build: ## 编译 sla-core、collector、migrate
+# 依赖 web：管理界面由 go:embed 打进二进制，跳过前端只会编出一个
+# /admin/ui 返回 500「前端产物缺失」的二进制 —— 而 go build 本身照旧成功
+# （webdist/ 里有占位文件，模式匹配得到），失败点被推迟到运行时。
+build: web ## 编译 sla-core、collector、migrate（含前端）
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/sla-core ./cmd/sla-core
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/collector ./cmd/collector
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINDIR)/migrate ./cmd/migrate
 
 .PHONY: test
-test: ## 跑全部单测
-	$(GO) test ./...
+test: ## 跑全部单测（带竞态检测）
+# -race：批量导入是 importConcurrency 个 worker 扇出写同一个 detectStash
+# （internal/admin/import_api.go），主进程还有关停协程。竞态是那种"压测不出、
+# 生产偶发"的错，而全部单测 2 秒、开了 -race 约 4 秒，没有不开的理由。
+	$(GO) test -race ./...
 
 .PHONY: vet
-vet: ## go vet
+vet: ## go vet + rows.Err() 漏检查
 	$(GO) vet ./...
+# 每个 rows.Next() 循环后面都必须查一次 rows.Err()：遍历中途出错时
+# rows.Next() 只返回 false，与"正常读完"无从区分，漏查就会静默返回截断的结果集。
+# go vet 不管这个。13 处里曾经漏过 1 处（listCredentials），加个 grep 别让它回来。
+# 先剔掉注释行再数 —— 否则解释这条规则的注释本身就会被算成一次调用。
+	@bad=$$(for f in $$(grep -rl 'rows.Next()' --include='*.go' ./cmd ./internal); do \
+	  code=$$(grep -v '^[[:space:]]*//' $$f); \
+	  n=$$(echo "$$code" | grep -c 'rows.Next()'); \
+	  e=$$(echo "$$code" | grep -c 'rows.Err()'); \
+	  [ "$$n" != "$$e" ] && echo "  $$f (Next=$$n Err=$$e)"; \
+	done); \
+	if [ -n "$$bad" ]; then echo "以下文件的 rows.Next() 循环缺 rows.Err()："; echo "$$bad"; exit 1; fi
+	@echo "✅ rows.Err() 无遗漏"
 
 .PHONY: lint
 lint: ## golangci-lint（未安装则退回 go vet 并提示）
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 	  golangci-lint run; \
 	else \
-	  echo "golangci-lint 未安装，退回 go vet；CI 会用真 linter"; \
+	  echo "golangci-lint 未安装，退回 go vet。装它（v2 起才支持 go1.25，注意路径含 /v2）："; \
+	  echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2"; \
+	  echo "（CI 用 golangci-lint-action 跑同一版本，本地跳过不代表 CI 会放过）"; \
 	  $(GO) vet ./...; \
 	fi
 
@@ -89,4 +114,16 @@ clean: ## 清理产物
 
 .PHONY: test-ui
 test-ui: ## 真 Chrome 验收管理界面（需 Chrome + node + PG）
-	./verify/test-ui.sh
+	./verify/ui-stack.sh
+
+.PHONY: dev-ui
+dev-ui: ## 起常驻本地栈供人工点验管理界面（Ctrl-C 拆除）
+	./verify/ui-stack.sh --keep
+
+.PHONY: test-remote
+test-remote: ## 内网真库只读界面验收 35 项（需 DATABASE_URL + Chrome）
+	./verify/remote-stack.sh
+
+.PHONY: test-ac38-sub2api
+test-ac38-sub2api: ## AC-38 的 sub2api 一族：真 Sub2API 站 + 临时 PG（需 HUB_FILE）
+	./verify/ac38-sub2api.sh

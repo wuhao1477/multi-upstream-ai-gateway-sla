@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// specByKey 在包初始化时建索引，避免每次查找都线性扫 72 项。
+// specByKey 在包初始化时建索引。
 var specByKey = func() map[string]ParamSpec {
 	m := make(map[string]ParamSpec, len(Params))
 	for _, p := range Params {

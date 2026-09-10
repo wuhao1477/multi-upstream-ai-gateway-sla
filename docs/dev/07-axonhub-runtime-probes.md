@@ -1,7 +1,14 @@
 # 07 AxonHub 运行时实测（部署开放点收口 · 2026-07-23）
 
 | 项目 | 内容 |
-| > ⚠️ **历史记录（2026-07-25 标注）**：本篇实测已用于支撑 [11 架构转向决策](./11-decision-full-selfbuilt.md)——一期**移除 AxonHub、改为自研直连**。§3bis 的真实上游 Responses 基线（35 字段、reasoning item、`prompt_cache_key`）**转为自研透传层要 100% 保真的目标**（见 [03 §10](./03-upstream-layer.md)）。**本篇不再指导部署**；部署见 [06](./06-deployment-and-operations.md)。
+| > 📌 **2026-08-29 补注**：本篇 §3 → §3bis 的翻案，是 [CLAUDE.md §1](../../CLAUDE.md)
+> 「禁止 mock」那条规则的**原始证据**，比规则本身早一个月。§3 用 mock 推断出
+> 「标准字段够用、无需自研转换」，§3bis 换真上游实测发现 AxonHub 丢弃 80% 顶层
+> 字段 —— 原因写在 §4 结论里：**mock 响应本身就不含这些字段，所以 mock 永远暴露
+> 不了字段丢失**。本篇的 mock 提及全部保留：它们是"当时用了什么方法"的史实，
+> 改写会让这段翻案读不通。
+>
+> ⚠️ **历史记录（2026-07-25 标注）**：本篇实测已用于支撑 [11 架构转向决策](./11-decision-full-selfbuilt.md)——一期**移除 AxonHub、改为自研直连**。§3bis 的真实上游 Responses 基线（35 字段、reasoning item、`prompt_cache_key`）**转为自研透传层要 100% 保真的目标**（见 [03 §10](./03-upstream-layer.md)）。**本篇不再指导部署**；部署见 [06](./06-deployment-and-operations.md)。
 
 --- | --- |
 | 状态 | ✅ 已实测收口（三项经验性开放点） |
@@ -27,7 +34,7 @@
 - PG `\dt`：`public` schema 建 **25 张表**（`api_keys/channels/requests/request_executions/usage_logs/users/systems/provider_quota_status…`）
 - **schema 隔离**：DSN 加 `&search_path=ax_custom`（需预先 `CREATE SCHEMA`，ent 不自建）→ 25 表全落 `ax_custom`，`public` 不变
 
-**判定 / 对设计的含义**：AxonHub 数据可直接用 PG，DSN 格式 `postgres://user:pass@host:5432/db?sslmode=disable`；与自研账本**共库分 schema**（`search_path` 指定），`Reconcile` 可本地 JOIN 对账。→ **收口 [02 开放点3](./02-data-model.md#11-开放点评审需拍板) / [06 §2.1](./06-deployment-and-operations.md#21-存储pg-共库分-schema01-开放点-4--02-开放点-3-的建议落地)**。
+**判定 / 对设计的含义**：AxonHub 数据可直接用 PG，DSN 格式 `postgres://user:pass@host:5432/db?sslmode=disable`；与自研账本**共库分 schema**（`search_path` 指定），`Reconcile` 可本地 JOIN 对账。→ **收口 [02 开放点3](./02-data-model.md#11-开放点评审需拍板) / [06 §2](./06-deployment-and-operations.md#2-上游直连自研无外部网关)**。
 
 ---
 
@@ -57,7 +64,7 @@
 
 - **FR-110 数据面单点可用 AxonHub 双实例 + 共享 PG 消除**（稳态双活实测通过：状态共享、任一实例可读写与路由）。
 - **硬约束（须写进部署 runbook）**：schema 迁移期不具并发安全——**初始化只让一个实例做；滚动升级须先单实例迁移完，再拉起其余实例**（或运维层加迁移锁 / init-container）。否则并发迁移崩实例。
-- → **收口 [01 开放点1](./01-architecture.md#6-开放点评审需拍板) / [06 §2.3 与开放点1](./06-deployment-and-operations.md#23-单点风险与处置01-开放点-1)**。
+- → **收口 [01 开放点1](./01-architecture.md#6-开放点评审需拍板) / [06 §2.3](./06-deployment-and-operations.md#23-上游不可用的处置)**。
 
 ---
 
@@ -78,7 +85,7 @@
 - beta5 **支持** OpenAI Responses 端到端（inbound 原生 + `openai_responses` 渠道 outbound 到上游原生）。
 - **两个必须知道的约束**：① 是否打上游原生 Responses **取决于渠道 type**——`openai` 型会**静默下转** Chat Completions（上游 Responses-only 语义丢失），要保原生须配 `openai_responses`；② 即便用 `openai_responses`，也是**经领域模型 round-trip 的结构化转译**，重签 item id、丢未知字段，**非透明字节代理**。
 - **对 FR-111**：若只需"标准 Responses 字段收发"，AxonHub 用 `openai_responses` 渠道即满足，无需自研直连转换。若需**严格保真**（保留 Responses-only 结构/自定义字段/原始 item id、`reasoning`/tool 专有内容零丢失），须自研核心 protocol 层直连转换补齐；且 GatewayAdapter 须确保 Responses 渠道被配成 `openai_responses`（误配 `openai` 会静默降级）。
-- → **收口 [01 开放点2](./01-architecture.md#6-开放点评审需拍板) / [03 §4.3](./03-upstream-layer.md#43-execute--内容感知首字由-executor-判定ac-3132)**。
+- → **收口 [01 开放点2](./01-architecture.md#6-开放点评审需拍板) / [03 §3.2](./03-upstream-layer.md#32-两个独立判定shouldcommit-与-hasttftoutputac-31)**。
 
 ---
 

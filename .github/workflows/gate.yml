@@ -1,18 +1,20 @@
 name: gate
 
-# 交付门禁：文档一致性 12 类检查 + DDL 在 postgres:16 真跑。
+# 交付门禁：文档一致性 + DDL 在 postgres:16 真跑 + Go 构建/单测/集成/界面验收。
 #
 # 与本地**同一份脚本**（verify/gate.sh）——这是 00 §5 与 README 声称的
 # "CI 与本地共用一份门禁"的落地。此前该说法只是计划：gate.sh 已存在，
 # 但没有任何 workflow 去跑它，于是"DDL 真跑"只在有 Docker 的开发机上偶发进行。
 #
-# 现阶段仓库仍是纯文档（无 go.mod），故只跑文档与 DDL 两道。
-# M0 起 Go 骨架落地后，在下方 build 作业里补 go build / test / lint
-# 与 FR-112 不可存列断言、凭证脱敏断言（[10 §3](docs/dev/10-project-structure.md)）。
+# ⚠️ **2026-08-29 补 `feat/**` 触发**：此前只在 push main 与 PR→main 时跑，
+# 于是一期那条 feat 分支上攒了 17 个提交、门禁一次没跑过 —— 只有 build-arm
+# 在跑（它的触发含 `feat/**`）。这不是"CI 是绿的"，是"CI 没看过"。
+# 真正的代价在开 PR 那一刻：13 道检查第一次同时面对 17 个提交，红了也不知道
+# 是哪一个引入的。分支上就跑，才有"哪一提交弄红的"这个信息。
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -28,13 +30,11 @@ jobs:
       # check_docs.py / extract_ddl.py 只用标准库（glob/os/re/sys），
       # ddl-check.sh 用 docker run 起临时 postgres:16。
       #
-      # 📌 关于 Node：本项目技术栈是 **Go**，门禁脚本是 shell + python3，
-      #    **构建链路完全不经 Node**。唯一的 Node 来源是 `actions/checkout`
-      #    这个官方 action —— GitHub 的 JS action 跑在 runner 自带的 Node 上，
-      #    与被测项目的技术栈无关（Go 项目用官方 action 同样是标准做法）。
-      #    若要彻底无 Node，可把 checkout 换成手写 `git clone`，但那要自行
-      #    处理 token、depth、ref 与 PR merge commit，得不偿失。
-      #    Node 20 弃用告警是 GitHub 侧的迁移节奏，待其发 v5 再升即可。
+      # 📌 关于 Node：**本作业**（文档一致性 + DDL）不经 Node，脚本是 shell + python3。
+      #    但整体构建链路已经用上 Node —— 管理界面是 web/ 下的独立 Vite 工程
+      #    （TS + Vue3），产物由 go:embed 打进二进制，见下方 build 作业的
+      #    setup-node 步骤与 deploy/Dockerfile 的 web 阶段。
+      #    运行时仍然无 Node：镜像是 distroless，里面只有 Go 二进制与静态资源。
       - name: 环境自检
         run: |
           python3 --version
@@ -69,15 +69,64 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          # 跟随 go.mod 声明，不锁死 patch（10 开放点 1）
+          # 跟随 go.mod 声明的安全补丁版本。
           go-version-file: go.mod
           cache: true
+
+      # 管理界面是独立的 Vite 工程（web/），产物由 go:embed 打进二进制，
+      # 所以 make build 依赖它 —— node 与 pnpm 必须在 build 之前就位。
+      #
+      # ⚠️ pnpm/action-setup 必须排在 setup-node **之前**：setup-node 的
+      #    `cache: pnpm` 要调 `pnpm store path` 才能定位缓存目录，pnpm 不在
+      #    PATH 上这一步直接失败。版本不写死，由 packageManager 字段决定，
+      #    与 Dockerfile 里的 corepack 同源。
+      #
+      # ⚠️ **必须给 package_json_file**：该 action 默认读**仓库根**的
+      #    package.json，而本仓库根下没有 package.json（前端是 web/ 下的独立
+      #    工程），于是它报 "No pnpm version is specified" 直接失败。
+      #    2026-08-29 首次在 feat 分支跑 gate 才暴露 —— 此前 gate 只在 main
+      #    触发，而这段 pnpm 步骤是随 Vue3 重写在 feat 分支上加的，从没被跑过。
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          # 两个前端工程各有自己的 lockfile：web/ 是管理界面，
+          # verify/ui/ 是浏览器验收工具链。
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            verify/ui/pnpm-lock.yaml
 
       - name: 格式检查
         run: make fmt-check
 
       - name: go vet
         run: make vet
+
+      # 只阻断当前代码可达的 Go/标准库漏洞；固定扫描器版本保证结果可复现。
+      - name: Go 可达漏洞扫描
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      # go vet 查不出死代码。首次接入时它就揪出两处从未被调用的实现，
+      # 其中一处是 normalizeFamily —— 与 admin 里活着的 normalizeDeclared
+      # 逐字相同，改了活的那份不会有人想起还有一份副本。
+      # 不配 .golangci.yml：默认规则集已经够用，加配置只是提前定死口径。
+      #
+      # ⚠️ **版本必须跟得上 go.mod**：golangci-lint 只支持**不高于自身构建
+      #    版本**的 Go。原先 pin 的 v1.62.2 是用 go1.23 构建的，而 go.mod
+      #    是 1.25，于是它直接拒绝启动：
+      #      can't load config: the Go language version (go1.23) used to build
+      #      golangci-lint is lower than the targeted Go version (1.25)
+      #    这不是告警而是 exit 3。2026-08-29 首次在 feat 分支跑 gate 才暴露。
+      #    v2 起才有 go1.25 构建的版本，故一并升 action 到 v9（v6 不识别 v2）。
+      #    升级后本机用 v2.13.2 实跑默认规则集：0 issues，无需加 .golangci.yml。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
 
       - name: 构建
         run: make build
@@ -114,14 +163,34 @@ jobs:
         run: make test-compose
 
       # 管理界面的真实浏览器验收：真 Chrome 点击/填表/等 XHR/截图。
-      # 验的是"运维真能在 web 端加渠道商并采集"，而不是"接口返回了正确 JSON"。
       # ubuntu-latest 自带 Chrome（/usr/bin/google-chrome），故只需装 puppeteer-core。
-      - name: 管理界面浏览器验收（真 Chrome）
+      # ui-stack.sh 自己会先编前端再 go build（顺序反了会把空目录编进二进制）。
+      #
+      # ⚠️ **CI 里只跑得到 SPA 那 14 项**（路由/断点/缓存/占位文件）。
+      #    功能与数据那 57 项（建渠道、探测站型、登记凭证、采集、分组、目录、
+      #    Key、限流、批量导入试运行）要真上游凭证，而真上游令牌**不进
+      #    GitHub secrets**（CLAUDE.md §1 的 CI 表；那是别人家站点的真凭证）。
+      #    无 HUB_FILE 时 ui-stack.sh 自动降级并打印跳过了什么 —— 看到这一步绿，
+      #    读作"前端工程化性质没退化"，**不能**读作"加渠道商功能验过了"。
+      #    那 57 项的结论只能来自本地跑，写进 PR/提交说明。
+      - name: 管理界面浏览器验收（真 Chrome，CI 只覆盖免密的 SPA 14 项）
         run: make test-ui
 
       # FR-112 不可存列断言已作为单测实现（internal/store 的
       # TestNoForbiddenColumnsInLedger，含反向自验），随 make test 执行。
-      # 余下两道守卫随对应功能接入：
-      #   sk- 前缀脱敏断言 → #9 Key 管理端点（现在无端点会打印凭证）
-      #   billing_unit 缩放断言 → #7 价格采集（现在无成本计算代码）
-      # ⚠️ 两者都在对应 issue 的完成标准里，勿让 issue 关闭时漏掉本文件的启用。
+      #
+      # 那两道"随功能接入"的守卫（2026-08-29 结清此处记账）：
+      #   · sk- 前缀脱敏 —— **已落地**，且不止一处：ListKeys 在 SQL 侧就截断
+      #     （channels.go 的 secretPrefixExpr，明文不出库），真 Chrome 验收在
+      #     两套件里各断言一次 DOM 无长密钥串（verify-ui.mjs / verify-remote.mjs），
+      #     另有一条 shell 断言查全量日志无明文。#9 已关闭。
+      #   · billing_unit —— **缩放断言本身仍无处可写**：成本公式的消费方是 P3，
+      #     当前无成本计算代码，写出来只能是"测试自己算一遍除法"。#7 关闭时
+      #     落地的是采集侧那一半（口径逐条落库 + 两种口径可区分，
+      #     adapters_test.go / newapi_pricing_test.go）。
+      #     2026-08-29 复评又补上库侧那一半：两处 billing_unit 列定义必须一致
+      #     （可空 + 无默认 + 同一套 CHECK 取值），见 test-migrate.sh 7/7 与
+      #     migrations/018 —— 缺陷正是两张表处置相反，而不设防的是权威表。
+      # ⚠️ 给 P3 的人：`成本 = 单价 3.0 / per_1m_token × 1000 token → 0.003`
+      #    这条 CI 断言（02 §3 末尾）仍然欠着，且 per_call 与 NULL 两支公式没定义
+      #    （02 §3 已列出该怎么算）。它不再挂在任何 open issue 上，别让它就此消失。

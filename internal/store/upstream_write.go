@@ -17,19 +17,17 @@ type GroupRow struct {
 	GroupRef        string
 	RateMultiplier  *float64 // 可空：采不到倍率时不写 0（0 倍率语义上是"免费"）
 	AvailableModels []string
-	DataSource      string // auto_collect | manual
-	FetchedAt       time.Time
-	// Payload 是不落结构化列的字段（高峰倍率/独占/平台等，ISSUE-005 §3.1）。
-	Payload map[string]any
+	// PreserveModels keeps the last complete list when this response omitted the model field.
+	PreserveModels bool
+	DataSource     string // auto_collect | manual
+	FetchedAt      time.Time
 }
 
-// UpsertGroups 写入分组与其可用模型。
+// UpsertGroups 写入分组与其可用模型，并自行提交一个事务。
 //
 // **单事务**（09 §5.0bis：③ 分组一个事务）。两个语义各不相同：
 //   - channel_groups：upsert（分组本身长期存在，倍率会变）
-//   - group_models：**按分组全量替换**（02 §1.3bis）—— 上游的完整声明，
-//     diff 需要额外判断"这次没返回"是下架还是接口抽风，而全量替换配合
-//     "采集失败则整项 failed 不进事务"已表达正确语义
+//   - group_models：完整响应按分组全量替换；缺少模型字段的 degraded 响应保留旧清单
 func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -40,6 +38,17 @@ func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, er
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	n, err := upsertGroups(ctx, tx, rows)
+	if err != nil {
+		return n, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("提交分组事务: %w", err)
+	}
+	return n, nil
+}
+
+func upsertGroups(ctx context.Context, db DBTX, rows []GroupRow) (int, error) {
 	var n int
 	for _, g := range rows {
 		if g.GroupRef == "" {
@@ -48,7 +57,7 @@ func UpsertGroups(ctx context.Context, conn *pgx.Conn, rows []GroupRow) (int, er
 			continue
 		}
 		var gid int64
-		err := tx.QueryRow(ctx, `
+		err := db.QueryRow(ctx, `
 INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier, data_source, fetched_at)
 VALUES ($1,$2,$3,$4,$5)
 ON CONFLICT (channel_id, group_ref) DO UPDATE
@@ -60,35 +69,49 @@ RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier, g.DataSource, g.Fetche
 			return n, fmt.Errorf("写分组 %s: %w", g.GroupRef, err)
 		}
 
-		// 全量替换该分组的可用模型
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM group_models WHERE channel_group_id = $1`, gid); err != nil {
-			return n, fmt.Errorf("清空分组 %s 的模型: %w", g.GroupRef, err)
-		}
-		for _, name := range g.AvailableModels {
-			if name == "" {
-				continue
+		if !g.PreserveModels {
+			// 完整响应全量替换；显式空数组表示该分组当前没有可用模型。
+			if _, err := db.Exec(ctx,
+				`DELETE FROM group_models WHERE channel_group_id = $1`, gid); err != nil {
+				return n, fmt.Errorf("清空分组 %s 的模型: %w", g.GroupRef, err)
 			}
-			if _, err := tx.Exec(ctx, `
+			for _, name := range g.AvailableModels {
+				if name == "" {
+					continue
+				}
+				if _, err := db.Exec(ctx, `
 INSERT INTO group_models (channel_group_id, model_name, fetched_at)
 VALUES ($1,$2,$3)
 ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
-				gid, name, g.FetchedAt); err != nil {
-				return n, fmt.Errorf("写分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+					gid, name, g.FetchedAt); err != nil {
+					return n, fmt.Errorf("写分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+				}
+			}
+		} else {
+			// 部分账号结果只表示“这些模型仍可见”，不能删除未返回的
+			// 模型；成功账号的新模型仍需并入现有清单。
+			for _, name := range g.AvailableModels {
+				if name == "" {
+					continue
+				}
+				if _, err := db.Exec(ctx, `
+INSERT INTO group_models (channel_group_id, model_name, fetched_at)
+VALUES ($1,$2,$3)
+ON CONFLICT (channel_group_id, model_name) DO UPDATE SET fetched_at = EXCLUDED.fetched_at`,
+					gid, name, g.FetchedAt); err != nil {
+					return n, fmt.Errorf("追加分组 %s 的模型 %s: %w", g.GroupRef, name, err)
+				}
 			}
 		}
 		n++
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("提交分组事务: %w", err)
 	}
 	return n, nil
 }
 
 // GroupIDByRef 取某渠道下分组的主键，供 Key 落库时填 channel_group_id。
-func GroupIDByRef(ctx context.Context, conn *pgx.Conn, channelID int64, ref string) (int64, bool, error) {
+func GroupIDByRef(ctx context.Context, db DBTX, channelID int64, ref string) (int64, bool, error) {
 	var id int64
-	err := conn.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		`SELECT id FROM channel_groups WHERE channel_id=$1 AND group_ref=$2`,
 		channelID, ref).Scan(&id)
 	if err == pgx.ErrNoRows {
@@ -124,8 +147,8 @@ type KeyUsageRow struct {
 // 凭空插一行没有 secret 的 Key 会让它永远不可用且污染资产台账。
 //
 // 每把 Key 一个事务（09 §5.0bis）：单把失败不影响其它。
-func UpdateKeyUsage(ctx context.Context, conn *pgx.Conn, row KeyUsageRow) error {
-	tag, err := conn.Exec(ctx, `
+func UpdateKeyUsage(ctx context.Context, db DBTX, row KeyUsageRow) error {
+	tag, err := db.Exec(ctx, `
 UPDATE upstream_keys
    SET remain_quota_usd  = COALESCE($2, remain_quota_usd),
        used_quota_usd    = COALESCE($3, used_quota_usd),
@@ -148,18 +171,17 @@ UPDATE upstream_keys
 	return nil
 }
 
-// KeyRefIndex 返回某渠道下 KeyRef → upstream_keys.id 的映射。
+// KeyRefIndex 返回某账号下 KeyRef → upstream_keys.id 的映射。
 //
 // 采集侧只能拿到脱敏引用（上游的 key id/name），故用 external_ref 匹配。
 // 匹配不上的 Key 计入 inventory 异常项"上游存在但库中未登记"。
-func KeyRefIndex(ctx context.Context, conn *pgx.Conn, channelID int64) (map[string]int64, error) {
-	rows, err := conn.Query(ctx, `
+func KeyRefIndex(ctx context.Context, db DBTX, accountID int64) (map[string]int64, error) {
+	rows, err := db.Query(ctx, `
 SELECT k.id, COALESCE(k.external_ref,'')
   FROM upstream_keys k
-  JOIN upstream_accounts a ON a.id = k.account_id
- WHERE a.channel_id = $1`, channelID)
+ WHERE k.account_id = $1`, accountID)
 	if err != nil {
-		return nil, fmt.Errorf("查渠道 %d 的 Key: %w", channelID, err)
+		return nil, fmt.Errorf("查账号 %d 的 Key: %w", accountID, err)
 	}
 	defer rows.Close()
 
@@ -195,7 +217,7 @@ type SnapshotRow struct {
 // payload 结构见 02 §7.1：**未采到的字段一律省略该键，不写 null** ——
 // 便于区分"没采到"与"采到的值是 0"。这条纪律由调用方保证（构造 map 时
 // 只放有值的键），本函数只负责序列化。
-func InsertSnapshot(ctx context.Context, conn *pgx.Conn, row SnapshotRow) error {
+func InsertSnapshot(ctx context.Context, conn DBTX, row SnapshotRow) error {
 	payload, err := json.Marshal(row.Payload)
 	if err != nil {
 		return fmt.Errorf("序列化 payload: %w", err)

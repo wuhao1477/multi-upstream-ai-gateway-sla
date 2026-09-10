@@ -354,7 +354,7 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 > | 问题 | 实测结果 |
 > | --- | --- |
 > | Codex 会调 `GET /v1/models` 吗 | **会**，一次会话调 2 次（带 `?client_version=0.142.3`） |
-> | 它用返回的列表**选模型**吗 | **不用**。mock 返回**空列表** `{"object":"list","data":[]}`，Codex 仍 POST `model="gpt-5.6-sol"` 并正常完成 |
+> | 它用返回的列表**选模型**吗 | **不用**。记录端返回**空列表** `{"object":"list","data":[]}`，Codex 仍 POST `model="gpt-5.6-sol"` 并正常完成 |
 > | 那个模型名从哪来 | **`~/.codex/config.toml` 的 `model =`**，与配置逐字一致 |
 > | 会发 `If-None-Match` 吗 | **不会**（两次调用都没发），尽管我方响应带了 `x-models-etag` |
 >
@@ -425,7 +425,7 @@ downstream_write_completed_at    TIMESTAMPTZ,   -- 终帧已写出 / 下游流�
 
 ## 10. 实现待办（M1）
 
-1. SSE 扫描器 + `ShouldCommit`/`HasTTFTOutput` **双判定**，用 `verify/mock_upstream.py` 场景做夹具；**须新增 tool-only、refusal-only、reasoning-summary-only、空终态四类场景**，每类分别断言两个布尔值（[11 §3](./11-decision-full-selfbuilt.md)）。
+1. SSE 扫描器 + `ShouldCommit`/`HasTTFTOutput` **双判定**，用 `verify/sse_stream_fixture.py` 的 SSE 流场景做夹具（造流不造站点，[CLAUDE.md §1](../../CLAUDE.md) 例外表第二行）；**须新增 tool-only、refusal-only、reasoning-summary-only、空终态四类场景**，每类分别断言两个布尔值（[11 §3](./11-decision-full-selfbuilt.md)）。
 2. 字节透传管道 + tee 旁路观察，验证 35 字段与 reasoning item **零丢失**（对照 [07 §3bis](./07-axonhub-runtime-probes.md) 的真实上游基线）。
 3. 取消传播与连接池轮换的集成测试。
 4. `Probe()` 的协议能力探测 + 落库。

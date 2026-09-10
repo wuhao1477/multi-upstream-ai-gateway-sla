@@ -36,7 +36,9 @@ const anomalyItemCap = 20
 //
 // 六类逐一给计数与可下钻列表，**不合并成一个总数** ——
 // 否则运维看到"异常 7"却不知道该修什么。
-func BuildInventory(ctx context.Context, conn *pgx.Conn, ch Channel) (*Inventory, error) {
+func BuildInventory(
+	ctx context.Context, conn *pgx.Conn, ch Channel, catalogMissingRounds int,
+) (*Inventory, error) {
 	inv := &Inventory{}
 
 	if err := conn.QueryRow(ctx, `
@@ -99,9 +101,10 @@ SELECT model_name FROM channel_model_catalog
 SELECT DISTINCT s.scope_id
   FROM collector_snapshots s
  WHERE s.channel_id=$1 AND s.scope_type='key'
+	AND s.payload @> '{"unregistered":true}'::jsonb
    AND NOT EXISTS (
-     SELECT 1 FROM upstream_keys k JOIN upstream_accounts a ON a.id=k.account_id
-      WHERE a.channel_id=$1 AND k.id::text = s.scope_id)
+	 SELECT 1 FROM upstream_keys k JOIN upstream_accounts a ON a.id=k.account_id
+	  WHERE a.channel_id=$1 AND k.external_ref = s.scope_id)
  ORDER BY s.scope_id`, ch.ID)
 	if err != nil {
 		return nil, err
@@ -109,14 +112,14 @@ SELECT DISTINCT s.scope_id
 	add("unregistered_key",
 		"上游存在但库中未登记的 Key，需经 /admin/keys 补登记（采集不自动建 Key）", unreg)
 
-	// ④ 疑似下架模型（FR-126）：last_seen_at 落后于该渠道最新一轮。
-	delisted, err := queryStrings(ctx, conn, `
-WITH newest AS (SELECT max(last_seen_at) AS t FROM channel_model_catalog WHERE channel_id=$1)
-SELECT c.model_name FROM channel_model_catalog c CROSS JOIN newest n
- WHERE c.channel_id=$1 AND n.t IS NOT NULL AND c.last_seen_at < n.t - interval '36 hours'
- ORDER BY c.model_name`, ch.ID)
+	// ④ 疑似下架模型（FR-126）：复用目录查询的真实连续轮次判据。
+	staleCatalog, err := ListCatalog(ctx, conn, ch.ID, true, catalogMissingRounds)
 	if err != nil {
 		return nil, err
+	}
+	delisted := make([]string, 0, len(staleCatalog))
+	for _, model := range staleCatalog {
+		delisted = append(delisted, model.ModelName)
 	}
 	add("delisted_model", "模型连续多轮未出现，疑似上游已下架", delisted)
 

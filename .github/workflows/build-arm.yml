@@ -1,0 +1,85 @@
+name: build-arm
+
+# 云端构建 arm64 镜像，产物以 workflow artifact 形式带回本地验收。
+#
+# 三个选型都有明确代价对比，别在不了解前提时"优化"掉：
+#
+# 1) 为什么在 **amd64** runner 上交叉编译，而不是用 arm64 runner？
+#    GitHub 的免费 arm64 runner（ubuntu-*-arm）只对 **public** 仓库免费，
+#    本仓库是 private → 用了要计费。而 CGO_ENABLED=0 的 Go 交叉编译是原生
+#    能力（无需交叉工具链），在免费 amd64 runner 上全速跑，产物仍是真 arm64。
+#    反向做法（amd64 runner + QEMU 模拟 arm64 跑编译器）慢 5～10 倍且更脆。
+#
+# 2) 为什么走 artifact，而不是推 GHCR？
+#    拉 private GHCR 镜像需要 read:packages scope，本地 gh token 只有 repo。
+#    artifact 用 `gh run download` 即可取，且 tar 本身就是"云端产物"的凭据 ——
+#    本地 docker load 进来的就是云端那一份，不存在"本地又编了一遍"的含糊。
+#
+# 3) 为什么 provenance: false？
+#    buildx 默认给产物挂 attestation，导出物变成 manifest list；
+#    `docker load` 一个 manifest list 会失败或加载出无法直接 run 的条目。
+#    单架构验收不需要 attestation，关掉换来一个干净可 load 的单镜像。
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本号取 commit SHA 前 7 位，注入到二进制的 main.version。
+      # 这不是装饰：本地验收会 `docker run <image> -version` 比对本地 HEAD，
+      # 用来证明"跑起来的容器确实来自这个提交的云端构建"，
+      # 而不是某次残留的旧镜像或本地误建的同名 tag。
+      - name: 计算版本号
+        id: ver
+        run: echo "sha7=$(git rev-parse HEAD | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 arm64 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/arm64
+          build-args: VERSION=${{ steps.ver.outputs.sha7 }}
+          # tag 带上 SHA7：`docker load` 后本地拿到的 ref 是确定的
+          # （sla-core:arm64-<sha7>），验收脚本不必去猜 load 输出里的名字，
+          # 也不会与上一轮遗留的同名镜像混淆。
+          tags: sla-core:arm64-${{ steps.ver.outputs.sha7 }}
+          provenance: false
+          # type=gha：层缓存存在 Actions cache 里，只改验收脚本时不必重编三个二进制
+          # （.dockerignore 已把 verify/、docs/ 排除出上下文，故那类改动连 COPY 层都不失效）。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/sla-core-arm64.tar
+
+      # ⚠️ 这里刻意 **不** 用 `docker image inspect {{.Architecture}}` 来断言架构。
+      #    那个字段是 buildx 照 --platform 直接写的，与层里装了什么 ELF 无关：
+      #    Dockerfile 若丢了 GOARCH=${TARGETARCH}，产出会是"config 写 arm64、
+      #    里面躺 amd64 二进制"，而 inspect 照样报 arm64 —— 那条断言在唯一会
+      #    发生的那种回归面前恰好是空的。故读 ELF e_machine（编译器实际写下的）。
+      - name: 断言二进制真是 arm64
+        run: python3 verify/assert_image_arch.py /tmp/sla-core-arm64.tar arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sla-core-arm64-${{ steps.ver.outputs.sha7 }}
+          path: /tmp/sla-core-arm64.tar
+          # 镜像层已是压缩数据，再 zip 一遍只烧 CPU 不省字节
+          compression-level: 0
+          retention-days: 7
+
+      - name: 产物信息
+        run: |
+          echo "版本（SHA7）：${{ steps.ver.outputs.sha7 }}"
+          echo "大小：$(du -h /tmp/sla-core-arm64.tar | cut -f1)"

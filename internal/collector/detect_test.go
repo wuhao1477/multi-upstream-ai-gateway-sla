@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -91,38 +92,51 @@ func TestDetectSub2API(t *testing.T) {
 	}
 }
 
-func TestDetectASXS(t *testing.T) {
-	srv := fakeSite(map[string]string{
-		"/api/public/site-config": `{"data":{"iss":"ampmanager","version":"1.2"}}`,
-	})
-	defer srv.Close()
-
-	got, err := Detect(context.Background(), srv.Client(), srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Family != FamilyASXS {
-		t.Fatalf("家族 = %s，期望 %s", got.Family, FamilyASXS)
-	}
-}
-
-// ASXS 的 ampmanager 指纹可能出现在非 JSON 响应里，也要能认出来。
-func TestDetectASXSFromRawBody(t *testing.T) {
+// TestDetectPassesRawBodyToMatch 钉住"指纹不在 JSON 里也能判族"这条通路。
+//
+// 为什么需要它：现役两族（NewAPI/Sub2API）的指纹都在顶层 JSON 字段里，
+// 两个 Match 都写 `_ []byte`。于是 getJSON 在解析失败时那句
+// `return nil, raw, nil` 一旦被改成 `return nil, nil, nil`（看着更"干净"），
+// **全部现役测试仍然全绿**，而自研站接入时会得到"探测不到、也没有任何报错"。
+//
+// 这里造的 Registration 不违反 CLAUDE.md §1：被测对象是 detectWith 这个
+// 循环，而它的输入正是一份注册 —— 真依赖（注册表）产不出"读 raw 的那一族"，
+// 因为现役两族都不读。造的是**被测输入**，不是被测依赖；且它不进全局注册表
+// （detectWith 收参数），不会让别处的"遍历 All() 断言每族合规"看见它。
+func TestDetectPassesRawBodyToMatch(t *testing.T) {
+	const probePath = "/api/public/site-config"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/public/site-config" {
-			_, _ = w.Write([]byte(`not-json but mentions ampmanager somewhere`))
+		if r.URL.Path != probePath {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		// 刻意不是合法 JSON：指纹只在原文里
+		_, _ = w.Write([]byte(`not-json but carries the fingerprint somewhere`))
 	}))
 	defer srv.Close()
 
-	got, err := Detect(context.Background(), srv.Client(), srv.URL)
+	var gotMap bool
+	selfhosted := &Registration{
+		Family:      Family("probe-only"),
+		DisplayName: "仅供本测试",
+		ProbePath:   probePath,
+		Match: func(m map[string]any, raw []byte) bool {
+			gotMap = m != nil
+			return strings.Contains(string(raw), "fingerprint")
+		},
+	}
+
+	got, err := detectWith(context.Background(), srv.Client(), srv.URL,
+		[]*Registration{selfhosted})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Family != FamilyASXS {
-		t.Fatalf("家族 = %s，期望 %s（指纹在原文里）", got.Family, FamilyASXS)
+	if got.Family != selfhosted.Family {
+		t.Fatalf("家族 = %s，期望 %s —— 指纹在原文里，"+
+			"八成是 getJSON 在 JSON 解析失败时没回传 raw", got.Family, selfhosted.Family)
+	}
+	if gotMap {
+		t.Error("非 JSON 响应时 map 应为 nil（Match 只能靠 raw 判定）")
 	}
 }
 

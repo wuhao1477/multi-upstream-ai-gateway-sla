@@ -11,7 +11,7 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
 
-// SeedConfigParams 把 09 §4bis 的 72 键灌入 config_params，幂等。
+// SeedConfigParams 把 09 §4bis 的 P1 键灌入 config_params，幂等。
 //
 // **为什么种子在 Go 里而不在 SQL 迁移里**：键清单是从文档生成的
 // （internal/config/params_gen.go）。若再手写一份 INSERT，就有了第二份清单，

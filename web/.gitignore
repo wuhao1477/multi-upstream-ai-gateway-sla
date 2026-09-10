@@ -1,0 +1,5 @@
+node_modules
+# 产物不在这里：vite 直接输出到 ../internal/admin/webdist（由 go:embed 打进二进制）
+dist
+*.local
+.vite

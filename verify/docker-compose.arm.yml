@@ -1,0 +1,82 @@
+# arm64 云端产物的本地验收栈。**仅供验收**，不是部署形态。
+#
+# 与 deploy/docker-compose.yml 的三处刻意差异，每处都有理由：
+#
+# 1) image 取自必填环境变量，且**没有 build 段**。
+#    这是本文件的要点：本次验收的对象是"云端构建出来的那个 arm64 镜像"。
+#    留着 build 段的话，镜像缺失时 compose 会默默本地编一个同名的顶上，
+#    验收照样全绿 —— 而它证明的东西（云端交叉编译产出可用的 arm64 镜像）
+#    恰好一点没验到。`:?` 让缺失时立刻失败，不给这种假绿留缝。
+#
+# 2) 发布 sla-core-a 的端口到宿主机。
+#    生产刻意不发布（06 §1：/admin/* 与 /metrics 只在容器网络内可达，
+#    Caddyfile 也不代理 /admin/*），但真 Chrome 跑在宿主机上、要点的就是
+#    /admin/ui。故这里不起 caddy，直接发布 core 端口。
+#    ⚠️ 这是验收专用的边界放宽，不要把这段抄回 deploy/。
+#
+# 3) 没有 mock 上游服务。
+#    Detect/采集是**服务端**行为（浏览器只是往 #ch-url 里填地址），所以上游
+#    要在容器网络里可达 —— 真上游走公网，本来就可达，不需要额外服务。
+#    CLAUDE.md §1：验收只对真实依赖。上游由 verify/pick-upstream.mjs 从
+#    HUB_FILE 里探活选出，容器需要能出公网。
+
+name: sla-arm-verify
+
+x-core-env: &core-env
+  DATABASE_URL: postgres://sla:${POSTGRES_PASSWORD:-armverify}@postgres:5432/sla?sslmode=disable
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置}
+  SLA_ADDR: ":8080"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sla
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-armverify}
+      POSTGRES_DB: sla
+    # 不挂 volume：验收要的是干净初态（迁移从零跑一遍才能数"已应用迁移"行数）。
+    # tmpfs 让数据随容器消失，省掉 down -v 漏跑就污染下一轮的可能。
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sla -d sla"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  sla-core-a: &core
+    image: ${SLA_IMAGE:?SLA_IMAGE 必须指向云端下载并 load 进来的 arm64 镜像}
+    environment: *core-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # 绑 127.0.0.1 而不是 0.0.0.0：/admin/* 与 /metrics 不经 Caddy(06 §1)，
+      # 这里直连的是管理面。ADMIN_TOKEN 是认证，不是网络隔离，两层边界都要在。
+      # Chrome 与 curl 都走 127.0.0.1，改这个不影响 test-arm-cloud.sh。
+      - "127.0.0.1:${CORE_PORT:-18290}:8080"
+    healthcheck:
+      # distroless 无 shell，只能 exec 形式直接跑二进制
+      test: ["CMD", "/sla-core", "-version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 第二个实例：在 arm64 上重新验一遍 PG 咨询锁选主（只有一个实例执行迁移）。
+  # 选主是跨实例并发行为，换架构后值得重验，而不是假设它与 amd64 同构。
+  sla-core-b:
+    <<: *core
+    ports: []
+
+  # 同一个镜像换 entrypoint 跑采集器：证明云端产物的另外两个二进制也是可执行的
+  # arm64（只验 /sla-core 的话，另两个即使架构错了也不会被发现）。
+  # restart: "no" —— 骨架期 collector 跑完一轮就退出，重启会刷无用日志。
+  collector:
+    image: ${SLA_IMAGE:?SLA_IMAGE 必须指向云端下载并 load 进来的 arm64 镜像}
+    environment: *core-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/collector"]
+    command: ["-once"]
+    restart: "no"

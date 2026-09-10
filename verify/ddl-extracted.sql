@@ -11,12 +11,26 @@ CREATE TABLE upstream_providers (
 CREATE TABLE channels (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name            TEXT NOT NULL,
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')), -- ISSUE-002 §1 三家族
-  base_url        TEXT NOT NULL,
+  -- 取值范围 = 站型注册表的家族 + unknown 哨兵（04 §7bis）。加一族要配一条迁移
+  -- 放宽它，否则新族的渠道**建不进来**（约束冲突，报在写入时而不是编译时）。
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
+  -- 全库唯一（019）：三处写入路径（createChannel / importOne / patchChannel）都是
+  -- "先查再插/改"，而 read-then-insert **防不住并发** —— 两个并发导入或一次 201
+  -- 丢失后的重试都能各插一条，台账里出现重复渠道而库里没有 DELETE 入口。
+  -- 约束认字面值，故规范化是写入侧的责任：internal/admin.validateBaseURL
+  -- 校验（scheme 为 http/https 且 host 非空）**并返回规范形态**（去首尾空白、
+  -- 小写 host、去尾斜杠）—— 三处入口共用它，少一处就能用一个 "/" 或一个大写字母
+  -- 绕过本约束。只小写 host 不动 path：path 大小写敏感。
+  -- ⚠️ 019 文件头里那句"没做 lower()…这个残留缺口记在这里"**已过时，且改不了** ——
+  -- 019 已应用到真库，checksum 契约把整个文件（含注释）冻住了，改注释也会让
+  -- 迁移在启动时直接 return error。2026-09-01 实测撞过一次：只改了 019 的注释，
+  -- remote-stack.sh 起 core 就报"已应用但内容已变"。**以本处为准。**
+  base_url        TEXT NOT NULL UNIQUE,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
+  catalog_sync_seq BIGINT NOT NULL DEFAULT 0 CHECK (catalog_sync_seq >= 0), -- 可靠目录成功轮次（FR-126）
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -168,8 +182,12 @@ CREATE TABLE channel_model_catalog (
   model_name    TEXT NOT NULL,               -- 上游原始名
   input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
   output_price  nonneg_usd,
+  -- billing_unit：上面两列的**口径**（第 46 轮真实数据补，见下方说明）
+  billing_unit  TEXT CHECK (billing_unit IN
+                  ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
   PRIMARY KEY (channel_id, model_name)
 );
 
@@ -417,7 +435,11 @@ CREATE TABLE price_versions (
   input_price     nonneg_usd NOT NULL,        -- 每计费单位（归一为美元）
   output_price    nonneg_usd NOT NULL,
   cache_price     nonneg_usd,                 -- 缓存价（走折扣）
-  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
+  -- billing_unit：可空 + CHECK，与 channel_model_catalog **同一套定义**（018 对齐）。
+  -- ⚠️ 原为 `NOT NULL DEFAULT 'per_1m_token'`，与 §1.3bis 的「无价则口径留 NULL、
+  --    不补默认值」直接矛盾 —— 而**本表才是成本公式读的那张**。详见 018 头部。
+  billing_unit    TEXT CHECK (billing_unit IN
+                    ('per_1m_token','per_1k_token','per_token','per_call')),
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
   data_source     TEXT NOT NULL,              -- auto_collect / manual
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）
@@ -679,15 +701,15 @@ CREATE INDEX idx_req_tenant_level   ON requests(tenant_id, sla_level, created_at
 CREATE TABLE subscription_plans (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  external_plan_id TEXT,                      -- 上游 planId（ASXS）/ group_id（sub2api）
-  name            TEXT NOT NULL,              -- ASXS planName / sub2api plan.name（如「每日90刀」）
-  -- 固定费用（FR-033）：sub2api plans.price / ASXS products.priceCnyCent，归一为美元
+  external_plan_id TEXT,                      -- 上游 planId / group_id（sub2api）
+  name            TEXT NOT NULL,              -- 上游 planName / sub2api plan.name（如「每日90刀」）
+  -- 固定费用（FR-033）：sub2api plans.price / 自建站的 priceCnyCent，归一为美元
   fixed_fee       nonneg_usd NOT NULL,
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称（FR-018）
-  -- 有效期（FR-033）：sub2api validity_days×unit / ASXS durationDays
+  -- 有效期（FR-033）：sub2api validity_days×unit / 自建站的 durationDays
   validity_days   INTEGER,
-  billing_period  TEXT,                       -- daily/weekly/monthly（ASXS limits.limitType + windowMode=fixed）
-  -- 周期包含额度（FR-033）：ASXS limits.limitMicros / sub2api group.*_limit_usd
+  billing_period  TEXT,                       -- daily/weekly/monthly（上游 limits.limitType + windowMode=fixed）
+  -- 周期包含额度（FR-033）：上游 limits.limitMicros / sub2api group.*_limit_usd
   period_quota    nonneg_usd,
   supported_models JSONB,                     -- 支持模型（FR-033）
   -- 倍率（FR-033）：sub2api group.rate_multiplier + 高峰倍率
@@ -696,8 +718,8 @@ CREATE TABLE subscription_plans (
   peak_start      TEXT,                       -- peak_start（时段）
   peak_end        TEXT,
   peak_rate_multiplier NUMERIC(12,6),
-  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / ASXS fixedResetTime）
-  renewal_status  TEXT,                       -- 续订状态（FR-033）：ASXS renewalRule / renewAllowed
+  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / 上游 fixedResetTime）
+  renewal_status  TEXT,                       -- 续订状态（FR-033）：上游 renewalRule / renewAllowed
   -- 超额计费规则（FR-033）：sub2api 无超额概念 → 据实登记 'no_overage_block'（ISSUE-002 §3.2 结论2）
   overage_rule    TEXT NOT NULL DEFAULT 'unknown'
                     CHECK (overage_rule IN ('no_overage_block','metered','unknown')),
@@ -706,11 +728,11 @@ CREATE TABLE subscription_plans (
   usable_multiplier NUMERIC(12,6),            -- 用满倍率＝固定费用÷周期额度×分组倍率 → 调度排序
   actual_multiplier NUMERIC(12,6),            -- 实际倍率＝固定费用÷实际消耗×倍率 → 账务报表
 
-  -- ── 额度来源优先级（FR-033、术语§3；ASXS primarySource/secondarySource）──
+  -- ── 额度来源优先级（FR-033、术语§3；上游 primarySource/secondarySource）──
   primary_source  TEXT,                       -- 如 'subscription'
   secondary_source TEXT,                      -- 如 'balance' —— 判断订阅额度是否真会被消耗
 
-  -- ── 可主动重置额度（FR-033；ASXS dailyReset）：只读登记，不自动触发 ──
+  -- ── 可主动重置额度（FR-033；上游 dailyReset）：只读登记，不自动触发 ──
   active_reset_supported BOOLEAN NOT NULL DEFAULT false,
   active_reset_threshold_pct NUMERIC(5,2),    -- usageThresholdPercent（如 90）
   active_reset_daily_limit INTEGER,           -- dailyLimit（如 4 次/日）
@@ -729,14 +751,14 @@ CREATE TABLE user_subscriptions (
   -- 共享额度聚合键（FR-035，源码级确证 UpdateSubscriptionUsage(userID,groupID,cost)）
   ext_user_id     TEXT NOT NULL,              -- sub2api user_id
   group_id        TEXT NOT NULL,              -- sub2api group_id —— 共享额度按 (user_id,group_id) 归集，不按 Key
-  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / ASXS startsAt
+  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / 上游 startsAt
   expires_at      TIMESTAMPTZ,               -- expires_at / expiresAt（到期时间，FR-033）
   status          TEXT NOT NULL CHECK (status IN ('not_effective','active','expired','suspended','data_unknown')),
                                               -- 对齐 PRD §9.3 订阅状态 + sub2api active/expired/suspended
   -- 已用/剩余（FR-034）：区分订阅额度、现金余额、超额付费
-  used_quota      nonneg_usd,                 -- ASXS usedMicros/1e6
-  left_quota      nonneg_usd,                 -- ASXS leftMicros/1e6
-  remaining_days  INTEGER,                    -- ASXS remainingDays（到期紧迫度，FR-037）
+  used_quota      nonneg_usd,                 -- 上游 usedMicros/1e6（micros 类单位在适配器内归一）
+  left_quota      nonneg_usd,                 -- 上游 leftMicros/1e6
+  remaining_days  INTEGER,                    -- 上游 remainingDays（到期紧迫度，FR-037）
   data_source     TEXT NOT NULL,
   fetched_at      TIMESTAMPTZ NOT NULL,
   valid_until     TIMESTAMPTZ,                -- 人工 7 天有效（FR-011）
@@ -936,23 +958,24 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_id      BIGINT NOT NULL REFERENCES upstream_accounts(id),
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')),
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   cred_type       TEXT NOT NULL CHECK (cred_type IN
-                    ('newapi_access_token','sub2api_jwt','asxs_jwt','account_password')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / ASXS 7d JWT + 账号密码
+                    ('newapi_access_token','sub2api_jwt')),
+  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
   access_token    TEXT,
-  refresh_token   TEXT,                         -- 仅 Sub2API（24h JWT + refresh 无密码续期）
-  username        TEXT,                         -- ASXS 须账号密码重登 POST /api/manage/auth/login
-  password        TEXT,                         -- 明文（一期）
+  refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
-  token_expires_at TIMESTAMPTZ,                 -- Sub2API 24h / ASXS 168h；到期前阈值内续期
+  token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期
   -- 凭证互斥作废风险（ISSUE-002 §4）：NewAPI 重生令牌作废旧、Sub2API 并发刷新互斥
   refresh_lock_key TEXT,                        -- 按账号加互斥锁串行刷新
   status          TEXT NOT NULL DEFAULT 'valid'
                     CHECK (status IN ('valid','expiring','invalid','needs_relogin')),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT collector_credentials_refresh_lock_key_check
+    CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
 CREATE TABLE collector_snapshots (
@@ -989,14 +1012,14 @@ CREATE TABLE balance_signals (
   signal_evidence TEXT,                         -- 触发信号原文关键词（元数据，非正文）
   -- 配额状态（FR-118、ISSUE-001 假设5）：**未知默认保守排除**，由我方 selector 执行
   quota_status    TEXT CHECK (quota_status IN ('available','warning','exhausted','unknown')),
-  -- ↑ 由采集器按站型映射（NewAPI/Sub2API/ASXS 各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
+  -- ↑ 由采集器按站型映射（各家族各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
   --   ⚠️ 该保守默认是我方硬要求：任何上游或第三方组件的宽松默认（"未知即保留"）不得覆盖它。
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_cred_channel     ON collector_credentials(channel_id, status);
 
-CREATE UNIQUE INDEX idx_cred_channel_unique ON collector_credentials (channel_id);
+CREATE UNIQUE INDEX idx_cred_account_unique ON collector_credentials (account_id);
 
 CREATE INDEX idx_snap_scope       ON collector_snapshots(channel_id, scope_type, fetched_at DESC);
 

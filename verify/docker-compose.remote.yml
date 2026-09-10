@@ -1,0 +1,49 @@
+# 连**远程真实库**的本地运行栈。与 docker-compose.arm.yml 的关键差异：
+#
+# 1) 不起 postgres 容器，DATABASE_URL 指向内网 <internal-db-host>。
+#    那个库里有真实数据（65 渠道 / 2782 catalog / 203 分组），
+#    所以**没有 tmpfs、没有 down -v 能清掉的东西** —— `down` 只停容器，
+#    数据在远端不受影响。反过来说：这个栈里的任何写操作都是对真库的写。
+#
+# 2) 仍然只发布到 127.0.0.1。
+#    远程库的引入不改变管理面的边界：/admin/* 不经 Caddy(06 §1)，
+#    ADMIN_TOKEN 是认证、不是网络隔离，两层都要在。
+#
+# 3) 没有 mock 上游（CLAUDE.md §1）。
+#    真库里的 65 个渠道指向真站点，采集就该发真请求。这个栈跑的是只读验收
+#    （verify/ui/verify-remote.mjs），本来不点 Detect/sync。
+#
+# ⚠️ 迁移器行为已核对（internal/store/migrate.go:151-158）：已应用的文件
+#    checksum 一致就 continue，不重跑 DDL；不一致则 return error 且不执行。
+#    17/17 已逐个比对一致，故启动时不会动 schema（实测 applied:0 skipped:17）。
+#
+#    动过真库 schema 的只有两次，都是新文件而非改基线 —— 改基线会撞上面那条
+#    checksum 契约，让这个库直接起不来：
+#
+#    - 016（2026-08-30）删掉 28 张 P2/P3/P4 空表（应用前逐张数过行数，合计 0 行）。
+#      表/视图 55 → 27。
+#    - 017（2026-08-30）把 channels.site_family 与 collector_credentials.cred_type
+#      的 CHECK 收窄到注册表现役取值（删掉整族 asxs）。应用前数过：**0 行会被拒**。
+#
+#    两份文件头部各有理由。
+
+name: sla-remote
+
+x-core-env: &core-env
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 必须指向远程库}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置}
+  SLA_ADDR: ":8080"
+
+services:
+  sla-core:
+    image: ${SLA_IMAGE:?SLA_IMAGE 必须设置}
+    environment: *core-env
+    ports:
+      # 只绑回环，理由同上第 2 条
+      - "127.0.0.1:${CORE_PORT:-18290}:8080"
+    healthcheck:
+      # distroless 无 shell，只能 exec 形式直接跑二进制
+      test: ["CMD", "/sla-core", "-version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

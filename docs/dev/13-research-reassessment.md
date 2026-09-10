@@ -114,7 +114,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 
 | 维度 | 参考价值 |
 | --- | --- |
-| 取消传播 | [假设6 补验](../issues/ISSUE-001-tech-assumption-verification.md)实测证明其 mid-stream 取消**能传播到上游止损**（mock 侧立即 EPIPE）——AC-32 的可行性证据与实现参考 |
+| 取消传播 | [假设6 补验](../issues/ISSUE-001-tech-assumption-verification.md)实测证明其 mid-stream 取消**能传播到上游止损**（夹具侧立即 EPIPE）——AC-32 的可行性证据与实现参考 |
 | 延迟提交 | `deferredWriter.Commit()` 的提交时机控制，与我们"首字前可切换、提交后不可切换"（FR-078）同构 |
 | 反面教材 | 其 Codex 400 body-rewrite 隐藏重试**只留一条审计记录**——我们自研**不做隐藏重试**，一次外部调用严格对应一次上游调用 |
 
@@ -139,7 +139,7 @@ unexpected status 502 Bad Gateway: Unknown error, url: .../v1/responses
 | --- | --- | --- |
 | NewAPI | [ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 完全有效 | 说 OpenAI 协议；**2026-07-25 实测**：同一站 `gpt-5.5` 支持 `/v1/responses` 与 `/v1/chat/completions`，但**部分模型仅 Responses**（CC 返回 503）——自研层须按模型探测能力，不能假设两协议都通 |
 | Sub2API | 完全有效 | 同上 |
-| ASXS | 完全有效 | 一期未接执行 |
+| 某闭源自建站（已于 2026-08-29 移出支持范围） | 完全有效 | 一期未接执行 |
 
 **新增实测事实**（[07 §3bis](./07-axonhub-runtime-probes.md)）：真实上游 Responses 响应含 **35 个顶层字段**、`reasoning` item、`prompt_cache_key`/`prompt_cache_retention`、`usage.cached_tokens`——**这就是自研透传层要 100% 保真的目标**。
 

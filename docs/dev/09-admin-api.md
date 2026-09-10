@@ -21,7 +21,7 @@
 | **管理平面** | **`/admin/*`**、`/metrics` | **两层都要**：① 网络边界（Caddy 不代理，仅容器网络/本机可达）② **独立管理令牌** `ADMIN_TOKEN`（env 注入，非业务 Key，与 `gateway_clients` 无关） | 本篇；配置读写、策略、审计查询 |
 
 > ⚠️ **鉴权口径冻结（第 31 轮：09 说"独立管理令牌"、06 说"网络边界是唯一边界"，两处打架，直接决定 handler 要不要验权、失败返回什么、env 要不要加）**：
-> **两层都要,不是二选一**。理由：网络边界防的是外部;管理令牌防的是**同一台机器上的其它进程或容器**（本项目 compose 里还跑着 collector 与 mock，它们不该能改配置）。
+> **两层都要,不是二选一**。理由：网络边界防的是外部;管理令牌防的是**同一台机器上的其它进程或容器**（compose 里还跑着 collector、caddy、postgres，它们都不该能改配置）。
 > 一期不做的是**多用户/RBAC**（[15](./15-scope-and-preflight.md) 已确认仅本人使用），不是不做鉴权 —— 一把静态令牌成本几乎为零。
 > 缺失或错误的令牌一律 **401**；令牌**不得**出现在日志与 `/metrics`（[12 §6](./12-debuggability.md) 脱敏同标准）。
 
@@ -100,7 +100,7 @@ type ParamMeta struct {
 
 ---
 
-## 4bis. `config_params` 全量键清单（**权威来源**，第 31 轮自查）
+## 4bis. P1 `config_params` 键清单（**权威来源**）
 
 > 此前配置键散落在 01/02/03/05/06/14 十余处，**没有一份清单** —— 开发不知道迁移种子该初始化哪些、`/admin/config` 该校验哪些、漏掉一个只会在运行时以默认零值的形式静默出错。
 > **本表是唯一权威来源**：新增键必须先进本表。**一行一个完整 `param_key`，不得用 `a / b` 合并行或 `.x` 缩写**——迁移种子与 `/admin/config` 白名单都按本表逐行生成，合并行会漏键。`is_critical=true` 的走 [§3 二次确认](#3-二次确认流程fr-115-的核心is_criticaltrue-强制)。
@@ -140,6 +140,25 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 **`prev_value` 的写入点**：`apply` 插入新版本行时，把**当时生效行**的 `param_value` 抄进新行的 `prev_value`
 （FR-099 要的是"前后值"可查）；首次设置该键时为 NULL。它是审计字段，**不参与取值**。
+
+| 键 | 默认 | 关键项 | 用途 / 定义处 |
+| --- | --- | --- | --- |
+| **采集** ||||
+| `collector_request_interval_ms` | 200 | | 站内请求间隔 |
+| `collector_price_interval_h` | 6 | | 价格采集周期（小时） |
+| `collector_balance_interval_min` | 5 | | 余额采集周期（分钟） |
+| `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
+| `collector_catalog_interval_h` | 12 | | 渠道模型目录采集周期（小时，FR-126） |
+| `catalog_missing_rounds` | 3 | | 模型连续 N 轮未出现即判下架（FR-126/AC-40） |
+| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128） |
+| **管理鉴权** ||||
+| `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`** |
+
+**CI 断言**：迁移种子为七个数据库配置键插入行；`admin_token` 只来自环境；`/admin/config` 拒绝写入表外键。
+
+## 4ter. 后续阶段配置设计（非 P1 运行白名单）
+
+> 下表仅保留 P2/P3/P4 设计语义，不生成代码、不种子、不被 P1 管理 API 接受。
 
 | 键 | 默认 | 关键项 | 用途 / 定义处 |
 | --- | --- | --- | --- |
@@ -210,7 +229,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `collector_keyquota_interval_min` | 30 | | Key 额度采集周期（分钟） |
 | `collector_catalog_interval_h` | 12 | | 渠道模型目录采集周期（小时，FR-126）。比价格稀疏——目录变动频率远低于价格 |
 | `catalog_missing_rounds` | 3 | | 模型连续 N 轮未出现即判下架并告警（FR-126/AC-40）。⚠️ **用轮数而非时长**：采集周期本身可配，轮数对周期变化免疫。**缺此键会静默取 0 → 每轮都判下架**（第 45 轮补，AC-40 早已声称"可配、默认 3"却从未登记） |
-| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128）。间隔内再调返回 429 且不打上游（[§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)） |
+| `sync_min_interval_s` | 60 | | 同渠道手动 sync 的最小间隔（秒，FR-128）。间隔内再调返回 429 且不打上游；**窗口只由触达过上游的尝试起算**，前置失败返 422 不占窗口（[§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)） |
 | **执行面（第 31 轮补：以下键被 02/03/12 引用但未进本表，而本表会拒绝表外键 → 直接 400）** ||||
 | `takeover_buffer_max_bytes` | 262144 | | T2 缓冲上限，达到即强制提交（[15 T2](./15-scope-and-preflight.md)、[03 §3.5](./03-upstream-layer.md)） |
 | `takeover_buffer_max_ms` | 5000 | | 同上，时间维 |
@@ -227,9 +246,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `ledger_batch_commit_enabled` | `false` | | 组提交总开关（[14 §2ter](./14-acceptance-matrix.md)） |
 | `ledger_batch_commit_max_size` | 16 | | 单事务最多合并几个请求 |
 | `ledger_batch_commit_linger_ms` | 2 | | 攒批等待上限，**不得超 2ms** |
-| `admin_token` | 由 env `ADMIN_TOKEN` 注入 | ✅ | 管理面令牌，**不落 `config_params`**（避免自己改自己）；此处仅登记其存在 |
-
-**CI 断言**：迁移种子必须为上表**每一个键**插入一行 `config_params`；`/admin/config` 拒绝写入表外的键（防拼写错误静默生效）。
+> 该历史表不参与 P1 CI 与运行配置。
 
 ---
 
@@ -239,20 +256,22 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 ### 5.0 P1 端点：上游资产采集与管理（FR-122~128）
 
-> 这 10 个端点构成 P1 的**全部对外面**（管理平面）。P1 **不新增任何 `/v1/*` 端点**。
+> 这 11 个端点构成 P1 的**全部对外面**（管理平面）。P1 **不新增任何 `/v1/*` 端点**。
 
 | 端点 | 作用 | 阶段 |
 | --- | --- | --- |
 | `GET /admin/channels`、`POST /admin/channels`、`PATCH /admin/channels/{id}` | 渠道 CRUD。此前只能经 `/admin/bindings` 间接建渠道，无独立管理面 | **P1** |
 | `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / **异常项计数**（FR-128 展示面、FR-129 并入）。<br>**异常项的构成（第 45 轮定义——它被三处引用却从未定义）**：① 数据陈旧（`fetched_at` 超对应 `collector_*_interval` 的 2 倍）；② `Degraded` 结果的 `MissingFields` 待人工补录（[04 §3.4bis](./04-collector-adapter.md)）；③ 上游存在但库中未登记的 Key（[02 §1.3bis](./02-data-model.md)）；④ 疑似下架模型（`catalog_missing_rounds` 已达阈值）；⑤ 凭证状态非 `valid`（`collector_credentials.status`）；⑥ Key 状态非 `active` 或已过期。**逐类给出计数与可下钻的列表**，不合并为一个总数——否则运维看到"异常 7"却不知道该修什么 | **P1** |
-| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现 | **P1** |
+| `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现；与周期采集共用同一 Runner | **P1** |
 | `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
-| `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；可设 `channel_group_id` | **P1** |
-| `POST /admin/keys/{id}/rotate`、`POST /admin/keys/{id}/disable` | Key 轮换与停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
+| `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；PATCH 替换 `secret` 即完成轮换；可设 `channel_group_id` | **P1** |
+| `POST /admin/keys/{id}/disable` | Key 停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
 | `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（FR-125）：读 `collector_snapshots(scope_type='key')` 的 payload 时序，返回剩余/已用/请求数曲线 | **P1** |
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
+| `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
+| `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容） | **P1** |
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
 
@@ -296,20 +315,20 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
     {"capability":"keys","status":"partial","elapsed_ms":900,"rows":3,
      "failed":1,"error":"key 12: 401 unauthorized"},
     {"capability":"pricing","status":"ok","elapsed_ms":760,"rows":214},
-    {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214},
-    {"capability":"subscription_quotas","status":"unsupported"}
+    {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214}
   ]
 }
 ```
 
-- `status` 枚举：`ok` / `partial`（仅 `keys` 可能，部分 Key 失败）/ `failed` / `unsupported` / `skipped`（被限流跳过）。
-- **`unsupported` 必须出现在 `items` 里**，不能省略该项——AC-38 要求"不支持的项返回明确的不支持而非静默留空"，且须与 `Capabilities()` 声明一致。
-- **`degraded` 能力的 status 取值**：见 [04 §3.4bis](./04-collector-adapter.md) —— 采到部分即 `ok` 并在 `note` 说明缺哪些字段，采不到即 `failed`；**`degraded` 是能力声明，不是运行时状态**。
+- `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
+- P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
+- **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 
 **限流与并发**：
 
 - **同渠道最小间隔** `sync_min_interval_s`（默认 60，`config_params`）：间隔内再次调用返回 **429** 且 `items` 全为 `skipped`，不打上游。
-- **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。
+- ⚠️ **窗口只由"真的触达了上游"的尝试起算**：站型未知、连接池取不到连接、**凭证未登记**都在发出第一个上游请求前失败，此类返回 **422**（配置问题，非上游故障）且 `items` 全为 `skipped`，**不起算窗口**。否则「建渠道 → 采集 → 提示缺凭证 → 登记 → 再采集」这条首跑路径会被自己上一次的失败挡满一个间隔（[P1-evidence §4 第 15 项](../acceptance/P1-evidence.md)）。采集层用 `collector.ErrPrecondition` 显式声明"未触达上游"，**接口层不靠匹配错误文案判断**。
+- **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。互斥与限流是两件事：**前置失败也必须解互斥**，否则一次本地失败会把渠道永久锁死。
 - 单项内的请求间隔仍受 `collector_request_interval_ms` 约束（[04 §6](./04-collector-adapter.md)）。
 
 ### 5.1 其余端点（P2~P3）
@@ -339,7 +358,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/fault-domains` | 列出故障域（`kind` + `label` 作显示名）及其当前封禁态、域下 binding 数与健康分布（[02 §1.2](./02-data-model.md)） | M3 |
 | `POST /admin/fault-domains/{id}/disable` | **人工隔离整个故障域**：置 `disabled_until`（入参 `duration_sec`，**省略 = NULL = 无限期，须人工恢复**）+ `disabled_reason`。用于已知供应商维护窗口等自动判据覆盖不到的场景（[05 §5bis.1bis](./05-scheduling-and-operations.md)） | M3 |
 | `POST /admin/fault-domains/{id}/enable` | 解除封禁（置 `disabled_until=NULL`）。⚠️ 若集中失败仍在持续，下一轮健康聚合会**再次自动封禁**——这是预期行为，不是解封失败 | M3 |
-| `POST /admin/collector/credentials` | 采集凭证登记（[04](./04-collector-adapter.md)、明文一期） | M3 |
+| ~~`POST /admin/collector/credentials`~~ | 已前移到 P1，见 §5.0 | P1 |
 | `POST /admin/clients` | **签发网关调用方凭证**：生成随机明文 → 存哈希 → **明文只返回一次**；可设 `allowed_aliases`/`quota_daily_usd`（NULL=不限额）/`rpm_limit`（**NULL=不限速**，此时跳过 RPM 闸）/`expires_at`/**数据许可属性 `tenant_id`/`region`/`business_tier`/`data_class`**（[02 §2bis](./02-data-model.md)） | **M0** |
 | `GET /admin/clients` | 列出调用方（只显示 `secret_prefix`，**永不回显完整凭证**，FR-094） | **M0** |
 | `POST /admin/clients/{id}/revoke` | 吊销（置 `status=revoked` + 记录 `revoked_at`/`revoke_reason`），立即生效。⚠️ **遇 `is_system=true` 返回 403** —— 内置 `system-probe` 被误吊销会让主动测活整体静默失效 | **M0** |

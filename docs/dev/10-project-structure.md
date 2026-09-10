@@ -15,43 +15,54 @@
 ## 1. 单仓布局
 
 ```
+下表 ✅ = 已存在，⏭ = 该阶段开工时新建。**空占位包不预先创建**
+（2026-08-29：原先七个只含 `doc.go` 的占位包已删 —— 空包不编译出任何东西，
+`go list ./...` 里多七行反而让"哪些模块真做了"读不出来。目录设计仍以本表为准）。
+
+```
 multi-upstream-ai-gateway-sla/
 ├── docs/                      # 现有文档(需求/选型/dev),不动
-├── verify/                    # mock 上游场景集(转为透传层测试夹具)
+├── verify/                    # 验收脚本;上游走真站点(CLAUDE.md §1),仅 SSE 流夹具是造的
+├── web/                    ✅ # 管理界面 Vue3 工程(源码);产物 embed 进二进制
 ├── go.mod                     # module: github.com/wuhao1477/multi-upstream-ai-gateway-sla
 ├── go.sum
 ├── Makefile                   # build/test/lint/migrate 入口
 ├── cmd/
-│   ├── sla-core/              # 主服务入口(数据平面+管理平面同进程)
-│   │   └── main.go
-│   └── collector/             # 采集器子命令入口(06 已定:一期同二进制子命令)
-│       └── main.go
+│   ├── sla-core/           ✅ # 主服务入口(数据平面+管理平面同进程)
+│   ├── collector/          ✅ # 采集器子命令入口(06 已定:一期同二进制子命令)
+│   └── migrate/            ✅ # 迁移子命令(容器 entrypoint 与本地都用它)
 ├── internal/                  # 全部业务代码(internal 禁外部 import)
-│   ├── protocol/              # 对外 OpenAI CC/Responses 端点、透传、会话标识提取(02 §4.5)
-│   ├── policy/                # 别名→策略解析(FR-062/117)
-│   ├── selector/              # 候选过滤+排序+RoutePlan(05 §1)
-│   ├── executor/              # 流式执行、内容感知首字、期限、取消(03/05 §1.4;AC-31/32)
-│   ├── ledger/                # 逐 Attempt 账本 + outbox 持久化协议(01 §5.1, 02 §9.2bis)
-│   ├── steward/               # 冷却/样本门槛/余额信号/告警/错误预算(05 §3~5)
-│   ├── upstream/              # 自研上游对接层(03):字节透传 + 旁路观察
+│   ├── protocol/           ⏭ # 对外 OpenAI CC/Responses 端点、透传、会话标识提取(02 §4.5)
+│   ├── policy/             ⏭ # 别名→策略解析(FR-062/117)
+│   ├── selector/           ⏭ # 候选过滤+排序+RoutePlan(05 §1)
+│   ├── executor/           ⏭ # 流式执行、内容感知首字、期限、取消(03/05 §1.4;AC-31/32)
+│   ├── ledger/             ⏭ # 逐 Attempt 账本 + outbox 持久化协议(01 §5.1, 02 §9.2bis)
+│   ├── steward/            ⏭ # 冷却/样本门槛/余额信号/告警/错误预算(05 §3~5)
+│   ├── upstream/           ⏭ # 自研上游对接层(03):字节透传 + 旁路观察
 │   │   ├── client.go          # Client 接口(03 §2)
 │   │   ├── passthrough.go     # 字节透传管道 + tee
 │   │   └── ssescan.go         # SSE 扫描器 + ShouldCommit/HasTTFTOutput 双判定(03 §3.2)
-│   ├── collector/             # CollectorAdapter 接口 + newapi/sub2api/asxs/ 实现(04)
+│   ├── collector/          ✅ # CollectorAdapter 接口 + 各家族实现(04)
 │   │   ├── collector.go       # 接口(04 §1)
-│   │   ├── newapi/ sub2api/ asxs/
-│   ├── store/                 # PG 访问层、schema 迁移、UUIDv7、快照重建(02)
-│   ├── admin/                 # 管理平面 /admin/* API + 二次确认(09)
-│   ├── config/                # config_params 读写、ParamMeta 元数据(09 §4)
-│   └── bootstrap/             # 启动选主(PG advisory lock)、迁移与快照初始化(06 §2.2)
-├── migrations/                # SQL 迁移(sqlc 对齐)
+│   │   ├── registry.go        # 站型注册表:加站型的唯一落点(04 §7bis)
+│   │   ├── register_*.go      # 一家族一份 Registration,与下面的实现一一对应
+│   │   └── newapi.go sub2api.go            # 平铺,一家族一文件(不再分子包:
+│   │                          #   各族共用 httpx/auth/detect,分包只会互相 import)
+│   │                          #   接一个自研站 = 加 register_X.go + X.go 两个文件,
+│   │                          #   本目录其它文件都不用改(04 §7bis)
+│   ├── store/              ✅ # PG 访问层、schema 迁移、UUIDv7、快照重建(02)
+│   ├── admin/              ✅ # 管理平面 /admin/* API + 二次确认(09)
+│   ├── config/             ✅ # config_params 读写、ParamMeta 元数据(09 §4)
+│   ├── health/             ✅ # /healthz(只看实例自身,不看渠道健康,01 §6)
+│   └── bootstrap/          ✅ # 启动选主(PG advisory lock)、迁移与快照初始化(06 §2.2)
+├── migrations/                # SQL 迁移(编号顺序应用,校验和锁定)
 ├── deploy/
 │   ├── docker-compose.yml     # Caddy + 2×core + PG + collector(06 §1)
 │   ├── Caddyfile
 │   └── .env.example
 └── .github/workflows/
-    └── gate.yml            # 交付门禁：直接调 verify/gate.sh(文档12类+DDL真跑)
-                            # M0 起在此补 go build/test/lint 与 FR-112、脱敏断言
+    ├── gate.yml            # 交付门禁：verify/gate.sh(文档12类+DDL真跑) + go build/test/lint
+    └── build-arm.yml       # arm64 镜像构建(云端真机)
 ```
 
 **包边界原则**：一个 `internal/` 子包对应 [01 §2](./01-architecture.md) 的一个模块，**依赖单向**：`protocol → policy → selector → executor → upstream`；`ledger`/`steward` 读写 `store`；`store` 不反向依赖业务包。
@@ -67,39 +78,52 @@ multi-upstream-ai-gateway-sla/
 | `executor` | 旁路观察 SSE 事件、内容感知 TTFT、期限到 `Close()` 传播取消（**不重组字节流**） | 03 §3、AC-31/32 |
 | `ledger` | Attempt 账本(单一真相源)、**outbox 写入与崩溃重放**、取消口径归并、gateway_overhead 计算 | 02 §4/§9.2bis、01 §5.1 |
 | `upstream` | 自研直连：字节透传、SSE 扫描、取消传播、usage 提取、协议能力探测 | 03 |
-| `store` | PG 访问（**`pgx` + `sqlc`**：手写 SQL 生成类型安全代码，零反射）、迁移、UUIDv7、月分区、内存快照重建；决策路径只读快照 | 02 §9、10 开放点3 |
+| `store` | PG 访问（**手写 `pgx`**：一函数一条 SQL，收 `store.DBTX` 故能跑在 conn 或 tx 上；[§5 开放点 3](#5-开放点) 2026-08-29 翻掉 sqlc）、迁移、UUIDv7、月分区、内存快照重建；决策路径只读快照 | 02 §9、10 开放点3 |
 | `bootstrap` | 启动 `pg_try_advisory_lock` 选主 → 取到锁的 core 跑迁移与初始化，其余跳过轮询就绪 | 06 §2.2 |
 | `admin`/`config` | `/admin/*` 管理 API、二次确认、ParamMeta | 09 |
 
 ---
 
-## 2bis. sqlc 查询契约（M0/M1 开工清单）
+## 2bis. 存储层查询契约（M0/M1 开工清单）
 
-> ⚠️ **开发视角审查第 27 轮 [P1]**：[02](./02-data-model.md) 里全是**事务骨架**（带 `:参数` 的多语句 CTE），它们不是 sqlc 能直接生成的形态。开发拿到手第一步就卡在"`queries.sql` 该怎么写"。本节给出最小清单与切分原则，**不重复 02 的 SQL 正文**（那里是唯一真相源）。
+> ⚠️ **2026-08-29 改写**：本节原名「sqlc 查询契约」，给出的是 `queries.sql` 的
+> `-- name:` 清单。**存储层已翻案为纯手写 pgx**（[§5 开放点 3](#5-开放点)），
+> 故清单改为"该有哪些函数"而非"该有哪些 sqlc 注解"。**这一节的存在理由没变** ——
+> 原文说的「[02](./02-data-model.md) 里全是事务骨架（带 `:参数` 的多语句 CTE），
+> 开发拿到手第一步就卡在"该怎么写"」对手写同样成立，只是卡的地方从
+> "`queries.sql` 怎么写"变成"哪些该是事务函数"。**不重复 02 的 SQL 正文**
+> （那里是唯一真相源）。
 
-**切分原则**：
+**切分原则**（这张表原本就是翻案的依据 —— 三种形态里有两种 sqlc 表达不了）：
 
 | 形态 | 放哪 | 理由 |
 | --- | --- | --- |
-| 单语句查询/写入 | `queries.sql`，由 sqlc 生成 | 类型安全、零反射 |
-| **多语句事务**（dispatch / finalize / recovery / adjust / closeout） | **手写 `pgx` 事务函数**，内部逐条调 sqlc 生成的语句或直接 `tx.Exec` | sqlc 不表达事务边界与"按行数分支"；而这套设计的正确性**恰恰依赖行数判定**（[02 §2bis](./02-data-model.md) 三态判定） |
-| 应用层断言 | Go 代码 | `settled=1 / already_applied / conflict` 这类分支 sqlc 无法生成 |
+| 单语句查询/写入 | 一个函数一条 SQL，收 `store.DBTX` | 同一条 SQL 能跑在 `*pgx.Conn` 或 `pgx.Tx` 上 —— 调用方决定要不要事务，被调函数不管 |
+| **多语句事务**（dispatch / finalize / recovery / adjust / closeout） | `conn.Begin(ctx)` + `defer tx.Rollback(ctx)`，逐条 `tx.Exec` | 事务边界与"按行数分支"必须在 Go 侧；而这套设计的正确性**恰恰依赖行数判定**（[02 §2bis](./02-data-model.md) 三态判定） |
+| 应用层断言 | Go 代码 | `settled=1 / already_applied / conflict` 这类分支只能在 Go 里判 |
+
+⚠️ **收 `store.DBTX` 而不是 `*pgx.Conn`** 是第三条的落地形态：`importOne`
+（2026-08-29）要把四处写入收进一个事务，靠这个接口做到了 **29 处现有调用一行未改**。
+新写查询函数默认收 `DBTX`；只有"必须自己取连接"的（如采集侧续期，无外层事务）才收
+`*Pool`，且要在注释里说明为什么。
 
 **M0 必需（对应 AC-27 / AC-33-M0）**：
 
-| `-- name:` | 类型 | 说明 |
+| 函数 | 形态 | 说明 |
 | --- | --- | --- |
-| `CreateGatewayClient` | `:one` | 签发凭证，返回 id 与 `secret_prefix`（**明文只在应用层返回一次，不入库**） |
-| `GetClientBySecretPrefix` | `:many` | 按前缀取候选行，哈希校验在 Go 侧做（避免把明文送进 SQL） |
-| `ListGatewayClients` | `:many` | **不得** SELECT `secret_hash`（FR-094 不回显） |
-| `RevokeGatewayClient` | `:exec` | 置 `status='revoked'` + `revoked_at`/`revoke_reason` |
-| `IncrementRPMWindow` | `:one` | [02 §2bis](./02-data-model.md) B 阶段原子语句，返回 `request_count`；**0 行 = 429** |
-| `RecordAuthRejection` | `:exec` | `ON CONFLICT ... DO UPDATE` 分钟聚合；**必须能写匿名 401（两列 NULL）** |
-| `UpsertConfigParam` / `ListConfigParams` | `:exec` / `:many` | `/admin/config` 读写 + 二次确认标记 |
+| `CreateGatewayClient` | 单语句，返回 1 行 | 签发凭证，返回 id 与 `secret_prefix`（**明文只在应用层返回一次，不入库**） |
+| `GetClientBySecretPrefix` | 单语句，多行 | 按前缀取候选行，哈希校验在 Go 侧做（避免把明文送进 SQL） |
+| `ListGatewayClients` | 单语句，多行 | **不得** SELECT `secret_hash`（FR-094 不回显）。同类守卫已落地：`internal/store/secret_render_test.go` 断言 `upstream_keys` 读路径不选明文 |
+| `RevokeGatewayClient` | 单语句 | 置 `status='revoked'` + `revoked_at`/`revoke_reason` |
+| `IncrementRPMWindow` | 单语句，返回 1 行 | [02 §2bis](./02-data-model.md) B 阶段原子语句，返回 `request_count`；**0 行 = 429** |
+| `RecordAuthRejection` | 单语句 | `ON CONFLICT ... DO UPDATE` 分钟聚合；**必须能写匿名 401（两列 NULL）** |
+| `UpsertConfigParam` / `ListConfigParams` | 单语句 | `/admin/config` 读写 + 二次确认标记。**已实现**：`internal/store/config_write.go`（`ApplyConfig` 是事务函数）与 `config_read.go` |
 
-**M1 追加（账本与配额）**：`CreateModel`（强校验两个 token 上界非空）、`InsertRequestAuthenticated`（C′ 阶段）、`SetRequestStage`、`DispatchFirstAttempt`（**事务函数**）、`DispatchNextAttempt`（**事务函数**）、`CloseoutAttempt`（**事务函数**）、`FinalizeUpstream` / `FinalizeAbort` / `FinalizeRecovery` / `FinalizeDelivery`（**均为事务函数**）、`AdjustReservation`（**事务函数**）、`ScanStaleRequests`（`:many`，含 outbox 反连接）。
+**M1 追加（账本与配额）**：`CreateModel`（强校验两个 token 上界非空）、`InsertRequestAuthenticated`（C′ 阶段）、`SetRequestStage`、`DispatchFirstAttempt`（**事务函数**）、`DispatchNextAttempt`（**事务函数**）、`CloseoutAttempt`（**事务函数**）、`FinalizeUpstream` / `FinalizeAbort` / `FinalizeRecovery` / `FinalizeDelivery`（**均为事务函数**）、`AdjustReservation`（**事务函数**）、`ScanStaleRequests`（多行，含 outbox 反连接）。
 
-> **命名与 02 的对应关系必须写在 `queries.sql` 注释里**（如 `-- 对应 02 §2bis D 阶段`），否则改了 02 没人知道该同步哪条查询。
+> **命名与 02 的对应关系必须写在函数注释里**（如 `// 对应 02 §2bis D 阶段`），
+> 否则改了 02 没人知道该同步哪个函数。P1 的现有函数已按此办（如 `sink.go` 的
+> `SavePricing` 注明 02 §1.3bis 的口径规则）。
 
 ---
 
@@ -108,10 +132,10 @@ multi-upstream-ai-gateway-sla/
 | 目标 | 内容 |
 | --- | --- |
 | `make build` | 编译 `cmd/sla-core`、`cmd/collector` 为静态二进制 |
-| `make test` | 单测；含 SSE 扫描器判定用例（MOCK 场景集）与 outbox 重放幂等性用例 |
+| `make test` | 单测；含 SSE 扫描器判定用例（STREAM 场景集）与 outbox 重放幂等性用例 |
 | `make lint` | `golangci-lint` |
 | `make migrate` | 应用 `migrations/`；本地/CI 用一次性 PG |
-| **CI 门禁** | 构建 + 测试 + lint + **`verify/gate.sh`**（文档一致性 6 类检查 + DDL 真跑，见 [02 §9.1bis](./02-data-model.md)）+ **DDL 真跑**（`verify/ddl-check.sh`：抽取 02 的全部 DDL 在 postgres:16 上执行 + 匿名 401 聚合回归；M0 后扩为 `migrations/` + 建分区 + `sqlc generate`，[02 §9.1bis](./02-data-model.md)）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)） |
+| **CI 门禁** | 构建 + 测试 + lint + **`verify/gate.sh`**（文档一致性 13 类检查 + DDL 真跑，见 [02 §9.1bis](./02-data-model.md)）+ **DDL 真跑**（`verify/ddl-check.sh`：抽取 02 的全部 DDL 在 postgres:16 上执行 + 匿名 401 聚合回归）+ **迁移集成测试**（`verify/test-migrate.sh` 8 步：迁移/种子/幂等/分区母表/CHECK 与注册表一致/两处 `billing_unit` 列定义相等/导入失败原子性）+ **FR-112 不可存列断言** + 别名/config 加载冒烟 + **凭证脱敏断言**（日志/抓包不得出现 `sk-` 前缀，[15 O3](./15-scope-and-preflight.md)；CI 侧另有 `internal/store/secret_render_test.go` 三条源码断言） |
 | 镜像 | `cmd/sla-core` 打最小镜像（distroless/alpine） |
 
 ---
@@ -132,7 +156,7 @@ multi-upstream-ai-gateway-sla/
 | pg_dump/restore 演练脚本 | `deploy/` 脚本 |
 | bootstrap 选主（避免双 core 重复迁移） | `internal/bootstrap` advisory lock；建议加双 core 并发冷启动的集成测试 |
 
-**移入 M1**（此前误列在本表）：上游直连打通与 Responses 保真 diff（`internal/upstream`）、`verify/mock_upstream.py` 场景集接入 CI。
+**移入 M1**（此前误列在本表）：上游直连打通与 Responses 保真 diff（`internal/upstream`）、`verify/sse_stream_fixture.py` 场景集接入 CI。
 **M0 期间并行但非门禁**：Codex 实机 spike（[15 T1](./15-scope-and-preflight.md)）。
 
 ---
@@ -143,8 +167,42 @@ multi-upstream-ai-gateway-sla/
 | --- | --- | --- |
 | 1 | Go 版本锁定策略 | ✅ **已定**：`go.mod` 声明 `go 1.2x` 跟随稳定版；不锁死 patch，CI 用固定 minor |
 | 2 | 单 module vs 多 module | ✅ **已定**：单 module（个人项目、包间共享类型多），`internal/` 隔离 |
-| 3 | 存储访问层选型 | ✅ **已定（2026-07-23）：`pgx` + `sqlc`** —— pgx 做驱动、sqlc 从手写 SQL 生成类型安全 Go 代码。零运行时反射、账本类重查询可控、与"决策只读内存快照 / **关键账本同步直写、其余经 outbox 异步**"的写路径分工契合（[01 §5.1](./01-architecture.md)、[02 §2bis](./02-data-model.md)）；避免重 ORM 的反射开销与不可控查询。迁移用纯 SQL（`migrations/`）+ sqlc 对齐 |
+| 3 | 存储访问层选型 | ⚠️ **2026-08-29 翻案：纯手写 `pgx`，不用 sqlc**（原决策见下方 ⚠️ 段） |
 | 4 | 配置来源（文件 vs env vs config_params） | ✅ **已定**：基础设施走 env（[06 §4](./06-deployment-and-operations.md)），业务策略走 `config_params`（[09](./09-admin-api.md)），不混 |
+
+⚠️ **开放点 3 的翻案记录（2026-08-29）**
+
+原决策（2026-07-23）：**`pgx` + `sqlc`** —— pgx 做驱动、sqlc 从手写 SQL 生成
+类型安全 Go 代码；理由是零运行时反射、账本类重查询可控、避免重 ORM 的反射开销。
+**迁移用纯 SQL（`migrations/`）+ sqlc 对齐。**
+
+实际实现是**纯手写 pgx**：`go.mod` 无 sqlc、无 `sqlc.yaml`、无 `queries.sql`、
+`Makefile` 无 `sqlc generate`。原决策的**驱动那一半仍然成立**（pgx 就是在用），
+翻掉的是**代码生成那一半**。
+
+**这条翻案此前从未被记录**，是 2026-08-29 发版复评从
+[#2](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/2) 与
+[#11](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/11)
+**两个已关 issue 的未勾选完成标准**里翻出来的（`- [ ] sqlc generate 成功且编译通过`、
+`- [ ] sqlc generate 后无未提交 diff`）。**教训是"挂在 issue 上的欠账会随 issue
+关闭一起消失"** —— 记在文档里才追得回来。
+
+**为什么手写胜出**（三条，前两条本文件 §2bis 早就自己列过）：
+
+1. **事务边界 sqlc 不表达。** 本仓库现有 7 处 `Begin(ctx)`（`migrate` / `config_write` /
+   `seed` / `sink` / `upstream_write` / `admin.importOne`），其中 `importOne` 是
+   2026-08-29 才加的：它要把四处写入收进一个事务，而 sqlc 生成的函数各自独立。
+2. **按行数分支 sqlc 不生成。** `settled=1 / already_applied / conflict` 这种三态
+   判定（[02 §2bis](./02-data-model.md)）是这套设计正确性的核心。
+3. **同一条 SQL 要能跑在 conn 或 tx 上。** `store.DBTX` 接口（`*pgx.Conn` 与
+   `pgx.Tx` 都满足）让 29 处调用点在引入事务时**一行未改**。sqlc 的生成物绑定
+   `DBTX` 是它自己那套，跨 conn/tx 复用要额外包装。
+
+**放弃 sqlc 的代价，以及为什么可接受**：sqlc 把"SELECT 列数/类型与 `Scan` 参数
+不匹配"从**运行时**错误变成**编译**错误。手写之后这道防线只能靠"每个查询都被真跑过"。
+2026-08-29 逐个数过：`internal/store` 带 `.Scan(` 的导出函数 **22 个，生产路径可达
+22 个，仅测试可达 0，无调用方 0** —— 没有一个"没人跑过的查询"在等着第一次运行时报错。
+⚠️ **这个论据需要维护**：新增查询函数时若它一时无人调用，那道防线就出现第一个缺口。
 
 ---
 

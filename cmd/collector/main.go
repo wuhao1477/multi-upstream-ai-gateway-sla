@@ -8,19 +8,28 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 var version = "dev"
 
 func main() {
 	var (
-		once    = flag.Bool("once", false, "跑一轮后退出（供 CI 与手动排查用）")
+		once    = flag.Bool("once", false, "跑一轮后退出")
+		dsn     = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
 		showVer = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
@@ -33,23 +42,62 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	snap := config.NewSnapshot(nil)
-	if err := snap.Validate(); err != nil {
-		logger.Error("配置校验失败", "err", err)
+	if err := run(*dsn, *once, logger); err != nil {
+		logger.Error("collector 退出", "err", err)
 		os.Exit(1)
 	}
+}
 
-	interval, err := snap.Int("collector_request_interval_ms")
-	if err != nil {
-		logger.Error("读取采集间隔失败", "err", err)
-		os.Exit(1)
+func run(dsn string, once bool, logger *slog.Logger) error {
+	if dsn == "" {
+		return errors.New("缺少 DSN：设 DATABASE_URL 或用 -dsn")
 	}
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelStart()
+	pool, err := store.NewPool(startCtx, dsn)
+	if err != nil {
+		return fmt.Errorf("连接 PG: %w", err)
+	}
+	defer pool.Close()
+
+	conn, release, err := pool.Acquire(startCtx)
+	if err != nil {
+		return err
+	}
+	boot, err := bootstrap.Run(startCtx, conn, logger)
+	release()
+	if err != nil {
+		return fmt.Errorf("初始化: %w", err)
+	}
+	snap := boot.Snapshot
+	requestInterval, err := snap.Int("collector_request_interval_ms")
+	if err != nil {
+		return err
+	}
+	periods, err := collection.IntervalsFromSnapshot(snap)
+	if err != nil {
+		return err
+	}
+	httpClient := collector.NewClient(time.Duration(requestInterval) * time.Millisecond)
+	runner := collection.NewRunner(pool, httpClient)
+	service := collection.NewService(pool, runner, collection.NewSchedule(periods), logger)
 
 	logger.Info("collector 启动",
-		"version", version, "phase", "P1", "once", *once,
-		"request_interval_ms", interval)
+		"version", version, "phase", "P1", "once", once,
+		"request_interval_ms", requestInterval,
+		"balance_interval", periods.Balance,
+		"keyquota_interval", periods.KeyQuota,
+		"price_interval", periods.Price,
+		"catalog_interval", periods.Catalog)
 
-	// 采集实现随 #5（Detect+Auth）、#6（Groups/Keys）、#7（Pricing/Catalog）接入。
-	// 骨架阶段只验证配置可读 —— 这已经能挡住"键名写错"这类问题。
-	logger.Info("采集适配器尚未接入（#5/#6/#7），本轮无操作")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if once {
+		return service.RunOnce(ctx)
+	}
+	if err := service.Run(ctx); errors.Is(err, context.Canceled) {
+		return nil
+	} else {
+		return err
+	}
 }

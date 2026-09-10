@@ -23,7 +23,7 @@
 
 | 服务 | 镜像/构建 | 端口 | 依赖 | 备注 |
 | --- | --- | --- | --- | --- |
-| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做的是**多用户/RBAC**（仅本人使用），但**仍有一把静态 `ADMIN_TOKEN`**（[09 §1](./09-admin-api.md) 冻结：网络边界 + 管理令牌**两层都要**）。**两层缺一不可**：网络边界防外部，令牌防同机其它进程（compose 里还跑着 collector 与 mock） |
+| `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做的是**多用户/RBAC**（仅本人使用），但**仍有一把静态 `ADMIN_TOKEN`**（[09 §1](./09-admin-api.md) 冻结：网络边界 + 管理令牌**两层都要**）。**两层缺一不可**：网络边界防外部，令牌防同机其它进程（compose 里还跑着 collector、caddy、postgres） |
 | `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres | 无本地状态；`/healthz` 就绪探针；**内含自研上游透传层**（[03](./03-upstream-layer.md)）。**必须 ≥2 实例**（FR-110） |
 | `postgres` | postgres:16 | 5432 | — | 单库；账本/台账/价格/健康（单一真相源） |
 | `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
@@ -65,7 +65,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 | --- | --- |
 | sla-core 自身 | 常规发布流程：构建 → CI 全绿（含 FR-112 不可存列断言）→ 灰度一个实例 → 观察 → 全量 |
 | Go 依赖 | `go.mod` 锁定；升级前跑全量测试 |
-| **上游协议变更** | 真正需要盯的风险从"网关版本"变为"**上游协议/模型变更**"：`Probe()` 定期探测协议能力（[03 §8](./03-upstream-layer.md)）；`verify/mock_upstream.py` 的场景集作为回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort） |
+| **上游协议变更** | 真正需要盯的风险从"网关版本"变为"**上游协议/模型变更**"：`Probe()` 定期探测协议能力（[03 §8](./03-upstream-layer.md)）；`verify/sse_stream_fixture.py` 的场景集作为回归夹具（role-only / 空 SSE / 心跳 / 慢首帧 / abort） |
 | Codex 客户端演进 | 其 SSE 生命周期契约与响应头要求（[13 §1](./13-research-reassessment.md)）纳入回归测试；**字节透传使我们对客户端演进天然免疫**——上游发什么原样到达 |
 
 > 对比转向前：不再需要"锁 AxonHub tag + 每次升级跑六假设 harness + 核对 GraphQL 适配表"这一整套（[11 §1.4](./11-decision-full-selfbuilt.md)）。
@@ -154,7 +154,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 
 ## 7. M0 部署清单（退出标准）
 
-> ⚠️ **2026-07-26 裁决澄清**：此前本清单混入了上游相关项，与 [00](./00-overview-and-milestones.md) 的「M0 只做骨架与入站侧」冲突，开发无从判断 M0 到底要交付什么。**以下清单已按 00 对齐**——上游透传、35 字段 diff、mock 场景集全部移入 M1。
+> ⚠️ **2026-07-26 裁决澄清**：此前本清单混入了上游相关项，与 [00](./00-overview-and-milestones.md) 的「M0 只做骨架与入站侧」冲突，开发无从判断 M0 到底要交付什么。**以下清单已按 00 对齐**——上游透传、35 字段 diff、STREAM 流夹具场景集全部移入 M1。
 
 > ⚠️ **2026-07-27 再拆分（[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md) 交付切分后）**：本清单原本假定 M0 之后直接进 M1（网关），故把**别名种子、`system-probe`、AC-33 入站鉴权**一并列为 M0 门禁。但交付顺序已改为 M0 → **P1（采集与管理）** → P2（网关），而这三项**服务的都是 P2**：别名映射路由策略、`system-probe` 是探测凭证、AC-33 是 `/v1/*` 的入站鉴权 —— **P1 没有 `/v1/*`、不做路由**（ISSUE-005 §2 与 D7）。
 >
@@ -163,7 +163,7 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 **M0 门禁（P1 开工前必须全绿）**：
 
 - [ ] `docker compose up` 一键起全栈；`/healthz` 全绿。
-- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。**须反向确认管理面在容器网络内可用**，否则"外部 404"可能只是服务挂了而非未代理。
+- [ ] `Caddyfile` **只代理 `/v1/*` 与 `/healthz`**；`/admin/*` 与 `/metrics` 不可从外部到达（§1）。管理界面仅经 `127.0.0.1:${ADMIN_PORT:-8080}` 访问；须确认回环入口与容器网络内管理 API 均可用。
 - [ ] 停掉 sla-core-a，服务经 core-b 不中断（FR-110/AC-27）。⚠️ **M0/P1 阶段打 `/healthz`**（`/v1/*` 属 P2），P2 起改打 `/v1/chat/completions` 并**重跑 AC-27**（[14 AC-27](./14-acceptance-matrix.md)）。
 - [ ] 迁移与 `config_params` 种子幂等；**运维改过的值不被重启抹回**。
 - [ ] 双实例并发冷启动**只有一个执行迁移**（PG 咨询锁选主，§2.2）。
@@ -201,7 +201,7 @@ wire_api = "responses"
 
 - [ ] **Codex 实机 spike**（[15 T1](./15-scope-and-preflight.md)）：临时最小透传脚本 + 真实 Codex CLI + 真实上游抓包。timebox 2~3 天；**必答**「Codex 请求的模型名从哪来」（决定 `/v1/models` 合成会不会 404 打不通）与「35 字段是否零丢失」。跑不通则记录阻塞，**不拖 M0**。
 
-**移入 M1**：上游直连打通与 35 字段 diff、`verify/mock_upstream.py` 场景集接入 CI（[14 §1bis](./14-acceptance-matrix.md) 已冻结 12 个场景与 diff 规范）。
+**移入 M1**：上游直连打通与 35 字段 diff、`verify/sse_stream_fixture.py` 的 **SSE 流夹具**场景集接入 CI（[14 §1bis](./14-acceptance-matrix.md) 已冻结 12 个场景与 diff 规范）。这一项**能**进 CI：它造的是本机 Python 起的流，不需要任何真凭证 —— 与"要令牌所以只能本地跑"的那三项（[14 §0bis](./14-acceptance-matrix.md)）不同。
 
 ---
 

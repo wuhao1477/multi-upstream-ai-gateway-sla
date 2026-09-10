@@ -35,7 +35,7 @@
 | AxonHub 强项 | 一期是否需要 | 依据 |
 | --- | --- | --- |
 | 多协议翻译（CC↔Anthropic↔Gemini↔Responses） | ❌ 不需要 | 一期入站仅 OpenAI CC + Responses（FR-111）；上游全说 OpenAI 协议 |
-| 订阅 OAuth 渠道（claudecode/codex 账号） | ❌ 不需要 | 约 20 个上游全是 **NewAPI/Sub2API/ASXS 中转站，用 `sk-` key**（[ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 四站实测 + 2026-07-25 真实上游验证） |
+| 订阅 OAuth 渠道（claudecode/codex 账号） | ❌ 不需要 | 约 20 个上游全是 **中转站，用 `sk-` key**（[ISSUE-002](../issues/ISSUE-002-collector-adapter-design.md) 四站实测 + 2026-07-25 真实上游验证） |
 
 → **一期场景下上游对接本质是"OpenAI 协议纯透传"**，自研反而更简单、更可控。
 
@@ -68,11 +68,11 @@
 | --- | --- |
 | **PRD 全部 FR/AC** | 需求与执行面选型无关 |
 | **02 数据模型**（账本/台账/价格/健康/告警） | 自研账本本就是权威源；转向后**反而更纯粹**（去掉对账列即可） |
-| **04 采集器契约**（三家族 NewAPI/Sub2API/ASXS） | 采集走上游站点管理面，与执行网关无关，**零影响** |
+| **04 采集器契约**（分站型采集） | 采集走上游站点管理面，与执行网关无关，**零影响** |
 | **05 调度与经营策略** | selector/steward 本就在自研核心，**零影响** |
 | **09 管理 API** | 自研控制面，**零影响** |
 | **02 §4.5 会话标识提取链** | 转向后**更完整**：不再受 AxonHub round-trip 丢字段影响，body 侧序 3/5 恢复可用 |
-| **ISSUE-001 六假设的运行时方法论** | 结论转为"为何不用 AxonHub"的证据；harness 的 mock 上游可复用于自研透传层测试 |
+| **ISSUE-001 六假设的运行时方法论** | 结论转为"为何不用 AxonHub"的证据；harness 的 SSE 流夹具可复用于自研透传层测试 |
 | **ISSUE-002 采集调研** | 完全有效 |
 | **07 真实上游实测** | 其 Responses 基线（35 字段、reasoning、缓存字段）正是自研透传层要保真的目标 |
 
@@ -94,7 +94,7 @@
 | [README](../../README.md) | 9 | 架构一句话与状态表更新 |
 | [PRD](../PRD.md) | 6 | 仅提及处更新（FR/AC 不变） |
 | 04 / 05 / 08 / 09 | 各 1~5 | 零星引用修正 |
-| `verify/` | — | 六假设 harness 转为历史；其 **mock 上游脚本复用**于自研透传层测试 |
+| `verify/` | — | 六假设 harness 转为历史；其 **SSE 流夹具脚本复用**于自研透传层测试（`sse_stream_fixture.py`，造流不造站点 —— [CLAUDE.md §1](../../CLAUDE.md)） |
 
 ---
 

@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | ✅ **已确认并落地（2026-07-27）** —— 11 条决定 PM 全部采纳推荐方案；已回写 [DECISIONS](../DECISIONS.md)、PRD 升 v1.5、同步 00/02/04/09/14/15 与门禁 |
+| 状态 | ✅ **已确认并落地（2026-07-27）** —— 11 条决定 PM 全部采纳推荐方案；已回写 [DECISIONS](../DECISIONS.md)、PRD 升 v1.5、同步 00/02/04/09/14/15 与门禁。2026-09-01 校正：周期采集已实现；`alert_events` 持久化仍归 P3；当前未重跑的验收不写成已通过。 |
 | 日期 | 2026-07-27 |
 | 发起 | 开发（整体交付体量过大，按负责人指示重新切分交付进度） |
 | 负责人指示 | ① **充值倍率一期不做**（多数站点 1:1，少数 1:2）；② **数据库不过度设计，每阶段只做最小设计**（[ponytail](https://github.com/DietrichGebert/ponytail) 决策阶梯）；③ 缺失的必要设计要补上，**分清当期与后期**；④ **当期重点是上游采集与管理，不做网关相关部分**；⑤ **原「一期」（SLA 网关全套 31 条 AC）升为最终目标**；⑥ **第一期开发进度（P1）= 仅实现多上游渠道的采集与管理** |
@@ -24,7 +24,7 @@
 | D4 | 渠道模型目录 | 新增 `channel_model_catalog`（**6 列**，砍掉能力位与启用关联） | ✅ 采纳 |
 | D5 | Key 级限流 | P1 **只采集存储**（`upstream_keys.rpm_limit`/`concurrency_limit` 两列），不做派生、不做判闸——判闸属容量保留，是网关的事 | ✅ 采纳 |
 | D6 | 「实时更新」语义 | 上游无 webhook → 不做推送式实时。`POST /admin/channels/{id}/sync` 手动立即刷新 + 周期采集（FR-116），界面显示 `synced_at` 与陈旧标记 | ✅ 采纳 |
-| D7 | 密钥管理边界 | P1 做**上游 Key** 的 CRUD＋轮换＋停用＋脱敏展示。入站凭证 `gateway_clients` 属网关，**P1 不做** | ✅ 采纳 |
+| D7 | 密钥管理边界 | P1 做**上游 Key** 的 CRUD＋停用＋脱敏展示；轮换通过 `PATCH /admin/keys/{id}` 替换 `secret` 完成，不设独立 rotate/grace 路由。入站凭证 `gateway_clients` 属网关，**P1 不做** | ✅ 采纳 |
 | N1 | 新增 FR | FR-122~FR-128（7 条，§4） | ✅ 采纳 |
 | N2 | 新增 AC | AC-37~AC-40（4 条，§4） | ✅ 采纳 |
 
@@ -64,7 +64,7 @@
 
 ## 2. P1 做什么（最小集）
 
-**做**：三家族采集适配器（`Detect`/`Authenticate`/`FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`）· 渠道/账号/Key 管理 CRUD · 分组与分组可用模型 · Key 用量同步 · 渠道模型目录 · 价格版本（不可覆盖，为 P2 铺路）· 手动刷新 · 资产总览
+**做**：逐家族采集适配器（`Detect`/`Authenticate`/`FetchAccount`/`FetchKeys`/`FetchGroups`/`FetchPricing`/`FetchModelCatalog`）· 渠道/账号/Key 管理 CRUD · 分组与分组可用模型 · Key 用量同步 · 渠道模型目录 · 价格版本（不可覆盖，为 P2 铺路）· 手动刷新 · 周期采集 · 资产总览；验收按 `supported`/`degraded`/`unsupported` 能力分级执行
 
 **不做**（全部属 P2 网关）：请求转发 · 账本 · 调度与候选过滤 · SLA/TTFT/接管 · canary/测活 · 入站凭证与配额 · 余额信号自适应识别（依赖真实请求失败信号，P1 无请求路径）· 容量保留判闸
 
@@ -98,8 +98,8 @@ CREATE TABLE channel_groups (
 | 砍掉 | 理由 |
 | --- | --- |
 | `display_name` | `group_ref` 本身就是可读的（如 `default`/`vip`），P1 无二次命名需求 |
-| `peak_enabled`/`peak_start`/`peak_end`/`peak_rate_multiplier` | 高峰倍率只有 Sub2API 系有，且**消费者是成本排序**（P2）。P1 采回来没人读 → 需要时再加列（`ALTER ADD COLUMN` 无损） |
-| `is_exclusive`/`platform` | 同上，调度用字段，P1 无消费者 |
+| `peak_enabled`/`peak_start`/`peak_end`/`peak_rate_multiplier` | 高峰倍率只有 Sub2API 系有，且**消费者是成本排序**（P2）。P1 不采集；需要时再加字段和采集逻辑 |
+| `is_exclusive`/`platform` | 同上，调度用字段，P1 不采集 |
 | `valid_until` | 陈旧性由 `fetched_at` + 配置阈值查询期计算即可，与 `collector_snapshots` 同一做法（那里已刻意不存 `is_stale`） |
 
 ### 3.2 新增 `group_models`（3 列）
@@ -117,7 +117,7 @@ CREATE TABLE group_models (
 
 **砍掉 `available BOOLEAN`**：采到就是可用，采不到就删行。加一个恒为 true 的列没有信息量。
 
-### 3.3 新增 `channel_model_catalog`（6 列）
+### 3.3 新增 `channel_model_catalog`（8 列）
 
 **为什么必须有**：「渠道所有可用模型列表」现在只能进 `models` 表，而它要求 `max_input_tokens`/`max_output_tokens` **必填**（[02 §2bis](../dev/02-data-model.md) 预留上界算法的硬前置，缺了该模型全部 binding 不进候选）。一个中转站 200~300 个模型 × 20 渠道 = 几千行手填 token 上界，不可行。
 
@@ -127,8 +127,11 @@ CREATE TABLE channel_model_catalog (
   model_name    TEXT NOT NULL,               -- 上游原始名
   input_price   nonneg_usd,                  -- 采到的价格，供选型参考
   output_price  nonneg_usd,
+  billing_unit  TEXT CHECK (billing_unit IN
+                  ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它
+  last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0),
   PRIMARY KEY (channel_id, model_name)
 );
 ```
@@ -137,7 +140,7 @@ CREATE TABLE channel_model_catalog (
 
 | 砍掉 | 理由 |
 | --- | --- |
-| `cache_price`/`billing_unit` | 价格进 `price_versions` 才是权威（不可覆盖版本，FR-012）；目录里两列只为"看一眼贵不贵"，缓存价与计费单位 P1 没人看 |
+| `cache_price` | 价格进 `price_versions` 才是权威（不可覆盖版本，FR-012）；目录里的价格只为"看一眼贵不贵" |
 | `supports_streaming`/`supports_tools`/`raw_capabilities` | 能力位的消费者是 selector 候选过滤（P2）。且**站点自报的能力位不可信**——P2 本来就要用 `Probe()` 实测（[03 §8](../dev/03-upstream-layer.md) 已定），采自报值等于存一份将被推翻的数据 |
 | `enabled_model_id` | 上一版设计的"目录 ↔ 启用态"双向关联。**P1 不需要**：P1 不做路由，没有"启用"这个动作。P2 要启用时用 `(channel_id, model_name)` 去 `models.canonical_name` 匹配即可，不必现在就建外键 |
 
@@ -179,11 +182,11 @@ ALTER TABLE upstream_keys
 
 | 编号 | 优先级 | 需求 |
 | --- | --- | --- |
-| FR-122 | P0 | 上游 Key 全生命周期管理：新增、编辑、停用、轮换、删除。明文仅在登记时接收，展示与日志一律脱敏（承 FR-094/113）。一个渠道可挂多个账号、一个账号可挂多个 Key。 |
+| FR-122 | P0 | 上游 Key 全生命周期管理：新增、编辑、停用、删除；轮换通过 `PATCH /admin/keys/{id}` 替换 `secret` 完成，不设独立 rotate/grace 路由。明文仅在登记时接收，展示与日志一律脱敏（承 FR-094/113）。一个渠道可挂多个账号、一个账号可挂多个 Key。 |
 | FR-123 | P0 | 采集并维护**渠道分组**及其倍率，并记录每把 Key 所属分组。 |
 | FR-124 | P0 | 采集并维护**每个分组可获取的模型清单**，支持按分组查询"这把 Key 能用哪些模型"。 |
 | FR-125 | P0 | 同步并展示每把 Key 在上游的**使用情况**：剩余额度、已用额度、同步时刻；历史用量落采集快照以支持消耗速度估算。 |
-| FR-126 | P0 | 采集并维护**渠道全部可用模型目录**（含采到的价格）；模型被上游下架时可识别并告警。 |
+| FR-126 | P0 | 采集并维护**渠道全部可用模型目录**（含采到的价格）；模型连续缺席达到配置轮次时标为疑似下架，并在目录/资产总览提示。`alert_events` 持久化归 P3。 |
 | FR-127 | P0 | 采集并存储上游施加的 **Key 级 RPM 与并发上限**（P1 只做登记与展示，执行属 P2 容量保留）。 |
 | FR-128 | P0 | 支持**按渠道手动触发立即刷新**全部上游元数据，与 FR-116 周期采集并存；界面须显示每项数据的同步时刻与陈旧标记。 |
 
@@ -194,9 +197,9 @@ ALTER TABLE upstream_keys
 | 编号 | 场景 | 环境 | 判定方法 |
 | --- | --- | --- | --- |
 | AC-37 | 一个渠道挂 2 账号、每账号 2 把 Key、分属不同分组 | FIXTURE | `GET /admin/channels/{id}/inventory` 返回 2 账号 / 4 Key / 各自分组与倍率；4 把 Key 明文**均不回显**（只见 `secret_prefix`）；库中 4 行 `upstream_keys.channel_group_id` 非空 |
-| AC-38 | 三家族站点各触发一次手动同步（FR-128） | **REAL** | `POST /admin/channels/{id}/sync` 返回逐项结果与耗时；`channel_groups`/`group_models`/`channel_model_catalog` 三表与 `upstream_keys` 用量列均更新；不支持的项返回 `unsupported` 而非留空（承 AC-28 口径） |
+| AC-38 | 每个已注册站型家族的站点各触发一次手动同步（FR-128） | **REAL** | `POST /admin/channels/{id}/sync` 返回逐项结果与耗时；`channel_groups`/`group_models`/`channel_model_catalog` 与 `upstream_keys` 用量列按能力分级验收；`supported` 必须产出数据并更新对应存储，`degraded` 允许部分或零数据但必须说明缺失或上游未提供的数据，`unsupported` 必须明确返回，均不得留空 |
 | AC-39 | 渠道目录含 200+ 模型 | FIXTURE | `channel_model_catalog` 200+ 行**无需任何 token 上界**即可入库；`GET /admin/channels/{id}/catalog` 可分页查询并按价格排序；`models` 表**不因此产生任何行** |
-| AC-40 | 上游下架某模型 | FIXTURE | 连续 N 轮采集后该行 `last_seen_at` 停止更新 → 产生 P3 `alert_events(category='model_capability')`（复用已有枚举，不新增） |
+| AC-40 | 上游下架某模型 | FIXTURE | 连续 N 轮可靠采集后该行 `last_seen_seq` 停止前进，`channels.catalog_sync_seq - last_seen_seq >= N` 时 `GET /admin/channels/{id}/catalog?stale=true` 可筛出，目录 UI 与资产总览提示疑似下架；P3 再写 `alert_events(category='model_capability')` |
 
 > 上一版的 AC-38（充值倍率成本）随 D1 砍掉；AC-40（目录→启用）随 §3.3 砍掉；AC-42（限流 MIN 与按 Key 归集）随 D5 移 P2。
 
@@ -210,8 +213,8 @@ ALTER TABLE upstream_keys
 | `GET /admin/channels/{id}/inventory` | 资产总览：账号/Key/分组/模型数、额度合计、同步时刻、异常计数（FR-128 展示面） |
 | `POST /admin/channels/{id}/sync` | 手动立即刷新，返回逐项结果与 `unsupported` 标记（FR-128） |
 | `GET/POST/PATCH /admin/accounts` | 账号 CRUD |
-| `GET/POST/PATCH /admin/keys` | Key CRUD（FR-122）；列表**只回 `secret_prefix`** |
-| `POST /admin/keys/{id}/rotate`、`/disable` | Key 轮换与停用 |
+| `GET/POST/PATCH /admin/keys` | Key CRUD（FR-122）；列表**只回 `secret_prefix`**；PATCH 替换 `secret` 即完成轮换 |
+| `POST /admin/keys/{id}/disable` | Key 停用 |
 | `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（读 `collector_snapshots`，FR-125） |
 | `GET /admin/channel-groups?channel_id=` | 分组列表含倍率（FR-123） |
 | `GET /admin/channel-groups/{id}/models` | 分组可用模型（FR-124） |

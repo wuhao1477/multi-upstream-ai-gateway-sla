@@ -27,13 +27,11 @@ func (a *Sub2APIAdapter) Capabilities() CapabilityMap {
 	return CapabilityMap{
 		CapAccount: Supported,
 		CapKeys:    Supported,
-		CapGroups:  Supported,
+		CapGroups:  Degraded,
 		// pricing 标 degraded（04 §3.2）：倍率经 groups/available 与分组耦合，
 		// **无独立模型价格表** → 目录里逐模型单价会缺失，用 MissingFields 标明。
 		CapPricing:      Degraded,
-		CapModelCatalog: Supported,
-		// ⏭ P4：订阅制整体推迟，一期所有站型一律 unsupported
-		CapSubscriptionQuotas: Unsupported,
+		CapModelCatalog: Degraded,
 	}
 }
 
@@ -73,7 +71,14 @@ func (a *Sub2APIAdapter) Authenticate(ctx context.Context, cred Credential) (Ses
 // **不要直接调它**。
 func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credential, error) {
 	if cred.RefreshToken == "" {
-		return cred, fmt.Errorf("%w: 无 refresh_token 可用", ErrNeedsRelogin)
+		// **同时标 ErrPrecondition**：这一条在发出任何请求之前就返回了，
+		// 与 ErrPrecondition 注释里"凭证没登记"是同一类 —— 登记了但缺
+		// refresh_token 仍是纯本地的配置缺口。不标的后果是上层按"上游故障"
+		// 处理：返 502 让运维去查别人家站点为什么挂了，并且起算 60s 限流窗口
+		// 白等一轮（upstream_api.go 的 422/502 分支注释写了这个理由）。
+		// 下面 401 那条**不标** —— 那时请求已经发出去了。
+		return cred, fmt.Errorf("%w: 无 refresh_token 可用（需人工重登：%w）",
+			ErrPrecondition, ErrNeedsRelogin)
 	}
 	body, _ := json.Marshal(map[string]string{"refresh_token": cred.RefreshToken})
 	url := strings.TrimRight(cred.BaseURL, "/") + "/api/v1/auth/refresh"
@@ -169,10 +174,10 @@ func (a *Sub2APIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error
 		}
 		// Sub2API 的额度直接是 USD 浮点（04 §3.4 额度单位表），无需换算
 		if q, ok := asFloat(t["quota"]); ok {
-			k.RemainQuotaUSD = q
+			k.RemainQuotaUSD = &q
 		}
 		if u, ok := asFloat(t["quota_used"]); ok {
-			k.UsedQuotaUSD = u
+			k.UsedQuotaUSD = &u
 		}
 		if exp := asString(t["expires_at"]); exp != "" {
 			if tm, err := time.Parse(time.RFC3339, exp); err == nil {
@@ -221,28 +226,12 @@ func (a *Sub2APIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, e
 		if t == nil {
 			continue
 		}
-		g := Group{
-			GroupRef:         asString(t["id"]),
-			SubscriptionType: asString(t["subscription_type"]),
-			Platform:         asString(t["platform"]),
-			IsExclusive:      asBool(t["is_exclusive"]),
-			// 高峰倍率等只进 payload，不落结构化列（ISSUE-005 §3.1）
-			PeakEnabled: asBool(t["peak_rate_enabled"]),
-			PeakStart:   asString(t["peak_start"]),
-			PeakEnd:     asString(t["peak_end"]),
-			Meta:        NewAPIMeta("/api/v1/groups/available", now),
-		}
+		g := Group{GroupRef: asString(t["id"]), Meta: NewAPIMeta("/api/v1/groups/available", now)}
 		if g.GroupRef == "" {
 			g.GroupRef = asString(t["name"])
 		}
 		if r, ok := asFloat(t["rate_multiplier"]); ok {
 			g.RateMultiplier = r
-		}
-		if r, ok := asFloat(t["peak_rate_multiplier"]); ok {
-			g.PeakMultiplier = r
-		}
-		if r, ok := asFloat(t["rpm_limit"]); ok {
-			g.RPMLimit = int(r)
 		}
 		// 分组可用模型（FR-124）：字段名各站略有差异，逐个尝试
 		for _, key := range []string{"available_models", "models", "supported_models"} {
@@ -255,14 +244,13 @@ func (a *Sub2APIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, e
 				break
 			}
 		}
+		if len(g.AvailableModels) == 0 {
+			g.Meta.Degraded = true
+			g.Meta.MissingFields = []string{"available_models"}
+		}
 		out = append(out, g)
 	}
 	return out, nil
-}
-
-// FetchSubscriptionQuotas ⏭ P4（订阅制整体推迟，04 §1）。
-func (a *Sub2APIAdapter) FetchSubscriptionQuotas(context.Context, Session) ([]SubscriptionQuota, error) {
-	return nil, ErrUnsupported
 }
 
 // FetchPricing 取价格 —— **degraded**（04 §3.2）。
@@ -279,6 +267,14 @@ func (a *Sub2APIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, 
 	meta := NewAPIMeta("/api/v1/groups/available", time.Now())
 	meta.Degraded = true
 	meta.MissingFields = []string{"input_price", "output_price"}
+	for _, group := range groups {
+		for _, field := range group.Meta.MissingFields {
+			if field == "available_models" {
+				meta.MissingFields = append(meta.MissingFields, field)
+				break
+			}
+		}
+	}
 
 	p := Pricing{GroupRatios: map[string]float64{}, Meta: meta}
 	for _, g := range groups {
@@ -292,6 +288,10 @@ func (a *Sub2APIAdapter) FetchPricing(ctx context.Context, s Session) (Pricing, 
 // 单价缺失（见 FetchPricing）→ 目录里 InputPrice/OutputPrice 留 0
 // 并标 Degraded。**留 0 而非省略**是因为目录的价格列本就允许空
 // （02 §1.3 nonneg_usd 可空），且 Meta 已说明缺什么。
+//
+// BillingUnit 同样留空：**没有价格就没有口径**。不要"顺手"填
+// per_1m_token —— 那会让下游以为这里有个已知单位的 0 价，
+// 而 NULL 才如实表达"上游没声明"（02 §1.3bis）。
 func (a *Sub2APIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]CatalogModel, error) {
 	groups, err := a.FetchGroups(ctx, s)
 	if err != nil {
@@ -300,6 +300,14 @@ func (a *Sub2APIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Ca
 	meta := NewAPIMeta("/api/v1/groups/available", time.Now())
 	meta.Degraded = true
 	meta.MissingFields = []string{"input_price", "output_price"}
+	for _, group := range groups {
+		for _, field := range group.Meta.MissingFields {
+			if field == "available_models" {
+				meta.MissingFields = append(meta.MissingFields, field)
+				break
+			}
+		}
+	}
 
 	seen := map[string]bool{}
 	out := make([]CatalogModel, 0)

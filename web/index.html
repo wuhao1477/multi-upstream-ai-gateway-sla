@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>上游渠道采集与管理 · P1</title>
+    <!--
+      故意不写 <link rel="icon">：Vite 会给 HTML 里的绝对路径加上 base 前缀，
+      /favicon.ico 会变成 /admin/ui/favicon.ico 而后端只在根路径提供它。
+      浏览器无论页面在哪个路径都会自动请求 /favicon.ico，交给后端那条路由即可。
+    -->
+    <script>
+      // 上色前先定主题，避免深色用户看到一帧白屏。
+      // 这段必须是同步内联脚本：入口 JS 是 module（defer 语义），跑起来时已经画过一帧了。
+      // key 与运行时一致（'theme': light|dark|system），下面这份逻辑在 stores/theme.ts 里有对应实现。
+      try {
+        var t = localStorage.getItem('theme') || 'system'
+        var dark =
+          t === 'dark' ||
+          (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.classList.toggle('dark', dark)
+      } catch (e) {
+        /* 隐私模式下 localStorage 可能抛异常，此时退回浅色即可 */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -4,7 +4,7 @@
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
 | 日期 | 2026-07-23 |
-| 栈 | Go（pgx + sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
+| 栈 | Go（pgx，手写 SQL —— [10 §5 开放点 3](./10-project-structure.md#5-开放点) 2026-08-29 翻掉 sqlc）/ PostgreSQL 单库（一期不引 Redis）/ 单机 Docker Compose / **无外部网关**（[11 转向](./11-decision-full-selfbuilt.md)） |
 | 输入 | [PRD v1.5](../PRD.md)（FR-001~128、**AC-01~40**、§11 默认策略、§13 参数）、[DECISIONS](../DECISIONS.md)（16 参数 + 5 新需求 + **ISSUE-004 开工前裁决 20 条** + **ISSUE-005 交付切分 11 条**）、[ISSUE-001 运行时结论](../issues/ISSUE-001-tech-assumption-verification.md)（六假设；其 AxonHub schema 适配表已随 [11 转向](./11-decision-full-selfbuilt.md) 转为历史）、[ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)（三家族、sub2api ent schema、凭证生命周期）、[ISSUE-002 探测实测](../issues/ISSUE-002-probe-results.md)（四站真实字段）、[00 总览](./00-overview-and-milestones.md)（硬约束 11 条）、[01 架构](./01-architecture.md)（sla-core 模块、自研上游直连） |
 | 覆盖范围 | 本篇定义**自研 SLA 核心的 PG 库**结构。转向自研后（[11](./11-decision-full-selfbuilt.md)），本库是**账本唯一真相源**，无外部网关账本需对账 |
 
@@ -22,7 +22,7 @@
 | 一期不存正文/上下文/请求头/请求体 | **全库无 `body`/`messages`/`prompt_text`/`headers` 列**；只存 token 计数、延迟、状态、费用等元数据；采集侧只存额度/价格数值，不存上游返回正文 | FR-112 |
 | 多实例共享（sla-core ×2 无本地状态） | 所有写入走同一 PG；账本主键用 **UUIDv7**（时间有序、无需跨实例协调序列），配置/注册表用 `BIGINT IDENTITY` | FR-110 |
 | 决策 P99≤50ms | 同步决策路径**只读内存快照**，不查 PG；本库承担写路径与后台快照重建，不在关键路径上 | FR-110、01-架构 §5 |
-| 上游 Key 一期明文 | `upstream_keys.secret` / `collector_credentials.*` 明文列，仅在应用层脱敏展示（FR-094） | FR-113 |
+| 上游 Key 一期明文 | `upstream_keys.secret` / `collector_credentials` 的 token 明文列，仅在应用层脱敏展示（FR-094） | FR-113 |
 | TTFT 不采信网关字段 | attempt 同时存**自算内容感知 TTFT** 与**网关上报值（仅存证）**两列，语义上永不混用 | AC-31、假设 3/6 |
 | 取消按 errorMessage 归并 | attempt 存**网关原始 status** 与**归并后的 `cancel_reason`** 两列 | AC-30、假设 2 |
 | 记账不假设「一次调用=一次上游用量」 | attempt 存 `upstream_call_count`（隐藏重试补算）与外部调用恒为 1 attempt 的关系 | FR-119、假设 6 |
@@ -53,6 +53,27 @@ CREATE DOMAIN nonneg_usd AS NUMERIC(20,10) CHECK (VALUE >= 0);
 - 枚举一律用 `TEXT + CHECK` 约束（便于扩枚举时不用 `ALTER TYPE`，迁移零锁表）。
 - `data_source` 取值：`auto_collect`（适配器自动采）/ `manual`（人工录入，7 天有效，FR-011）/ `upstream`（上游回传）/ `derived`（自算）。
 
+### 0.3 本篇是全阶段设计，`migrations/` 只建当前阶段用的表（第 47 轮）
+
+**放弃 M0 的「一次建全」**（2026-08-30）。原做法是把本篇 53 张表在 M0 一次
+`CREATE` 完，P2/P3/P4 慢慢往里写。代价是**读 schema 的人得先判断哪张表是活的** ——
+28 张里一行数据都没有、一处代码都不碰，而它们跟 25 张在用的表混在同一个库里。
+
+于是 [`migrations/016_drop_unbuilt_phase_tables.sql`](../../migrations/016_drop_unbuilt_phase_tables.sql)
+把那 28 张删掉（不是改基线 001~012 —— `migrate.go` 的 checksum 契约不允许，
+理由写在 016 头部）。**本篇的设计一张没删**：DDL、索引、事务骨架全部原样保留，
+届时由各阶段自己的迁移 `CREATE`。
+
+于是 §9.1bis 规则 3「以 `migrations/` 为准」现在要读成两句：
+
+- **本篇有、迁移无** → 该表属后续阶段，*设计*仍以本篇为准（P2 建表时照它写）。
+- **两边都有** → 该表已在用，*形态*以迁移为准（列名列类型不一致时改本篇）。
+
+哪 28 张属延期，由 `verify/check_migrations.py` 的 `DEFERRED_TABLES` **穷举声明**，
+`make mig-check` 逐字比对：往本篇加表却忘了写迁移会红（新环境缺表，否则要等到
+运行时才炸），实现了延期表却没从清单删也会红。**这里不重抄那 28 个名字** ——
+抄一遍就是第三份，而三份里总有一份先漂。
+
 ---
 
 ## 1. 资源注册域（账本与台账的外键基座）
@@ -74,12 +95,26 @@ CREATE TABLE upstream_providers (
 CREATE TABLE channels (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name            TEXT NOT NULL,
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')), -- ISSUE-002 §1 三家族
-  base_url        TEXT NOT NULL,
+  -- 取值范围 = 站型注册表的家族 + unknown 哨兵（04 §7bis）。加一族要配一条迁移
+  -- 放宽它，否则新族的渠道**建不进来**（约束冲突，报在写入时而不是编译时）。
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
+  -- 全库唯一（019）：三处写入路径（createChannel / importOne / patchChannel）都是
+  -- "先查再插/改"，而 read-then-insert **防不住并发** —— 两个并发导入或一次 201
+  -- 丢失后的重试都能各插一条，台账里出现重复渠道而库里没有 DELETE 入口。
+  -- 约束认字面值，故规范化是写入侧的责任：internal/admin.validateBaseURL
+  -- 校验（scheme 为 http/https 且 host 非空）**并返回规范形态**（去首尾空白、
+  -- 小写 host、去尾斜杠）—— 三处入口共用它，少一处就能用一个 "/" 或一个大写字母
+  -- 绕过本约束。只小写 host 不动 path：path 大小写敏感。
+  -- ⚠️ 019 文件头里那句"没做 lower()…这个残留缺口记在这里"**已过时，且改不了** ——
+  -- 019 已应用到真库，checksum 契约把整个文件（含注释）冻住了，改注释也会让
+  -- 迁移在启动时直接 return error。2026-09-01 实测撞过一次：只改了 019 的注释，
+  -- remote-stack.sh 起 core 就报"已应用但内容已变"。**以本处为准。**
+  base_url        TEXT NOT NULL UNIQUE,
   upstream_provider_id BIGINT REFERENCES upstream_providers(id),   -- 真实上游（故障域根，FR-044）
   status          TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled','disabled')), -- FR-004
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
+  catalog_sync_seq BIGINT NOT NULL DEFAULT 0 CHECK (catalog_sync_seq >= 0), -- 可靠目录成功轮次（FR-126）
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -270,8 +305,12 @@ CREATE TABLE channel_model_catalog (
   model_name    TEXT NOT NULL,               -- 上游原始名
   input_price   nonneg_usd,                  -- 采到的价格，供选型参考（权威价仍在 price_versions）
   output_price  nonneg_usd,
+  -- billing_unit：上面两列的**口径**（第 46 轮真实数据补，见下方说明）
+  billing_unit  TEXT CHECK (billing_unit IN
+                  ('per_1m_token','per_1k_token','per_token','per_call')),
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
+  last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
   PRIMARY KEY (channel_id, model_name)
 );
 
@@ -316,7 +355,7 @@ SELECT :gid, unnest(:model_names::text[]), :fetched_at;
 COMMIT;
 ```
 
-- **全量替换而非 diff**：分组可用模型是**上游的完整声明**，diff 需要额外判断"这次没返回"是"下架了"还是"接口抽风"——而全量替换配合"采集失败则整项 `failed`、不进事务"已经表达了正确语义：**要么用这次的完整快照，要么保留上一次的**。
+- **完整响应全量替换**：分组可用模型是上游的完整声明；显式空数组会清空旧清单。若响应缺少 `available_models`/`models`/`supported_models` 字段并标为 `degraded`，则只更新分组本身并保留上一次模型清单，避免把“上游没给字段”误当成“当前零模型”。
 - **并发安全**：③ 已被 `sync` 的渠道级 advisory lock 串行化（[09 §5.0bis](./09-admin-api.md)），同渠道不会有两个 sync 同时删同一分组。
 - **空结果的处理**：若上游明确返回"该分组零个可用模型"，则删完不插——这是合法状态。但**若采集报错，整项 `failed`、事务不提交**，旧行保留。
 
@@ -324,17 +363,38 @@ COMMIT;
 
 ```sql
 INSERT INTO channel_model_catalog
-       (channel_id, model_name, input_price, output_price, first_seen_at, last_seen_at)
-VALUES (:cid, :name, :in_price, :out_price, :now, :now)
+       (channel_id, model_name, input_price, output_price, billing_unit,
+        first_seen_at, last_seen_at, last_seen_seq)
+VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''), :now, :now, :sync_seq)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price   = EXCLUDED.input_price,
        output_price  = EXCLUDED.output_price,
-       last_seen_at  = EXCLUDED.last_seen_at;
+       billing_unit  = EXCLUDED.billing_unit,
+       last_seen_at  = EXCLUDED.last_seen_at,
+       last_seen_seq = EXCLUDED.last_seen_seq;
        -- ⚠️ **不更新 first_seen_at** —— 它记录"首次见到"，被覆盖就永久丢失
 ```
 
-- **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断——`last_seen_at` 停止前进**本身就是下架信号**。
-- **下架判据**：`last_seen_at` 连续 `catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）轮采集未前进 → 视为下架，触发 P3 告警（AC-40）。用"轮数"而非"时长"是因为采集周期可配，轮数对周期变化免疫。
+**`billing_unit` 为何必需**（第 46 轮实测发现，不是理论洁癖）
+
+同一个 NewAPI 的 `/api/pricing` 里**混着两种口径**，靠 `quota_type` 区分：
+
+| `quota_type` | 取价字段 | 语义 | 口径 |
+| --- | --- | --- | --- |
+| `0` | `model_ratio` | 相对基准价的**倍率** | `per_1m_token` |
+| `1` | `model_price` | 每次调用的**绝对美元价** | `per_call` |
+
+实测某真实站点 1369 个模型中 **208 个（15%）是按次计价**，而两种口径的**数值区间重叠**——按次价样本 `0.15 / 0.56 / 0.22 / 0.08`，倍率样本 `30 / 2 / 0.685`。因此**无法从数值反推口径**：把 `$0.15/次` 当成倍率 `0.15` 参与成本排序，会让按次计价的模型显得比实际便宜若干个数量级，而这类模型（绘图、视频）往往恰恰是最贵的。
+
+这就是 [§3](#3-价格版本域不可覆盖版本--美元口径) 与 [#7](https://github.com/) 一直强调的 `billing_unit` 缩放风险，只不过它先在 P1 的目录表上现形，而不是等到 P3 的成本计算。
+
+- **无价则口径留 NULL**：`pricing` 标 degraded 的站型（现役 Sub2API）单价一律缺失，**不补默认值**。补 `per_1m_token` 会把"上游未声明"伪装成"已知按 token 计价"；NULL 才让消费方按未知处理。
+- **消费方义务**：读 `input_price` 前必须先读 `billing_unit`，缺失时**不得**假定任何默认口径。
+
+- **不删除消失的模型**：这是与 `group_models` 相反的选择。目录要回答"上游曾经有什么、什么时候消失的"（FR-126 下架识别），删掉行就无从判断。
+- **真实轮次**：仅当本轮模型存在性信息完整时，`channels.catalog_sync_seq` 才递增；本轮出现的模型把 `last_seen_seq` 更新为该值。缺 `available_models` 等字段的降级结果不递增，避免把"上游没给完整清单"误判成下架。
+- **独立价格周期**：`collector_price_interval_h` 到期时只刷新已有目录行的价格与 `billing_unit`，不改 `last_seen_at`/`last_seen_seq`，也不推进目录可靠轮次；已登记为可路由模型时同时追加 `price_versions`。
+- **下架判据**：`catalog_sync_seq - last_seen_seq >= catalog_missing_rounds`（默认 3，见 [09 §4bis](./09-admin-api.md)）即疑似下架，并在 P1 管理界面显示异常；`alert_events` 持久化告警属 P3（AC-40）。该判据直接计可靠成功轮次，不受任务延迟、手动刷新或采集周期修改影响。
 
 **`upstream_keys` 的用量列：只更新、不插入**
 
@@ -348,7 +408,7 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 | Key 用量**历史**不建新表 | 复用已有 `collector_snapshots`（`scope_type='key'` + `payload` JSONB + 三元组 + 保留策略 + 索引全都在）。`upstream_keys` 六列只存**当前值**供列表展示 |
 | Key 归属分组用**单列**而非关联表 | 20 个渠道均为中转站，Key 建好后分组基本固定。多对多要传导到 `bindings` 唯一性定义与健康统计，代价不对等 |
 | `group_models` 不设 `available` 布尔 | 采到即可用，采不到即删行。恒为 true 的列没有信息量 |
-| 目录不存 `cache_price`/`billing_unit` | 权威价在 `price_versions`（不可覆盖版本，FR-012）；目录两列只为"看一眼贵不贵" |
+| 目录不存 `cache_price` | 权威价在 `price_versions`（不可覆盖版本，FR-012）；目录两列只为"看一眼贵不贵"。⚠️ 本行原含 `billing_unit`，**第 46 轮已推翻**：两种口径数值区间重叠，没有它目录里的价格是个无单位数字（见上方"`billing_unit` 为何必需"），故 015 把它加进目录 |
 | 目录不设 `enabled_model_id` | P1 无路由，"启用模型"这个动作不存在。P2 要启用时按 `(channel_id, model_name)` 匹配 `models.canonical_name` 即可 |
 | **`topup_rate` 不建**（充值倍率） | 唯一消费者是成本排序，P1 无成本排序。**P3 必建**——不建则 1:2 充值渠道成本被高估 2 倍（[ISSUE-005 §6 T-1](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 
@@ -927,7 +987,7 @@ SELECT (SELECT count(*) FROM cap) AS capacity_ok,
 -- ⚠️ 块内不写 COMMIT：同上
 ```
 
-- **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（[stage 推进协议](#stage-的推进协议)）。
+- **不改 `stage`**：已是 `dispatched`，多跳不推进阶段（见下方「`stage` 的推进协议」）。
 - **不追加预留**：预留在首跳已按 RoutePlan **全部跳**求和（见上方上界算法），接管跳不再动聚合。
 - **`attempt_no` 由 `UNIQUE (request_id, request_created_at, attempt_no)` 保证不重复**——并发重复插入会撞唯一约束而失败，正是期望行为。
 
@@ -991,7 +1051,7 @@ WITH att AS (
          -- 第 40 轮补：两列建好后全库零赋值，FR-080/FR-058 因此没有任何数据可依。
          -- `continue_billing`：我们关连接时上游**已经在生成**（已提交首字）——
          --   上游不会因为我们断开就立刻停止计费，故这笔钱**还会继续涨**，
-         --   而我们再也观测不到（[§取消时的费用口径](#取消时的费用口径) 的误差敞口就在这里）。
+         --   而我们再也观测不到（「取消时的费用口径」那段的误差敞口就在这里）。
          --   未提交首字就取消的跳不置位：还没开始产出，继续计费的风险可忽略。
          continue_billing  = (a.attempt_status = 'committed'),
          -- `is_duplicate_cost`：本跳的钱照付，但它的输出**没有交付给用户**（被接管取代）。
@@ -1400,8 +1460,8 @@ cap_res AS (          -- 【变体 A：已登记容量】条件 UPDATE 原子递
 -- ⚠️ **变体 B 仍然写 capacity_claims，下面的 cap 段不变**（第 42 轮明确：
 --    05 §1.1 序 7 写的"未登记容量的渠道不设保留、本层直接放行"读起来像"跳过整段"，
 --    与这里的结构冲突，开发只能靠猜）。理由：claim 不只是计数器，
---    它还是**租约与悬挂回收的载体**（[§6bis](#6bis-claim-回收) 的回收任务、
---    [§4.2bis](#42bis-崩溃恢复扫描) 的悬挂检测都按 claim 找孤儿 attempt）。
+--    它还是**租约与悬挂回收的载体**（[§6bis](#6bis-canary-占用fr-121跨实例硬上限的执行载体) 的回收任务、
+--    [§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 的悬挂检测都按 claim 找孤儿 attempt）。
 --    不写 claim = 未登记容量的 binding 上的请求崩溃后无人回收。
 --    "不设保留"指的是**不做闸门判定**（没有上限可判），不是"不留痕迹"。
 -- ⚠️ 释放侧对称：`rel_cap` 照常把 claim 置 released；`dec` 递减 resource_health 时
@@ -1443,10 +1503,10 @@ SELECT (SELECT count(*) FROM claimed) AS quota_ok,
 --    完整顺序见上方「三套 claim 的统一编排」：req→quota→resv→cap_res→cap→exp→att→adv。
 ```
 
-**应用层据四值分支**（与上方[统一编排](#三套-claim-的统一编排)同一张表，此处不重复列——以那一节为准）：
+**应用层据四值分支**（与上方「三套 claim 的统一编排」同一张表，此处不重复列——以那一节为准）：
 `quota_ok=0` → 429；`capacity_ok=0` → **换候选**；`exp_ok=0` → canary 回落普通路径 / probe 跳过；四值全 1 → 提交。
 
-**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方[统一编排](#三套-claim-的统一编排)的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回四值：
+**canary 路径的两个 CTE 片段**（⚠️ **这不是一段完整可执行 SQL** —— 它只给出 canary 专有的两个 CTE，`req`/`claimed`/`resv`/`cap_res`/`cap`/`att`/`adv` 与普通路径完全相同，见上方主链。完整链固定为 `req→quota→resv→cap_res→cap→canary_claimed→claim_ins→att→adv`。本段是**上方「三套 claim 的统一编排」的一个实例**，不是并行的另一套真相源。统一编排定义**顺序与四值分支**，本段给出 canary 那两个 CTE 的具体 SQL；二者冲突时**以统一编排为准**）：在 `resv` 与 `att` 之间插入两个 CTE，`att` 改为 `FROM claim_ins`，末尾返回四值：
 
 ```sql
 -- ...（req / claimed / resv 三个 CTE 与普通路径完全相同）...
@@ -1596,7 +1656,11 @@ CREATE TABLE price_versions (
   input_price     nonneg_usd NOT NULL,        -- 每计费单位（归一为美元）
   output_price    nonneg_usd NOT NULL,
   cache_price     nonneg_usd,                 -- 缓存价（走折扣）
-  billing_unit    TEXT NOT NULL DEFAULT 'per_1m_token',
+  -- billing_unit：可空 + CHECK，与 channel_model_catalog **同一套定义**（018 对齐）。
+  -- ⚠️ 原为 `NOT NULL DEFAULT 'per_1m_token'`，与 §1.3bis 的「无价则口径留 NULL、
+  --    不补默认值」直接矛盾 —— 而**本表才是成本公式读的那张**。详见 018 头部。
+  billing_unit    TEXT CHECK (billing_unit IN
+                    ('per_1m_token','per_1k_token','per_token','per_call')),
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称，不换汇（FR-018/AC-17）
   data_source     TEXT NOT NULL,              -- auto_collect / manual
   queried_at      TIMESTAMPTZ NOT NULL,       -- 查询时间（FR-012）
@@ -1649,6 +1713,14 @@ CREATE TABLE price_change_log (
      u  = unit_tokens(pv.billing_unit)：per_1m_token→1_000_000 / per_1k_token→1_000 / per_token→1
      m  = COALESCE(mv.group_multiplier, 1) × COALESCE(mv.key_multiplier, 1)
 
+  ⚠️ 下式只覆盖**按 token 计价**那一支。billing_unit 另有两个取值，unit_tokens 都给不出数：
+     · per_call —— 实测占 15%（1369 个模型里 208 个），成本与 token 数**无关**：
+                   成本 = pv.input_price × 调用次数 × m（toModelPrice 已把输入/输出同价，
+                   按次计费不分输入输出）。**不得**套下式：把 $0.15/次 除以 1,000,000
+                   会让最贵的那批模型（绘图、视频）成本显示为约等于 0。
+     · NULL    —— 上游未声明口径（§1.3bis）。**不得**假定 per_1m_token，
+                   按 FR-015「价格查询失败/过期保守处理」走，不进低价优选。
+
   cached   = COALESCE(au.prompt_cached_tokens, 0)              -- 缓存命中的输入 token
   fresh_in = GREATEST(COALESCE(au.prompt_tokens,0) - cached, 0) -- 未命中的输入 token
   p_cache  = COALESCE(pv.cache_price, pv.input_price)           -- 无缓存价的渠道退回输入价
@@ -1666,7 +1738,8 @@ CREATE TABLE price_change_log (
     二者独立叠加；任一为 NULL 视作 1（未登记 ≠ 免费）。
   - **`upstream_keys.key_multiplier` 是登记态，`multiplier_versions.key_multiplier` 是版本快照**——
     算成本一律用后者（前者会被采集器覆盖，历史复算会失真）。
-  > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而 `billing_unit` 默认就是 `per_1m_token`——照原式实现会把每一笔成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
+  > ⚠️ 原文写作 `成本 = 基础价 × 倍率 × token`，**漏掉了按 `billing_unit` 的缩放**。而实测口径以 `per_1m_token` 为主——照原式实现会把这批成本**放大 1,000,000 倍**，预留、配额、错误预算、告警阈值全部失真。
+  > （此处原写「而 `billing_unit` 默认就是 `per_1m_token`」——018 已去掉那个默认值，理由见其头部：默认值会把"上游未声明"伪装成"已知按 token 计价"。缩放风险不因此减轻，只是不再有一个列默认值替上游做声明。）
   > **实现要求**：入库时**不做**归一（保留上游原始口径便于对账与排障），缩放只发生在算成本的这一处，且 `unit_tokens` 必须由 `billing_unit` 查表得出，**不得硬编码**。
   > **CI 断言**：给定 `per_1m_token` 单价 3.0、1000 token → 成本必须是 `0.003` 而非 `3000`。
 - **两个版本 id 都必须落到 attempt**，历史复算时同时取回才能还原当时的完整计价输入（FR-013/AC-02）。
@@ -2181,7 +2254,7 @@ CREATE TABLE attempt_usage (
 ) PARTITION BY RANGE (request_created_at);
 ```
 
-> **不存正文**：`decision_snapshot` / `cost_items` / `error_message` 均为元数据 JSON / 文本，不含 messages / prompt 正文 / 请求头体（FR-112）。失败/取消请求 `attempt_usage` 可为空（假设4：mock-500 usageLogs 为空，符合预期）。
+> **不存正文**：`decision_snapshot` / `cost_items` / `error_message` 均为元数据 JSON / 文本，不含 messages / prompt 正文 / 请求头体（FR-112）。失败/取消请求 `attempt_usage` 可为空（假设4 实测：`fx-500` 场景下 usageLogs 为空，符合预期）。
 
 ### 4.4 连续会话前缀首字（FR-050/051）
 
@@ -2261,28 +2334,38 @@ CREATE INDEX idx_req_tenant_level   ON requests(tenant_id, sla_level, created_at
 
 ---
 
-## 5. 订阅台账域（双倍率 + 共享额度 + 三家族真实字段）
+## 5. 订阅台账域（双倍率 + 共享额度）
 
 > ⏭ **本域已移入二期**（[15 §1.2](./15-scope-and-preflight.md)）：**表结构保留**（空表无成本、便于二期直接启用），一期**不写入、不参与调度**。
 
-> FR-033~039。字段以 **ISSUE-002 §3.2 sub2api ent schema** 与 **§3.3 ASXS `/api/me/billing/state`** 真实结构为准。一期**不建模签到额度**（FR-034 已删该句；NewAPI 系接受额度预测偏低）。双倍率（用满/实际，参数14/AC-24）。共享额度按 `(user_id, group_id)` 聚合（FR-035，源码级确证）。可主动重置额度只读登记、不自动触发。
+> ⚠️ **字段形状的来源之一已失效**（2026-08-29）：本域的字段取自 **ISSUE-002 §3.2 sub2api ent schema**
+> 与**一家自建站的 `/api/me/billing/state` 实测**，而后者已移出支持范围（[04 §3.3](./04-collector-adapter.md)）。
+> 现役两族里 Sub2API 有订阅对象、NewAPI 没有，所以**做二期时必须按当时真实纳管的站型重新实测一遍**
+> —— 照现在这个形状直接建表，会得到一批没有数据源的列。表结构本身仍保留（下同）。
+>
+> 下面注释里形如 `usedMicros`、`limitMicros`、`planId`、`dailyReset` 的**字段名保留**（不标站名）：
+> 它们是这些列当初的形状依据，去掉就无从回溯为什么会有这一列。
+> [`migrations/008_subscriptions.sql`](../../migrations/008_subscriptions.sql) 里同样的注释**不改**
+> —— 它已应用过，改一个字符都会让 `migrate.go` 的 checksum 契约拒绝整批迁移（§0.3）。
+>
+> FR-033~039。一期**不建模签到额度**（FR-034 已删该句；NewAPI 系接受额度预测偏低）。双倍率（用满/实际，参数14/AC-24）。共享额度按 `(user_id, group_id)` 聚合（FR-035，源码级确证）。可主动重置额度只读登记、不自动触发。
 
 ### 5.1 订阅计划（可售套餐 / 商品）
 
 ```sql
--- 订阅计划（FR-033）：对应 sub2api subscription_plans + group / ASXS purchase products
+-- 订阅计划（FR-033）：对应 sub2api subscription_plans + group / 自建站的套餐商品表
 CREATE TABLE subscription_plans (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  external_plan_id TEXT,                      -- 上游 planId（ASXS）/ group_id（sub2api）
-  name            TEXT NOT NULL,              -- ASXS planName / sub2api plan.name（如「每日90刀」）
-  -- 固定费用（FR-033）：sub2api plans.price / ASXS products.priceCnyCent，归一为美元
+  external_plan_id TEXT,                      -- 上游 planId / group_id（sub2api）
+  name            TEXT NOT NULL,              -- 上游 planName / sub2api plan.name（如「每日90刀」）
+  -- 固定费用（FR-033）：sub2api plans.price / 自建站的 priceCnyCent，归一为美元
   fixed_fee       nonneg_usd NOT NULL,
   currency        TEXT NOT NULL DEFAULT 'USD',-- 一期仅名称（FR-018）
-  -- 有效期（FR-033）：sub2api validity_days×unit / ASXS durationDays
+  -- 有效期（FR-033）：sub2api validity_days×unit / 自建站的 durationDays
   validity_days   INTEGER,
-  billing_period  TEXT,                       -- daily/weekly/monthly（ASXS limits.limitType + windowMode=fixed）
-  -- 周期包含额度（FR-033）：ASXS limits.limitMicros / sub2api group.*_limit_usd
+  billing_period  TEXT,                       -- daily/weekly/monthly（上游 limits.limitType + windowMode=fixed）
+  -- 周期包含额度（FR-033）：上游 limits.limitMicros / sub2api group.*_limit_usd
   period_quota    nonneg_usd,
   supported_models JSONB,                     -- 支持模型（FR-033）
   -- 倍率（FR-033）：sub2api group.rate_multiplier + 高峰倍率
@@ -2291,8 +2374,8 @@ CREATE TABLE subscription_plans (
   peak_start      TEXT,                       -- peak_start（时段）
   peak_end        TEXT,
   peak_rate_multiplier NUMERIC(12,6),
-  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / ASXS fixedResetTime）
-  renewal_status  TEXT,                       -- 续订状态（FR-033）：ASXS renewalRule / renewAllowed
+  reset_rule      TEXT,                       -- 重置规则（FR-033）：固定窗口 日/周/月（sub2api window / 上游 fixedResetTime）
+  renewal_status  TEXT,                       -- 续订状态（FR-033）：上游 renewalRule / renewAllowed
   -- 超额计费规则（FR-033）：sub2api 无超额概念 → 据实登记 'no_overage_block'（ISSUE-002 §3.2 结论2）
   overage_rule    TEXT NOT NULL DEFAULT 'unknown'
                     CHECK (overage_rule IN ('no_overage_block','metered','unknown')),
@@ -2301,11 +2384,11 @@ CREATE TABLE subscription_plans (
   usable_multiplier NUMERIC(12,6),            -- 用满倍率＝固定费用÷周期额度×分组倍率 → 调度排序
   actual_multiplier NUMERIC(12,6),            -- 实际倍率＝固定费用÷实际消耗×倍率 → 账务报表
 
-  -- ── 额度来源优先级（FR-033、术语§3；ASXS primarySource/secondarySource）──
+  -- ── 额度来源优先级（FR-033、术语§3；上游 primarySource/secondarySource）──
   primary_source  TEXT,                       -- 如 'subscription'
   secondary_source TEXT,                      -- 如 'balance' —— 判断订阅额度是否真会被消耗
 
-  -- ── 可主动重置额度（FR-033；ASXS dailyReset）：只读登记，不自动触发 ──
+  -- ── 可主动重置额度（FR-033；上游 dailyReset）：只读登记，不自动触发 ──
   active_reset_supported BOOLEAN NOT NULL DEFAULT false,
   active_reset_threshold_pct NUMERIC(5,2),    -- usageThresholdPercent（如 90）
   active_reset_daily_limit INTEGER,           -- dailyLimit（如 4 次/日）
@@ -2321,7 +2404,7 @@ CREATE TABLE subscription_plans (
 ### 5.2 已购订阅实例（含日/周/月窗口用量）
 
 ```sql
--- 已购订阅（FR-033/034/036）：对应 sub2api user_subscriptions / ASXS billing/state
+-- 已购订阅（FR-033/034/036）：对应 sub2api user_subscriptions / 自建站的 billing/state
 CREATE TABLE user_subscriptions (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   plan_id         BIGINT NOT NULL REFERENCES subscription_plans(id),
@@ -2329,14 +2412,14 @@ CREATE TABLE user_subscriptions (
   -- 共享额度聚合键（FR-035，源码级确证 UpdateSubscriptionUsage(userID,groupID,cost)）
   ext_user_id     TEXT NOT NULL,              -- sub2api user_id
   group_id        TEXT NOT NULL,              -- sub2api group_id —— 共享额度按 (user_id,group_id) 归集，不按 Key
-  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / ASXS startsAt
+  starts_at       TIMESTAMPTZ,                -- sub2api starts_at / 上游 startsAt
   expires_at      TIMESTAMPTZ,               -- expires_at / expiresAt（到期时间，FR-033）
   status          TEXT NOT NULL CHECK (status IN ('not_effective','active','expired','suspended','data_unknown')),
                                               -- 对齐 PRD §9.3 订阅状态 + sub2api active/expired/suspended
   -- 已用/剩余（FR-034）：区分订阅额度、现金余额、超额付费
-  used_quota      nonneg_usd,                 -- ASXS usedMicros/1e6
-  left_quota      nonneg_usd,                 -- ASXS leftMicros/1e6
-  remaining_days  INTEGER,                    -- ASXS remainingDays（到期紧迫度，FR-037）
+  used_quota      nonneg_usd,                 -- 上游 usedMicros/1e6（micros 类单位在适配器内归一）
+  left_quota      nonneg_usd,                 -- 上游 leftMicros/1e6
+  remaining_days  INTEGER,                    -- 上游 remainingDays（到期紧迫度，FR-037）
   data_source     TEXT NOT NULL,
   fetched_at      TIMESTAMPTZ NOT NULL,
   valid_until     TIMESTAMPTZ,                -- 人工 7 天有效（FR-011）
@@ -2379,7 +2462,7 @@ CREATE INDEX idx_subs_expiry        ON user_subscriptions(expires_at) WHERE stat
 CREATE INDEX idx_qwin_reset         ON subscription_quota_windows(window_resets_at);
 ```
 
-**服务 FR/AC**：FR-011、FR-033/034/035/036/037/038/039、FR-057/058；AC-20/21/22/23/24（双倍率）、AC-28（三家族采集）。
+**服务 FR/AC**：FR-011、FR-033/034/035/036/037/038/039、FR-057/058；AC-20/21/22/23/24（双倍率）、AC-28（逐家族采集）。
 **一期不建模**：签到额度（FR-034 删句；NewAPI 系 `checkin` 不入账，接受额度预测偏低）；超额计费对 sub2api 系登记 `no_overage_block`（ISSUE-002 §3.2 结论2）。
 
 ---
@@ -2722,26 +2805,27 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 > 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证明文（FR-113）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
 
 ```sql
--- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：三家族不同续期机制，明文存储
+-- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_id      BIGINT NOT NULL REFERENCES upstream_accounts(id),
   channel_id      BIGINT NOT NULL REFERENCES channels(id),
-  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','asxs','unknown')),
+  site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   cred_type       TEXT NOT NULL CHECK (cred_type IN
-                    ('newapi_access_token','sub2api_jwt','asxs_jwt','account_password')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh / ASXS 7d JWT + 账号密码
+                    ('newapi_access_token','sub2api_jwt')),
+  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
   access_token    TEXT,
-  refresh_token   TEXT,                         -- 仅 Sub2API（24h JWT + refresh 无密码续期）
-  username        TEXT,                         -- ASXS 须账号密码重登 POST /api/manage/auth/login
-  password        TEXT,                         -- 明文（一期）
+  refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
-  token_expires_at TIMESTAMPTZ,                 -- Sub2API 24h / ASXS 168h；到期前阈值内续期
+  token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期
   -- 凭证互斥作废风险（ISSUE-002 §4）：NewAPI 重生令牌作废旧、Sub2API 并发刷新互斥
   refresh_lock_key TEXT,                        -- 按账号加互斥锁串行刷新
   status          TEXT NOT NULL DEFAULT 'valid'
                     CHECK (status IN ('valid','expiring','invalid','needs_relogin')),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT collector_credentials_refresh_lock_key_check
+    CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
 -- 采集快照（FR-011/020/116；ISSUE-002 §5 降级一致性）：每次采集一行，标来源+时效
@@ -2781,7 +2865,7 @@ CREATE TABLE balance_signals (
   signal_evidence TEXT,                         -- 触发信号原文关键词（元数据，非正文）
   -- 配额状态（FR-118、ISSUE-001 假设5）：**未知默认保守排除**，由我方 selector 执行
   quota_status    TEXT CHECK (quota_status IN ('available','warning','exhausted','unknown')),
-  -- ↑ 由采集器按站型映射（NewAPI/Sub2API/ASXS 各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
+  -- ↑ 由采集器按站型映射（各家族各自的余量与状态字段）；`unknown` → selector 默认排除（FR-118）。
   --   ⚠️ 该保守默认是我方硬要求：任何上游或第三方组件的宽松默认（"未知即保留"）不得覆盖它。
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -2789,29 +2873,30 @@ CREATE TABLE balance_signals (
 
 #### 7.1 `collector_snapshots.payload` 的逐 scope_type 结构（**P1 必需**，第 45 轮补）
 
-> ⚠️ **此前只写了"归一后数值元数据"** —— 而 P1 的 [`GET /admin/keys/{id}/usage`](./09-admin-api.md) 被定义为"读该 payload 的时序"，[04 §4](./04-collector-adapter.md) 也要求把 Key 用量历史与分组的高峰倍率等字段写进 payload。**写入侧与读取侧都没有可实现的契约**（开发视角审查第 45 轮）。
+> ⚠️ **此前只写了"归一后数值元数据"** —— 而 P1 的 [`GET /admin/keys/{id}/usage`](./09-admin-api.md) 被定义为"读该 payload 的时序"，写入侧与读取侧都没有可实现的契约（开发视角审查第 45 轮）。
 >
 > **总则**：payload 只存**归一后的数值与枚举**（金额一律 `usd_amount` 数值、时间一律 ISO8601 字符串），**不存上游返回正文**（FR-112）。键名一律 snake_case。**未采到的字段一律省略该键**，不写 `null` —— 便于区分"没采到"与"采到的值是 0"。
 
 | `scope_type` | `scope_id` 填什么 | payload 必备键 | 可选键 |
 | --- | --- | --- | --- |
-| `key` | `upstream_keys.id`（十进制字符串） | `remain_quota_usd`、`used_quota_usd` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
-| `group` | `channel_groups.group_ref` | `rate_multiplier` | `peak_enabled`、`peak_start`、`peak_end`、`peak_rate_multiplier`、`is_exclusive`、`platform`、`subscription_type`、`rpm_limit` —— **这几项 P1 只进 payload、不落结构化列**（[§1.3](#13-上游分组与模型目录交付阶段-p1fr-123127) 的取舍表），P2/P3 需要时按本表回填 |
+| `key` | 已登记时为 `upstream_keys.id`（十进制字符串）；未登记时为上游 `external_ref` | 已登记：`remain_quota_usd`、`used_quota_usd`；未登记：`unregistered=true` | `request_count`（上游累计请求数，NewAPI 有）、`window_usage`（Sub2API 的 5h/1d/7d 窗口用量，形如 `{"5h":{"limit_usd":x,"usage_usd":y,"window_start":"…"},"1d":{…}}`）、`current_concurrency`、`expired_time`、`rpm_limit`、`concurrency_limit` |
+| `group` | `channel_groups.group_ref` | `rate_multiplier` | —（P1 只保存分组、倍率和可用模型；调度字段留待后续阶段） |
 | `account` | `upstream_accounts.id` | `balance_usd` | `used_usd`、`external_user_id`、`quota_per_unit`（NewAPI 的额度换算基数，逐站不同、**不可写死**） |
 | `pricing` | `models.canonical_name` 或上游原始模型名 | `input_price`、`output_price` | `cache_price`、`billing_unit`、`group_ratio`、`completion_ratio` |
 | `subscription` | ⏭ P4 | — | 订阅制整体推迟，P1~P3 不写该 scope |
 
 - **`GET /admin/keys/{id}/usage` 的读取契约**：按 `scope_type='key' AND scope_id=<id>` 取，按 `fetched_at` 升序返回 `{fetched_at, remain_quota_usd, used_quota_usd, request_count?}` 序列。缺键的点位**跳过该字段**而不是填 0（填 0 会在曲线上造出假的"额度归零"）。
+- **未登记 Key**：采集器以 `scope_id=<external_ref>`、`payload.unregistered=true` 写快照；资产总览只用该标记识别异常，并在后来登记相同 `external_ref` 后自动消失，不把它混入 Key ID 的用量时序。
 - **为何 `scope_id` 用 TEXT 存数字 id**：该列是跨 scope 复用的通用标识（`group` 用的是字符串 `group_ref`），故统一 TEXT；读取侧自行转换。
 
 **索引**
 
 ```sql
 CREATE INDEX idx_cred_channel     ON collector_credentials(channel_id, status);
--- 一渠道一份采集凭证（第 46 轮补）：续期是 upsert 语义（refresh 后写回新令牌，
+-- 一账号一份采集凭证：续期是 upsert 语义（refresh 后写回新令牌，
 -- 04 §5），没有唯一约束就只能"先查再插/改" —— 那是 check-then-act，
--- 而凭证刷新恰恰并发敏感（不变式 S-1）。多账号分别采集属后续阶段。
-CREATE UNIQUE INDEX idx_cred_channel_unique ON collector_credentials (channel_id);
+-- 而凭证刷新恰恰并发敏感（不变式 S-1）。
+CREATE UNIQUE INDEX idx_cred_account_unique ON collector_credentials (account_id);
 CREATE INDEX idx_snap_scope       ON collector_snapshots(channel_id, scope_type, fetched_at DESC);
 CREATE INDEX idx_snap_stale       ON collector_snapshots(valid_until) WHERE valid_until IS NOT NULL;
 CREATE INDEX idx_balsig_account   ON balance_signals(account_id);
@@ -2819,7 +2904,7 @@ CREATE INDEX idx_balsig_state     ON balance_signals(balance_state) WHERE balanc
 CREATE INDEX idx_balsig_quota     ON balance_signals(quota_status) WHERE quota_status='unknown'; -- FR-118 保守排除
 ```
 
-**服务 FR/AC**：FR-010/011、FR-020~027、FR-031、FR-113、FR-116、FR-118；AC-28（三家族探测）、AC-29（非标准余额不足识别）。
+**服务 FR/AC**：FR-010/011、FR-020~027、FR-031、FR-113、FR-116、FR-118；AC-28（逐家族探测）、AC-29（非标准余额不足识别）。
 
 ---
 
@@ -2903,6 +2988,14 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 -- ALTER TABLE requests DETACH PARTITION requests_2026_01; DROP TABLE requests_2026_01;
 ```
 
+> ⚠️ **上面三条是示例，不是迁移。** 012 曾把它们照抄进迁移，016 已删（写死月份的
+> 分区留着不构成任何保护 —— `2026_08` 在 2026-09-01 就出窗口了）。**三张母表保留**
+> 且确实以 `PARTITION BY` 建出（`verify/test-migrate.sh` 第 5 步断言 `relkind='p'`）。
+>
+> **给 P2 的人**：母表现在**没有任何分区**，第一次往 `requests` 插行会报
+> `no partition of relation found for row`。上表「清理方式」一栏依赖的滑动窗口
+> 同样以此为前提。分区管理要在写账本之前落地，这不是回归而是本来就欠的那一步。
+
 ### 9.1bis DDL 可执行性门禁（**必须做，已三次栽在这里**）
 
 > 本文档的 DDL 曾出现三类**光看不出、一跑就炸**的错误：`attempt_usage` 双主键、`is_stale` 用 `now()` 做 stored generated column、`channels` 外键前向引用未创建的 `upstream_providers`。**人眼评审挡不住这类问题。**
@@ -2910,8 +3003,15 @@ CREATE TABLE attempt_usage_2026_08 PARTITION OF attempt_usage
 **门禁规则（M0 起生效，纳入 CI）**：
 
 1. `migrations/` 的完整 DDL **必须在一次性 PostgreSQL 实例上真实执行成功**，才算 schema 基线通过。
-2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 执行一遍 `sqlc generate` → 全部成功才绿。
+2. CI 每次跑：起临时 PG → 按序执行全部迁移 → 建分区 → 全部成功才绿。
+   ⚠️ 本条原文末尾还有「执行一遍 `sqlc generate`」—— **2026-08-29 删**：存储层已翻案为
+   纯手写 pgx（[10 §5 开放点 3](./10-project-structure.md#5-开放点) 的翻案记录），
+   仓库里没有 `sqlc.yaml` 也没有 `queries.sql`，那一步永远不会存在。
+   实际落地的是 `verify/test-migrate.sh` 8 步（真跑迁移 + 种子 + 幂等 + 分区母表 +
+   CHECK 与注册表一致 + 两处 `billing_unit` 列定义相等 + 导入失败原子性）。
 3. 本文档的 DDL 与 `migrations/` **以后者为准**；文档变更若涉及 DDL，须同步迁移文件并通过门禁。
+   （第 47 轮起这条分两种情形读 —— 见 [§0.3](#03-本篇是全阶段设计migrations-只建当前阶段用的表第-47-轮)：
+   延期表只有本篇有，那是设计而非漂移。）
 4. 附加断言（[9.2](#92-保留策略配置化) 的 FR-112 守卫同批执行）：账本表禁止出现 `body/messages/prompt/headers` 命名列。
 
 > 建表顺序原则：**被引用的表先建**。当前依赖链为
@@ -2989,7 +3089,7 @@ VALUES (:attempt_id, :rcat, :event_type, :payload, :attempt_id || ':' || :event_
 ON CONFLICT (idempotency_key) DO NOTHING;      -- 重放/重试只投一次
 ```
 
-> ⚠️ **`idempotency_key` 必须是 `<attempt_id>:<event_type>`**（[§2ter](#2ter-幂等键一览) 已登记）。
+> ⚠️ **`idempotency_key` 必须是 `<attempt_id>:<event_type>`**（本节 outbox 的 `ON CONFLICT (idempotency_key)` 即以此为键；全仓并无「幂等键一览」那一节）。
 > 用随机 UUID 会让每次重试都被当成新事件 —— 首字节时间戳被反复覆盖、`finalize_delivery` 反复触发。
 
 **投递（drain）**：后台 goroutine 每秒一轮，**取出 → 执行对应事务 → 标记已投递**。
@@ -3013,7 +3113,7 @@ RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
 - **`delivered_at` 的唯一写入者是本 drain**，不要在别处标记。
 
 **恢复流程**：实例启动时先 drain 一遍 `delivered_at IS NULL` 的行（同上语句），再进 §4.2bis 的悬挂扫描——
-顺序不可颠倒（[§4.2bis](#42bis-崩溃恢复扫描) 已定：已写完的请求靠 drain 收口，根本不该进恢复扫描）。
+顺序不可颠倒（[§4.2bis](#42bis-悬挂-attempt-检测补齐-outbox-的盲区) 已定：已写完的请求靠 drain 收口，根本不该进恢复扫描）。
 因幂等键存在，重放不会产生重复账目。
 
 ### 9.3 多实例并发写（FR-110）
@@ -3060,11 +3160,11 @@ RETURNING o.attempt_id, o.request_created_at, o.event_type, o.payload;
 | sub2api `user_subscriptions.daily/weekly/monthly_window_start + usage_usd` | `subscription_quota_windows`（三窗口拆行） |
 | sub2api 共享额度按 `(user_id, group_id)` 聚合 | `user_subscriptions(ext_user_id, group_id)` UNIQUE + `idx_subs_shared` |
 | sub2api 无超额概念 | `subscription_plans.overage_rule='no_overage_block'` |
-| ASXS `primarySource/secondarySource` | `subscription_plans.primary_source/secondary_source` |
-| ASXS `dailyReset`（usageThresholdPercent/dailyLimit） | `subscription_plans.active_reset_*`（只读登记，不自动触发） |
-| ASXS `priceCnyCent + durationDays` / sub2api `price + validity_days` | `subscription_plans.fixed_fee + validity_days` → 双倍率输入 |
-| 三家族凭证/续期差异（长期令牌/refresh/账号密码重登） | `collector_credentials.cred_type + refresh_token/username/password` |
-| 三家族额度单位（quota整数 / USD / micros）归一 | 入库前由适配器归一为 `usd_amount`（§0.2） |
+| 自建站 `primarySource/secondarySource` | `subscription_plans.primary_source/secondary_source` |
+| 自建站 `dailyReset`（usageThresholdPercent/dailyLimit） | `subscription_plans.active_reset_*`（只读登记，不自动触发） |
+| 自建站 `priceCnyCent + durationDays` / sub2api `price + validity_days` | `subscription_plans.fixed_fee + validity_days` → 双倍率输入 |
+| 各站型凭证/续期差异（长期令牌/refresh） | `collector_credentials.cred_type + refresh_token` |
+| 各站型额度单位（quota 整数 / USD / micros）归一 | 入库前由适配器归一为 `usd_amount`（§0.2） |
 
 ---
 

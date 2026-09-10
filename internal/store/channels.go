@@ -7,10 +7,51 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrNotFound 是通用的"记录不存在"。
 var ErrNotFound = errors.New("store: 记录不存在")
+
+// ErrDuplicate 是"唯一约束冲突"。
+//
+// 存在的理由：019 给 channels.base_url 加了唯一约束之后，"同地址已存在"从
+// 应用层的 read-then-insert 判断变成库级冲突。调用方要能把它与"请求写错了"
+// 分开 —— 前者该返 409（去改那一条），后者返 400（改自己的请求）。
+var ErrDuplicate = errors.New("store: 已存在")
+
+// TryChannelSyncLock prevents manual and periodic collection from hitting one channel concurrently.
+func TryChannelSyncLock(ctx context.Context, conn DBTX, channelID int64) (bool, error) {
+	var locked bool
+	err := conn.QueryRow(ctx,
+		`SELECT pg_try_advisory_lock(hashtext('sync:' || $1::bigint::text))`, channelID).
+		Scan(&locked)
+	return locked, err
+}
+
+// UnlockChannelSync releases the session-level lock acquired by TryChannelSyncLock.
+func UnlockChannelSync(ctx context.Context, conn DBTX, channelID int64) error {
+	var unlocked bool
+	if err := conn.QueryRow(ctx,
+		`SELECT pg_advisory_unlock(hashtext('sync:' || $1::bigint::text))`, channelID).
+		Scan(&unlocked); err != nil {
+		return err
+	}
+	if !unlocked {
+		return fmt.Errorf("渠道 %d 未持有采集锁", channelID)
+	}
+	return nil
+}
+
+// asDuplicate 把 PG 的唯一约束冲突（23505）翻成 ErrDuplicate。
+// 其它错误原样返回。
+func asDuplicate(err error, msg string) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return fmt.Errorf("%w: %s", ErrDuplicate, msg)
+	}
+	return err
+}
 
 // Channel 是一个上游渠道。
 type Channel struct {
@@ -26,7 +67,7 @@ type Channel struct {
 }
 
 // CreateChannel 登记一个渠道。
-func CreateChannel(ctx context.Context, conn *pgx.Conn, c Channel) (int64, error) {
+func CreateChannel(ctx context.Context, conn DBTX, c Channel) (int64, error) {
 	if c.SiteFamily == "" {
 		// 站型未知时显式写 unknown，而不是留空 —— CHECK 约束只认四个值，
 		// 且 unknown 有明确语义（04 §7：走未知家族接入流程）
@@ -38,13 +79,17 @@ INSERT INTO channels (name, site_family, base_url, status)
 VALUES ($1,$2,$3,COALESCE(NULLIF($4,''),'enabled'))
 RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("建渠道 %q: %w", c.Name, err)
+		// 019 的唯一约束是"同地址只一个渠道"的**唯一**真实防线（read-then-insert
+		// 防不住并发）。撞上去时要能被上层区分出来，否则并发导入只会得到一句
+		// PG 原文，而正确的处置是"去用已有那条"。
+		return 0, asDuplicate(fmt.Errorf("建渠道 %q: %w", c.Name, err),
+			"已有渠道使用地址 "+c.BaseURL)
 	}
 	return id, nil
 }
 
 // ListChannels 列出全部渠道。
-func ListChannels(ctx context.Context, conn *pgx.Conn) ([]Channel, error) {
+func ListChannels(ctx context.Context, conn DBTX) ([]Channel, error) {
 	rows, err := conn.Query(ctx, `
 SELECT id, name, site_family, base_url, status,
        COALESCE(disabled_reason,''), disabled_until, created_at, updated_at
@@ -83,20 +128,34 @@ SELECT id, name, site_family, base_url, status,
 }
 
 // UpdateChannel 更新渠道可变字段。
-func UpdateChannel(ctx context.Context, conn *pgx.Conn, c Channel) error {
+func UpdateChannel(ctx context.Context, conn DBTX, c Channel) error {
 	tag, err := conn.Exec(ctx, `
 UPDATE channels
    SET name = COALESCE(NULLIF($2,''), name),
        site_family = COALESCE(NULLIF($3,''), site_family),
        base_url = COALESCE(NULLIF($4,''), base_url),
        status = COALESCE(NULLIF($5,''), status),
-       disabled_reason = NULLIF($6,''),
-       disabled_until = $7,
+       -- 停用原因/有效期**只随 status 变更而变**，不像上面几列那样"空则不动"：
+       --   传 disabled → 用传入值（FR-095 要求填原因，由处理器强制非空）
+       --   传 enabled  → 清空（留着上次的原因，界面上会显示"已启用"却带着停用理由）
+       --   没传 status → 原样不动
+       -- 原先这两列是无条件赋值，于是"只改个名字"的 PATCH 会把停用原因悄悄抹掉，
+       -- 留下一个 status='disabled' 而没人知道为什么的渠道（库里无 CHECK 拦这个）。
+       disabled_reason = CASE $5
+                           WHEN 'disabled' THEN NULLIF($6,'')
+                           WHEN 'enabled'  THEN NULL
+                           ELSE disabled_reason END,
+       disabled_until  = CASE $5
+                           WHEN 'disabled' THEN $7
+                           WHEN 'enabled'  THEN NULL
+                           ELSE disabled_until END,
        updated_at = now()
  WHERE id = $1`, c.ID, c.Name, c.SiteFamily, c.BaseURL, c.Status,
 		c.DisabledReason, c.DisabledUntil)
 	if err != nil {
-		return fmt.Errorf("更新渠道 %d: %w", c.ID, err)
+		// PATCH 也能改 base_url，故同样会撞 019 的唯一约束。
+		return asDuplicate(fmt.Errorf("更新渠道 %d: %w", c.ID, err),
+			"已有渠道使用地址 "+c.BaseURL)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: 渠道 %d", ErrNotFound, c.ID)
@@ -106,16 +165,18 @@ UPDATE channels
 
 // Account 是一个上游账号。
 type Account struct {
-	ID              int64     `json:"id"`
-	ChannelID       int64     `json:"channel_id"`
-	ExternalUserID  string    `json:"external_user_id,omitempty"`
-	BalanceGroupKey string    `json:"balance_group_key,omitempty"`
-	Status          string    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              int64      `json:"id"`
+	ChannelID       int64      `json:"channel_id"`
+	ExternalUserID  string     `json:"external_user_id,omitempty"`
+	BalanceGroupKey string     `json:"balance_group_key,omitempty"`
+	Status          string     `json:"status"`
+	DisabledReason  string     `json:"disabled_reason,omitempty"`
+	DisabledUntil   *time.Time `json:"disabled_until,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 // CreateAccount 登记账号。
-func CreateAccount(ctx context.Context, conn *pgx.Conn, a Account) (int64, error) {
+func CreateAccount(ctx context.Context, conn DBTX, a Account) (int64, error) {
 	var id int64
 	err := conn.QueryRow(ctx, `
 INSERT INTO upstream_accounts (channel_id, external_user_id, balance_group_key, status)
@@ -131,7 +192,7 @@ RETURNING id`, a.ChannelID, a.ExternalUserID, a.BalanceGroupKey, a.Status).Scan(
 func ListAccounts(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Account, error) {
 	rows, err := conn.Query(ctx, `
 SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key,''),
-       status, created_at
+       status, COALESCE(disabled_reason,''), disabled_until, created_at
   FROM upstream_accounts
  WHERE ($1 <= 0 OR channel_id = $1) ORDER BY id`, channelID)
 	if err != nil {
@@ -142,7 +203,8 @@ SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key
 	for rows.Next() {
 		var a Account
 		if err := rows.Scan(&a.ID, &a.ChannelID, &a.ExternalUserID,
-			&a.BalanceGroupKey, &a.Status, &a.CreatedAt); err != nil {
+			&a.BalanceGroupKey, &a.Status, &a.DisabledReason,
+			&a.DisabledUntil, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -150,107 +212,38 @@ SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key
 	return out, rows.Err()
 }
 
-// Key 是一把上游 Key。**响应中永不含明文**（FR-094）。
-type Key struct {
-	ID               int64      `json:"id"`
-	AccountID        int64      `json:"account_id"`
-	ChannelID        int64      `json:"channel_id"`
-	SecretPrefix     string     `json:"secret_prefix"`
-	ExternalRef      string     `json:"external_ref,omitempty"`
-	ChannelGroupID   *int64     `json:"channel_group_id,omitempty"`
-	RemainQuotaUSD   *float64   `json:"remain_quota_usd,omitempty"`
-	UsedQuotaUSD     *float64   `json:"used_quota_usd,omitempty"`
-	RPMLimit         *int       `json:"rpm_limit,omitempty"`
-	ConcurrencyLimit *int       `json:"concurrency_limit,omitempty"`
-	Status           string     `json:"status"`
-	ExpiredTime      *time.Time `json:"expired_time,omitempty"`
-	QuotaSyncedAt    *time.Time `json:"quota_synced_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
+// AccountPatch 是账号局部更新；非 nil 字段即使为空也会被清除。
+type AccountPatch struct {
+	ID              int64
+	ExternalUserID  *string
+	BalanceGroupKey *string
+	Status          *string
+	DisabledReason  *string
+	DisabledUntil   *time.Time
 }
 
-// CreateKey 登记一把 Key。明文只在此处接收，之后永不回显。
-func CreateKey(ctx context.Context, conn *pgx.Conn, accountID int64,
-	secret, externalRef string, groupID *int64) (int64, error) {
-	if secret == "" {
-		return 0, fmt.Errorf("secret 不可为空")
-	}
-	var id int64
-	err := conn.QueryRow(ctx, `
-INSERT INTO upstream_keys (account_id, secret, external_ref, channel_group_id, status)
-VALUES ($1,$2,NULLIF($3,''),$4,'active')
-RETURNING id`, accountID, secret, externalRef, groupID).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("建 Key（账号 %d）: %w", accountID, err)
-	}
-	return id, nil
-}
-
-// secretPrefixExpr 是脱敏展示表达式。
-//
-// **只取前 8 位**（09：列表只显示 secret_prefix，永不回显完整凭证）。
-// 用 SQL 表达式而非 Go 侧截断：这样完整 secret 根本不出库，
-// 少一处可能被日志/错误信息带出去的路径。
-const secretPrefixExpr = `left(secret, 8) || '…'`
-
-// ListKeys 列出 Key（脱敏）。
-func ListKeys(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Key, error) {
-	rows, err := conn.Query(ctx, `
-SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
-       COALESCE(k.external_ref,''), k.channel_group_id,
-       k.remain_quota_usd, k.used_quota_usd, k.rpm_limit, k.concurrency_limit,
-       k.status, k.expired_time, k.quota_synced_at, k.created_at
-  FROM upstream_keys k
-  JOIN upstream_accounts a ON a.id = k.account_id
- WHERE ($1 <= 0 OR a.channel_id = $1)
- ORDER BY k.id`, channelID)
-	if err != nil {
-		return nil, fmt.Errorf("列 Key: %w", err)
-	}
-	defer rows.Close()
-	var out []Key
-	for rows.Next() {
-		var k Key
-		if err := rows.Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
-			&k.ExternalRef, &k.ChannelGroupID, &k.RemainQuotaUSD, &k.UsedQuotaUSD,
-			&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
-			&k.QuotaSyncedAt, &k.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, k)
-	}
-	return out, rows.Err()
-}
-
-// DisableKey 停用一把 Key（FR-004/095 的 Key 层）。
-func DisableKey(ctx context.Context, conn *pgx.Conn, id int64) error {
-	tag, err := conn.Exec(ctx,
-		`UPDATE upstream_keys SET status='revoked', updated_at=now() WHERE id=$1`, id)
-	if err != nil {
-		return fmt.Errorf("停用 Key %d: %w", id, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: Key %d", ErrNotFound, id)
-	}
-	return nil
-}
-
-// RotateKey 轮换：写入新 secret，旧值被覆盖。
-//
-// 一期不做"宽限期双活"（09 里 rotate 标 M1/P2）：那需要同时持有两个 secret
-// 并按时间切换，而 P1 没有请求路径、无从判断"旧 key 是否还在被用"。
-// 这里的轮换语义是"换掉凭证"，明文只在响应里返回一次。
-func RotateKey(ctx context.Context, conn *pgx.Conn, id int64, newSecret string) error {
-	if newSecret == "" {
-		return fmt.Errorf("新 secret 不可为空")
-	}
+// UpdateAccount 更新账号可变字段。
+func UpdateAccount(ctx context.Context, conn *pgx.Conn, a AccountPatch) error {
 	tag, err := conn.Exec(ctx, `
-UPDATE upstream_keys SET secret=$2, status='active', updated_at=now() WHERE id=$1`,
-		id, newSecret)
+UPDATE upstream_accounts
+   SET external_user_id = CASE WHEN $2::text IS NULL THEN external_user_id ELSE NULLIF($2,'') END,
+       balance_group_key = CASE WHEN $3::text IS NULL THEN balance_group_key ELSE NULLIF($3,'') END,
+       status = CASE WHEN $4::text IS NULL THEN status ELSE NULLIF($4,'') END,
+       disabled_reason = CASE $4
+                           WHEN 'disabled' THEN NULLIF($5,'')
+                           WHEN 'active'   THEN NULL
+                           ELSE disabled_reason END,
+       disabled_until  = CASE $4
+                           WHEN 'disabled' THEN $6
+                           WHEN 'active'   THEN NULL
+                           ELSE disabled_until END
+ WHERE id = $1`, a.ID, a.ExternalUserID, a.BalanceGroupKey, a.Status,
+		a.DisabledReason, a.DisabledUntil)
 	if err != nil {
-		return fmt.Errorf("轮换 Key %d: %w", id, err)
+		return fmt.Errorf("更新账号 %d: %w", a.ID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: Key %d", ErrNotFound, id)
+		return fmt.Errorf("%w: 账号 %d", ErrNotFound, a.ID)
 	}
 	return nil
 }
@@ -313,41 +306,43 @@ func ListGroupModels(ctx context.Context, conn *pgx.Conn, groupID int64) ([]stri
 
 // CatalogEntry 是模型目录的一行。
 type CatalogEntry struct {
-	ModelName   string    `json:"model_name"`
-	InputPrice  *float64  `json:"input_price,omitempty"`
-	OutputPrice *float64  `json:"output_price,omitempty"`
+	ModelName   string   `json:"model_name"`
+	InputPrice  *float64 `json:"input_price,omitempty"`
+	OutputPrice *float64 `json:"output_price,omitempty"`
+	// BillingUnit 是上面两个价格的口径，**必须与价格一同展示**。
+	// nil = 上游未声明，消费方按未知处理（02 §1.3bis）。
+	BillingUnit *string   `json:"billing_unit,omitempty"`
 	FirstSeenAt time.Time `json:"first_seen_at"`
 	LastSeenAt  time.Time `json:"last_seen_at"`
-	// Stale 表示疑似下架（last_seen_at 落后于最新一轮采集）。
+	// Stale 表示连续缺席轮次已达到配置阈值。
 	Stale bool `json:"stale"`
 }
 
 // ListCatalog 列出渠道模型目录。
 //
-// stale 判据（FR-126）：`last_seen_at` 落后于该渠道最新采集时刻超过
-// catalogMissingRounds 轮。这里用"最新 last_seen_at"作为"最近一轮"的代理 ——
-// 采集周期可配，用轮数比用时长更稳（02 §1.3bis）。
+// stale 判据（FR-126）：channel.catalog_sync_seq - last_seen_seq 达到
+// catalogMissingRounds。只计算可靠成功轮次，不受任务延迟、手动刷新或改周期影响。
 func ListCatalog(
 	ctx context.Context, conn *pgx.Conn, channelID int64,
-	staleOnly bool, missingRounds int, intervalHours int,
+	staleOnly bool, missingRounds int,
 ) ([]CatalogEntry, error) {
-	// 落后阈值 = 轮数 × 采集周期
-	lag := time.Duration(missingRounds) * time.Duration(intervalHours) * time.Hour
-	if lag <= 0 {
-		lag = 36 * time.Hour // 默认 3 轮 × 12h
+	// ⚠️ 排序**先按 billing_unit 再按价格**：两种口径的数值区间重叠
+	// （实测按次 0.004~7 vs 倍率 0.01~175），跨口径按价格排会把
+	// $7/次 的视频模型排在"倍率 175"之前，读者据此选型必然选错。
+	// 分段后同段内可比，段间由 unit 列显式隔开（02 §1.3bis）。
+	//
+	if missingRounds <= 0 {
+		missingRounds = 3
 	}
 	rows, err := conn.Query(ctx, `
-WITH newest AS (
-  SELECT max(last_seen_at) AS t FROM channel_model_catalog WHERE channel_id = $1
-)
-SELECT c.model_name, c.input_price, c.output_price,
+SELECT c.model_name, c.input_price, c.output_price, c.billing_unit,
        c.first_seen_at, c.last_seen_at,
-       (n.t IS NOT NULL AND c.last_seen_at < n.t - $2::interval) AS stale
-  FROM channel_model_catalog c CROSS JOIN newest n
+       (ch.catalog_sync_seq - c.last_seen_seq >= $2::bigint) AS stale
+  FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
  WHERE c.channel_id = $1
-   AND ($3 = false OR (n.t IS NOT NULL AND c.last_seen_at < n.t - $2::interval))
- ORDER BY c.input_price NULLS LAST, c.model_name`,
-		channelID, lag.String(), staleOnly)
+   AND ($3 = false OR ch.catalog_sync_seq - c.last_seen_seq >= $2::bigint)
+ ORDER BY c.billing_unit NULLS LAST, c.input_price NULLS LAST, c.model_name`,
+		channelID, missingRounds, staleOnly)
 	if err != nil {
 		return nil, fmt.Errorf("列渠道 %d 目录: %w", channelID, err)
 	}
@@ -356,7 +351,7 @@ SELECT c.model_name, c.input_price, c.output_price,
 	for rows.Next() {
 		var e CatalogEntry
 		if err := rows.Scan(&e.ModelName, &e.InputPrice, &e.OutputPrice,
-			&e.FirstSeenAt, &e.LastSeenAt, &e.Stale); err != nil {
+			&e.BillingUnit, &e.FirstSeenAt, &e.LastSeenAt, &e.Stale); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

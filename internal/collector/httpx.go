@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,16 @@ func (c *Client) wait(ctx context.Context, host string) error {
 	}
 	// 提前占位，避免并发请求都读到同一个 prev 而一起放行
 	c.last[host] = now.Add(sleep)
+	// 顺手清掉已无意义的条目：占位时刻早于 now-MinInterval 的条目，
+	// 再取出来算 sleep 也必然 ≤0，留着只是让 map 随"见过多少 host"单调增长。
+	// 扫描代价与**清理后**的规模同阶：清理把 map 压到"最近一个间隔内活跃的 host"
+	// （单渠道同步时通常 1~2 个），所以这个 O(n) 是自限的，不需要按大小设阈值。
+	cutoff := now.Add(-c.MinInterval)
+	for h, t := range c.last {
+		if t.Before(cutoff) {
+			delete(c.last, h)
+		}
+	}
 	c.mu.Unlock()
 
 	if sleep <= 0 {
@@ -74,21 +85,23 @@ func (c *Client) wait(ctx context.Context, host string) error {
 	}
 }
 
-// authHeaders 按站型构造鉴权头。
+// authHeaders 构造鉴权头。
 //
-// NewAPI 的关键点（04 §3.1）：**必须同时带用户 ID 头**，只带 Authorization
-// 会 401。头名因二开而异，由 Authenticate 阶段 fan-out 确定。
+// **这里没有逐家族分流，是刻意的。** 三家族的差别只有"要不要带用户 ID 头"，
+// 而那由会话里有没有头名决定 —— 头名只有 NewAPI 的 Authenticate 会 fan-out
+// 试探出来并写进凭证（04 §3.1：只带 Authorization 会 401，且二开站改了头名）。
+// 原先这里是一个 switch，它表达的是**零个变化点**：三个 case 里两个逐字相同，
+// 第三个多的那两行本身已经被 if 守住了。
+//
+// 这一处曾是"加站型要改九处"里最坏的两处之一：漏加 case 的后果是新站型
+// 一个头都不带 → 401，而编译、单测、Capabilities 声明全是绿的。
+// 删掉分流之后，新站型默认就拿到 Bearer + 有则带用户 ID 头 —— 漏不掉。
 func authHeaders(s Session) http.Header {
 	h := http.Header{}
-	switch s.Family {
-	case FamilyNewAPI:
-		// 实测 `Authorization: <token>` 与 `Bearer <token>` 均可，用后者更通用
-		h.Set("Authorization", "Bearer "+s.Token)
-		if s.UserIDHeader != "" && s.ExternalUserID != "" {
-			h.Set(s.UserIDHeader, s.ExternalUserID)
-		}
-	case FamilySub2API, FamilyASXS:
-		h.Set("Authorization", "Bearer "+s.Token)
+	// 实测 `Authorization: <token>` 与 `Bearer <token>` 均可，用后者更通用
+	h.Set("Authorization", "Bearer "+s.Token)
+	if s.UserIDHeader != "" && s.ExternalUserID != "" {
+		h.Set(s.UserIDHeader, s.ExternalUserID)
 	}
 	h.Set("Accept", "application/json")
 	return h
@@ -152,9 +165,11 @@ func snippet(b []byte) string {
 
 // asFloat 从任意 JSON 值取浮点。
 //
-// **必须容忍字符串数字**：ASXS 的 balanceUsd 就是字符串（04 §3.3），
-// 而 NewAPI 的 quota 是数字。用 float64 断言会静默得到 0 —— 那意味着
-// "余额 0"，会让 selector 把一个有钱的渠道判成耗尽。
+// **必须容忍字符串数字**：上游 JSON 的数字类型不稳定是实测过的事
+// （NewAPI 的 quota 是数字，而有的站把余额返回成 `"90.50"`）。
+// 用 float64 断言会静默得到 0 —— 那意味着"余额 0"，
+// 会让 selector 把一个有钱的渠道判成耗尽。
+// TestAsFloatToleratesStringNumbers 钉住这条容错。
 func asFloat(v any) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
@@ -217,6 +232,50 @@ func asSlice(v any) []any {
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
+}
+
+// decodeJWTPayload decodes a JWT payload without validating its signature.
+//
+// **不验签，只读 claim。** 读的是我方自己库里已存的令牌，用途仅是决定何时
+// 续期 —— 签名的意义是"上游能不能确认这是它签的"，而我方伪造自己的令牌来
+// 骗自己提早续期没有任何收益。真正的判定权在上游：令牌不对它会 401。
+// 反过来说这里**不能**用来做任何授权决定。
+//
+// 读不出就返回 false 让调用方退回"不主动续期"，**不猜默认到期时间**：
+// 真库里就有两条 cred_type 写 sub2api_jwt 而内容不是三段 JWT 的凭证
+// （渠道 30/31），给它们编一个到期时间会让系统按凭空的节奏刷令牌。
+//
+// exp 是 Unix 秒（RFC 7519 §4.1.4 的 NumericDate）。JSON 解出来是 float64，
+// 大整数在 float64 里到 2^53 都是精确的，Unix 秒离那儿还很远。
+func decodeJWTPayload(accessToken string, dst any) bool {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	// JWT 用的是无填充的 base64url（RFC 7515 §2）。有些实现仍带 '='，
+	// 两种都吃：只认一种会让"看着像 JWT 的令牌"静默读不出 exp。
+	seg := parts[1]
+	dec, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(seg, "="))
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(dec, dst) == nil
+}
+
+// jwtExpiry 读 JWT 的 exp 声明，读不出返回 false。
+func jwtExpiry(accessToken string) (time.Time, bool) {
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if !decodeJWTPayload(accessToken, &claims) || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	// exp<=0 当读不出：0 会被 time.Unix 解成 1970，于是"早已过期"，
+	// 让每次采集都刷一遍。
+	if *claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(*claims.Exp), 0), true
 }
 
 // dig 按路径逐层取值，任一层缺失即返回 nil。
