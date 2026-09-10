@@ -1,5 +1,7 @@
 # P1 采不到数据的上游渠道：已放弃纳管
 
+> 公开版本只保留匿名渠道标识和处置分类；真实站名、URL、渠道 ID 与凭证信息不进入仓库。
+
 | | |
 | --- | --- |
 | 用途 | [#12](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/12) 完成标准第 4 项「采不到数据的渠道列出人工维护责任人」 |
@@ -19,7 +21,7 @@
 | 动作 | 逐个 `PATCH /admin/channels/{id}` → `status=disabled` + `disabled_reason` |
 | 范围 | 三类共 **20** 个：需人工重登 11 / 凭证失效 6 / 形态不符 3 |
 | 台账 | 渠道总数仍 **65**（52 newapi + 13 sub2api），其中 **enabled 45**（全为 newapi）、**disabled 20** |
-| 未动 | `retryable` 那 2 个（渠道 1 夹具残留、Translate 的 CDN 522）—— 它们不属这三类 |
+| 未动 | `retryable` 那 2 个（渠道 1 夹具残留、redacted-channel-45 的 CDN 522）—— 它们不属这三类 |
 | 还原 | 停用前快照见提交说明；单个还原就是 `PATCH status=enabled`（服务端会一并清空原因与有效期） |
 
 **为什么是停用而不是删除**：仓库里没有 `DELETE /admin/channels` 路由，删除要对真库
@@ -49,9 +51,9 @@
 
 | 站 | 真实原因 | 为什么这是硬错误 |
 | --- | --- | --- |
-| redacted-channel-03 API（渠道 3） | `net/http: TLS handshake timeout` | 它的令牌与 all-api-hub 导出里那把**逐字节相同**（sha256 前 12 位 `[redacted fingerprint]` 两边一致），且同一天 `ui-stack.sh` 拿它跑完 58 项全绿。**派人去重登一把好令牌，是把人派去修一个不存在的问题。** |
-| UI验收-397444（渠道 1） | `connection refused` | 夹具残留，base_url 指向已删除的 mock 端口（§3.4） |
-| Translate（渠道 45） | `GET /api/user/self 返回 522` | Cloudflare 边缘：站点自己的源不可达，重登无用 |
+| redacted-channel-03（渠道 3） | `net/http: TLS handshake timeout` | 它的令牌与 all-api-hub 导出里那把**逐字节相同**（sha256 前 12 位 `[redacted fingerprint]` 两边一致），且同一天 `ui-stack.sh` 拿它跑完 58 项全绿。**派人去重登一把好令牌，是把人派去修一个不存在的问题。** |
+| redacted-channel-01（渠道 1） | `connection refused` | 夹具残留，base_url 指向已删除的 mock 端口（§3.4） |
+| redacted-channel-45（渠道 45） | `GET /api/user/self 返回 522` | Cloudflare 边缘：站点自己的源不可达，重登无用 |
 
 修法与破坏性验证见 [P1-evidence §5.16](P1-evidence.md#516-覆盖率报告把-tls-超时记成凭证失效人工清单虚高了三个站2026-08-30)。
 报告现在产出**两张**单子：`need_manual`（要人手）与 `retryable`（网络/边缘，下轮重试）。
@@ -63,35 +65,35 @@
 
 ## 2. 放弃清单（20 个）
 
-<!-- ROSTER-START 表体由 verify/coverage_report.py 的 need_manual 生成；「当前状态」列每轮由真库现查 -->
-| # | 渠道号 | 站名 | 站型 | 放弃原因 | 若要恢复需做什么 | 当前状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | 37 | 100xlabs | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 2 | 27 | Bwen | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 3 | 38 | Dwaiai | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 4 | 21 | Jlypx | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 5 | 64 | redacted-channel-05 | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 6 | 13 | Owlai | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 7 | 14 | Qaq | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 8 | 18 | redacted-channel-08 | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 9 | 12 | Td | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 10 | 63 | redacted-channel-10.Chat - redacted-channel-10，智在必达 | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 11 | 58 | redacted-channel-11 | sub2api | 需人工重登（无 refresh_token） | 账密重登（04 §5.3）或补 `refresh_token` | `disabled` |
-| 12 | 25 | redacted-channel-12 | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
-| 13 | 33 | redacted-channel-13 | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
-| 14 | 8 | Z API | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
-| 15 | 42 | redacted-channel-15 | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
-| 16 | 31 | redacted-channel-16 | sub2api | 凭证失效/鉴权失败 | **先修凭证类型**，见 §3；再换有效令牌 | `disabled` |
-| 17 | 30 | 龙虾 | sub2api | 凭证失效/鉴权失败 | **先修凭证类型**，见 §3；再换有效令牌 | `disabled` |
-| 18 | 9 | redacted-channel-18 | newapi | 鉴权通过但响应形态不符（需确认站型） | 确认真实站型后重登记 | `disabled` |
-| 19 | 57 | redacted-channel-19 | newapi | 鉴权通过但响应形态不符（需确认站型） | 确认真实站型后重登记 | `disabled` |
-| 20 | 46 | redacted-channel-20 | newapi | 鉴权通过但响应形态不符（需确认站型） | 确认真实站型后重登记 | `disabled` |
+<!-- ROSTER-START：公开版本只保留匿名编号、站型和处置分类，不发布运营站名或渠道 ID。 -->
+| # | 渠道标识 | 站型 | 放弃原因 | 若要恢复需做什么 | 当前状态 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `redacted-channel-01` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 2 | `redacted-channel-02` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 3 | `redacted-channel-03` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 4 | `redacted-channel-04` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 5 | `redacted-channel-05` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 6 | `redacted-channel-06` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 7 | `redacted-channel-07` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 8 | `redacted-channel-08` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 9 | `redacted-channel-09` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 10 | `redacted-channel-10` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 11 | `redacted-channel-11` | sub2api | 需人工重登（无 refresh_token） | 账密重登或补 `refresh_token` | `disabled` |
+| 12 | `redacted-channel-12` | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
+| 13 | `redacted-channel-13` | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
+| 14 | `redacted-channel-14` | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
+| 15 | `redacted-channel-15` | newapi | 凭证失效/鉴权失败 | 换一把有效令牌 | `disabled` |
+| 16 | `redacted-channel-16` | sub2api | 凭证失效/鉴权失败 | 先确认凭证类型，再登记有效令牌 | `disabled` |
+| 17 | `redacted-channel-17` | sub2api | 凭证失效/鉴权失败 | 先确认凭证类型，再登记有效令牌 | `disabled` |
+| 18 | `redacted-channel-18` | newapi | 鉴权通过但响应形态不符 | 确认真实站型后重登记 | `disabled` |
+| 19 | `redacted-channel-19` | newapi | 鉴权通过但响应形态不符 | 确认真实站型后重登记 | `disabled` |
+| 20 | `redacted-channel-20` | newapi | 鉴权通过但响应形态不符 | 确认真实站型后重登记 | `disabled` |
 <!-- ROSTER-END -->
 
 小计：需人工重登 11、凭证失效 6、响应形态不符 3。
 
 另有 2 个站本轮不可达但**不需人工**（网络/CDN 边缘，下一轮重试自愈）：
-redacted-channel-03 API（TLS 握手超时）、Translate（Cloudflare 522）。夹具行 UI验收-397444 永不可达，
+redacted-channel-03（TLS 握手超时）、redacted-channel-45（Cloudflare 522）。夹具行 redacted-channel-01 永不可达，
 它的处置见 [§3.4](P1-evidence.md#34-真库里有一行夹具残留35-项里的-3-条-key-断言跑在它身上2026-08-30-查明)。
 
 ## 3. 重新导入解决不了任何一个

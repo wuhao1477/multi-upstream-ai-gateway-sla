@@ -1,11 +1,13 @@
 # P1 验收证据（AC-37~40 + 退出标准）
 
+> 公开版本已匿名化渠道名称、上游 URL、内部数据库地址和真实验收站点标识；原始运营报告只保存在私有验收环境。
+
 | 项目 | 内容 |
 | --- | --- |
 | 阶段 | **P1：多上游渠道采集与管理**（[PRD §2.1.0](../PRD.md)、[ISSUE-005](../issues/ISSUE-005-phase1-upstream-inventory.md)） |
 | 日期 | 2026-08-28 起，2026-08-29 补齐全渠道覆盖率与 `billing_unit`；2026-09-02 更新当前工作树证据状态 |
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
-| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03 API」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
+| 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
 | 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 58 项（见 §5） |
 | 结论 | 真 NewAPI 浏览器验收已在当前 HEAD 重跑 `62/62`；2026-09-02 两个显式授权的真 Sub2API 站点均完成 AC-38。当前发布判定以 [P1-release-readiness](P1-release-readiness.md#当前结论) 为准。 |
 
@@ -121,7 +123,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 
 | 断言 | 实测 |
 | --- | --- |
-| 全量入目录、**无需 token 上界** | ✅ **真实站点最大单渠道 1369 个模型全部入库**（redacted-channel-03 API），`channel_model_catalog` 无 token 上界列<br>⚠️ 原文此处还举了"mock 9 个模型全部入库"，2026-08-29 删去 —— 那 9 个是我自己编的，证不了容量也证不了形态；真站点的 1369 行本就是更强的证据 |
+| 全量入目录、**无需 token 上界** | ✅ **真实站点最大单渠道 1369 个模型全部入库**（redacted-channel-03），`channel_model_catalog` 无 token 上界列<br>⚠️ 原文此处还举了"mock 9 个模型全部入库"，2026-08-29 删去 —— 那 9 个是我自己编的，证不了容量也证不了形态；真站点的 1369 行本就是更强的证据 |
 | **`models` 表不产生任何行** | ✅ 真库 65 渠道 2782 行目录之后 `models = 0`、`channel_models = 0` —— 这是本条的核心：目录（上游有什么）与可路由模型（我们决定用什么）是两层。**"容纳大量模型"由真实数据兑现**：若两层合一，光这 2782 行就要手填 2782 个 token 上界 |
 | 可分页与排序 | ✅ `?limit/offset/q` 生效；排序**先按 `billing_unit` 分段再按价格**（NULL 末位）—— 跨口径比价无意义（§4 第 11 项）|
 | 口径逐条落库 | ✅ 单渠道 1369 行中 `per_1m_token` 1161 行（0.01~175）、`per_call` 208 行（$0.004~7/次），**区间重叠**故不可由数值反推口径 |
@@ -163,7 +165,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 | [`coverage/p1-coverage-2026-08-31.json`](coverage/p1-coverage-2026-08-31.json) | 2026-08-31 12:55 | **45 渠道** / 88.0 秒 | 放弃 20 个站之后的首轮：`need_manual` **0**、`skipped_disabled` 20，见 [§5.18](#518-放弃-20-个采不到的站并修掉停用不影响采集2026-08-31) |
 
 归档前查过四份都无凭证串（`sk-` / `eyJ`（JWT）/ `Bearer` / `password` / `*token` 值：各 0 处）——
-报告只记站名、base_url、逐项 ok/failed 与失败原因文本，不含令牌。
+报告只记匿名渠道标识、占位 URL、逐项 ok/failed 与失败原因文本，不含令牌。
 
 下表是 **2026-08-29 那轮**。次轮的差异与退化见 §2.1bis，放弃纳管之后的形态见 §2.1ter，
 **不要只读这一张**。
@@ -220,7 +222,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 | --- | --- | --- |
 | 采集范围 | 全部 65 | **45 在纳管**，另 20 记入 `skipped_disabled` |
 | `need_manual` | 20 | **0** |
-| `retryable` | 2 | 2（渠道 1 夹具残留、Translate 的 CDN 522） |
+| `retryable` | 2 | 2（渠道 1 夹具残留、redacted-channel-45 的 CDN 522） |
 | newapi 可用 | 42 / 52 | **42 / 45** |
 | `matrix` 家族 | newapi + sub2api | **只有 newapi** |
 | 耗时 | 163.7s | **88.0s** |
@@ -230,7 +232,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 
 **`need_manual` 归零不等于"全都能采到了"。** 它等于"采不到的那些已经不在纳管
 范围内"。两个仍然失败的站（`retryable`）都不属这三类：渠道 1 是夹具残留（§3.4，
-处置未决），Translate 是 Cloudflare 边缘 522（站点自己的源不可达，重登无用）。
+处置未决），redacted-channel-45 是 Cloudflare 边缘 522（站点自己的源不可达，重登无用）。
 
 ⚠️ **`matrix` 里只剩 newapi 一族。** 这是"真库里 sub2api 在纳管渠道数为 0"在
 报告侧的证据，见 §1 AC-38 那段 ⚠️。**注意它不等于 AC-38 不可复验** —— 覆盖率报告
@@ -364,7 +366,7 @@ NULL：按 FR-015 保守处理、不进低价优选），P3 实现时不得只�
 ### 3.4 真库里有一行夹具残留，35 项里的 3 条 Key 断言跑在它身上（2026-08-30 查明）
 
 改 `verify-remote.mjs` 的站型分布断言时，破坏性验证顺带把 65 个渠道名全打出来，
-里面有一个 `UI验收-397444` —— `verify-ui.mjs:148` 的 `'UI验收-' + Date.now()`。
+里面有一个 `redacted-channel-01` —— `verify-ui.mjs:148` 的 `'UI验收-' + Date.now()`。
 查下来：
 
 | 事实 | 值 |
@@ -479,7 +481,7 @@ NULL：按 FR-015 保守处理、不进低价优选），P3 实现时不得只�
 | 套件 | 结果 | 上游 / 数据源 |
 | --- | --- | --- |
 | `verify-spa.mjs`（路由、断点、缓存、embed 占位） | **14/14** | 不需上游，CI 跑的就是这份 |
-| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入→改名/停用/启用） | **58/58** | 真站点「redacted-channel-03 API」`upstream-a.invalid` |
+| `verify-ui.mjs`（建渠道→探测站型→登记凭证→采集→分组→目录→Key→限流→批量导入→改名/停用/启用） | **58/58** | 真站点「redacted-channel-03」`upstream-a.invalid` |
 | `verify-remote.mjs`（内网真库只读） | **35/35** | SLA_DB @ <internal-db-host>（PG 17.5）；靶子每轮由 `pickTargets()` 现查，见 §3.3。2026-08-31 从 32 增：停用态 3 条（[§5.18](#518-放弃-20-个采不到的站并修掉停用不影响采集2026-08-31)） |
 | `ui-stack.sh` 末步：Key 明文不进 core 日志 | **✅** | 退出标准③ 的"日志"那一端，2026-08-29 补 |
 | 合计 | **107 项** | 2026-08-30 从 103 增至 104：`verify-remote.mjs` 补了一条「筛选关键词不在首页行内」的**前提断言** —— 关键词改为推导后，若它恰好落在首页，「筛选走后端 q 参数」就退化成「前端在当前页里过滤也能绿」。破坏性验证里这条正是这样红的，而它守的那条断言当时仍然绿。<br>2026-08-31 增至 107：放弃 20 个站之后，**台账里 20 行带着一个此前没有任何断言覆盖的状态**，补了停用态 3 条（逐行标出 / 每行带原因 / 在纳管的不被误标），见 [§5.18](#518-放弃-20-个采不到的站并修掉停用不影响采集2026-08-31)。 |
@@ -966,16 +968,16 @@ checksum 逐个一致，故起栈不动 schema；本地 017 文件的 sha256 前
 
 ### 5.16 覆盖率报告把 TLS 超时记成"凭证失效"，人工清单虚高了三个站（2026-08-30）
 
-写 §2.1bis 时顺手核对了一件本来不打算查的事：`need_manual` 里有「redacted-channel-03 API」——
+写 §2.1bis 时顺手核对了一件本来不打算查的事：`need_manual` 里有「redacted-channel-03」——
 **而那正是同一天 `ui-stack.sh` 拿来跑完 58 项全绿的站**。这两件事不可能同时为真。
 
 查下去发现报告在撒谎，不是站点有问题：
 
 | 站 | 报告记的 | 实际的 `fatal` 原串 |
 | --- | --- | --- |
-| redacted-channel-03 API（渠道 3） | 凭证失效/鉴权失败 | `…: net/http: TLS handshake timeout` |
-| UI验收-397444（渠道 1） | 凭证失效/鉴权失败 | `…: dial tcp 127.0.0.1:18099: connect: connection refused` |
-| Translate（渠道 45） | 凭证失效/鉴权失败 | `…: GET /api/user/self 返回 522`（Cloudflare 源不可达） |
+| redacted-channel-03（渠道 3） | 凭证失效/鉴权失败 | `…: net/http: TLS handshake timeout` |
+| redacted-channel-01（渠道 1） | 凭证失效/鉴权失败 | `…: dial tcp 127.0.0.1:18099: connect: connection refused` |
+| redacted-channel-45（渠道 45） | 凭证失效/鉴权失败 | `…: GET /api/user/self 返回 522`（Cloudflare 源不可达） |
 
 渠道 3 的令牌与 all-api-hub 导出里那把**逐字节相同**（sha256 前 12 位 `[redacted fingerprint]`
 两边一致，长度均 32）。**让运维去重登一把好令牌，是把人派去修一个不存在的问题** ——
@@ -1124,7 +1126,7 @@ checksum 逐个一致，故起栈不动 schema；本地 017 文件的 sha256 前
 停完立刻验"停用是否真的生效"，**没生效**：
 
 ```
-POST /admin/channels/30/sync        # 龙虾，已 disabled
+POST /admin/channels/30/sync        # redacted-channel-17，已 disabled
 → 502 {"error":"鉴权失败: collector: 上游返回 401: GET /api/v1/auth/me"}
 ```
 

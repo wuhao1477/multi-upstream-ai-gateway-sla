@@ -56,7 +56,7 @@ def api(path, method="GET", timeout=360):
 # 而是**报告在撒谎**：2026-08-30 那轮把 `TLS handshake timeout`（渠道 3 redacted-channel-03）
 # 和 `connection refused`（渠道 1 夹具）都记成"凭证失效"，并列进 need_manual
 # 让人去重登。而渠道 3 的令牌与 all-api-hub 导出里那把**逐字节相同**（sha256
-# 前 12 位 [redacted fingerprint] 两边一致），同一轮 ui-stack.sh 拿它跑 58 项全绿 ——
+# 指纹与库中登记值一致），同一轮 ui-stack.sh 拿它跑 58 项全绿 ——
 # 让运维去重登一把好令牌，是把人派去修一个不存在的问题。
 #
 # 所以传输层证据必须**先于**任何鉴权判定：底层连不上时，"鉴权失败"只是调用栈

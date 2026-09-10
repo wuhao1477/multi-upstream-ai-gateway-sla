@@ -10,6 +10,14 @@
 
 这条命令只运行 `docker compose config`，检查根目录 `compose.yml` 的服务、镜像、管理端口、collector entrypoint 和必填密钥约束；它不会启动容器，也不会访问真实数据库或上游渠道。
 
+公开仓库安全基线：
+
+```bash
+./test-public-safety.sh
+```
+
+它扫描当前 Git 内容中的 JWT、带密码 DSN、私钥、长 Bearer 令牌、内网数据库标识和已知真实验收站点，并检查本地备份/架构图文件不会被 Git 跟踪。
+
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
 | `ui-stack.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 58 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |

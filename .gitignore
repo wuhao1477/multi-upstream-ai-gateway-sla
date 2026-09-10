@@ -10,6 +10,11 @@ deploy/.env
 *.env
 !deploy/.env.example
 
+# 真实渠道导出和本地生成的架构图只用于本地验收，禁止进入公开仓库
+all-api-hub-backup-*.json
+docs/ARCHIFY-*
+docs/superpowers/plans/
+
 # Go
 *.test
 *.out
