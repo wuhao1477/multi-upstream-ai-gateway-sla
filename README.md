@@ -72,7 +72,7 @@ collector ───────────────────────>
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0` | 发布镜像版本 |
+| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0` | 发布镜像版本 |
 | `POSTGRES_PASSWORD` | 无 | 必填；建议 `openssl rand -hex 32` |
 | `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌 |
 | `ADMIN_PORT` | `8080` | 本机管理端口 |
@@ -123,7 +123,7 @@ docker compose -f deploy/docker-compose.yml down -v
 Release 工作流由 Tag 触发，构建 Linux amd64/arm64 二进制并推送多架构 GHCR 镜像：
 
 ```text
-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0
+ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0
 ```
 
 当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.0) 与 [发布工作流](.github/workflows/release.yml)。

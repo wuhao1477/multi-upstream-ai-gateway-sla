@@ -16,7 +16,7 @@
 
 ## 部署模型
 
-根目录 `compose.yml` 使用 `SLA_IMAGE` 指定的镜像，默认值为 `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0`，启动以下服务：
+根目录 `compose.yml` 使用 `SLA_IMAGE` 指定的镜像，默认值为 `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0`，启动以下服务：
 
 - `postgres`：PostgreSQL 16，仅加入 Compose 内部网络。
 - `sla-core-a`、`sla-core-b`：同一版本的 `sla-core`，共享 PostgreSQL；仅 A 将管理端口绑定到宿主机回环地址。
