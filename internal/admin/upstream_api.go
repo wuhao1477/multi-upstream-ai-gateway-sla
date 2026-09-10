@@ -14,8 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 // SyncRunner 执行一次渠道采集（由 main 注入，避免 admin 依赖具体适配器）。

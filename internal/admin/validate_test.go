@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
 
 func spec(key string) config.ParamSpec {

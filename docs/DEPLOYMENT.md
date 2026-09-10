@@ -21,7 +21,7 @@ Token 需要 `read:packages` 权限。不要把 Token 写入仓库或 `.env`。
 ### 首次启动
 
 ```bash
-git clone https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public.git
+git clone https://github.com/wuhao1477/multi-upstream-ai-gateway-sla.git
 cd multi-upstream-ai-gateway-sla-public
 cp .env.example .env
 ```
@@ -91,7 +91,7 @@ collector ───────────────────────�
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0` | 要运行的发布镜像，可用于升级/回滚 |
+| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0` | 要运行的发布镜像，可用于升级/回滚 |
 | `POSTGRES_PASSWORD` | 是 | 无 | PostgreSQL 密码；不要使用默认值 |
 | `ADMIN_TOKEN` | 是 | 无 | 管理 API 令牌；不会写入 `config_params` |
 | `ADMIN_PORT` | 否 | `8080` | 本机管理 UI/API 端口 |
@@ -140,7 +140,7 @@ docker compose down
 修改 `.env` 中的 `SLA_IMAGE`，然后拉取并重建容器：
 
 ```bash
-SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0
+SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0
 docker compose pull
 docker compose up -d
 curl -k https://localhost/healthz
@@ -190,8 +190,8 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ## 10. 发布信息
 
-- Release：[v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/releases/tag/v1.0.0)
-- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0`
+- Release：[v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.0)
+- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0`
 - 发布工作流：[`.github/workflows/release.yml`](../.github/workflows/release.yml)
 - P1 验收记录：[P1 release readiness](acceptance/P1-release-readiness.md)
 

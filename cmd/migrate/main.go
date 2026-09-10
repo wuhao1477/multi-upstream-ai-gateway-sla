@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
 )
 
 func main() {

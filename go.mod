@@ -1,4 +1,4 @@
-module github.com/wuhao1477/multi-upstream-ai-gateway-sla-public
+module github.com/wuhao1477/multi-upstream-ai-gateway-sla
 
 go 1.25.13
 

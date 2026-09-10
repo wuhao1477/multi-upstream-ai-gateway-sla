@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
 
 // SeedConfigParams 把 09 §4bis 的 P1 键灌入 config_params，幂等。

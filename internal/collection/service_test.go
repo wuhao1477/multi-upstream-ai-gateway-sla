@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 func TestIntervalsFromSnapshot(t *testing.T) {

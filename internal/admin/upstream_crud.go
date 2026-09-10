@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 // ── 账号 ──

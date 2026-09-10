@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
 func TestSavePricingUpdatesExistingCatalogPriceOnly(t *testing.T) {

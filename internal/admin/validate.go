@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
 )
 
 // validateBaseURL 校验一个将被采集器请求的上游地址，**并返回它的规范形态**。

@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/admin"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/bootstrap"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collection"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/health"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/admin"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/health"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 // version 由构建时注入（-ldflags "-X main.version=..."）。

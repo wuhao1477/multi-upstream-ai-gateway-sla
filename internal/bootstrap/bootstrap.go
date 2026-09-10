@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 // Result 是初始化产物。

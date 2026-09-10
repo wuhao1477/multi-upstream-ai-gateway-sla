@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
 // CredentialStore 持久化采集凭证（一期明文，FR-113）。

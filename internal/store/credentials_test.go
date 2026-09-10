@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
 type rotatingRefresher struct{ calls atomic.Int32 }
