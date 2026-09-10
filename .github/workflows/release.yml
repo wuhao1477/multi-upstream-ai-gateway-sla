@@ -3,6 +3,12 @@ name: release
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要构建的版本 Tag
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +20,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
@@ -32,7 +40,7 @@ jobs:
 
       - name: 构建发布二进制
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           make web
           mkdir -p dist
@@ -49,14 +57,6 @@ jobs:
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ github.ref_name }}
-          path: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
-          if-no-files-found: error
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -71,7 +71,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=tag
+            type=raw,value=${{ inputs.tag || github.ref_name }}
 
       - name: 推送多架构 Docker 镜像
         uses: docker/build-push-action@v6
@@ -79,7 +79,7 @@ jobs:
           context: .
           file: deploy/Dockerfile
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ inputs.tag || github.ref_name }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -88,10 +88,11 @@ jobs:
       - name: 创建 GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --title "${GITHUB_REF_NAME}" \
+            --title "${RELEASE_TAG}" \
             --generate-notes \
             dist/*.tar.gz dist/SHA256SUMS
