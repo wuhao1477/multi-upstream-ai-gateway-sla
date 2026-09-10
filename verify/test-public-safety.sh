@@ -26,7 +26,7 @@ scan 'JWT 令牌' 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
 scan '疑似真实数据库连接串' '(postgres|mysql|redis)://[^[:space:]$]+:[^[:space:]$@]{16,}@'
 scan '私钥' '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
 scan '长 Bearer 令牌' 'Bearer[[:space:]]+[A-Za-z0-9._-]{40,}'
-scan '内网数据库地址' '100\.60\.0\.1|SLA_DB'
+scan '内网数据库地址' '100\.60\.0\.1|SLAHUB'
 scan '真实验收站点地址' 'api2\.aigcbest\.top|api\.lyy\.team|molifangapi\.xyz|7x\.hk|api\.hyhawang\.com|api\.asxs\.top'
 
 if [ -d .git ]; then
