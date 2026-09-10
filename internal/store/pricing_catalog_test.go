@@ -104,6 +104,20 @@ func TestSavePricingStoresSnapshotBeforeCountingRow(t *testing.T) {
 	if _, err := conn.Exec(ctx, `INSERT INTO models (canonical_name) VALUES ('pricing-model')`); err != nil {
 		t.Fatalf("建模型: %v", err)
 	}
+	// models 没有 channel_id，wipeInventoryTest 按 base_url 清不到这行；
+	// 不删则同一个库第二次跑本用例必撞 models_canonical_name_key。
+	defer func() {
+		ctx := context.Background()
+		if _, err := conn.Exec(ctx, `
+DELETE FROM price_versions WHERE model_id IN (
+	SELECT id FROM models WHERE canonical_name='pricing-model')`); err != nil {
+			t.Errorf("清理价格版本: %v", err)
+		}
+		if _, err := conn.Exec(ctx,
+			`DELETE FROM models WHERE canonical_name='pricing-model'`); err != nil {
+			t.Errorf("清理模型: %v", err)
+		}
+	}()
 	if _, err := NewCollectorSink(pool).SaveCatalog(ctx, channelID, []collector.CatalogModel{{
 		ModelName: "pricing-model", InputPrice: 1, OutputPrice: 1,
 		BillingUnit: "per_call", Meta: collector.SourceMeta{FetchedAt: time.Now()},
