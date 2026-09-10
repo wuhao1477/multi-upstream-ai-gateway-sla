@@ -2,6 +2,14 @@
 
 ## 一、P1 验收（现役，日常用这些）
 
+发布镜像部署的配置校验：
+
+```bash
+./test-compose-release.sh
+```
+
+这条命令只运行 `docker compose config`，检查根目录 `compose.yml` 的服务、镜像、管理端口、collector entrypoint 和必填密钥约束；它不会启动容器，也不会访问真实数据库或上游渠道。
+
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
 | `ui-stack.sh` | 真 Chrome 点管理界面：SPA 14 项 + 功能 58 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 14 项并打印跳过了什么） |

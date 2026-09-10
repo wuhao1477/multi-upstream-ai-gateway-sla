@@ -1,85 +1,154 @@
-# 多上游 AI 网关 SLA 保障项目
+# multi-upstream-ai-gateway-sla
 
-统一接入约 20 个 AI 上游渠道，依据价格、余额、性能、稳定性、容量、缓存表现、模型能力和订阅额度动态分配请求，在满足可定义 SLA 的前提下降低实际服务成本。
+一个面向个人和内网环境的多上游 AI 渠道管理系统。它把不同站型的渠道、账号、Key、分组、额度和模型目录统一采集到 PostgreSQL，并提供管理 UI、手动采集和周期采集。
 
-本仓库为**需求、选型与开发设计阶段的文档库**（暂不含代码实现）。开发设计见 [docs/dev/](docs/dev/00-overview-and-milestones.md)。
+当前发布版本：`v1.0.0` · 当前交付阶段：**P1 上游采集与管理**
 
-## 当前阶段（截至 2026-07-27）
+[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.0) · [Apache-2.0](LICENSE)
 
-| 事项 | 状态 |
-| --- | --- |
-| 产品需求 PRD | ✅ **v1.5 基线已冻结**（2026-07-27）：16 项业务参数确认 + 运行时验证反馈（ISSUE-003）+ 开工前裁决 20 条（ISSUE-004）+ **交付切分（ISSUE-005）**全部折入 |
-| **当前交付阶段** | 🚧 **P1 ＝ 多上游渠道采集与管理**（[ISSUE-005](docs/issues/ISSUE-005-phase1-upstream-inventory.md)）。**不含请求转发**；网关核心属 P2、调度经营属 P3、订阅制属 P4。交付进度表见 [PRD §2.1.0](docs/PRD.md)。<br>**开发工作项**：[EPIC #13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13)（含依赖链与第一周顺序）、[P1 milestone](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/milestone/1) |
-| **开工前反馈（ISSUE-004）** | ✅ **已裁定并落地**：20 条全部采纳，其中 6 处经审计修正后落地（见 [ISSUE-004 §0bis](docs/issues/ISSUE-004-dev-preflight-feedback.md)） |
-| **交付切分（ISSUE-005）** | ✅ **已裁定并落地**：11 条全部采纳。「一期/二期」自此只表**需求范围**，交付进度另立 **P1~P4**；既有 331 处期别标签一字未改 |
-| 开源网关技术选型 | ⚠️ 已被取代：2026-07-25 转向**彻底自研**，移除 AxonHub/ccLoad（见 [11 转向决策](docs/dev/11-decision-full-selfbuilt.md)） |
-| 未决问题清单 | ✅ 全部逐项确认（[OPEN-ISSUES](docs/OPEN-ISSUES.md)、[DECISIONS](docs/DECISIONS.md)） |
-| 上游采集调研（ISSUE-002） | ✅ 当时的三个家族接口全部打通，4 站实测 + 源码级解析（其中一家自建站已于 2026-08-29 移出支持范围，现役 NewAPI/Sub2API 两族） |
-| AxonHub 6 项假设（ISSUE-001） | ✅ 已完成（2026-07-23）；其结论（首字非可见内容、Responses 吞 reasoning）成为**转向自研的直接依据**，现为历史记录 |
-| 交付门禁 | ✅ `verify/gate.sh`：文档一致性 **12 类检查全绿**（零告警）+ DDL 在 postgres:16 真跑（**107 条 DDL**）；其中**七类做过注入验证**。**CI 已接入**（[gate.yml](.github/workflows/gate.yml)，2026-07-27）——push/PR 到 main 自动跑同一份脚本，本地无需装 Docker |
+## P1 已交付什么
+
+- 渠道列表、创建、编辑、启用和停用
+- 多账号管理与账号级采集凭证
+- 上游 Key 登记、编辑、停用、删除和脱敏展示
+- 渠道分组、分组倍率与 Key 分组关联
+- Key 额度、用量、限流字段和同步历史
+- 渠道模型目录、价格信息和疑似下架提示
+- NewAPI / Sub2API 站型探测与采集适配器
+- 手动采集、周期采集、部分成功和 `degraded` 能力标记
+- 资产总览、异常项、管理 API 和 Vue 管理 UI
+
+## 明确不在 v1.0.0
+
+P1 不包含请求转发、账本、候选调度、SLA 接管、容量保留、告警、压测、订阅台账或多租户。`/v1/*` 是后续 P2 的数据面入口；当前版本可通过 Caddy 访问 `/healthz`，管理面走本机回环端口。
+
+## 5 分钟启动
+
+```bash
+git clone https://github.com/wuhao1477/multi-upstream-ai-gateway-sla.git
+cd multi-upstream-ai-gateway-sla
+cp .env.example .env
+openssl rand -hex 32
+```
+
+把生成的随机值分别填入 `.env` 的 `POSTGRES_PASSWORD` 和 `ADMIN_TOKEN`。不要把 `.env`、上游 Key 或采集凭证提交到 Git。
+
+当前 GHCR 镜像需要 `read:packages` 权限：
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+```
+
+启动并检查：
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+curl -k https://localhost/healthz
+```
+
+管理界面地址：<http://127.0.0.1:8080/admin/ui/>。在界面中输入 `.env` 的 `ADMIN_TOKEN`，然后创建渠道、账号、采集凭证和上游 Key。
+
+## 架构
+
+```text
+管理 UI/API ──> sla-core-a :8080 ─┐
+                                  ├── PostgreSQL 16
+管理 UI/API ──> sla-core-b :8080 ┘
+
+客户端 ────────> Caddy :80/:443 ──> /healthz（P1）
+                              └──> /v1/*（P2）
+
+collector ───────────────────────> PostgreSQL + 上游管理接口
+```
+
+- `sla-core-a/b` 共享 PostgreSQL；启动时自动执行迁移和配置种子。
+- `collector` 使用同一镜像中的 `/collector`，负责周期采集，不发布宿主机端口。
+- Caddy 只代理 `/healthz` 和未来的 `/v1/*`；`/admin/*`、`/metrics` 不经 Caddy。
+- 管理端口只绑定 `127.0.0.1`，默认是 `8080`。
+
+## 配置
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0` | 发布镜像版本 |
+| `POSTGRES_PASSWORD` | 无 | 必填；建议 `openssl rand -hex 32` |
+| `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌 |
+| `ADMIN_PORT` | `8080` | 本机管理端口 |
+| `SITE_ADDRESS` | `localhost` | Caddy 站点名；默认使用自签证书 |
+| `HTTP_PORT` | `80` | Caddy HTTP 端口 |
+| `HTTPS_PORT` | `443` | Caddy HTTPS 端口 |
+
+上游 Key 和采集凭证是运行时数据，使用管理界面登记，不写进环境变量。
+
+## 日常运维
+
+```bash
+docker compose ps
+docker compose logs --tail=200 sla-core-a sla-core-b collector
+docker compose logs -f caddy
+docker compose stop
+docker compose start
+docker compose exec -T postgres pg_dump -U sla -d sla > sla-backup.sql
+```
+
+`docker compose down -v` 会删除 PostgreSQL 数据卷，只能在明确放弃数据时使用。升级或回滚时修改 `.env` 的 `SLA_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
+
+完整的备份恢复、安全边界和排障说明见 [部署指南](docs/DEPLOYMENT.md)。
+
+## 本地开发
+
+发布镜像部署使用根目录 `compose.yml`；修改源码后的本地构建使用 `deploy/docker-compose.yml`：
+
+```bash
+make check
+docker compose -f deploy/docker-compose.yml up -d --build
+./verify/test-compose.sh
+docker compose -f deploy/docker-compose.yml down -v
+```
+
+常用入口：
+
+- `make build`：构建前端和三个 Go 二进制
+- `make test`：Go 竞态测试
+- `make test-ui`：真实 Chrome 管理界面验收
+- `./verify/test-migrate.sh`：临时 PostgreSQL 迁移验收
+- `./verify/gate.sh`：文档一致性和 DDL 门禁
+- `./verify/test-compose-release.sh`：发布 Compose 配置校验
+- `./verify/test-doc-links.sh`：README/部署文档链接校验
+
+## 发布
+
+Release 工作流由 Tag 触发，构建 Linux amd64/arm64 二进制并推送多架构 GHCR 镜像：
+
+```text
+ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0
+```
+
+当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.0) 与 [发布工作流](.github/workflows/release.yml)。
 
 ## 文档地图
 
-### 核心交付
-- [产品需求 PRD v1.4](docs/PRD.md) —— 需求主文档（FR-001～121、AC-01～36、默认策略、参数确认）
-- [决策确认记录 DECISIONS](docs/DECISIONS.md) —— 16 项参数 + 5 条新需求 + **ISSUE-004 开工前裁决 20 条**
-- [未决问题清单 OPEN-ISSUES](docs/OPEN-ISSUES.md) —— 五部分问题及处理状态
+- [部署指南](docs/DEPLOYMENT.md)：启动、配置、升级、回滚、备份和排障
+- [P1 验收记录](docs/acceptance/P1-release-readiness.md)：真实验收和发布判定
+- [PRD](docs/PRD.md)：产品需求与 P1/P2/P3/P4 切分
+- [开发总览](docs/dev/00-overview-and-milestones.md)：里程碑和工程约束
+- [架构设计](docs/dev/01-architecture.md)：组件与数据流
+- [数据模型](docs/dev/02-data-model.md)：PostgreSQL 表和迁移规则
+- [采集器契约](docs/dev/04-collector-adapter.md)：站型适配器和能力分级
+- [管理 API](docs/dev/09-admin-api.md)：管理面接口
+- [验收入口](verify/README.md)：本地门禁、Compose、迁移和 UI 验收
 
-### 技术选型
-- [技术选型结论 TECHNICAL-SELECTION](docs/tech-selection/TECHNICAL-SELECTION.md)
-- [技术选型决策图 DECISION-MAP](docs/tech-selection/DECISION-MAP.md)
-- [候选仓库固定基线](docs/tech-selection/research/00-repository-baseline.md)
-- 逐仓库评估（历史，转向后不再作为执行面候选）：[AxonHub](docs/tech-selection/research/axonhub.md)、[Aether](docs/tech-selection/research/aether.md)、[OmniRoute](docs/tech-selection/research/omniroute.md)、[NewAPI](docs/tech-selection/research/newapi.md)、[Sub2API](docs/tech-selection/research/sub2api.md)、[Octopus 系列](docs/tech-selection/research/octopus.md)、[ccLoad](docs/tech-selection/research/ccload.md)、[zhfeng1/ai-gateway](docs/tech-selection/research/zhfeng1-ai-gateway.md)
-- 横向分析：[能力覆盖矩阵](docs/tech-selection/research/capability-matrix.md)、[外部控制边界](docs/tech-selection/research/control-boundary.md)、[维护性判断](docs/tech-selection/research/maintenance.md)
-- [选型复审（2026-07-23）](docs/tech-selection/research/2026-07-resurvey.md) —— 新筛 10+ 家（LiteLLM/Bifrost/Portkey/gpt-load 等），未发现更优，维持推荐
+## 路线图
 
-### 专项调研（issues）
-- [ISSUE-001：AxonHub 6 项技术假设验证](docs/issues/ISSUE-001-tech-assumption-verification.md)（历史记录，转向依据）
-- [ISSUE-002：上游采集调研（第一阶段）](docs/issues/ISSUE-002-upstream-data-collection.md)
-- [ISSUE-002：四站实测探测结果](docs/issues/ISSUE-002-probe-results.md)
-- [ISSUE-002：多平台采集适配器设计](docs/issues/ISSUE-002-collector-adapter-design.md)
-- [订阅数据采集验证记录](docs/tech-selection/research/subscription-data-verification.md)
-- [ISSUE-003：运行时/采集反馈的需求候选](docs/issues/ISSUE-003-runtime-feedback-requirement-candidates.md) —— ✅ 已并入 PRD v1.3
-- [ISSUE-004：开发开工前需求反馈](docs/issues/ISSUE-004-dev-preflight-feedback.md) —— ✅ **已裁定并落地（PRD v1.4）**：20 条决议 + 6 处审计修正
-- [ISSUE-005：交付切分——P1 只做上游采集与管理](docs/issues/ISSUE-005-phase1-upstream-inventory.md) —— ✅ **已裁定并落地（PRD v1.5）**：11 条决议；含数据库最小设计的逐项理由与 6 项后续阶段任务台账
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| P1 | 上游渠道采集与管理 | 已发布 |
+| P2 | 网关转发、账本、入站鉴权与配额 | 未开始 |
+| P3 | 调度、SLA、告警和压测 | 未开始 |
+| P4 | 订阅制、多 SLA 等级和外部告警完整渠道 | 未开始 |
 
-### 开发设计（2026-07-23 启动，07-25 转向自研）
-- [00 开发总览与里程碑](docs/dev/00-overview-and-milestones.md) —— 技术栈决策（Go/PG/Compose）、硬约束清单、M0～M4
-- [01 架构设计](docs/dev/01-architecture.md) —— 组件拓扑、sla-core 模块、上游直连、请求时序
-- [02 数据模型](docs/dev/02-data-model.md) —— PG 单库 schema：逐 Attempt 账本、订阅台账（双倍率）、价格版本、健康冷却、月分区保留
-- [03 上游对接层](docs/dev/03-upstream-layer.md) —— **自研直连**：字节透传 + 旁路观察、Codex 兼容硬约束、取消与超时
-- [04 采集器契约](docs/dev/04-collector-adapter.md) —— CollectorAdapter 接口 + 逐家族字段映射 + 凭证生命周期状态机
-- [05 调度与经营策略](docs/dev/05-scheduling-and-operations.md) —— selector 排序/RoutePlan + steward 测活/冷却/订阅倾斜/告警
-- [06 部署与运维](docs/dev/06-deployment-and-operations.md) —— 单机 Compose、上游直连与选主、版本治理、备份保留、M0 部署清单
-- [07 AxonHub 运行时实测](docs/dev/07-axonhub-runtime-probes.md) —— 历史记录；其 Responses round-trip 损耗实测是转向的直接依据
-- [08 参考项目评估：zhfeng1/ai-gateway](docs/dev/08-ref-eval-zhfeng1-ai-gateway.md) —— 源码级评估：TTFT 品类通病佐证、网关开销测法、TPS 分母口径、不吸收清单
-- [09 管理 API 与设置面](docs/dev/09-admin-api.md) —— `/admin/*` 配置 API、关键项二次确认、策略元数据（FR-115 操作面）
-- [10 工程结构与构建](docs/dev/10-project-structure.md) —— Go 单仓布局、包边界、构建/CI 门禁、M0 交付物映射
-- [11 架构转向决策](docs/dev/11-decision-full-selfbuilt.md) —— **移除外部网关、彻底自研**的决策与依据
-- [12 可调试性设计](docs/dev/12-debuggability.md) —— 自研透传层排障：FR-112 约束下只存元数据
-- [13 调研资产重审](docs/dev/13-research-reassessment.md) —— Codex 三条硬约束；三项目在同一处翻车 → 字节透传
-- [14 验收矩阵](docs/dev/14-acceptance-matrix.md) —— 32 条 AC → 里程碑 → 可执行判定方法（PM 与开发的验收契约）
-- [15 一期范围与开工前确认清单](docs/dev/15-scope-and-preflight.md) —— 一期/二期范围（**订阅制移入二期**）+ 开工前必须确认的隐患清单
+## 许可证
 
-### 运行时验证与交付门禁
-- [verify/ — 验收入口导航](verify/README.md)（P1 现役套件；SSE 流夹具场景集；AxonHub harness 已删，结论转历史）
-- `verify/gate.sh` —— **交付门禁**（CI 与本地**同一份脚本**）：`check_docs.py` 12 类文档一致性检查 + `ddl-check.sh` 在 postgres:16 上真跑全部 DDL。CI 入口 [`.github/workflows/gate.yml`](.github/workflows/gate.yml)：push/PR 到 main 自动跑，另校验 `ddl-extracted.sql` 未与 02 脱节
-- `verify/probe_codex_wire.py` —— Codex 线上行为实测：**证实它发的模型名来自自身 config.toml、与 `/v1/models` 无关**（据此确定 A2 的合成方案安全，接入前须改 Codex 的 `model` 为我方别名）
-
-## 推荐架构（一句话）
-
-**客户端（主力 Codex CLI）→ 自研 SLA 决策核心（承担价格/余额/会话/缓存/测活决策）→ 自研上游透传层 → 真实上游。** 一期**无外部网关**（[11 转向](docs/dev/11-decision-full-selfbuilt.md)）；Responses 走**字节级透传**保真，`/v1/models` 由网关**合成**别名列表（不透传上游目录），TTFT 判定与 Attempt 账本全由自研核心负责（⏭ 订阅台账与双倍率移入二期）。
-
-## 关键约束
-
-- **使用场景**：个人 / 内部使用，不对外提供服务（决定许可证、合规与鉴权边界）。
-- **规模**：峰值 100～1000 QPS。
-- **对外协议**：OpenAI Chat Completions 与 Responses；对外模型名一律是**别名**（承载策略），非别名请求 404、越权 403。
-- **一期数据**：不存请求正文/上下文/头/体；账本元数据保留 ≥180 天。
-- **单一承诺等级**：一期只承诺一档 SLA；调度与实验流量判断读策略行的 `is_committed`/`canary_eligible`/`probe_allowed` **显式字段，不读等级名**（二期加等级零改结构）。
-- **策略配置化**：所有调度与经营策略以建议值为默认、设置页可改，关键项修改需二次确认。
-- **管理面边界**：`/admin/*` 与 `/metrics` 不经 Caddy 代理；管理界面默认从本机 `http://127.0.0.1:8080/admin/ui/` 访问，API 仍需管理令牌。
-
-## 编号约定
-
-需求 `FR-xxx`、验收 `AC-xx`、专项 `ISSUE-xxx`。开发计划、验收用例与上线检查必须引用这些编号；需求变更须更新 PRD 版本、日期、原因与受影响编号。
+本项目采用 [Apache License 2.0](LICENSE)。
