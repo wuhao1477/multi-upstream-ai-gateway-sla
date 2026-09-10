@@ -23,7 +23,11 @@ const probeMaxBytes = 1 << 20
 // 全部公开端点、零成本，可对 ~20 个上游批量跑一次自动分桶（AC-28）。
 // 全未命中返回 FamilyUnknown —— 按 04 §7 走未知家族接入流程，
 // **不猜、不 fallback 到某个家族**：猜错会让后续所有字段映射都错。
-func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult, error) {
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func Detect(ctx context.Context, hc httpDoer, baseURL string) (DetectResult, error) {
 	return detectWith(ctx, hc, baseURL, All())
 }
 
@@ -35,7 +39,7 @@ func Detect(ctx context.Context, hc *http.Client, baseURL string) (DetectResult,
 // 而它正是自研站接入要靠的那条（registry.go 的 Match 注释）。
 // 用参数而不是在测试里改全局 registrations：改全局会泄漏给同包其它测试，
 // 而那些测试正是靠遍历 All() 来断言"每族都合规"的。
-func detectWith(ctx context.Context, hc *http.Client, baseURL string, regs []*Registration) (DetectResult, error) {
+func detectWith(ctx context.Context, hc httpDoer, baseURL string, regs []*Registration) (DetectResult, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -72,7 +76,7 @@ func detectWith(ctx context.Context, hc *http.Client, baseURL string, regs []*Re
 }
 
 // getJSON 取一个 JSON 响应。
-func getJSON(ctx context.Context, hc *http.Client, url string) (map[string]any, []byte, error) {
+func getJSON(ctx context.Context, hc httpDoer, url string) (map[string]any, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, err
@@ -85,7 +89,8 @@ func getJSON(ctx context.Context, hc *http.Client, url string) (map[string]any, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("%s 返回 %d", url, resp.StatusCode)
+		return nil, nil, newHTTPError(resp,
+			fmt.Sprintf("%s 返回 %d", url, resp.StatusCode), nil)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, probeMaxBytes))
 	if err != nil {

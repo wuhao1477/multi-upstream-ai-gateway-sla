@@ -404,6 +404,7 @@ echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 0
 echo "   ✅ 编辑：账号字段可清空 / Key 可解除分组"
 
 STORE_TESTS=(
+  TestHostRequestLimiterSerializesIndependentInstances
   TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey
   TestSaveTxPreservesExistingRefreshLockKeyOnPartialUpdate
   TestCredentialRefreshLockMigrationMatchesRuntimeURLNormalization

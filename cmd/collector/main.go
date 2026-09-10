@@ -79,6 +79,7 @@ func run(dsn string, once bool, logger *slog.Logger) error {
 		return err
 	}
 	httpClient := collector.NewClient(time.Duration(requestInterval) * time.Millisecond)
+	httpClient.WaitHost = store.NewHostRequestLimiter(pool).Wait
 	runner := collection.NewRunner(pool, httpClient)
 	service := collection.NewService(pool, runner, collection.NewSchedule(periods), logger)
 

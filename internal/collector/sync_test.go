@@ -58,6 +58,29 @@ func (f *fakeSink) SaveCatalog(_ context.Context, _ int64, cs []CatalogModel) (i
 	return len(cs), nil
 }
 
+func TestSyncItemPreservesHTTPRetryMetadata(t *testing.T) {
+	var result SyncResult
+	syncer := &Syncer{}
+	syncer.run(context.Background(), &result,
+		CapabilityMap{CapAccount: Supported}, CapAccount,
+		func() (int, int, string, error) {
+			return 0, 0, "", &HTTPError{
+				StatusCode: 429,
+				RetryAfter: 2 * time.Minute,
+				Message:    "rate limited",
+			}
+		})
+
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %d，期望 1", len(result.Items))
+	}
+	item := result.Items[0]
+	if item.HTTPStatus != 429 || item.RetryAfterMs != 120_000 {
+		t.Fatalf("HTTP 重试元数据 = status %d / retry %dms，期望 429 / 120000ms",
+			item.HTTPStatus, item.RetryAfterMs)
+	}
+}
+
 // stubAdapter 是可控的适配器，用于编排测试。
 type stubAdapter struct {
 	caps     CapabilityMap

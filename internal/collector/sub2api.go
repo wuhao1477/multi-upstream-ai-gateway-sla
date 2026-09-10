@@ -36,7 +36,7 @@ func (a *Sub2APIAdapter) Capabilities() CapabilityMap {
 }
 
 func (a *Sub2APIAdapter) Detect(ctx context.Context, baseURL string) (DetectResult, error) {
-	return Detect(ctx, a.C.HC, baseURL)
+	return Detect(ctx, a.C, baseURL)
 }
 
 // Authenticate 校验 JWT 可用。
@@ -89,10 +89,7 @@ func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credenti
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	if err := a.C.wait(ctx, req.URL.Host); err != nil {
-		return cred, err
-	}
-	resp, err := a.C.HC.Do(req)
+	resp, err := a.C.Do(req)
 	if err != nil {
 		return cred, fmt.Errorf("刷新请求失败: %w", err)
 	}
@@ -101,10 +98,12 @@ func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credenti
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		// refresh_token 也失效 → 只能人工重登（04 §5.2 第 4 层）
-		return cred, fmt.Errorf("%w: refresh_token 已失效", ErrNeedsRelogin)
+		return cred, newHTTPError(resp,
+			fmt.Sprintf("%v: refresh_token 已失效", ErrNeedsRelogin), ErrNeedsRelogin)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return cred, fmt.Errorf("刷新返回 %d: %s", resp.StatusCode, snippet(raw))
+		return cred, newHTTPError(resp,
+			fmt.Sprintf("刷新返回 %d: %s", resp.StatusCode, snippet(raw)), nil)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {

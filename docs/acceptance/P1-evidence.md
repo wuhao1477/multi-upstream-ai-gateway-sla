@@ -1,5 +1,7 @@
 # P1 验收证据（AC-37~40 + 退出标准）
 
+> **历史验收证据。** 本文记录 2026-08-28 至 2026-09-02、代码基线 `49d979ed2ed06da1f7b0e9e8689a9da543c35d1b` 的 P1 验收过程；“当前”均指记录当时，不代表当前 HEAD 已重新验证。
+
 > 公开版本已匿名化渠道名称、上游 URL、内部数据库地址和真实验收站点标识；原始运营报告只保存在私有验收环境。
 
 | 项目 | 内容 |
@@ -9,7 +11,7 @@
 | 判定依据 | [14 §2 P1 段](../dev/14-acceptance-matrix.md) 的四条 AC + [00 §3](../dev/00-overview-and-milestones.md) P1 退出标准 |
 | 验证环境 | ① **真库**：SLA_DB @ <internal-db-host>（PostgreSQL **17.5**，设计基线是 16 —— 顺带验证向上兼容）② **65 个真实上游站点**（52 NewAPI + 13 Sub2API，来自运营导出的 all-api-hub 备份）③ ~~mock NewAPI 上游~~ —— **2026-08-29 移除**（CLAUDE.md §1 禁止 mock）。改为 `verify/pick-upstream.mjs` 从 all-api-hub 导出里**探活**选真站点：要求 `/api/status` 给出正数 `quota_per_unit`、`/api/pricing` 同时存在倍率与按次两种口径、且凭证能过 `/api/user/self`。当轮选中「redacted-channel-03」`upstream-a.invalid`（1369 模型 = 倍率 1161 + 按次 208）④ **真 Chrome 152**（点击/填表/等 XHR/截图，非 DOM dump） |
 | 可复现 | `HUB_FILE=... make test-ui` 一键起 PG + sla-core + Chrome，上游由 `verify/pick-upstream.mjs` 探活选真站点。全渠道覆盖率报告：`verify/coverage_report.py`<br>⚠️ **CI 里只跑得到免密的 SPA 14 项**：真上游令牌不进 GitHub secrets，无 `HUB_FILE` 时脚本自动降级并声明跳过了哪 58 项（见 §5） |
-| 结论 | 真 NewAPI 浏览器验收已在当前 HEAD 重跑 `62/62`；2026-09-02 两个显式授权的真 Sub2API 站点均完成 AC-38。当前发布判定以 [P1-release-readiness](P1-release-readiness.md#当前结论) 为准。 |
+| 结论 | 真 NewAPI 浏览器验收已在当时 HEAD 重跑 `62/62`；2026-09-02 两个显式授权的真 Sub2API 站点均完成 AC-38。当时发布判定见 [P1-release-readiness](P1-release-readiness.md#当时结论)。 |
 
 ---
 
@@ -117,7 +119,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 "这话什么意思"。判定基准（`collector.All()`）从头到尾一个字没动，这一点上面那段是对的。
 
 这次历史复跑的细节保留在本节；当前复验状态见
-[P1-release-readiness 当前结论](P1-release-readiness.md#当前结论)。
+[P1-release-readiness 当时结论](P1-release-readiness.md#当时结论)。
 
 ### AC-39 目录容纳大量模型且不产生可路由模型行
 
@@ -147,7 +149,7 @@ Detect 归族正确 —— 实跑通过，逐项结果带耗时、429 限流、K
 | AC-37~40 全绿 | ⏳ 真 NewAPI 浏览器 `62/62` 和两个真 Sub2API AC-38 均通过；等待本轮完整本地门禁 |
 | #1~#11 全部关闭 | ✅ 12 个 issue 全关（#13 EPIC 收尾） |
 | 证据留档 | ✅ 本文件 + [P1-manual-channels.md](P1-manual-channels.md)（人工清单）+ 四轮覆盖率报告归档在 [`coverage/`](coverage/)。截图仍只在 `/tmp/sla-ui-shots/`（8 张 + `results.json`，含 fullPage）—— **未入库**，因为含真实站名与额度，且每轮覆写 |
-| 门禁全绿 | ⏳ Sub2API 真实站点阻塞已解除；等待本轮完整本地门禁，详见 [P1-release-readiness 当前结论](P1-release-readiness.md#当前结论) |
+| 门禁全绿 | ⏳ Sub2API 真实站点阻塞已解除；等待本轮完整本地门禁，详见 [P1-release-readiness 当时结论](P1-release-readiness.md#当时结论) |
 | 全渠道 sync 覆盖率报告 | ✅ 见 §2.1（四轮已归档进仓库；末轮的分母是 45 在纳管渠道，见 §2.1ter） |
 | 采不到的渠道列出人工维护责任人（#12 第 4 项） | ✅ **已结清（2026-08-31），但方式是"不再纳管"而非"指定了人"** —— 运营决定三类（需人工重登 11 / 凭证失效 6 / 形态不符 3）全部放弃，20 个渠道已 `status=disabled` + 停用原因，[P1-manual-channels.md](P1-manual-channels.md) 从"待指派清单"改成"放弃记录"。责任人一列失去对象：没有需要人去维护的站了。<br>⚠️ 与 §3.1 那次「第三族被移除而非填上」同类 —— **放弃是一个决定，不是一次修复**：那 20 个站的可采集性至今未被恢复，只是不再由本系统承担。执行细节与顺带修掉的「停用不影响采集」见 [§5.18](#518-放弃-20-个采不到的站并修掉停用不影响采集2026-08-31) |
 

@@ -162,6 +162,8 @@ export interface SyncItem {
   failed?: number
   error?: string
   note?: string
+  http_status?: number
+  retry_after_ms?: number
 }
 
 export interface SyncResult {
