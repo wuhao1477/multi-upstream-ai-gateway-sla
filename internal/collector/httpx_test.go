@@ -5,14 +5,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestClientDoStopsBeforeRequestWhenSharedHostLimiterFails(t *testing.T) {
-	requested := false
+	var requested atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		requested = true
+		requested.Store(true)
 	}))
 	defer server.Close()
 
@@ -28,15 +29,15 @@ func TestClientDoStopsBeforeRequestWhenSharedHostLimiterFails(t *testing.T) {
 	if _, err := client.Do(req); !errors.Is(err, waitErr) {
 		t.Fatalf("Client.Do 错误 = %v，期望保留共享限速错误", err)
 	}
-	if requested {
+	if requested.Load() {
 		t.Fatal("共享 host limiter 失败后仍向上游发出了请求")
 	}
 }
 
 func TestDetectUsesCollectorClientHostLimiter(t *testing.T) {
-	requested := false
+	var requested atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		requested = true
+		requested.Store(true)
 	}))
 	defer server.Close()
 
@@ -49,7 +50,7 @@ func TestDetectUsesCollectorClientHostLimiter(t *testing.T) {
 	if _, err := Detect(context.Background(), client, server.URL); !errors.Is(err, waitErr) {
 		t.Fatalf("Detect 错误 = %v，期望保留共享限速错误", err)
 	}
-	if requested {
+	if requested.Load() {
 		t.Fatal("站型探测绕过共享 host limiter 发出了请求")
 	}
 }

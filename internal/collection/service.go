@@ -74,6 +74,12 @@ const (
 	retryBackoffMax           = 30 * time.Minute
 )
 
+// 编译期守住连接预算：每个 worker 峰值占两条连接（整轮持有的渠道 advisory lock
+// + 临时的凭证/限速/写入连接）。调大 maxConcurrentChannels 而不同步抬高
+// store.MinPoolConns 会让整轮采集阻塞到 120s 超时 —— 让它在这里编译不过，
+// 而不是在生产上表现为"采集莫名全红"。
+const _ = uint(store.MinPoolConns - 2*maxConcurrentChannels)
+
 type scheduleKey struct {
 	channelID  int64
 	capability collector.Capability
