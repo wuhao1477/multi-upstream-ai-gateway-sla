@@ -405,6 +405,9 @@ echo "   ✅ 编辑：账号字段可清空 / Key 可解除分组"
 
 STORE_TESTS=(
   TestHostRequestLimiterSerializesIndependentInstances
+  TestHostRequestLimiterDoesNotBlockDifferentHosts
+  TestHostRequestLimiterHonorsCancellation
+  TestPoolMaxConnsFitsConcurrentCollectionWorkers
   TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey
   TestSaveTxPreservesExistingRefreshLockKeyOnPartialUpdate
   TestCredentialRefreshLockMigrationMatchesRuntimeURLNormalization
@@ -440,6 +443,8 @@ echo "   ✅ Key 用量：明确采到 0 时覆盖旧额度，不把 0 当成缺
 echo "   ✅ 价格：独立价格周期刷新现有目录且不推进目录轮次"
 echo "   ✅ 分组：降级响应缺少模型字段时保留旧模型清单"
 echo "   ✅ 凭证：跨实例共享 refresh_lock_key 且只刷新一次"
+echo "   ✅ host 限速：跨进程串行 / 不同 host 互不阻塞 / 取消即退出"
+echo "   ✅ 连接池：4 条时并发采集会互等到超时，MinPoolConns 条够用"
 
 echo
 echo "✅ 迁移集成测试全部通过"
