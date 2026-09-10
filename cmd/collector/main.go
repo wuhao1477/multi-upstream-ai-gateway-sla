@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collection"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
 )
 
 var version = "dev"

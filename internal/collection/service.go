@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
 )
 
 // Intervals are the four independently configurable collection periods.

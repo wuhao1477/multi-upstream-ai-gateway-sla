@@ -8,7 +8,7 @@
 | 负责人指示 | ① **充值倍率一期不做**（多数站点 1:1，少数 1:2）；② **数据库不过度设计，每阶段只做最小设计**（[ponytail](https://github.com/DietrichGebert/ponytail) 决策阶梯）；③ 缺失的必要设计要补上，**分清当期与后期**；④ **当期重点是上游采集与管理，不做网关相关部分**；⑤ **原「一期」（SLA 网关全套 31 条 AC）升为最终目标**；⑥ **第一期开发进度（P1）= 仅实现多上游渠道的采集与管理** |
 | 本版与上一版的差别 | 上一版提 4 张新表 + 3 组 ALTER + 8 条 FR；按指示②④重审后 → **3 张新表 + 1 组 ALTER + 7 条 FR**，砍掉 1 张表、11 个字段、2 条 FR、2 条 AC（逐项理由见 §3） |
 | 使用方式 | ✅ 已确认完毕。本文档转为**裁决记录**：§0 是决定速览，§3 是数据库最小设计的逐项理由，§6 是后续阶段任务台账 |
-| 开发工作项 | 已拆为 13 个 GitHub Issue（[EPIC #13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/13) 含依赖链与建议顺序、[P1 milestone](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/milestone/1)）。本文档定**范围与理由**，issue 定**任务与完成标准**，二者不重复 |
+| 开发工作项 | 已拆为 13 个 GitHub Issue（[EPIC #13](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/issues/13) 含依赖链与建议顺序、[P1 milestone](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/milestone/1)）。本文档定**范围与理由**，issue 定**任务与完成标准**，二者不重复 |
 
 ---
 

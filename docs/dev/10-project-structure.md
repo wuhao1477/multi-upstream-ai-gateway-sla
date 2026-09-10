@@ -24,7 +24,7 @@ multi-upstream-ai-gateway-sla/
 ├── docs/                      # 现有文档(需求/选型/dev),不动
 ├── verify/                    # 验收脚本;上游走真站点(CLAUDE.md §1),仅 SSE 流夹具是造的
 ├── web/                    ✅ # 管理界面 Vue3 工程(源码);产物 embed 进二进制
-├── go.mod                     # module: github.com/wuhao1477/multi-upstream-ai-gateway-sla
+├── go.mod                     # module: github.com/wuhao1477/multi-upstream-ai-gateway-sla-public
 ├── go.sum
 ├── Makefile                   # build/test/lint/migrate 入口
 ├── cmd/
@@ -181,8 +181,8 @@ multi-upstream-ai-gateway-sla/
 翻掉的是**代码生成那一半**。
 
 **这条翻案此前从未被记录**，是 2026-08-29 发版复评从
-[#2](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/2) 与
-[#11](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/11)
+[#2](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/issues/2) 与
+[#11](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/issues/11)
 **两个已关 issue 的未勾选完成标准**里翻出来的（`- [ ] sqlc generate 成功且编译通过`、
 `- [ ] sqlc generate 后无未提交 diff`）。**教训是"挂在 issue 上的欠账会随 issue
 关闭一起消失"** —— 记在文档里才追得回来。

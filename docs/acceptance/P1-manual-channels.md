@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| 用途 | [#12](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/issues/12) 完成标准第 4 项「采不到数据的渠道列出人工维护责任人」 |
+| 用途 | [#12](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/issues/12) 完成标准第 4 项「采不到数据的渠道列出人工维护责任人」 |
 | 数据来源 | [`coverage/p1-coverage-2026-08-30b.json`](coverage/p1-coverage-2026-08-30b.json)，2026-08-30 22:59 全量 sync（65 渠道 / 163.7 秒 / 并发 6） |
 | 依据 | FR-011「采不到的转人工录入」；[04 §5.3](../dev/04-collector-adapter.md) 账密重登通路 |
 | **处置** | **2026-08-31 决定：三类全部放弃纳管，只保留可用的。** 20 个渠道已 `status=disabled` + 停用原因；责任人一列**作废**（不再需要人去维护它们） |

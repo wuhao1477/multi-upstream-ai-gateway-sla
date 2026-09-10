@@ -9,7 +9,7 @@ compose() {
     ADMIN_TOKEN='compose-test-admin' \
     ADMIN_PORT='18080' \
     SITE_ADDRESS='localhost' \
-    SLA_IMAGE='ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0' \
+    SLA_IMAGE='ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0' \
     docker compose --env-file /dev/null -f compose.yml "$@"
 }
 
@@ -22,7 +22,7 @@ for service in postgres sla-core-a sla-core-b collector caddy; do
 done
 
 config=$(compose config)
-grep -q 'ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0' <<<"$config"
+grep -q 'ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla-public:v1.0.0' <<<"$config"
 grep -q 'host_ip: 127.0.0.1' <<<"$config"
 grep -q 'published: "18080"' <<<"$config"
 grep -q 'entrypoint:' <<<"$config"

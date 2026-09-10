@@ -16,9 +16,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
 )
 
 // DB 是管理平面所需的库能力。用接口而非具体池类型，便于单测替换。

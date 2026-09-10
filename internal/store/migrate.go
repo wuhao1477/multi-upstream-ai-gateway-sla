@@ -17,7 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	slagateway "github.com/wuhao1477/multi-upstream-ai-gateway-sla"
+	slagateway "github.com/wuhao1477/multi-upstream-ai-gateway-sla-public"
 )
 
 // migrationFS 是仓库根 migrations/ 的嵌入快照。

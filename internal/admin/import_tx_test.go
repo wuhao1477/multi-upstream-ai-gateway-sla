@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/store"
 )
 
 // importOne 的失败原子性与半成品补齐 —— 打**真 PG**，由 test-migrate.sh 第 8 步驱动。

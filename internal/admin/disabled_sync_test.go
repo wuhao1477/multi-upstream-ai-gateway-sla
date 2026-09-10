@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
 )
 
 // 「已停用的渠道不采集」的语义守卫。

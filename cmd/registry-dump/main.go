@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/collector"
 )
 
 func main() {

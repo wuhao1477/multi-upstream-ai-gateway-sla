@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/config"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla-public/internal/config"
 )
 
 func TestJSONToScalar(t *testing.T) {
