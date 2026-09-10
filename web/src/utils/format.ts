@@ -5,6 +5,27 @@ export function fmtTime(t: string | undefined | null): string {
 }
 
 /**
+ * 相对时刻（"2 小时前"）。表格里比绝对时间好扫 —— 运维要判断的是"这个数
+ * 有多旧"，而不是"它是几号采的"。绝对时间放 title，鼠标一停就能看到。
+ *
+ * 与 fmtTime 一样，缺值写"从未"而不是空白。
+ */
+export function fmtAgo(t: string | undefined | null): string {
+  if (t === undefined || t === null || t === '') return '从未'
+  const ms = Date.now() - new Date(t).getTime()
+  if (Number.isNaN(ms)) return '从未'
+  // 未来时刻（时钟偏移）不写成"-3 分钟前"，直接说刚刚
+  if (ms < 60_000) return '刚刚'
+  const min = Math.floor(ms / 60_000)
+  if (min < 60) return `${min} 分钟前`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d} 天前`
+  return fmtTime(t)
+}
+
+/**
  * 计价口径的展示文案。
  *
  * 口径必须与价格同格显示：per_call 是每次调用的绝对美元价，

@@ -11,16 +11,20 @@ import (
 
 // Key 是一把上游 Key。**响应中永不含明文**（FR-094）。
 type Key struct {
-	ID               int64      `json:"id"`
-	AccountID        int64      `json:"account_id"`
-	ChannelID        int64      `json:"channel_id"`
-	SecretPrefix     string     `json:"secret_prefix"`
-	ExternalRef      string     `json:"external_ref,omitempty"`
-	ChannelGroupID   *int64     `json:"channel_group_id,omitempty"`
-	GroupRef         string     `json:"group_ref,omitempty"`
-	RateMultiplier   *float64   `json:"rate_multiplier,omitempty"`
-	RemainQuotaUSD   *float64   `json:"remain_quota_usd,omitempty"`
-	UsedQuotaUSD     *float64   `json:"used_quota_usd,omitempty"`
+	ID             int64    `json:"id"`
+	AccountID      int64    `json:"account_id"`
+	ChannelID      int64    `json:"channel_id"`
+	SecretPrefix   string   `json:"secret_prefix"`
+	ExternalRef    string   `json:"external_ref,omitempty"`
+	ChannelGroupID *int64   `json:"channel_group_id,omitempty"`
+	GroupRef       string   `json:"group_ref,omitempty"`
+	RateMultiplier *float64 `json:"rate_multiplier,omitempty"`
+	RemainQuotaUSD *float64 `json:"remain_quota_usd,omitempty"`
+	UsedQuotaUSD   *float64 `json:"used_quota_usd,omitempty"`
+	// UnlimitedQuota 为真时 remain_quota_usd 无意义（上游对无限额 Key 回 0）。
+	// 不加 omitempty：false 也必须出现在响应里，否则前端分不清
+	// "这把 Key 有限额" 和 "后端版本旧、还没这个字段"。
+	UnlimitedQuota   bool       `json:"unlimited_quota"`
 	RPMLimit         *int       `json:"rpm_limit,omitempty"`
 	ConcurrencyLimit *int       `json:"concurrency_limit,omitempty"`
 	Status           string     `json:"status"`
@@ -59,7 +63,8 @@ func ListKeys(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Key, erro
 SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(k.external_ref,''), k.channel_group_id,
        COALESCE(g.group_ref,''), g.rate_multiplier,
-       k.remain_quota_usd, k.used_quota_usd, k.rpm_limit, k.concurrency_limit,
+       k.remain_quota_usd, k.used_quota_usd, COALESCE(k.unlimited_quota,false),
+       k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
   FROM upstream_keys k
   JOIN upstream_accounts a ON a.id = k.account_id
@@ -75,7 +80,7 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
 		var k Key
 		if err := rows.Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
 			&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
-			&k.RemainQuotaUSD, &k.UsedQuotaUSD,
+			&k.RemainQuotaUSD, &k.UsedQuotaUSD, &k.UnlimitedQuota,
 			&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 			&k.QuotaSyncedAt, &k.CreatedAt); err != nil {
 			return nil, err
@@ -92,14 +97,15 @@ func GetKey(ctx context.Context, conn *pgx.Conn, id int64) (Key, error) {
 SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(k.external_ref,''), k.channel_group_id,
        COALESCE(g.group_ref,''), g.rate_multiplier,
-       k.remain_quota_usd, k.used_quota_usd, k.rpm_limit, k.concurrency_limit,
+       k.remain_quota_usd, k.used_quota_usd, COALESCE(k.unlimited_quota,false),
+       k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
   FROM upstream_keys k
   JOIN upstream_accounts a ON a.id = k.account_id
   LEFT JOIN channel_groups g ON g.id = k.channel_group_id
  WHERE k.id = $1`, id).Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
 		&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
-		&k.RemainQuotaUSD, &k.UsedQuotaUSD,
+		&k.RemainQuotaUSD, &k.UsedQuotaUSD, &k.UnlimitedQuota,
 		&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 		&k.QuotaSyncedAt, &k.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

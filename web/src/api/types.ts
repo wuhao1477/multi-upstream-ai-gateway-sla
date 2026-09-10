@@ -70,6 +70,23 @@ export interface Account {
   disabled_reason?: string
   disabled_until?: string
   created_at: string
+
+  /**
+   * 账号余额（归一美元，FR-018 一期 1:1），来自 balance_signals 最近一行。
+   *
+   * **缺席 = 从未采到，不是 0**（FR-020/026）。绝不许 `?? 0` —— 那会把
+   * 一个查不到余额的账号渲染成"已耗尽"，运维会去充一笔不需要的钱。
+   * 三种情形要分开渲染：有值 / 未采集（本字段缺席）/ 状态非 normal。
+   */
+  balance_usd?: number
+  /** 余额五态：normal | critical | unknown | exhausted | abnormal。缺席=无余额信号。 */
+  balance_state?: string
+  /** 上面那个余额的确认时刻。**必须与金额同格展示** —— 三天前的余额和五分钟前的余额不是一回事。 */
+  balance_confirmed_at?: string
+
+  /** 该账号下的 Key 数。停用账号的确认框要写「将影响 N 把 Key」。 */
+  keys_total: number
+  keys_active: number
 }
 
 export interface Key {
@@ -84,6 +101,16 @@ export interface Key {
   rate_multiplier?: number
   remain_quota_usd?: number
   used_quota_usd?: number
+  /**
+   * 上游声明该 Key 不限额度。
+   *
+   * **必须先看它再看 remain_quota_usd**：NewAPI 对无限额 Key 回
+   * `remain_quota: 0`，不看这一位就会把「不限额度」渲染成 `$0.0000`，
+   * 与「额度耗尽」完全无法区分。
+   *
+   * 后端不带 omitempty（false 也会出现），所以它缺席只意味着后端版本旧。
+   */
+  unlimited_quota?: boolean
   rpm_limit?: number
   concurrency_limit?: number
   status: string

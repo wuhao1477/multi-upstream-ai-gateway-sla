@@ -221,10 +221,17 @@ try {
   // 渠道名里出现的族名也算进去（"某站-newapi-备用"这种名字会重复计数）。
   // 现在数的是全部实际取值，断言比对整张分布表 —— 少一族、多一族、名字撞车
   // 都会红，且红的信息就是库里真实的分布。
+  // 站型按 **data-col="family"** 取，不按下标。行首多了一个展开箭头格之后，
+  // 原先的 td[2] 恰好还是站型 —— "恰好"正是问题：下一次加列它就静默错位，
+  // 而错位后这条断言仍然绿，只是从此在数别的列。
+  //
+  // 站型格里现在可能还带一个「站型未识别」红徽标（阻断性问题前置到列表），
+  // 所以取的是徽标里的第一段文本，不是整格 innerText。
   const families = await page.$$eval('#channels tbody tr[data-ch-row]', trs => {
     const c = {};
     trs.forEach(tr => {
-      const fam = tr.querySelectorAll('td')[2].innerText.trim();
+      const cell = tr.querySelector('td[data-col="family"]');
+      const fam = (cell?.querySelector('.badge') ?? cell)?.innerText.trim() ?? '';
       c[fam] = (c[fam] || 0) + 1;
     });
     return c;
@@ -250,10 +257,12 @@ try {
       reason: reason ? reason.innerText.trim() : '',
     };
   }));
-  const shownDisabled = stat.filter(s => s.st === 'disabled');
+  // 状态徽标的文案从英文枚举值（enabled/disabled）换成了中文（启用/停用）：
+  // 直接把库里的枚举名抛给运维，disabled 与 revoked 在界面上要靠猜。
+  const shownDisabled = stat.filter(s => s.st === '停用');
   check(`已停用渠道逐行标出（库里 ${DISABLED.length} 个）`,
     shownDisabled.length === DISABLED.length,
-    `界面 ${shownDisabled.length} 行标 disabled，库里 ${DISABLED.length} 个`);
+    `界面 ${shownDisabled.length} 行标停用，库里 ${DISABLED.length} 个`);
   // 只断言"标了 disabled"是空断言：原因丢了同样会绿，而运维就不知道为什么停的。
   const withReason = shownDisabled.filter(s => s.reason.length > 0);
   check('每个已停用渠道都带停用原因（不是只改了状态）',
@@ -262,8 +271,8 @@ try {
   // 反向：在纳管的那些不许被标成停用。少了这条，"全部标 disabled" 也能让上面两条绿。
   const enabledTotal = Object.values(ENABLED_FAMILIES).reduce((a, b) => a + b, 0);
   check(`在纳管的 ${enabledTotal} 个渠道未被误标为停用`,
-    stat.filter(s => s.st === 'enabled').length === enabledTotal,
-    `界面 ${stat.filter(s => s.st === 'enabled').length} 行 enabled，库里 ${enabledTotal} 个`);
+    stat.filter(s => s.st === '启用').length === enabledTotal,
+    `界面 ${stat.filter(s => s.st === '启用').length} 行启用，库里 ${enabledTotal} 个`);
 
   // 65 行表格最容易触发的布局事故：宽表把网格列顶宽、侧栏被挤出视口
   const layout = await page.evaluate(() => {
@@ -328,7 +337,7 @@ try {
   await page.screenshot({ path: `${SHOT}/02-real-detail.png`, fullPage: true });
 
   // ── 4. 真实模型目录：口径标注与跨段告警 ──
-  await page.click('#btn-catalog');
+  await page.click('[data-seg="catalog"]');
   await page.waitForFunction(
     () => document.querySelector('#detail-body')?.innerText.includes('模型'),
     { timeout: 20000 });
@@ -430,7 +439,7 @@ try {
     () => document.querySelector('#pane-detail')?.classList.contains('on'),
     { timeout: 5000 });
   await sleep(1200);
-  await page.click('#btn-catalog');
+  await page.click('[data-seg="catalog"]');
   await page.waitForFunction(
     () => document.querySelector('#detail-body')?.innerText.includes('模型'),
     { timeout: 20000 });
@@ -461,14 +470,17 @@ try {
     () => document.querySelector('#pane-detail')?.classList.contains('on'),
     { timeout: 5000 });
   await sleep(1200);
-  await page.click('#btn-keys');
-  // 等表体真出行，别睡（同 FR-124 那条）
+  await page.click('[data-seg="keys"]');
+  // 等 **Key 专有的行标记**，不是"表体有行"。
+  // 渠道详情的默认页签现在是「账号」，它同样是一张表 —— 只等 `tbody tr`
+  // 会立刻在账号行上返回，然后把账号数当成 Key 数（本脚本另一处正是
+  // 这样误报过两项，见 verify-ui.mjs 同处注释）。
   await page.waitForFunction(
-    () => document.querySelectorAll('#detail-body tbody tr').length >= 1,
+    () => document.querySelectorAll('#detail-body tr[data-key-row]').length >= 1,
     { timeout: 20000 },
   ).catch(() => {});
   const keyText = await page.$eval('#detail-body', el => el.innerText);
-  const keyRows = await page.$$eval('#detail-body tbody tr', trs => trs.length)
+  const keyRows = await page.$$eval('#detail-body tr[data-key-row]', trs => trs.length)
     .catch(() => 0);
   check(`渠道 #${KEY_CH} 的 Key 列表确有行（不是空状态）`, keyRows >= 1,
     `${keyRows} 行`);
@@ -493,10 +505,13 @@ try {
     () => document.querySelector('#pane-detail')?.classList.contains('on'),
     { timeout: 5000 });
   await sleep(1200);
-  await page.click('#btn-groups');
-  // 等分组行真出来（数量来自 pickTargets 的实测查询），别睡固定时长
+  await page.click('[data-seg="groups"]');
+  // 等分组行真出来（数量来自 pickTargets 的实测查询），别睡固定时长。
+  // 同上：先等分组专有的「可用模型」按钮出现，确认换的确实是分组表，
+  // 再按行数等 —— 否则默认的账号表行数可能已经满足条件。
   await page.waitForFunction(
-    n => document.querySelectorAll('#detail-body tbody tr').length >= n,
+    n => document.querySelectorAll('#detail-body button[data-g]').length >= 1
+      && document.querySelectorAll('#detail-body tbody tr').length >= n,
     { timeout: 20000 }, MIXED_GROUPS,
   ).catch(() => {});
   const grpRows = await page.$$eval('#detail-body tbody tr',

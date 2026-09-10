@@ -206,6 +206,11 @@ func wipeInventoryTest(ctx context.Context, t *testing.T, conn *pgx.Conn, base s
 	stmts := []string{
 		`DELETE FROM collector_snapshots WHERE channel_id IN (
 			SELECT id FROM channels WHERE base_url=$1)`,
+		// balance_signals 有指向 upstream_accounts 的外键，必须先于账号删；
+		// 漏了它，任何调用过 SaveAccount 的用例都会在清理时撞外键而 Fatalf。
+		`DELETE FROM balance_signals WHERE account_id IN (
+			SELECT a.id FROM upstream_accounts a JOIN channels ch ON ch.id=a.channel_id
+			WHERE ch.base_url=$1)`,
 		`DELETE FROM upstream_keys WHERE account_id IN (
 			SELECT a.id FROM upstream_accounts a JOIN channels ch ON ch.id=a.channel_id
 			WHERE ch.base_url=$1)`,
