@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,7 +36,10 @@ func main() {
 		addr     = flag.String("addr", envOr("SLA_ADDR", ":8080"), "监听地址（管理平面 + /healthz）")
 		dsn      = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
 		readOnly = flag.Bool("read-only", false, "只读启动：跳过迁移和种子，并让 PG 会话拒绝写入")
-		showVer  = flag.Bool("version", false, "打印版本后退出")
+		collect  = flag.Bool("collector", os.Getenv("SLA_COLLECTOR") != "",
+			"在本进程内跑周期采集（单容器部署用，省掉独立 collector 容器）")
+		probe   = flag.Bool("healthcheck", false, "探测本进程 /healthz 后按结果退出（容器 healthcheck 用）")
+		showVer = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
 
@@ -44,18 +48,26 @@ func main() {
 		return
 	}
 
+	if *probe {
+		if err := healthcheck(*addr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
-	if err := run(*addr, *dsn, *readOnly, logger); err != nil {
+	if err := run(*addr, *dsn, *readOnly, *collect, logger); err != nil {
 		logger.Error("退出", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
+func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	if dsn == "" {
 		return errors.New("缺少 DSN：设 DATABASE_URL 或用 -dsn")
 	}
@@ -171,6 +183,34 @@ func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 单容器部署：周期采集跑在本进程，省掉独立 collector 容器
+	// （06 §8 开放点 3 已定"一期同二进制子命令"，这里只是少起一个容器）。
+	//
+	// 多实例同时开着也安全：每个渠道由 store.TryChannelSyncLock 的 PG 咨询锁
+	// 排他，落败者跳过该渠道 —— 与独立 collector 容器并存时同理。
+	//
+	// 连接预算已经含这一路：MinPoolConns=12 = 4 worker × 2 + 给 admin 请求
+	// 留的 4 条（store.MinPoolConns 注释），本来就是按同进程共池算的。
+	//
+	// read-only 实例不启动：采集是写路径，会被 default_transaction_read_only 拒掉。
+	if collect && !readOnly {
+		periods, err := collection.IntervalsFromSnapshot(snap.Load())
+		if err != nil {
+			return err
+		}
+		svc := collection.NewService(pool, runner, collection.NewSchedule(periods), logger)
+		go func() {
+			logger.Info("内置采集器启动",
+				"balance_interval", periods.Balance,
+				"keyquota_interval", periods.KeyQuota,
+				"price_interval", periods.Price,
+				"catalog_interval", periods.Catalog)
+			if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("内置采集器退出", "err", err)
+			}
+		}()
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("sla-core 启动", "addr", addr, "version", version,
@@ -189,6 +229,40 @@ func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
 	}
+}
+
+// healthcheck 让二进制探自己的 /healthz —— distroless 镜像里没有 shell 也没有
+// curl/wget，容器 healthcheck 只能 exec 一个二进制，所以这件事得由它自己做。
+//
+// 为什么不继续用 `-version`：那只证明二进制能执行。进程卡死、PG 连接断掉、
+// 配置快照没加载，`-version` 照样退 0，于是容器一直报 healthy 而服务早已不可用。
+// /healthz 反映的是实例自身（进程 + PG + 快照），**不含上游渠道可用性**
+// （06 §6 健康语义分层）—— 上游全挂时本实例仍应判健康。
+//
+// 不需要 ADMIN_TOKEN：/healthz 是匿名端点，LB 就绪探针本来就要免鉴权。
+func healthcheck(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("解析监听地址 %q: %w", addr, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// 固定打回环：探的是"本进程活着吗"，不是"这个地址可达吗"。
+	// 监听 0.0.0.0 时用 addr 原样拼会得到 http://0.0.0.0:8080，不可移植。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://127.0.0.1:"+port+"/healthz", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("/healthz 返回 %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func envOr(key, def string) string {

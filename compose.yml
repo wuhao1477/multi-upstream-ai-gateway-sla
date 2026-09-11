@@ -1,67 +1,61 @@
-name: sla-gateway
+name: sla-ai-gateway
 
+# 单机最小栈：sla-core + collector，库在栈外。
+#
+# 与 06 §1 原拓扑的差异（2026-09-11 决定，代价已知）：
+#   · 不起 postgres —— 库是外部依赖，备份/升级/HA 归那一侧。
+#   · 不起 caddy，也不起第二个 sla-core —— 外网已有 NGINX 一层，
+#     Caddy 的 TLS 与它重复；而 P1 经 LB 对外只有 /healthz，没有代理的价值。
+#     ⚠️ 随之**放弃 AC-27 的进程级冗余**（重启即中断），见 14 AC-27 的注记。
+#   · ⚠️ P2 的 /v1/* 上线后必须复核：届时管理面与数据面共用 :8080，
+#     要么把管理面拆成独立 listener，要么把反代加回来 —— 否则 /admin/*
+#     会随数据面一起暴露，只剩 ADMIN_TOKEN 一层（09 §1 冻结：两层都要）。
+#
+# 库在宿主机上：容器里的 localhost 指向容器自己，必须走 host.docker.internal，
+# 并用 extra_hosts 把它映射到 host-gateway（Linux 上没有这行就解析不到）。
 x-core-env: &core-env
-  DATABASE_URL: postgres://sla:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}@postgres:5432/sla?sslmode=disable
-  ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置}
-  SLA_ADDR: ":8080"
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 必须设置——数据库没有安全默认值}
 
 services:
-  postgres:
-    image: postgres:16
+  sla-core:
+    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.2}
+    # entrypoint 与 user 跟 Dockerfile 里的值一致，显式写出来是为了
+    # 以后改 Dockerfile 时不会静默改掉这里的行为。
+    entrypoint: ["/sla-core"]
+    user: "nonroot:nonroot"
     environment:
-      POSTGRES_USER: sla
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
-      POSTGRES_DB: sla
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sla -d sla"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
-  sla-core-a: &core
-    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1}
-    environment: *core-env
-    depends_on:
-      postgres:
-        condition: service_healthy
+      <<: *core-env
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置——管理平面没有它会拒绝全部请求}
+      SLA_ADDR: ":8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:${ADMIN_PORT:-8080}:8080"
-    healthcheck:
-      test: ["CMD", "/sla-core", "-version"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+      # ⚠️ 必须带 127.0.0.1： 少了它就是发布到 0.0.0.0，局域网内谁都能打开
+      #    /admin/ui/，前面那层 NGINX 被整个绕过。ADMIN_TOKEN 是认证，
+      #    不是网络隔离，两层边界都要在（06 §1、09 §1 冻结）。
+      - "127.0.0.1:${ADMIN_PORT:-18081}:8080"
     restart: unless-stopped
-
-  sla-core-b:
-    <<: *core
-    ports: []
+    healthcheck:
+      # 打 /healthz 而不是 -version：后者只证明二进制能执行，进程卡死或
+      # PG 连接断掉时照样退 0，容器会一直报 healthy 而服务已不可用。
+      # distroless 无 shell/curl，故由二进制自己探（cmd/sla-core 的 healthcheck）。
+      test: ["CMD", "/sla-core", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   collector:
-    <<: *core
-    ports: []
+    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.2}
+    # ⚠️ 必须用 entrypoint 而非 command：Dockerfile 的 ENTRYPOINT 是 /sla-core，
+    #    command 只覆盖 CMD → 实际执行 `/sla-core /collector`，sla-core 忽略
+    #    多余参数照常启动，于是"采集器"容器里跑的其实是第二个管理面。
     entrypoint: ["/collector"]
-    healthcheck:
-      disable: true
-
-  caddy:
-    image: caddy:2
-    environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddydata:/data
-    depends_on:
-      - sla-core-a
-      - sla-core-b
+    user: "nonroot:nonroot"
+    # 不给 ADMIN_TOKEN：collector 全程不读它（cmd/collector 与 internal/collection
+    # 里零引用），多一个容器持有密钥没有收益。
+    environment: *core-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-volumes:
-  pgdata:
-  caddydata:
+    # 无 HTTP 端口可探，故不设 healthcheck（它活没活看日志）。
