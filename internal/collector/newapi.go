@@ -32,7 +32,7 @@ func (a *NewAPIAdapter) Capabilities() CapabilityMap {
 }
 
 func (a *NewAPIAdapter) Detect(ctx context.Context, baseURL string) (DetectResult, error) {
-	return Detect(ctx, a.C.HC, baseURL)
+	return Detect(ctx, a.C, baseURL)
 }
 
 // Authenticate 确认凭证可用，并**试探出用户 ID 头名**。

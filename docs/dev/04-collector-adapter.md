@@ -168,11 +168,11 @@ type ManualReserve struct {
 | 项 | 约定 |
 | --- | --- |
 | 分页 | 统一 `page`(从 1)/`page_size`(默认 100)；适配器内部循环取完再返回，**不把分页暴露给调用方** |
-| 单站并发 | 1（顺序采集）—— 采集是后台任务，没有并发必要，反而容易触发上游风控 |
-| 站内请求间隔 | `collector_request_interval_ms`，默认 200ms |
-| 失败重试 | 指数退避 1s/2s/4s，最多 3 次；仍失败 → 该站本轮放弃，`collector_credentials.status='error'` + P2 告警，**不影响其它站** |
-| 429/403 | 立即停止本轮该站采集并退避到下一周期（不重试），避免把凭证打死 |
-| 超时 | 单请求 10s，整站一轮 120s |
+| 并发 | 单渠道内部保持顺序；不同渠道使用最多 4 个 worker 并发，慢渠道不阻塞其它渠道。**每个 worker 峰值占两条数据库连接**（整轮持有的渠道 advisory lock + 临时的凭证读取/host 限速/结果写入），故 DSN 未写 `pool_max_conns` 时连接池下限抬到 `store.MinPoolConns`；调大 worker 数必须同步抬高它，否则整轮采集会阻塞到 120s 超时（`internal/collection/service.go` 有编译期断言） |
+| 站内请求间隔 | `collector_request_interval_ms`，默认 200ms；由 PostgreSQL 的 `collector_host_rate_limits` 原子预留请求时隙，手动采集、周期采集与站型探测跨进程共享 |
+| 失败重试 | 调度键为 `(channel_id, capability)`；30s 起指数退避，最大为正常周期与 30min 的较小值，并加 ±20% jitter；成功后清零失败次数，不影响其它渠道或已成功能力 |
+| 401/403/429 | 401/403 至少退避 5min；429 优先采用有效的 `Retry-After`，缺失时退避 5min |
+| 超时 | 单请求 30s，周期采集整渠道一轮 120s |
 
 **返回结构（均内嵌 `SourceMeta`，金额统一归一为数值美元 —— FR-018 一期 1:1，AC-17）**：
 

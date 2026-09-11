@@ -23,14 +23,16 @@ const (
 
 // SyncItem 是一项采集的结果。
 type SyncItem struct {
-	Capability Capability   `json:"capability"`
-	Support    SupportLevel `json:"support"`
-	Status     ItemStatus   `json:"status"`
-	ElapsedMs  int64        `json:"elapsed_ms"`
-	Rows       int          `json:"rows,omitempty"`
-	Failed     int          `json:"failed,omitempty"`
-	Error      string       `json:"error,omitempty"`
-	Note       string       `json:"note,omitempty"`
+	Capability   Capability   `json:"capability"`
+	Support      SupportLevel `json:"support"`
+	Status       ItemStatus   `json:"status"`
+	ElapsedMs    int64        `json:"elapsed_ms"`
+	Rows         int          `json:"rows,omitempty"`
+	Failed       int          `json:"failed,omitempty"`
+	Error        string       `json:"error,omitempty"`
+	Note         string       `json:"note,omitempty"`
+	HTTPStatus   int          `json:"http_status,omitempty"`
+	RetryAfterMs int64        `json:"retry_after_ms,omitempty"`
 }
 
 // SyncResult 是一次 sync 的完整结果（09 §5.0bis 的响应结构）。
@@ -569,6 +571,10 @@ func (s *Syncer) run(
 		Support:    caps[cap],
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Rows:       rows, Failed: failed, Note: note,
+	}
+	if status, retryAfter, ok := HTTPFailure(err); ok {
+		item.HTTPStatus = status
+		item.RetryAfterMs = retryAfter.Milliseconds()
 	}
 	switch {
 	case err != nil && failed > 0:

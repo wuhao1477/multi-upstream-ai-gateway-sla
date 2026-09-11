@@ -68,6 +68,30 @@ try {
     await page.keyboard.press('Backspace');
     await page.type(sel, val, { delay: 2 });
   };
+  // ── 抽屉 / 菜单 / 确认框改造后新增的三个助手 ──
+  //
+  // 登记表单搬进了右侧抽屉，低频操作（停用/删除）收进了行内的「更多」菜单，
+  // 危险操作走统一确认框而不再是 window.confirm。三者都要先"打开"才能点到
+  // 里面的控件，而 puppeteer 往未渲染的元素 click 会直接抛错 —— 不是静默
+  // 失败，所以漏了这一步会红在正确的地方。
+  const openDrawer = async (btn, field) => {
+    await page.click(btn);
+    await page.waitForSelector(field, { visible: true, timeout: 5000 });
+  };
+  // 行内「更多」菜单：原生 <details>，点 summary 展开。
+  // 已经展开时再点会收起，故先判状态。
+  const openMore = async (sel) => {
+    const el = await page.$(sel);
+    if (el === null) throw new Error(`找不到更多菜单：${sel}`);
+    const open = await page.evaluate(s => document.querySelector(s)
+      ?.closest('details')?.open === true, sel);
+    if (!open) await page.click(sel);
+  };
+  // 统一确认框。同一时刻只会开一个，故按 [data-confirm-ok] 取即可。
+  const confirmOK = async () => {
+    await page.waitForSelector('[data-confirm-ok]', { visible: true, timeout: 5000 });
+    await page.click('[data-confirm-ok]');
+  };
   // 取 body 背景的真实 sRGB 亮度：断言"深色模式真的是深的"，
   // 而不是只断言 class 名变了（那样把 .dark 里的色值写成白色也照样绿）。
   const bgLuma = () => page.evaluate(() => {
@@ -137,6 +161,9 @@ try {
     const d = await r.json();
     return (d.items ?? []).map(f => [f.family, f.display_name]);
   });
+  // 新建渠道搬进了抽屉（建渠道一周一次，不该常年占着首屏），
+  // 所以站型下拉要先把抽屉打开才存在。
+  await openDrawer('#btn-open-create', '#ch-family');
   // 首项是"自动探测"（value=''），它不属注册表 —— 按 value 非空筛掉。
   const famInDOM = await page.$$eval('#ch-family option',
     os => os.filter(o => o.value !== '').map(o => [o.value, o.textContent.trim()]));
@@ -168,22 +195,42 @@ try {
 
   await page.screenshot({ path: `${SHOT}/02-created.png` });
 
-  // 列表里能看到刚建的渠道
+  // 列表里能看到刚建的渠道。
+  //
+  // ⚠️ 名称与 id **都按 data-* 属性取，不按列下标**。原先取的是
+  // `td:nth-child(2)`（名称）与 `td:first-child`（id）—— 列一改就全错位，
+  // 而错位后断言仍然绿，只是从此验的是别的列。现在名称格里还多了一行
+  // base_url，按下标取到的会是 "UI验收-123456https://…"，`includes(uniq)`
+  // 恰好还能过，然后在下一行 indexOf 上静默错位。
   await page.click('#btn-reload');
   await sleep(800);
-  const names = await page.$$eval('#channels tr[data-ch-row] td:nth-child(2)',
+  const names = await page.$$eval('#channels [data-ch-name]',
     ts => ts.map(t => t.textContent.trim()));
   check('新渠道出现在列表中', names.includes(uniq), names.slice(-3).join(', '));
 
   check('创建后列表至少有 1 行', names.length >= 1, `${names.length} 行`);
   const newRowIdx = names.indexOf(uniq);
-  const newChannelId = await page.$$eval('#channels tr[data-ch-row] td:first-child',
-    (ts, i) => ts[i].textContent.trim(), newRowIdx);
+  const newChannelId = await page.$$eval('#channels [data-ch-name]',
+    (ts, i) => ts[i].getAttribute('data-ch-name'), newRowIdx);
+
+  // ── 4bis. 渠道行二级展开：直接看到该渠道下的账号与 Key ──
+  //
+  // 此刻这个渠道**刚建好、什么都没有**，所以正确的展开区不是空白，
+  // 而是明确说"没有账号"。这一条断的正是那个说法：旧版一行只有名称与
+  // 状态，"它是空的"和"它采失败了"在界面上一模一样。
+  await page.click(`[data-ch-toggle="${newChannelId}"]`);
+  await page.waitForFunction(
+    id => document.querySelector(`tr[data-ch-row="${id}"]`)?.classList.contains('open'),
+    { timeout: 5000 }, newChannelId);
+  const emptyExpand = await page.evaluate(() =>
+    document.querySelector('.expand')?.textContent ?? '');
+  check('新渠道展开后明确说明"还没有账号"（不是空白）',
+    /还没有账号/.test(emptyExpand),
+    emptyExpand.replace(/\s+/g, ' ').slice(0, 80));
+  await page.click(`[data-ch-toggle="${newChannelId}"]`);
 
   // ── 5. 点开详情，看资产总览与异常项 ──
-  await page.evaluate(i => {
-    document.querySelectorAll('#channels button[data-ch]')[i].click();
-  }, newRowIdx);
+  await page.click(`[data-ch="${newChannelId}"]`);
   await page.waitForFunction(
     () => document.querySelector('#inv-stats .stat') !== null, { timeout: 8000 });
   const stats = await page.$$eval('#inv-stats .stat',
@@ -191,12 +238,34 @@ try {
                       s.querySelector('b').textContent));
   check('资产总览已渲染', stats.length >= 5, stats.join(' '));
 
-  const anomText = await page.$eval('#inv-anomalies', el => el.textContent);
+  // 口径断言。这一格取的是 SUM(upstream_keys.remain_quota_usd) —— 那是 Key
+  // 的**使用约束**，不是这个渠道的钱。它原先叫「额度合计」，摆在「账号」
+  // 旁边会被读成渠道余额，正是 FR-022 禁止的那种混淆（多把 Key 的配额相加
+  // 不等于账号余额）。名字必须写全，且必须与「账号余额合计」并存、可区分。
+  const statLabels = stats.map(s => s.split('=')[0]);
+  check('资金口径在总览里分得开（Key 配额 ≠ 账号余额）',
+    statLabels.includes('Key 剩余配额合计')
+      && statLabels.includes('关联账号余额合计')
+      && !statLabels.includes('额度合计'),
+    statLabels.join(' | '));
+
   // 新渠道还没登记凭证与 Key，**必须**报出"缺凭证" ——
   // 首版这条允许"无异常"通过，于是掩盖了一个真缺口：
   // 最常见的"为什么不工作"（没凭证）恰恰是唯一没被 inventory 覆盖的情形。
+  //
+  // ⚠️ 判据是 **data-anom 属性**，不是可见文案。异常项现在渲染成中文标签
+  // （「未登记采集凭证」），原始 kind 不再出现在文本里 —— 拿
+  // /credential_missing/ 去 grep textContent 会永远为假，而那看起来像功能坏了。
+  // 属性是给机器读的稳定契约，文案是给人读的，两者本就该分开。
+  const anomKinds = await page.$$eval('#inv-anomalies [data-anom]',
+    els => els.map(e => e.getAttribute('data-anom')));
+  const anomText = await page.$eval('#inv-anomalies', el => el.textContent);
   check('新渠道明确报出缺少采集凭证',
-    /credential_missing/.test(anomText),
+    anomKinds.includes('credential_missing'),
+    `kinds=${JSON.stringify(anomKinds)}`);
+  // 光有属性不够：运维读的是文案。属性对而文案没渲染出来同样是缺陷。
+  check('缺凭证异常同时给出可读文案与处置动作',
+    /未登记采集凭证/.test(anomText) && /登记凭证/.test(anomText),
     anomText.replace(/\s+/g, ' ').slice(0, 110));
 
   await page.screenshot({ path: `${SHOT}/03-detail.png` });
@@ -229,28 +298,51 @@ try {
     preCredRows.length ? JSON.stringify(preCredRows[0]) : '无 items（旧 502 路径）');
 
   // ── 6. 界面登记两个账号与四把 Key，并验证明文不回显（AC-37）──
-  await pane('register');
-  await fill('#acc-channel', String(newChannelId));
-  // 必须填**真的**上游用户 ID：SaveAccount 先按 external_user_id 匹配账号行，
-  // 匹配不上才退回"该渠道只有一个账号就用它"。填个假 uid 一样能过，
-  // 但过的是兜底分支 —— 匹配逻辑本身就没被验到。
-  await fill('#acc-uid', UP_UID);
-  await page.click('#btn-acc');
-  await page.waitForFunction(
-    () => /账号已创建/.test(document.querySelector('#toast').textContent),
-    { timeout: 8000 });
+  //
+  // 「账号与 Key」分栏已拆成「账号管理」与「Key 管理」两个分栏，登记表单
+  // 下沉到抽屉：渠道与账号都是**下拉选择**，不再要求把 id 从列表抄进输入框。
+  // 所以这里用 page.select 而不是 fill —— 往 <select> 里 type 不会报错，
+  // 但也什么都不会发生（症状是"填了却没填进去"）。
+  await pane('accounts');
+  const addAccount = async () => {
+    await openDrawer('#btn-new-account', '#acc-channel');
+    await page.select('#acc-channel', String(newChannelId));
+    // 必须填**真的**上游用户 ID：SaveAccount 先按 external_user_id 匹配账号行，
+    // 匹配不上才退回"该渠道只有一个账号就用它"。填个假 uid 一样能过，
+    // 但过的是兜底分支 —— 匹配逻辑本身就没被验到。
+    await fill('#acc-uid', UP_UID);
+    await page.click('#btn-acc');
+    await page.waitForFunction(
+      () => /账号已创建/.test(document.querySelector('#toast').textContent),
+      { timeout: 8000 });
+  };
+  // 渠道下拉必须真的列出了刚建的那个渠道 —— 它是"不再手抄 ID"的前提。
+  await openDrawer('#btn-new-account', '#acc-channel');
+  const chOptionExists = await page.evaluate(
+    id => document.querySelector(`#acc-channel option[value="${id}"]`) !== null,
+    newChannelId);
+  check('登记账号时渠道来自下拉选择（不再手抄渠道 ID）', chOptionExists,
+    `渠道 #${newChannelId} ${chOptionExists ? '在下拉里' : '不在下拉里'}`);
+  await page.click('.drawer-x');
 
-  await fill('#acc-uid', UP_UID);
-  await page.click('#btn-acc');
+  await addAccount();
+  await addAccount();
   await page.waitForFunction(
-    () => /账号已创建/.test(document.querySelector('#toast').textContent),
+    () => document.querySelectorAll('#pane-accounts tr[data-account-row]').length >= 2,
     { timeout: 8000 });
-  await page.waitForFunction(
-    () => document.querySelectorAll('#pane-register tr[data-account-row]').length >= 2,
-    { timeout: 8000 });
-  const accountIDs = await page.$$eval('#pane-register tr[data-account-row] td:first-child',
-    ts => ts.map(t => t.textContent.trim().replace('#', '')));
+  // id 取自 data-account-row 属性而不是第一格文本：第一格前面还多了一个
+  // 展开箭头格，按下标取会取到那个箭头。
+  const accountIDs = await page.$$eval('#pane-accounts tr[data-account-row]',
+    rs => rs.map(r => r.getAttribute('data-account-row')));
   check('界面登记两个账号（AC-37）', accountIDs.length >= 2, accountIDs.join(', '));
+
+  // 账号页必须给出**该账号下的 Key 数**：停用确认框的影响面文案靠它，
+  // 而"这个账号挂了几把 Key"是决定要不要停用的依据。
+  const keyCountCells = await page.$$eval('#pane-accounts td[data-col="keys"]',
+    ts => ts.map(t => t.textContent.replace(/\s+/g, ' ').trim()));
+  check('账号列表显示各账号的 Key 数（可用 / 总数）',
+    keyCountCells.length >= 2 && keyCountCells.every(t => /\d+\s*\/\s*\d+/.test(t)),
+    keyCountCells.join(' | '));
 
   // 账号编辑与停用/启用必须在同一条真实管理路径中可用。
   const secondAccount = accountIDs[1];
@@ -261,16 +353,38 @@ try {
   await page.waitForFunction(
     (id, uid) => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes(uid),
     { timeout: 8000 }, secondAccount, `${UP_UID}-edited`);
+
+  // 停用走统一确认框（原来是 window.confirm，写不下影响面）。
+  // 确认框必须**说清影响多少把 Key** —— 那是决定要不要点的依据，
+  // 而"确定？"三个字给不了这个信息。
   await page.click(`[data-account-disable="${secondAccount}"]`);
   await page.waitForSelector(`#account-disable-reason-${secondAccount}`, { timeout: 5000 });
+  const impactText = await page.$eval('.confirm-i', el => el.textContent.trim());
+  check('停用确认框写明影响范围（不是一句"确定？"）',
+    /Key/.test(impactText) && impactText.length > 8,
+    impactText.slice(0, 70));
+  // 原因必填（FR-095）：先不填就点确认，必须被拦住、账号仍是启用。
+  await confirmOK();
+  await sleep(400);
+  const stillOpen = await page.evaluate(() =>
+    document.querySelector('[data-confirm-ok]') !== null);
+  const reasonToast = await page.$eval('#toast', el => el.textContent);
+  check('停用原因未填时被拦下（FR-095）',
+    stillOpen && /原因/.test(reasonToast),
+    `${stillOpen ? '确认框仍开着' : '确认框已关闭'}；toast=${reasonToast.slice(0, 40)}`);
+
   await fill(`#account-disable-reason-${secondAccount}`, '验收脚本停用测试');
-  await page.click(`[data-account-disable-ok="${secondAccount}"]`);
+  await confirmOK();
+  // 状态文案从 active/disabled 改成了启用/停用：英文枚举值直接抛给运维，
+  // 而 disabled 与 revoked 在界面上要靠猜。
   await page.waitForFunction(
-    id => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes('disabled'),
+    id => document.querySelector(`[data-account-row="${id}"] [data-col="status"]`)
+      ?.textContent.includes('停用'),
     { timeout: 8000 }, secondAccount);
   await page.click(`[data-account-enable="${secondAccount}"]`);
   await page.waitForFunction(
-    id => document.querySelector(`[data-account-row="${id}"]`)?.textContent.includes('active'),
+    id => document.querySelector(`[data-account-row="${id}"] [data-col="status"]`)
+      ?.textContent.includes('启用'),
     { timeout: 8000 }, secondAccount);
   check('账号编辑、停用与启用可用（AC-37）', true);
 
@@ -295,14 +409,18 @@ try {
     credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
     credRow.length ? credRow[0].join(' / ') : '空');
 
-  await pane('register');
+  await pane('keys');
   const keySecrets = [
     'sk-ui-account1-key1-never-echoed', 'sk-ui-account1-key2-never-echoed',
     'sk-ui-account2-key1-never-echoed', 'sk-ui-account2-key2-never-echoed',
   ];
   const keyRefs = [UP_KEYREF, `${UP_KEYREF}-2`, `${UP_KEYREF}-3`, `${UP_KEYREF}-4`];
   for (let i = 0; i < keySecrets.length; i++) {
-    await fill('#key-account', accountIDs[i < 2 ? 0 : 1]);
+    await openDrawer('#btn-new-key', '#key-account');
+    // 账号同样是下拉。选渠道会把账号下拉限定到该渠道 —— 跨渠道挂 Key
+    // 本来就建不出来，让它在界面上也选不出来。
+    await page.select('#key-channel', String(newChannelId));
+    await page.select('#key-account', accountIDs[i < 2 ? 0 : 1]);
     await fill('#key-secret', keySecrets[i]);
     await fill('#key-ref', keyRefs[i]);
     await page.click('#btn-key');
@@ -311,6 +429,18 @@ try {
       { timeout: 8000 });
   }
   check('界面登记四把 Key（AC-37）', true);
+
+  // 登记抽屉关闭后，明文输入框必须**从 DOM 上消失**而不只是隐藏。
+  // 留在 DOM 里等于把它留在页面上 —— 与 FR-094 是同一条理由。
+  //
+  // 给它一个短等待而不是当场断言：上面等的是 toast，而 toast 在关抽屉之前
+  // 就出现了。当场读必然读到还没被移除的那一帧 —— 那是断言写错，不是产品
+  // 没关。给 3 秒：真没关的话照样红，只是不会红在时序上。
+  const secretGone = await page.waitForFunction(
+    () => document.querySelector('#key-secret') === null,
+    { timeout: 3000 }).then(() => true).catch(() => false);
+  check('登记抽屉关闭后明文输入框离开 DOM（FR-094）', secretGone,
+    secretGone ? '已移除' : '⚠️ #key-secret 仍在 DOM 中');
 
   // 这些 Key 是**假的**,而且必须是假的 —— CLAUDE.md §1 允许的唯一例外:
   // 被造的东西本身就是测试输入。这里要验的是"明文不回显",拿真 Key 试等于
@@ -351,7 +481,10 @@ try {
   await page.screenshot({ path: `${SHOT}/05-sync.png`, fullPage: true });
 
   // ── 8. 查看分组、目录、Key ──
-  await page.click('#btn-groups');
+  //
+  // 三个 Tab 按钮换成了分段控件（渠道详情现在有四个页签：账号 / Key /
+  // 分组 / 模型目录）。按 data-seg 取，不按 id。
+  await page.click('[data-seg="groups"]');
   await page.waitForFunction(
     () => /可用模型/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
@@ -402,7 +535,7 @@ try {
 
   await page.screenshot({ path: `${SHOT}/06-groups.png` });
 
-  await page.click('#btn-catalog');
+  await page.click('[data-seg="catalog"]');
   await page.waitForFunction(
     () => /输入价/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
@@ -444,18 +577,29 @@ try {
     { timeout: 15000 }).catch(() => {});
   await page.screenshot({ path: `${SHOT}/07-catalog.png` });
 
-  await page.click('#btn-keys');
+  await page.click('[data-seg="keys"]');
   // ⚠️ 等"表头出现 Key 专有列"而非"存在 table"：切视图时上一个视图的表格
   // 仍在 DOM 里，只等 table 会读到目录数据（本脚本首版就这样误报了两项）
   await page.waitForFunction(
-    () => /前缀/.test(document.querySelector('#detail-body')?.textContent || ''),
+    () => /Key 前缀/.test(document.querySelector('#detail-body')?.textContent || ''),
     { timeout: 8000 });
-  const keyCells = await page.$$eval('#detail-body tbody tr[data-key-row]',
-    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
+  // 单元格按 **data-col 语义名** 取，不按下标。
+  // 原先用的是 c[2]（前缀）、slice(4,6)（分组/倍率）、c[6]（额度）——
+  // 列顺序一改就全错位，而错位后断言照样绿，只是从此验的是别的列。
+  // 这次改版正好证明了这一点：加一个"所属渠道"列就会让三处同时静默失准。
+  const readKeyRows = () => page.$$eval('#detail-body tbody tr[data-key-row]',
+    rs => rs.map(r => {
+      const o = { id: r.getAttribute('data-key-row') };
+      for (const td of r.querySelectorAll('td[data-col]')) {
+        o[td.dataset.col] = td.textContent.replace(/\s+/g, ' ').trim();
+      }
+      return o;
+    }));
+  const keyCells = await readKeyRows();
   check('Key 列表已渲染', keyCells.length >= 4, `${keyCells.length} 把`);
   // 列表只显示前缀
-  const prefixOK = keyCells.every(c => c[2].includes('…'));
-  check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c[2]).join(' '));
+  const prefixOK = keyCells.every(c => c.prefix.includes('…'));
+  check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c.prefix).join(' '));
 
   const groupData = await page.evaluate(async cid => {
     const token = document.querySelector('#token').value;
@@ -467,25 +611,42 @@ try {
   check('Key 可选择至少两个上游分组（AC-37）', groupData.length >= 2,
     `${groupData.length} 个分组`);
   for (let i = 0; i < keyCells.length && groupData.length >= 2; i++) {
-    const keyID = keyCells[i][0];
+    const keyID = keyCells[i].id;
     const group = groupData[i % 2];
     await page.click(`[data-key-edit="${keyID}"]`);
     await page.waitForSelector(`#key-edit-group-${keyID}`, { timeout: 5000 });
     await page.select(`#key-edit-group-${keyID}`, String(group.id));
     await page.click(`[data-key-save="${keyID}"]`);
     await page.waitForFunction(
-      (id, ref) => document.querySelector(`[data-key-row="${id}"]`)?.textContent.includes(ref),
+      (id, ref) => document.querySelector(`[data-key-row="${id}"] td[data-col="group"]`)
+        ?.textContent.includes(ref),
       { timeout: 8000 }, keyID, group.group_ref);
   }
-  const groupedKeys = await page.$$eval('#detail-body tbody tr[data-key-row]',
-    rs => rs.map(r => [...r.querySelectorAll('td')].slice(4, 6).map(t => t.textContent.trim())));
+  const groupedKeys = await readKeyRows();
   check('四把 Key 均显示分组与倍率（AC-37）',
-    groupedKeys.length >= 4 && groupedKeys.every(c => c[0] !== '—' && c[1] !== '未知'),
-    JSON.stringify(groupedKeys));
-  // 采集后应有剩余额度（归一为美元）
-  const hasQuota = keyCells.some(c => c[6].startsWith('$'));
-  check('Key 剩余额度已归一为美元显示', hasQuota,
-    keyCells.map(c => c[6]).join(' '));
+    groupedKeys.length >= 4
+      && groupedKeys.every(c => c.group !== '—' && c.rate !== '未知'),
+    JSON.stringify(groupedKeys.map(c => [c.group, c.rate])));
+
+  // 采集后应有剩余配额（归一为美元）。
+  //
+  // ⚠️ 判据是 quotaView 的四态之一，不是"以 $ 开头"。无限额度的 NewAPI Key
+  // 上游回的是 `remain_quota: 0`，旧版把它渲染成 $0.0000 —— 与"额度耗尽"
+  // 完全无法区分，而两者对"能不能承接请求"是相反的结论（FR-025）。
+  // 现在无限额度渲染成「不限额度」，所以这条改成"每一行都落在四态里，
+  // 且至少有一行给出了真实金额或明确的不限额度"。
+  const quotaCells = keyCells.map(c => c.quota);
+  const quotaTyped = quotaCells.every(t =>
+    /\$/.test(t) || /不限额度/.test(t) || /配额耗尽/.test(t) || /未采集/.test(t));
+  const quotaInformative = quotaCells.some(t => /\$/.test(t) || /不限额度/.test(t));
+  check('Key 剩余配额已归一为美元显示，且四态可区分',
+    quotaTyped && quotaInformative, quotaCells.join(' | '));
+
+  // 配额与账号余额必须是**两个列**，不能共用一个"额度"字样。
+  const keyHeaders = await page.$$eval('#detail-body thead th',
+    ts => ts.map(t => t.textContent.trim()));
+  check('Key 表列名写全为「Key 剩余配额」（不是笼统的"额度"）',
+    keyHeaders.includes('Key 剩余配额'), keyHeaders.join(' | '));
   // FR-127「登记与展示」的展示端。**不能断言"有数字"**—— 实测 newapi 的
   // /api/token 不给 Key 级 RPM/并发，真站点就是「—」。断言有数字就只能靠 mock
   // 才绿，那正是 CLAUDE.md §1 禁的。
@@ -525,14 +686,95 @@ try {
       && rlCells.every((t, i) => squash(t) === squash(rlWant[i])),
     `期望=${JSON.stringify(rlWant)} 实际=${JSON.stringify(rlCells)}`);
 
-  const deletedKeyID = keyCells[keyCells.length - 1][0];
+  // 删除收进了行内「更多」菜单，并走统一确认框 ——
+  // 原来它与「编辑」并排且是 window.confirm，两个按钮看起来一样轻，
+  // 而后果差着一个数量级。
+  const deletedKeyID = keyCells[keyCells.length - 1].id;
+  await openMore(`[data-key-more="${deletedKeyID}"]`);
   await page.click(`[data-key-delete="${deletedKeyID}"]`);
+  const delImpact = await page.$eval('.confirm-i', el => el.textContent.trim());
+  check('删除 Key 的确认框写明不可恢复与归属',
+    /不可恢复|永久删除/.test(delImpact), delImpact.slice(0, 70));
+  await confirmOK();
   await page.waitForFunction(
     id => !document.querySelector(`[data-key-row="${id}"]`),
     { timeout: 8000 }, deletedKeyID);
   check('Key 编辑与删除可用（AC-37）', true);
 
   await page.screenshot({ path: `${SHOT}/08-keys.png`, fullPage: true });
+
+  // ── 8bis. Key 管理页：平铺 / 分组双视图 + 筛选互通 ──
+  //
+  // 两种视图解决两类任务（跨渠道排查 vs 理解归属），所以都要有。
+  // 关键断言是**切视图不丢筛选** —— 各自实现筛选的话，用户切一下就发现
+  // "少了几把"，而那时分不清是筛选变了还是数据变了。
+  await pane('keys');
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pane-keys tr[data-key-row]').length > 0,
+    { timeout: 8000 });
+  const allKeysFlat = await page.$$eval('#pane-keys tr[data-key-row]', rs => rs.length);
+  check('Key 管理页默认平铺列出全部渠道的 Key', allKeysFlat >= 3, `${allKeysFlat} 把`);
+
+  // 按渠道筛选后，剩下的必须**都属于**这个渠道 —— 不是"数量对得上"。
+  await page.select('#key-f-channel', String(newChannelId));
+  await sleep(400);
+  const filteredRows = await page.$$eval('#pane-keys tr[data-key-row]',
+    rs => rs.map(r => r.querySelector('td[data-col="channel"]')?.textContent.trim()));
+  check('按渠道筛选后每一行都属于该渠道',
+    filteredRows.length > 0 && new Set(filteredRows).size === 1,
+    `${filteredRows.length} 行，渠道取值 ${JSON.stringify([...new Set(filteredRows)])}`);
+
+  // 筛选条件必须落进 URL：刷新 / 回退 / 分享链接看到的是同一批。
+  const urlHasFilter = await page.evaluate(() =>
+    new URLSearchParams(location.search).get('channel'));
+  check('筛选条件写入 URL（刷新与分享可复现）',
+    urlHasFilter === String(newChannelId),
+    `?channel=${urlHasFilter}`);
+
+  // 切到分组视图：筛选保留，且分组头写「匹配 N / 全部 M」。
+  await page.click('[data-seg="by-channel"]');
+  await page.waitForFunction(
+    () => document.querySelector('#pane-keys .group-h') !== null, { timeout: 5000 });
+  const groupedCount = await page.$$eval('#pane-keys tr[data-key-row]', rs => rs.length);
+  check('切换视图不丢筛选（平铺与分组行数一致）',
+    groupedCount === filteredRows.length,
+    `平铺 ${filteredRows.length} 行 / 分组 ${groupedCount} 行`);
+  const bucketLabel = await page.$eval(`[data-bucket-count="${newChannelId}"]`,
+    el => el.textContent.replace(/\s+/g, ' ').trim());
+  check('分组头写明「匹配 N / 全部 M」（不让人以为 Key 丢了）',
+    /匹配\s*\d+\s*\/\s*全部\s*\d+/.test(bucketLabel), bucketLabel);
+
+  await page.click('#btn-key-reset');
+  await sleep(300);
+  const afterReset = await page.$$eval('#pane-keys tr[data-key-row]', rs => rs.length);
+  check('重置筛选恢复全量', afterReset === groupedCount || afterReset > groupedCount,
+    `重置后 ${afterReset} 行（筛选时 ${groupedCount} 行）`);
+  await page.screenshot({ path: `${SHOT}/09-keys-grouped.png`, fullPage: true });
+
+  // ── 8ter. 账号页：余额三件事同格（金额 / 状态 / 确认时刻）──
+  //
+  // 采集刚跑过一轮，所以这个渠道的账号**应该**已经有余额了。
+  // 但断言不写死金额 —— 上游余额是人家的钱，随时在变。断的是形态：
+  // 要么给出金额与确认时刻，要么明说"未采集"，不能是空白也不能是裸 0。
+  await pane('accounts');
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pane-accounts tr[data-account-row]').length > 0,
+    { timeout: 8000 });
+  const balCells = await page.$$eval('#pane-accounts td[data-col="balance"]',
+    ts => ts.map(t => t.textContent.replace(/\s+/g, ' ').trim()));
+  check('账号余额列非空且区分「未采集」与金额',
+    balCells.length > 0
+      && balCells.every(t => t.length > 0)
+      && balCells.every(t => /未采集/.test(t) || /\$\d/.test(t)),
+    balCells.join(' | '));
+  // 采到金额的行必须**同时**给出确认时刻 —— 金额离开时刻就没有意义
+  // （三天前的 $0.42 和五分钟前的 $0.42 是不同的结论，FR-020/026）。
+  const withAmount = balCells.filter(t => /\$\d/.test(t));
+  check('有金额的账号同时显示确认时刻（FR-020）',
+    withAmount.length === 0 || withAmount.every(t => /确认/.test(t)),
+    withAmount.length === 0 ? '本轮无账号采到余额（站型可能不提供）' : withAmount.join(' | '));
+  await page.screenshot({ path: `${SHOT}/10-accounts.png`, fullPage: true });
+  await pane('detail');
 
   // ── 10. 限流：立刻再点一次采集应被拒（429，且不打上游）──
   await page.click('#btn-sync');
@@ -554,7 +796,10 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
+  // 六项：渠道管理 / 渠道详情 / 账号管理 / Key 管理 / 采集凭证 / 批量导入。
+  // 原来是五项 ——「账号与 Key」一个分栏管两个对象，拆成两个之后
+  // 「在哪登记、在哪管理」不再是两个地方。
+  check('侧栏导航项齐全', layout.navs === 6, `${layout.navs} 项`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //
@@ -696,7 +941,10 @@ try {
   await page.click('#btn-reload');
   await sleep(600);
 
+  // 编辑 / 停用 / 启用都收进了行内「更多」菜单（低频且后果重的操作不与
+  // 「详情」并排），所以每次都要先把那个 <details> 打开。
   const renamed = `${uniq}-改名`;
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
   await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
   await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
@@ -711,24 +959,32 @@ try {
     `期望 ${renamed}，实际 ${nameAfter}`);
 
   // 停用：原因必填。先试空原因 —— 应被拦住且状态不变，否则"必填"是句空话。
+  //
+  // 停用改走统一确认框（原来是行内展开 + #btn-ch-disable-ok）：确认框里能写下
+  // 影响范围，而"确定？"三个字写不下。状态文案也从库里的枚举值改成了中文，
+  // 所以下面比的是「启用 / 停用」而不是 enabled / disabled。
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-disable="${newChannelId}"]`);
   await page.waitForSelector('#ch-dis-reason', { timeout: 5000 });
-  await page.click('#btn-ch-disable-ok');
+  const chImpact = await page.$eval('.confirm-i', el => el.textContent.trim());
+  check('停用渠道的确认框写明影响的账号与 Key 数',
+    /账号/.test(chImpact) && /Key/.test(chImpact), chImpact.slice(0, 70));
+  await confirmOK();
   await sleep(800);
   const statusAfterEmpty = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   check('停用不填原因被拦下且状态未变（FR-095）',
-    /enabled/.test(statusAfterEmpty), `状态=${statusAfterEmpty}`);
+    /启用/.test(statusAfterEmpty), `状态=${statusAfterEmpty}`);
 
   const reason = '验收脚本停用测试-站点余额耗尽';
   await page.type('#ch-dis-reason', reason);
-  await page.click('#btn-ch-disable-ok');
+  await confirmOK();
   await page.waitForFunction(
-    id => /disabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    id => /停用/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
     { timeout: 8000 }, newChannelId).catch(() => {});
   const statusAfter = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
-  check('停用后列表状态变为 disabled', /disabled/.test(statusAfter), statusAfter);
+  check('停用后列表状态变为「停用」', /停用/.test(statusAfter), statusAfter);
   // 原因必须显示出来 —— 停用是要人来解除的，看不到原因就无从判断能不能解
   const reasonShown = await page.$eval(`[data-ch-reason="${newChannelId}"]`,
     el => el.textContent.trim()).catch(() => '');
@@ -740,6 +996,7 @@ try {
   // 原因清成 NULL —— 留下一个"已停用但没人知道为什么"的渠道，而库里没有 CHECK
   // 拦这个状态。改成随 status 变更才动之后，这条断言守着它。
   const renamed2 = `${uniq}-停用中改名`;
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-edit="${newChannelId}"]`);
   await page.waitForSelector('#ch-edit-name', { timeout: 5000 });
   await page.evaluate(() => { document.querySelector('#ch-edit-name').value = ''; });
@@ -753,19 +1010,20 @@ try {
   const stillDisabled = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   check('停用态下只改名，停用原因与状态都不受影响',
-    reasonKept === reason && /disabled/.test(stillDisabled),
+    reasonKept === reason && /停用/.test(stillDisabled),
     `原因=${reasonKept || '（被抹掉了）'} 状态=${stillDisabled}`);
 
+  await openMore(`[data-ch-more="${newChannelId}"]`);
   await page.click(`#channels button[data-ch-enable="${newChannelId}"]`);
   await page.waitForFunction(
-    id => /enabled/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
+    id => /启用/.test(document.querySelector(`[data-ch-status="${id}"]`)?.textContent || ''),
     { timeout: 8000 }, newChannelId).catch(() => {});
   const backOn = await page.$eval(`[data-ch-status="${newChannelId}"]`,
     el => el.textContent.trim());
   // 启用后原因必须一并清掉：留着上次的原因，界面上就是"已启用"却带着停用理由
   const reasonGone = await page.$$eval(`[data-ch-reason="${newChannelId}"]`,
     els => els.length === 0);
-  check('启用后状态恢复且停用原因被清空', /enabled/.test(backOn) && reasonGone,
+  check('启用后状态恢复且停用原因被清空', /启用/.test(backOn) && reasonGone,
     `状态=${backOn}，原因元素${reasonGone ? '已消失' : '仍在'}`);
 
   await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });

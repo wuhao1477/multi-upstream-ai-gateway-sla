@@ -164,6 +164,11 @@ UPDATE channels
 }
 
 // Account 是一个上游账号。
+//
+// 后四个字段是**读路径派生**的，不在 upstream_accounts 表上：
+// 余额来自 balance_signals（采集器写，见 sink.go SaveAccount），
+// Key 数来自 upstream_keys。它们只由 ListAccounts 填充，
+// CreateAccount/UpdateAccount 不碰。
 type Account struct {
 	ID              int64      `json:"id"`
 	ChannelID       int64      `json:"channel_id"`
@@ -173,6 +178,26 @@ type Account struct {
 	DisabledReason  string     `json:"disabled_reason,omitempty"`
 	DisabledUntil   *time.Time `json:"disabled_until,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
+
+	// BalanceUSD 是最近一次确认的账号余额（归一美元，FR-018 一期 1:1）。
+	//
+	// **nil = 从未采到，不是 0**（FR-020/026）。采集器只在非 degraded 时写
+	// balance_signals，所以"这个站型不给余额"和"余额确实是 0"在这里是
+	// 两个不同的值，界面必须分开渲染 —— 把 nil 填成 0 会让一个查不到余额的
+	// 账号看起来像已耗尽。
+	BalanceUSD *float64 `json:"balance_usd,omitempty"`
+	// BalanceState 是余额五态之一（normal/critical/unknown/exhausted/abnormal）。
+	// 空串 = 没有任何余额信号行。
+	BalanceState string `json:"balance_state,omitempty"`
+	// BalanceConfirmedAt 是上面这个余额的确认时刻。
+	// **必须与金额一同展示**：一个三天前的余额和五分钟前的余额，
+	// 对"还能不能发付费请求"是完全不同的结论。
+	BalanceConfirmedAt *time.Time `json:"balance_confirmed_at,omitempty"`
+
+	// KeysTotal / KeysActive 是该账号下的 Key 数与其中 active 的个数。
+	// 停用账号时要在确认框里写清影响面（"将影响 N 把 Key"），靠它。
+	KeysTotal  int `json:"keys_total"`
+	KeysActive int `json:"keys_active"`
 }
 
 // CreateAccount 登记账号。
@@ -188,13 +213,38 @@ RETURNING id`, a.ChannelID, a.ExternalUserID, a.BalanceGroupKey, a.Status).Scan(
 	return id, nil
 }
 
-// ListAccounts 列出某渠道的账号（channelID<=0 表示全部）。
+// ListAccounts 列出某渠道的账号（channelID<=0 表示全部），并带上最近一次
+// 确认的余额与该账号下的 Key 计数。
+//
+// 余额取 balance_signals 的**最新一行**而不是聚合：那张表是 append-only 的
+// 采集流水，每轮成功采集追加一条。按 confirmed_at 降序取一条 = "最近一次
+// 可信余额"（FR-026 的输入）。一次采集失败不会写行，所以上一次成功值仍在，
+// 这正是 FR-026 要的"刷新失败不覆盖最后一次成功余额"—— 不需要额外代码。
+//
+// 用两个 LEFT JOIN LATERAL 而不是给每个账号发一条查询：账号页要列全部
+// 渠道的账号（channelID<=0），N+1 会在 65 个渠道上变成上百次往返。
 func ListAccounts(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Account, error) {
 	rows, err := conn.Query(ctx, `
-SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key,''),
-       status, COALESCE(disabled_reason,''), disabled_until, created_at
-  FROM upstream_accounts
- WHERE ($1 <= 0 OR channel_id = $1) ORDER BY id`, channelID)
+SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
+       COALESCE(a.balance_group_key,''),
+       a.status, COALESCE(a.disabled_reason,''), a.disabled_until, a.created_at,
+       b.last_confirmed_balance, COALESCE(b.balance_state,''), b.confirmed_at,
+       k.total, k.active
+  FROM upstream_accounts a
+  LEFT JOIN LATERAL (
+    SELECT last_confirmed_balance, balance_state, confirmed_at
+      FROM balance_signals
+     WHERE account_id = a.id
+     -- id 兜底：同一轮里 confirmed_at 可能相同（采集器用同一个 FetchedAt）
+     ORDER BY confirmed_at DESC NULLS LAST, id DESC
+     LIMIT 1
+  ) b ON true
+  LEFT JOIN LATERAL (
+    SELECT count(*) AS total,
+           count(*) FILTER (WHERE status = 'active') AS active
+      FROM upstream_keys WHERE account_id = a.id
+  ) k ON true
+ WHERE ($1 <= 0 OR a.channel_id = $1) ORDER BY a.id`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("列账号: %w", err)
 	}
@@ -204,7 +254,9 @@ SELECT id, channel_id, COALESCE(external_user_id,''), COALESCE(balance_group_key
 		var a Account
 		if err := rows.Scan(&a.ID, &a.ChannelID, &a.ExternalUserID,
 			&a.BalanceGroupKey, &a.Status, &a.DisabledReason,
-			&a.DisabledUntil, &a.CreatedAt); err != nil {
+			&a.DisabledUntil, &a.CreatedAt,
+			&a.BalanceUSD, &a.BalanceState, &a.BalanceConfirmedAt,
+			&a.KeysTotal, &a.KeysActive); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

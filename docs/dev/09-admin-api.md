@@ -313,7 +313,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
     {"capability":"account","status":"ok","elapsed_ms":210,"rows":1},
     {"capability":"groups","status":"ok","elapsed_ms":180,"rows":3},
     {"capability":"keys","status":"partial","elapsed_ms":900,"rows":3,
-     "failed":1,"error":"key 12: 401 unauthorized"},
+     "failed":1,"error":"key 12: 401 unauthorized","http_status":401},
     {"capability":"pricing","status":"ok","elapsed_ms":760,"rows":214},
     {"capability":"model_catalog","status":"ok","elapsed_ms":2160,"rows":214}
   ]
@@ -321,6 +321,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 ```
 
 - `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
+- 上游 HTTP 失败时可附 `http_status`；存在有效 `Retry-After` 时同时附 `retry_after_ms`，供周期采集调度退避使用。
 - P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
 - **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 
@@ -329,7 +330,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 - **同渠道最小间隔** `sync_min_interval_s`（默认 60，`config_params`）：间隔内再次调用返回 **429** 且 `items` 全为 `skipped`，不打上游。
 - ⚠️ **窗口只由"真的触达了上游"的尝试起算**：站型未知、连接池取不到连接、**凭证未登记**都在发出第一个上游请求前失败，此类返回 **422**（配置问题，非上游故障）且 `items` 全为 `skipped`，**不起算窗口**。否则「建渠道 → 采集 → 提示缺凭证 → 登记 → 再采集」这条首跑路径会被自己上一次的失败挡满一个间隔（[P1-evidence §4 第 15 项](../acceptance/P1-evidence.md)）。采集层用 `collector.ErrPrecondition` 显式声明"未触达上游"，**接口层不靠匹配错误文案判断**。
 - **同渠道互斥**：用 `pg_try_advisory_lock(hashtext('sync:'||channel_id))`；抢不到锁返回 **409**（已有一次 sync 在跑）。**不排队**——手动刷新重复点击应立即得到反馈，而非静默堆积。互斥与限流是两件事：**前置失败也必须解互斥**，否则一次本地失败会把渠道永久锁死。
-- 单项内的请求间隔仍受 `collector_request_interval_ms` 约束（[04 §6](./04-collector-adapter.md)）。
+- 单项内的请求间隔仍受 `collector_request_interval_ms` 约束（[04 §6](./04-collector-adapter.md)）；`sla-core` 与 `collector` 通过 PostgreSQL host 时隙跨进程共享该限制。
 
 ### 5.1 其余端点（P2~P3）
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,9 +27,22 @@ type Client struct {
 	// MinInterval 是同一 host 两次请求的最小间隔
 	// （config_params 的 collector_request_interval_ms，默认 200ms）。
 	MinInterval time.Duration
+	WaitHost    func(context.Context, string, time.Duration) error
 
 	mu   sync.Mutex
 	last map[string]time.Time // host → 上次请求时刻
+}
+
+// Do sends one collection request.
+func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if err := c.wait(req.Context(), req.URL.Host); err != nil {
+		return nil, err
+	}
+	hc := c.HC
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	return hc.Do(req)
 }
 
 // NewClient 构造采集客户端。
@@ -47,6 +61,9 @@ func NewClient(minInterval time.Duration) *Client {
 func (c *Client) wait(ctx context.Context, host string) error {
 	if c.MinInterval <= 0 {
 		return nil
+	}
+	if c.WaitHost != nil {
+		return c.WaitHost(ctx, host, c.MinInterval)
 	}
 	c.mu.Lock()
 	if c.last == nil {
@@ -116,14 +133,7 @@ func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[s
 	}
 	req.Header = authHeaders(s)
 
-	if err := c.wait(ctx, req.URL.Host); err != nil {
-		return nil, nil, err
-	}
-	hc := c.HC
-	if hc == nil {
-		hc = http.DefaultClient
-	}
-	resp, err := hc.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GET %s: %w", path, err)
 	}
@@ -135,11 +145,12 @@ func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[s
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		// 401 单列：调用方据此触发续期或人工重登（04 §5 第 2/4 层）
-		return nil, raw, fmt.Errorf("%w: GET %s", ErrUnauthorized, path)
+		return nil, raw, newHTTPError(resp,
+			fmt.Sprintf("%v: GET %s", ErrUnauthorized, path), ErrUnauthorized)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, raw, fmt.Errorf("GET %s 返回 %d: %s",
-			path, resp.StatusCode, snippet(raw))
+		return nil, raw, newHTTPError(resp, fmt.Sprintf("GET %s 返回 %d: %s",
+			path, resp.StatusCode, snippet(raw)), nil)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -150,6 +161,47 @@ func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[s
 
 // ErrUnauthorized 是 401，供调用方区分"凭证问题"与"其它错误"。
 var ErrUnauthorized = errors.New("collector: 上游返回 401")
+
+// HTTPError preserves response metadata needed by the collection scheduler.
+type HTTPError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	Message    string
+	Cause      error
+}
+
+func (e *HTTPError) Error() string { return e.Message }
+
+func (e *HTTPError) Unwrap() error { return e.Cause }
+
+// HTTPFailure extracts retry metadata through wrapped and joined errors.
+func HTTPFailure(err error) (status int, retryAfter time.Duration, ok bool) {
+	var target *HTTPError
+	if !errors.As(err, &target) {
+		return 0, 0, false
+	}
+	return target.StatusCode, target.RetryAfter, true
+}
+
+func newHTTPError(resp *http.Response, message string, cause error) *HTTPError {
+	return &HTTPError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		Message:    message,
+		Cause:      cause,
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
+}
 
 // snippet 截取响应片段用于错误信息。
 // 限长是刻意的：上游可能返回整页 HTML，全塞进 error 会污染日志。

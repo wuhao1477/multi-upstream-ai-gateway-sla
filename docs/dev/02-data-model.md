@@ -1,5 +1,7 @@
 # 02 数据模型（自研 SLA 核心 · PostgreSQL 单库 · v0.1 草案）
 
+> **文档性质：全阶段目标设计。** 本文包含尚未实现的 P2/P3/P4 数据结构；`migrations/` 只建立当前阶段实际使用的对象。当前已交付范围以 [README 路线图](../../README.md#路线图) 与迁移净结果为准。
+
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录；DDL 已在 postgres:16 实测通过（`verify/ddl-check.sh`） |
@@ -2805,6 +2807,14 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 > 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证明文（FR-113）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
 
 ```sql
+-- 跨进程采集限速：sla-core 手动采集/探测与 collector 周期采集共用同一 host 时隙。
+-- 每次请求前用单条 UPSERT 原子推进 next_allowed_at；不存 URL path、凭证或请求内容。
+CREATE TABLE collector_host_rate_limits (
+  host            TEXT PRIMARY KEY CHECK (host <> ''),
+  next_allowed_at TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

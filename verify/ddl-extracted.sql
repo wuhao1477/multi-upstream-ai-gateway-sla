@@ -956,6 +956,12 @@ CREATE TABLE canary_claims (
 
 CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'active';
 
+CREATE TABLE collector_host_rate_limits (
+  host            TEXT PRIMARY KEY CHECK (host <> ''),
+  next_allowed_at TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   account_id      BIGINT NOT NULL REFERENCES upstream_accounts(id),

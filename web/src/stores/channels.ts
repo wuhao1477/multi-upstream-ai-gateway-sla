@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import * as adminApi from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { Channel, InventoryResp, SiteFamilyInfo, SyncItem, SyncResult } from '@/api/types'
+import { useResourcesStore } from './resources'
 import { useToastStore } from './toast'
 
 /**
@@ -22,6 +23,7 @@ function itemsOf(body: unknown): SyncItem[] | undefined {
 
 export const useChannelsStore = defineStore('channels', () => {
   const toast = useToastStore()
+  const res = useResourcesStore()
 
   const list = ref<Channel[]>([])
   const loaded = ref(false)
@@ -153,7 +155,14 @@ export const useChannelsStore = defineStore('channels', () => {
       const next = await adminApi.syncChannel(id)
       if (currentID.value !== id || syncRequest !== request) return
       syncResult.value = next
-      await loadInventory()
+      // 采集**改变了库里的账号/Key/分组**，共享缓存必须跟着重拉。
+      //
+      // 漏了这一步的症状很隐蔽：界面看着采成功了（逐项结果表全绿、总览数字
+      // 也变了，因为 inventory 是另拉的），但 Key 编辑里的「所属分组」下拉
+      // 是空的 —— 分组是这轮采集才建的，而 res.groups 还停在进页面时那一份。
+      // 旧版每个子视图自己 onMounted 拉分组，所以从来碰不到；改成共享缓存
+      // 之后就必须在这里补。本地验收正是在这条上超时的。
+      await Promise.all([loadInventory(), res.reload()])
     } catch (e) {
       if (currentID.value !== id || syncRequest !== request) return
       // 429/409/422 都带结构化响应，一并展示 —— 运维要看到"哪一项被跳过了"，

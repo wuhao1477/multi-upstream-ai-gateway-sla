@@ -185,6 +185,7 @@ func (s *CollectorSink) SaveKey(
 	row := KeyUsageRow{
 		KeyID: keyID, SyncedAt: k.Meta.FetchedAt, ExpiredAt: k.ExpiredAt,
 		RemainQuotaUSD: k.RemainQuotaUSD, UsedQuotaUSD: k.UsedQuotaUSD,
+		Unlimited: k.Unlimited,
 	}
 	if k.RateLimit.RPM > 0 {
 		v := k.RateLimit.RPM

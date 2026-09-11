@@ -137,6 +137,16 @@ type KeyUsageRow struct {
 	ChannelGroupID   *int64
 	ExpiredAt        *time.Time
 	SyncedAt         time.Time
+	// Unlimited 是"该 Key 不限额度"（NewAPI 的 unlimited_quota）。
+	//
+	// 不是 *bool 而是 bool：适配器每轮都能明确判定它（字段缺席即 false），
+	// 不存在"这轮没采到"的第三态 —— 与上面几个 COALESCE 保留旧值的列不同，
+	// 这一列必须**每轮覆写**，否则上游把无限额改成限额后界面永远显示"不限额度"。
+	//
+	// ⚠️ 它不是可有可无的展示位：无限额度的 NewAPI Key 回的是
+	// `remain_quota: 0`，不落这一列的话界面会把它渲染成 $0.0000，
+	// 与"额度耗尽"完全无法区分（FR-025 要靠这个判断能不能承接请求）。
+	Unlimited bool
 }
 
 // UpdateKeyUsage 更新 Key 的用量与限流列。
@@ -157,11 +167,12 @@ UPDATE upstream_keys
        channel_group_id  = COALESCE($6, channel_group_id),
        expired_time      = COALESCE($7, expired_time),
        quota_synced_at   = $8,
+       unlimited_quota   = $9,
        updated_at        = now()
  WHERE id = $1`,
 		row.KeyID, row.RemainQuotaUSD, row.UsedQuotaUSD,
 		row.RPMLimit, row.ConcurrencyLimit, row.ChannelGroupID,
-		row.ExpiredAt, row.SyncedAt)
+		row.ExpiredAt, row.SyncedAt, row.Unlimited)
 	if err != nil {
 		return fmt.Errorf("更新 Key %d 用量: %w", row.KeyID, err)
 	}

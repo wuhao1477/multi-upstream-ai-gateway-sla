@@ -131,6 +131,9 @@ func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
 		interval = time.Duration(v) * time.Millisecond
 	}
 	hc := collector.NewClient(interval)
+	if !readOnly {
+		hc.WaitHost = store.NewHostRequestLimiter(pool).Wait
+	}
 	runner := collection.NewRunner(pool, hc)
 
 	mux := http.NewServeMux()
@@ -142,7 +145,7 @@ func run(addr, dsn string, readOnly bool, logger *slog.Logger) error {
 	srv := admin.NewServer(pool, adminToken, logger, rebuild)
 	srv.Snapshot = func() *config.Snapshot { return snap.Load() }
 	srv.Detect = func(ctx context.Context, baseURL string) (collector.DetectResult, error) {
-		return collector.Detect(ctx, hc.HC, baseURL)
+		return collector.Detect(ctx, hc, baseURL)
 	}
 	srv.Sync = func(ctx context.Context, ch store.Channel) (*collector.SyncResult, error) {
 		return runner.Sync(ctx, ch, nil)
