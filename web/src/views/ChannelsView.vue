@@ -283,7 +283,7 @@ function blocked(c: Channel): string {
                       <span class="dim cell-sub" :title="c.base_url">{{ c.base_url }}</span>
                     </td>
                     <td data-col="family">
-                      <span class="badge">{{ familyLabel(c.site_family) }}</span>
+                      <span class="badge" :data-family="c.site_family">{{ familyLabel(c.site_family) }}</span>
                       <!-- 阻断性问题就摆在站型旁边：站型未识别 = 没有适配器可用，
                            这个渠道无论如何都采不到任何东西（04 §7） -->
                       <span v-if="blocked(c) !== ''" class="badge bad" :data-ch-blocked="c.id">{{

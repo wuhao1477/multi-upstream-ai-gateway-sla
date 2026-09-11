@@ -148,6 +148,7 @@ function statusClass(s: string): string {
                       v-if="i.family_mismatch === true"
                       class="dim"
                       style="font-size: 11px"
+                      :data-declared-family="i.declared_family"
                       title="导出声明与探测不符，以探测为准"
                       >声明 {{ declaredFamilyLabel(i.declared_family) }}</span
                     >

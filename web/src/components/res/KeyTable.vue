@@ -252,7 +252,7 @@ async function runPending(): Promise<void> {
                 {{ k.expired_time === undefined ? '永不过期' : fmtTime(k.expired_time) }}
               </td>
               <td v-if="!compact" data-col="status">
-                <span class="badge" :class="k.status === 'active' ? 'ok' : 'bad'" :title="keyStatusLabel(k.status)">{{
+                <span class="badge" :class="k.status === 'active' ? 'ok' : 'bad'" :data-key-status="k.status" :title="keyStatusLabel(k.status)">{{
                   keyStatusLabel(k.status)
                 }}</span>
               </td>

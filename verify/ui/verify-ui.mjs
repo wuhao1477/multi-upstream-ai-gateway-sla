@@ -255,6 +255,14 @@ try {
       && !statLabels.includes('额度合计'),
     statLabels.join(' | '));
 
+  await page.goto(`${BASE}/admin/ui/channels/999999`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(
+    () => document.querySelector('#detail-empty')?.textContent.includes('渠道不存在或已删除'),
+    { timeout: 8000 });
+  const missingDetail = await page.$eval('#detail-empty', el => el.textContent.trim());
+  check('真实令牌下不存在的渠道不显示旧渠道数据', /渠道不存在或已删除/.test(missingDetail), missingDetail);
+  await openDetail(newChannelId);
+
   // 新渠道还没登记凭证与 Key，**必须**报出"缺凭证" ——
   // 首版这条允许"无异常"通过，于是掩盖了一个真缺口：
   // 最常见的"为什么不工作"（没凭证）恰恰是唯一没被 inventory 覆盖的情形。
@@ -678,11 +686,11 @@ try {
   // 分路径的那版里，"有值"那支在 newapi 上永不执行（pick-upstream 只选 newapi 系，
   // 而它不报 Key 级限流），等于一半断言从没跑过。构造式只有一条路径，
   // 两种数据都覆盖，且更强：无值时不只验"是 —"，验的是"恰好是 API 说的那个"。
-  // 与 KeysView.vue 的模板同构：rpm→"N rpm"、并发→"N 并发"、都有→中间 " / "、
+  // 与 KeysView.vue 的模板同构：rpm→"N 次/分钟"、并发→"N 并发"、都有→中间 " / "、
   // 都无→"—"。DOM 侧已折叠连续空白，所以这里也用单空格拼。
   const rlWant = rlFromAPI.map(([r, c]) => {
     const parts = [];
-    if (r !== null) parts.push(`${r} rpm`);
+    if (r !== null) parts.push(`${r} 次/分钟`);
     if (c !== null) parts.push(`${c} 并发`);
     return parts.length === 0 ? '—' : parts.join(' / ');
   });
