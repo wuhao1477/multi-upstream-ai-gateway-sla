@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -136,12 +137,31 @@ func (c *Client) postJSONAuth(ctx context.Context, s Session, path string) (map[
 func (c *Client) doJSONAuth(
 	ctx context.Context, s Session, method, path string,
 ) (map[string]any, []byte, error) {
+	return c.doJSONBodyAuth(ctx, s, method, path, nil)
+}
+
+func (c *Client) postJSONBodyAuth(
+	ctx context.Context, s Session, path string, body any,
+) (map[string]any, []byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("编码 %s 请求失败: %w", path, err)
+	}
+	return c.doJSONBodyAuth(ctx, s, http.MethodPost, path, raw)
+}
+
+func (c *Client) doJSONBodyAuth(
+	ctx context.Context, s Session, method, path string, body []byte,
+) (map[string]any, []byte, error) {
 	url := strings.TrimRight(s.BaseURL, "/") + path
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}
 	req.Header = authHeaders(s)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.Do(req)
 	if err != nil {
@@ -294,6 +314,61 @@ func asSlice(v any) []any {
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
+}
+
+// fetchAllKeyItems follows the numbered pagination envelope used by NewAPI and
+// Sub2API. When bareArrayPages is true, older NewAPI forks are read until an
+// empty or repeated page; otherwise a bare data array is treated as one page.
+func fetchAllKeyItems(
+	ctx context.Context, c *Client, s Session, pathForPage func(int) string,
+	bareArrayPages bool,
+) ([]any, error) {
+	const maxPages = 1000
+	var out []any
+	seen := map[string]struct{}{}
+	for page := 1; page <= maxPages; page++ {
+		m, _, err := c.getJSONAuth(ctx, s, pathForPage(page))
+		if err != nil {
+			return nil, err
+		}
+		items := asSlice(unwrapDataList(m))
+		data := asMap(m["data"])
+		for _, item := range items {
+			if id := asString(asMap(item)["id"]); id != "" {
+				if _, exists := seen[id]; exists {
+					if data == nil && bareArrayPages && page > 1 {
+						return out, nil
+					}
+					return nil, fmt.Errorf("Key 分页未推进：重复 id %s", id)
+				}
+				seen[id] = struct{}{}
+			}
+		}
+		out = append(out, items...)
+
+		if data == nil {
+			if !bareArrayPages || len(items) == 0 {
+				return out, nil
+			}
+			continue
+		}
+		if responsePage, ok := asFloat(data["page"]); ok && int(responsePage) != page {
+			return nil, fmt.Errorf("Key 分页未推进：请求第 %d 页，响应第 %d 页", page, int(responsePage))
+		}
+		totalPages, hasTotalPages := asFloat(data["total_pages"])
+		total, hasTotal := asFloat(data["total"])
+		hasMore := hasTotalPages && page < int(totalPages)
+		if !hasTotalPages && hasTotal {
+			hasMore = len(out) < int(total)
+		}
+		if !hasMore {
+			return out, nil
+		}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("Key 分页提前结束：第 %d 页为空", page)
+		}
+	}
+	return nil, fmt.Errorf("Key 分页超过 %d 页", maxPages)
 }
 
 // decodeJWTPayload decodes a JWT payload without validating its signature.

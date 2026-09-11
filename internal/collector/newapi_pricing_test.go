@@ -83,6 +83,27 @@ func TestGroupModelsFromEnableGroups(t *testing.T) {
 	}
 }
 
+func TestGroupModelsExpandsAllToEveryUsableGroup(t *testing.T) {
+	var raw map[string]any
+	if err := jsonUnmarshal([]byte(`{
+		"group_ratio":{"default":1,"vip":0.8},
+		"data":[{"model_name":"gpt-global","quota_type":0,"model_ratio":1,
+			"enable_groups":["all"]}]
+	}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+	pricing, err := parseNewAPIPricing(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []string{"default", "vip"} {
+		models := pricing.GroupModels[group]
+		if len(models) != 1 || models[0] != "gpt-global" {
+			t.Fatalf("%s 分组模型 = %v，期望包含 gpt-global", group, models)
+		}
+	}
+}
+
 // 两种计价口径必须区分（02 §3：漏区分会让成本比较失去意义）。
 func TestBillingUnitDistinguishesQuotaType(t *testing.T) {
 	var raw map[string]any

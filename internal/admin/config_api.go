@@ -55,6 +55,11 @@ type Server struct {
 	// ImportKeys 在渠道基础事务提交后读取并登记上游 Key。它是可选能力：
 	// Key 读取失败不得影响渠道、账号与凭证导入。
 	ImportKeys func(ctx context.Context, conn *pgx.Conn, channelID, accountID int64) (collector.KeyImportResult, error)
+	// ProvisionKeys 通过账号会话按分组补齐远端 Key。
+	ProvisionKeys func(
+		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
+		request collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error)
 
 	guard  *syncGuard
 	tokens *tokenStore

@@ -279,6 +279,79 @@ func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
 	}
 }
 
+func TestNewAPIFetchKeysReadsEveryPage(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("p"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("p") {
+		case "", "1":
+			_, _ = w.Write([]byte(`{"data":{"page":1,"page_size":2,"total":3,"items":[
+				{"id":11,"remain_quota":10,"expired_time":-1},
+				{"id":12,"remain_quota":10,"expired_time":-1}]}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"data":{"page":2,"page_size":2,"total":3,"items":[
+				{"id":13,"remain_quota":10,"expired_time":-1}]}}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "New-API-User", ExternalUserID: "42", QuotaPerUnit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望完整读取 3 把", len(keys))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
+	}
+}
+
+func TestNewAPIFetchKeysReadsBareArrayPagesUntilEmpty(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("p")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":31,"remain_quota":10},{"id":32,"remain_quota":10}]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"data":[{"id":33,"remain_quota":10}]}`))
+		case "3":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "New-API-User", ExternalUserID: "42", QuotaPerUnit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望裸数组分页完整读取 3 把", len(keys))
+	}
+	if len(pages) != 3 || pages[0] != "1" || pages[1] != "2" || pages[2] != "3" {
+		t.Fatalf("请求页码 = %v，期望 [1 2 3]", pages)
+	}
+}
+
 func TestNewAPIFetchKeys(t *testing.T) {
 	srv := newAPISite(t)
 	defer srv.Close()
@@ -497,6 +570,40 @@ func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
 	}
 	if w.LimitUSD != 100 || w.UsageUSD != 20 {
 		t.Errorf("1d 窗口 = %+v", w)
+	}
+}
+
+func TestSub2APIFetchKeysReadsEveryPage(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":1,"page_size":2,"total":3,"total_pages":2,"items":[
+				{"id":21,"quota":10},{"id":22,"quota":10}]}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":2,"page_size":2,"total":3,"total_pages":2,"items":[
+				{"id":23,"quota":10}]}}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望完整读取 3 把", len(keys))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
 	}
 }
 

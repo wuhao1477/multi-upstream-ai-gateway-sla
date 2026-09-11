@@ -155,11 +155,12 @@ func (a *Sub2APIAdapter) FetchAccount(ctx context.Context, s Session) (Account, 
 
 // FetchKeys 取 Key 级额度与限流窗口（04 §3.2）。
 func (a *Sub2APIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error) {
-	m, _, err := a.C.getJSONAuth(ctx, s, "/api/v1/keys")
+	items, err := fetchAllKeyItems(ctx, a.C, s, func(page int) string {
+		return "/api/v1/keys?page=" + strconv.Itoa(page) + "&page_size=1000"
+	}, false)
 	if err != nil {
 		return nil, err
 	}
-	items := asSlice(unwrapDataList(m))
 	now := time.Now()
 	out := make([]Key, 0, len(items))
 	for _, it := range items {
@@ -229,6 +230,28 @@ func (a *Sub2APIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef
 		return "", fmt.Errorf("上游未返回可用 Key 明文")
 	}
 	return key, nil
+}
+
+// CreateRemoteKey 在 Sub2API 账号的指定原生分组中创建一把不限额度 Key。
+func (a *Sub2APIAdapter) CreateRemoteKey(
+	ctx context.Context, s Session, request RemoteKeyRequest,
+) error {
+	groupID, err := strconv.ParseInt(strings.TrimSpace(request.GroupRef), 10, 64)
+	if err != nil || groupID <= 0 {
+		return fmt.Errorf("Sub2API 分组标识无效")
+	}
+	m, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/v1/keys", map[string]any{
+		"name": request.Name, "group_id": groupID, "quota": 0,
+	})
+	if err != nil {
+		return err
+	}
+	if code, exists := m["code"]; exists {
+		if value, ok := asFloat(code); ok && value != 0 {
+			return fmt.Errorf("上游拒绝创建 Key: %s", asString(m["message"]))
+		}
+	}
+	return nil
 }
 
 // FetchGroups 取分组倍率、可用模型与限流（04 §3.2 /api/v1/groups/available）。
@@ -343,4 +366,5 @@ func (a *Sub2APIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Ca
 }
 
 var _ Adapter = (*Sub2APIAdapter)(nil)
+var _ KeyProvisioner = (*Sub2APIAdapter)(nil)
 var _ Refresher = (*Sub2APIAdapter)(nil)

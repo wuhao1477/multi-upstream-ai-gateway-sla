@@ -122,7 +122,9 @@ func (a *NewAPIAdapter) FetchAccount(ctx context.Context, s Session) (Account, e
 
 // FetchKeys 取 Key 级额度、有效期、限流、模型权限（FR-003/028/031/122/125/127）。
 func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error) {
-	m, _, err := a.C.getJSONAuth(ctx, s, "/api/token")
+	items, err := fetchAllKeyItems(ctx, a.C, s, func(page int) string {
+		return "/api/token?p=" + strconv.Itoa(page) + "&size=100"
+	}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +133,6 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 		return nil, fmt.Errorf("缺少 quota_per_unit，无法归一 Key 额度")
 	}
 
-	items := asSlice(unwrapDataList(m))
 	out := make([]Key, 0, len(items))
 	now := time.Now()
 	for _, it := range items {
@@ -191,6 +192,24 @@ func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef 
 		return "", fmt.Errorf("上游未返回可用 Key 明文")
 	}
 	return key, nil
+}
+
+// CreateRemoteKey 在 NewAPI 账号中创建一把不限额度、永不过期的 Key。
+func (a *NewAPIAdapter) CreateRemoteKey(
+	ctx context.Context, s Session, request RemoteKeyRequest,
+) error {
+	m, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/token/", map[string]any{
+		"name": request.Name, "group": request.GroupRef,
+		"expired_time": -1, "remain_quota": 0, "unlimited_quota": true,
+		"model_limits_enabled": false, "model_limits": "", "allow_ips": "",
+	})
+	if err != nil {
+		return err
+	}
+	if success, exists := m["success"]; exists && !asBool(success) {
+		return fmt.Errorf("上游拒绝创建 Key: %s", asString(m["message"]))
+	}
+	return nil
 }
 
 // FetchGroups 由 /api/pricing 派生分组（04 §3.1 + 第 46 轮实测修正）。
@@ -339,3 +358,4 @@ func splitCSV(s string) []string {
 }
 
 var _ Adapter = (*NewAPIAdapter)(nil)
+var _ KeyProvisioner = (*NewAPIAdapter)(nil)

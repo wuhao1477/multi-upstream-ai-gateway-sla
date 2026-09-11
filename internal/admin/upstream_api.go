@@ -40,6 +40,8 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
+	mux.Handle("POST /admin/keys/import", h(s.importKeys))
+	mux.Handle("POST /admin/keys/provision", h(s.provisionKeys))
 	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
 	mux.Handle("POST /admin/keys/{id}/disable", h(s.disableKey))

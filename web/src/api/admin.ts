@@ -16,6 +16,8 @@ import type {
   HubImportResult,
   InventoryResp,
   Key,
+  KeyImportBatchResult,
+  KeyProvisionBatchResult,
   ListResp,
   SiteFamilyInfo,
   SyncResult,
@@ -167,6 +169,28 @@ export function deleteKey(id: number): Promise<{ deleted: boolean }> {
 
 export function disableKey(id: number): Promise<{ status: string }> {
   return api<{ status: string }>(`/admin/keys/${id}/disable`, { method: 'POST' })
+}
+
+export interface KeyAutomationInput {
+  channel_id: number
+  account_id: number
+  all: boolean
+  model: string
+  only_without_keys: boolean
+}
+
+export function importKeys(input: KeyAutomationInput): Promise<KeyImportBatchResult> {
+  return api<KeyImportBatchResult>('/admin/keys/import', { method: 'POST', body: input })
+}
+
+export function provisionKeys(
+  input: KeyAutomationInput,
+  dryRun: boolean,
+): Promise<KeyProvisionBatchResult> {
+  return api<KeyProvisionBatchResult>(`/admin/keys/provision?dry_run=${dryRun}`, {
+    method: 'POST',
+    body: input,
+  })
 }
 
 // ── 分组 ─────────────────────────────────────────────────────────────────────

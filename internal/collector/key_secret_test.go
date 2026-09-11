@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,5 +105,61 @@ func TestResolveKeySecretRejectsMissingOrMaskedKey(t *testing.T) {
 				t.Fatalf("error contains key value: %q", err)
 			}
 		})
+	}
+}
+
+func TestNewAPICreateRemoteKeyUsesTokenEndpointAndGroup(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/token/" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"message":""}`))
+	}))
+	defer srv.Close()
+
+	adapter := NewNewAPIAdapter(NewClient(0))
+	adapter.C.HC = srv.Client()
+	err := adapter.CreateRemoteKey(context.Background(), Session{
+		BaseURL: srv.URL, Token: "session-token", ExternalUserID: "42",
+	}, RemoteKeyRequest{Name: "gateway-auto", GroupRef: "vip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["name"] != "gateway-auto" || body["group"] != "vip" || body["unlimited_quota"] != true {
+		t.Fatalf("创建载荷 = %#v", body)
+	}
+}
+
+func TestSub2APICreateRemoteKeyUsesNumericGroupID(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/keys" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"id":23,"key":"remote-secret"}}`))
+	}))
+	defer srv.Close()
+
+	adapter := NewSub2APIAdapter(NewClient(0))
+	adapter.C.HC = srv.Client()
+	err := adapter.CreateRemoteKey(context.Background(), Session{
+		BaseURL: srv.URL, Token: "jwt-token",
+	}, RemoteKeyRequest{Name: "gateway-auto", GroupRef: "17"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["name"] != "gateway-auto" || body["group_id"] != float64(17) || body["quota"] != float64(0) {
+		t.Fatalf("创建载荷 = %#v", body)
 	}
 }

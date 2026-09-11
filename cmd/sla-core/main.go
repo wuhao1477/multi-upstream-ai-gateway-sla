@@ -165,25 +165,44 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 		return runner.Sync(ctx, ch, nil)
 	}
 	credStore := store.NewCredentialStore(pool)
-	srv.ImportKeys = func(
+	loadKeyAccount := func(
 		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
-	) (collector.KeyImportResult, error) {
+	) (store.Channel, collector.Credential, error) {
 		ch, err := store.GetChannel(ctx, conn, channelID)
 		if err != nil {
-			return collector.KeyImportResult{}, err
+			return store.Channel{}, collector.Credential{}, err
 		}
 		creds, err := credStore.ListByChannel(ctx, conn, ch)
 		if err != nil {
-			return collector.KeyImportResult{}, err
+			return store.Channel{}, collector.Credential{}, err
 		}
 		for _, cred := range creds {
 			if cred.AccountID != accountID {
 				continue
 			}
 			cred.QuotaPerUnit = store.QuotaPerUnit(ctx, conn, channelID)
-			return runner.ImportKeys(ctx, conn, ch, []collector.Credential{cred})
+			return ch, cred, nil
 		}
-		return collector.KeyImportResult{}, fmt.Errorf("账号 %d 没有可用采集凭证", accountID)
+		return store.Channel{}, collector.Credential{}, fmt.Errorf("账号 %d 没有可用采集凭证", accountID)
+	}
+	srv.ImportKeys = func(
+		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
+	) (collector.KeyImportResult, error) {
+		ch, cred, err := loadKeyAccount(ctx, conn, channelID, accountID)
+		if err != nil {
+			return collector.KeyImportResult{}, err
+		}
+		return runner.ImportKeys(ctx, conn, ch, []collector.Credential{cred})
+	}
+	srv.ProvisionKeys = func(
+		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
+		request collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error) {
+		ch, cred, err := loadKeyAccount(ctx, conn, channelID, accountID)
+		if err != nil {
+			return collector.KeyProvisionResult{}, err
+		}
+		return runner.ProvisionKeys(ctx, conn, ch, cred, request)
 	}
 	// 注入收 DBTX 的那一版（SaveTx，不是 Save）：管理面的写入要能被调用方
 	// 收进事务。Save 那个自取连接的变体留给采集侧的续期路径（不变式 S-1）。

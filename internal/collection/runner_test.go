@@ -35,6 +35,85 @@ func TestRunnerUnknownFamilyFailsBeforeCredentialLoad(t *testing.T) {
 	}
 }
 
+func TestSelectProvisionGroupsFiltersModelAndExistingCoverage(t *testing.T) {
+	groups := []collector.Group{
+		{GroupRef: "default", AvailableModels: []string{"gpt-5.5"}},
+		{GroupRef: "vip", AvailableModels: []string{"gpt-5.5", "claude-sonnet"}},
+		{GroupRef: "legacy", AvailableModels: []string{"gpt-4"}},
+	}
+	keys := []collector.Key{{KeyRef: "1", GroupRef: "default"}}
+
+	selected, skipped := selectProvisionGroups(keys, groups, "gpt-5.5", false)
+	if skipped != "" {
+		t.Fatalf("不应跳过账号：%s", skipped)
+	}
+	if len(selected) != 1 || selected[0].GroupRef != "vip" {
+		t.Fatalf("待创建分组 = %+v，期望仅 vip", selected)
+	}
+}
+
+func TestSelectProvisionGroupsSkipsAccountWithAnyRemoteKey(t *testing.T) {
+	selected, skipped := selectProvisionGroups(
+		[]collector.Key{{KeyRef: "1", GroupRef: "default"}},
+		[]collector.Group{{GroupRef: "vip"}}, "", true,
+	)
+	if len(selected) != 0 || skipped == "" {
+		t.Fatalf("待创建分组 = %+v，跳过原因 = %q", selected, skipped)
+	}
+}
+
+func TestProvisionRemoteKeysCreatesOnlyMissingModelGroup(t *testing.T) {
+	created := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/token":
+			items := []map[string]any{{"id": 1, "group": "default", "remain_quota": 10}}
+			if created {
+				items = append(items, map[string]any{"id": 2, "group": "vip", "remain_quota": 10})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"page": 1, "page_size": 100, "total": len(items), "items": items,
+			}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1,"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,
+				 "enable_groups":["default","vip"]}]}`))
+		case "POST /api/token/":
+			created = true
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := collector.NewClient(0)
+	client.HC = srv.Client()
+	adapter := collector.NewNewAPIAdapter(client)
+	var imported []collector.Key
+	result, err := provisionRemoteKeys(
+		context.Background(), adapter,
+		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
+		collector.KeyProvisionRequest{Model: "gpt-5.5"},
+		nil,
+		func(key collector.Key) error {
+			imported = append(imported, key)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Found != 1 || result.MatchedGroups != 2 || result.ExistingGroups != 1 ||
+		result.WouldCreate != 1 || result.Created != 1 || result.Failed != 0 {
+		t.Fatalf("批量创建结果 = %+v", result)
+	}
+	if len(imported) != 1 || imported[0].KeyRef != "2" || imported[0].GroupRef != "vip" {
+		t.Fatalf("登记回调 = %+v，期望新建 vip Key", imported)
+	}
+}
+
 func TestImportKeysSkipsExistingExternalRefAndCreatesNewKey(t *testing.T) {
 	dsn := os.Getenv("SLA_TEST_DSN")
 	if dsn == "" {
@@ -116,6 +195,102 @@ VALUES ('runner-import-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&c
 	}
 	if count != 2 {
 		t.Fatalf("Key 行数 = %d，期望 2", count)
+	}
+}
+
+func TestProvisionKeysCreatesRemoteGroupKeyAndRegistersIt(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接测试库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	base := "https://runner-provision-keys.example.invalid"
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+        (SELECT id FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1))`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1)`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE base_url=$1`, base)
+
+	var channelID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, site_family, base_url, status)
+VALUES ('runner-provision-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&channelID); err != nil {
+		t.Fatalf("创建测试渠道: %v", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+            (SELECT id FROM upstream_accounts WHERE channel_id=$1)`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id=$1`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE id=$1`, channelID)
+	}()
+	accountID, err := store.CreateAccount(ctx, conn, store.Account{ChannelID: channelID, ExternalUserID: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `
+INSERT INTO channel_groups(channel_id, group_ref, rate_multiplier, data_source, fetched_at)
+VALUES ($1,'vip',0.8,'auto_collect',now())`, channelID); err != nil {
+		t.Fatal(err)
+	}
+
+	created := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/user/self":
+			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
+		case "GET /api/token":
+			items := []map[string]any{}
+			if created {
+				items = append(items, map[string]any{"id": 501, "group": "vip", "remain_quota": 100})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": items})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,"enable_groups":["vip"]}]}`))
+		case "POST /api/token/":
+			created = true
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case "POST /api/token/501/key":
+			_, _ = w.Write([]byte(`{"data":{"key":"created-secret"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := collector.NewClient(0)
+	client.HC = server.Client()
+	runner := &Runner{Client: client}
+	result, err := runner.ProvisionKeys(ctx, conn, store.Channel{
+		ID: channelID, SiteFamily: string(collector.FamilyNewAPI), BaseURL: server.URL,
+	}, collector.Credential{
+		AccountID: accountID, ChannelID: channelID, Family: collector.FamilyNewAPI,
+		BaseURL: server.URL, AccessToken: "session", ExternalUserID: "42",
+		UserIDHeaderName: "New-API-User", QuotaPerUnit: 1,
+	}, collector.KeyProvisionRequest{Model: "gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || result.Imported != 1 || result.Failed != 0 {
+		t.Fatalf("补齐结果 = %+v", result)
+	}
+	var secret, externalRef, groupRef string
+	if err := conn.QueryRow(ctx, `
+SELECT k.secret, k.external_ref, g.group_ref
+  FROM upstream_keys k JOIN channel_groups g ON g.id=k.channel_group_id
+ WHERE k.account_id=$1`, accountID).Scan(&secret, &externalRef, &groupRef); err != nil {
+		t.Fatal(err)
+	}
+	if secret != "created-secret" || externalRef != "501" || groupRef != "vip" {
+		t.Fatalf("登记结果 = secret:%q ref:%q group:%q", secret, externalRef, groupRef)
 	}
 }
 
