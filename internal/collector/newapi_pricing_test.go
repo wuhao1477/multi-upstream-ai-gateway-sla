@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 )
 
@@ -84,6 +85,8 @@ func TestGroupModelsFromEnableGroups(t *testing.T) {
 }
 
 func TestGroupModelsExpandsAllToEveryUsableGroup(t *testing.T) {
+	// 来源：NewAPI bdef117 controller/pricing.go 将 enable_groups 含 all 的模型对全部可用组放行：
+	// https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/controller/pricing.go
 	var raw map[string]any
 	if err := jsonUnmarshal([]byte(`{
 		"group_ratio":{"default":1,"vip":0.8},
@@ -100,6 +103,24 @@ func TestGroupModelsExpandsAllToEveryUsableGroup(t *testing.T) {
 		models := pricing.GroupModels[group]
 		if len(models) != 1 || models[0] != "gpt-global" {
 			t.Fatalf("%s 分组模型 = %v，期望包含 gpt-global", group, models)
+		}
+	}
+}
+
+func TestAllGroupExpansionIsSorted(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		var raw map[string]any
+		mustJSON(t, `{
+			"group_ratio":{"vip":0.8,"default":1,"premium":2},
+			"data":[{"model_name":"gpt-global","quota_type":0,"model_ratio":1,
+				"enable_groups":["all"]}]
+		}`, &raw)
+		pricing, err := parseNewAPIPricing(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !sort.StringsAreSorted(pricing.Models[0].EnableGroups) {
+			t.Fatalf("第 %d 次解析的 all 分组顺序不稳定：%v", attempt, pricing.Models[0].EnableGroups)
 		}
 	}
 }

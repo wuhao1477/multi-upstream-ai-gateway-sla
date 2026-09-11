@@ -31,6 +31,8 @@ type Server struct {
 	DB     DB
 	Token  string // ADMIN_TOKEN；空则拒绝一切请求（不是"放行一切"）
 	Logger *slog.Logger
+	// ReadOnly 禁止会触达上游或写入资产台账的 Key 自动化操作。
+	ReadOnly bool
 
 	// Detect 探测站型（建渠道时可选自动探测，04 §2）。
 	Detect func(ctx context.Context, baseURL string) (collector.DetectResult, error)
@@ -54,7 +56,10 @@ type Server struct {
 	SaveDetected func(ctx context.Context, db store.DBTX, channelID int64, d collector.DetectResult) error
 	// ImportKeys 在渠道基础事务提交后读取并登记上游 Key。它是可选能力：
 	// Key 读取失败不得影响渠道、账号与凭证导入。
-	ImportKeys func(ctx context.Context, conn *pgx.Conn, channelID, accountID int64) (collector.KeyImportResult, error)
+	ImportKeys func(
+		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
+		request collector.KeyImportRequest,
+	) (collector.KeyImportResult, error)
 	// ProvisionKeys 通过账号会话按分组补齐远端 Key。
 	ProvisionKeys func(
 		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,

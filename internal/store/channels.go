@@ -43,6 +43,27 @@ func UnlockChannelSync(ctx context.Context, conn DBTX, channelID int64) error {
 	return nil
 }
 
+// TryKeyAutomationLock serializes remote Key imports and provisioning across instances.
+func TryKeyAutomationLock(ctx context.Context, conn DBTX) (bool, error) {
+	var locked bool
+	err := conn.QueryRow(ctx,
+		`SELECT pg_try_advisory_lock(hashtext('key-automation'))`).Scan(&locked)
+	return locked, err
+}
+
+// UnlockKeyAutomation releases the lock acquired by TryKeyAutomationLock.
+func UnlockKeyAutomation(ctx context.Context, conn DBTX) error {
+	var unlocked bool
+	if err := conn.QueryRow(ctx,
+		`SELECT pg_advisory_unlock(hashtext('key-automation'))`).Scan(&unlocked); err != nil {
+		return err
+	}
+	if !unlocked {
+		return errors.New("未持有 Key 补齐锁")
+	}
+	return nil
+}
+
 // asDuplicate 把 PG 的唯一约束冲突（23505）翻成 ErrDuplicate。
 // 其它错误原样返回。
 func asDuplicate(err error, msg string) error {

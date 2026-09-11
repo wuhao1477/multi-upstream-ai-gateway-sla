@@ -228,7 +228,17 @@ type KeyProvisionRequest struct {
 	Model           string `json:"model,omitempty"`
 	OnlyWithoutKeys bool   `json:"only_without_keys"`
 	DryRun          bool   `json:"dry_run"`
+	// MaxCreates 仅由管理面设定，不接受客户端直接扩大单次写入规模。
+	MaxCreates int `json:"-"`
+	// MaxSecretResolves 仅由管理面设定，限制明文读取以遵守上游风控。
+	MaxSecretResolves int `json:"-"`
 }
+
+// DefaultKeyProvisionCreateLimit 限制一次补齐的远端创建数，避免触发上游风控。
+const DefaultKeyProvisionCreateLimit = 20
+
+// DefaultKeySecretResolveLimit 限制一次自动化操作读取的 Key 明文数。
+const DefaultKeySecretResolveLimit = 20
 
 // KeyProvisionResult 是一次账号级补齐的可审计计数。
 type KeyProvisionResult struct {
@@ -239,16 +249,24 @@ type KeyProvisionResult struct {
 	WouldCreate    int    `json:"would_create"`
 	Created        int    `json:"created"`
 	Failed         int    `json:"failed"`
+	Deferred       int    `json:"deferred"`
+	SecretResolves int    `json:"-"`
 	SkippedReason  string `json:"skipped_reason,omitempty"`
+}
+
+// KeyImportRequest 控制一次 Key 导入的内部读取预算。
+type KeyImportRequest struct {
+	MaxSecretResolves int `json:"-"`
 }
 
 // KeyImportResult 是一次账号 Key 导入的计数结果。
 type KeyImportResult struct {
-	Found    int
-	Imported int
-	Skipped  int
-	Failed   int
-	Deferred int
+	Found          int
+	Imported       int
+	Skipped        int
+	Failed         int
+	Deferred       int
+	SecretResolves int `json:"-"`
 }
 
 // Group 是分组数据（FR-123/124）。

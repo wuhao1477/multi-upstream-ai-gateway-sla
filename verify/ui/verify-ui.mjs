@@ -728,6 +728,28 @@ try {
   const allKeysFlat = await page.$$eval('#pane-keys tr[data-key-row]', rs => rs.length);
   check('Key 管理页默认平铺列出全部渠道的 Key', allKeysFlat >= 3, `${allKeysFlat} 把`);
 
+  // Key 自动化入口只验证界面与默认安全筛选；不点“执行补齐”，避免验收改变真上游。
+  const automationButtons = await page.$$eval('#btn-import-keys, #btn-provision-keys', bs => bs.map(b => b.id));
+  check('Key 管理页提供同步与批量补齐入口',
+    automationButtons.includes('btn-import-keys') && automationButtons.includes('btn-provision-keys'),
+    automationButtons.join(', '));
+
+  await page.click('#btn-import-keys');
+  await page.waitForFunction(
+    () => document.querySelector('.drawer-t')?.textContent.includes('同步已有 Key'),
+    { timeout: 5000 });
+  check('同步已有 Key 抽屉要求选择渠道',
+    await page.$eval('#key-auto-channel option[value="0"]', o => o.textContent.trim()) === '请选择渠道');
+  await page.click('.drawer-x');
+
+  await page.click('#btn-provision-keys');
+  await page.waitForFunction(
+    () => document.querySelector('.drawer-t')?.textContent.includes('批量补齐 Key'),
+    { timeout: 5000 });
+  const onlyEmpty = await page.$eval('.drawer input[type="checkbox"]', input => input.checked);
+  check('批量补齐默认仅处理无 Key 账号', onlyEmpty);
+  await page.click('.drawer-x');
+
   // 按渠道筛选后，剩下的必须**都属于**这个渠道 —— 不是"数量对得上"。
   await page.select('#key-f-channel', String(newChannelId));
   await sleep(400);

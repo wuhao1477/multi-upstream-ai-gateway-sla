@@ -241,6 +241,7 @@ export interface KeyProvisionItem {
   would_create: number
   created: number
   failed: number
+  deferred: number
   skipped_reason?: string
 }
 
@@ -254,6 +255,7 @@ export interface KeyProvisionBatchResult {
   would_create: number
   created: number
   failed: number
+  deferred: number
   items: KeyProvisionItem[]
 }
 

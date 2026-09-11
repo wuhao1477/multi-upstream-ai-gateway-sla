@@ -59,13 +59,17 @@ function request(): adminApi.KeyAutomationInput {
   return {
     channel_id: channelID.value,
     account_id: accountID.value,
-    all: channelID.value === 0 && accountID.value === 0,
+    all: props.mode === 'provision' && channelID.value === 0 && accountID.value === 0,
     model: groupMode.value === 'model' ? model.value.trim() : '',
     only_without_keys: onlyWithoutKeys.value,
   }
 }
 
 async function syncExisting(): Promise<void> {
+  if (channelID.value === 0) {
+    toast.show('请选择渠道', 'bad')
+    return
+  }
   busy.value = true
   try {
     const result = await adminApi.importKeys(request())
@@ -120,12 +124,12 @@ async function applyProvision(): Promise<void> {
   <UiDrawer
     :open="mode !== null"
     :title="mode === 'import' ? '同步已有 Key' : '批量补齐 Key'"
-    desc="使用已登记的账号采集凭证访问上游；Key 明文不会回显。"
+    desc="使用已登记的账号采集凭证访问上游；Key 明文不会回显，单次最多处理 20 个账号。"
     @close="emit('close')"
   >
     <UiField label="渠道范围" for="key-auto-channel">
       <select id="key-auto-channel" v-model.number="channelID">
-        <option :value="0">全部渠道</option>
+        <option :value="0">{{ mode === 'import' ? '请选择渠道' : '全部渠道' }}</option>
         <option v-for="channel in channels.list" :key="channel.id" :value="channel.id">
           {{ channel.name }}
         </option>
@@ -163,6 +167,7 @@ async function applyProvision(): Promise<void> {
         <UiStat label="已有分组 Key" :value="preview.existing_groups" />
         <UiStat label="计划创建" :value="preview.would_create" />
         <UiStat v-if="preview.created > 0" label="已创建" :value="preview.created" />
+        <UiStat v-if="preview.deferred > 0" label="待后续处理" :value="preview.deferred" />
         <UiStat v-if="preview.failed > 0" label="失败" :value="preview.failed" />
       </div>
     </template>

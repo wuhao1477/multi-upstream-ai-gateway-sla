@@ -1,10 +1,13 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -19,6 +22,8 @@ type keyAutomationRequest struct {
 	Model          string `json:"model"`
 	OnlyWithoutKey bool   `json:"only_without_keys"`
 }
+
+const maxKeyAutomationAccounts = 20
 
 func decodeKeyAutomationRequest(r *http.Request) (keyAutomationRequest, error) {
 	var request keyAutomationRequest
@@ -70,6 +75,13 @@ func keyAutomationTargets(
 	return nil, fmt.Errorf("account_id %d 不属于指定 channel_id", request.AccountID)
 }
 
+func validateKeyAutomationTargetLimit(targets []store.Account) error {
+	if len(targets) > maxKeyAutomationAccounts {
+		return fmt.Errorf("一次最多处理 %d 个账号，请缩小到渠道或账号范围", maxKeyAutomationAccounts)
+	}
+	return nil
+}
+
 type keyImportItem struct {
 	ChannelID int64  `json:"channel_id"`
 	AccountID int64  `json:"account_id"`
@@ -93,25 +105,70 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.ReadOnly {
+		s.fail(w, http.StatusServiceUnavailable, "只读实例不支持 Key 自动同步")
+		return
+	}
+	if request.All {
+		s.fail(w, http.StatusBadRequest, "同步已有 Key 必须选择具体渠道")
+		return
+	}
 	if s.ImportKeys == nil {
 		s.fail(w, http.StatusNotImplemented, "Key 自动导入未配置")
 		return
 	}
+	if err := s.guard.acquire(0, s.syncMinInterval()); err != nil {
+		code := http.StatusTooManyRequests
+		if errors.Is(err, errSyncRunning) {
+			code = http.StatusConflict
+		}
+		s.fail(w, code, "Key 自动化正在执行或间隔未到: "+err.Error())
+		return
+	}
+	reachedUpstream := false
+	defer func() { s.guard.release(0, reachedUpstream) }()
 	s.withConn(w, r, func(conn *pgx.Conn) {
+		locked, err := store.TryKeyAutomationLock(r.Context(), conn)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, "取得 Key 自动化锁失败: "+err.Error())
+			return
+		}
+		if !locked {
+			s.fail(w, http.StatusConflict, "另一实例正在执行 Key 自动化")
+			return
+		}
+		defer func() {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := store.UnlockKeyAutomation(unlockCtx, conn); err != nil {
+				s.Logger.Error("释放 Key 自动化锁失败", "err", err)
+			}
+		}()
 		targets, err := keyAutomationTargets(r, conn, request)
 		if err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := validateKeyAutomationTargetLimit(targets); err != nil {
+			s.fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		result := keyImportBatchResult{Items: []keyImportItem{}}
+		remainingSecrets := collector.DefaultKeySecretResolveLimit
 		for _, account := range targets {
+			if remainingSecrets == 0 {
+				result.Deferred++
+				break
+			}
 			item := keyImportItem{ChannelID: account.ChannelID, AccountID: account.ID}
 			if account.Status != "active" {
 				item.Status, item.Error = "skipped", "账号已停用"
 				result.Items = append(result.Items, item)
 				continue
 			}
-			got, err := s.ImportKeys(r.Context(), conn, account.ChannelID, account.ID)
+			reachedUpstream = true
+			got, err := s.ImportKeys(r.Context(), conn, account.ChannelID, account.ID,
+				collector.KeyImportRequest{MaxSecretResolves: remainingSecrets})
 			item.KeyImportResult = got
 			if err != nil {
 				item.Status, item.Error = "failed", shortErr(err)
@@ -127,6 +184,10 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 			result.Failed += got.Failed
 			result.Deferred += got.Deferred
 			result.Items = append(result.Items, item)
+			remainingSecrets -= got.SecretResolves
+			if err != nil || got.Failed > 0 || got.Deferred > 0 {
+				break
+			}
 		}
 		result.Count = len(result.Items)
 		s.ok(w, result)
@@ -151,12 +212,21 @@ type keyProvisionBatchResult struct {
 	WouldCreate     int                `json:"would_create"`
 	Created         int                `json:"created"`
 	Failed          int                `json:"failed"`
+	Deferred        int                `json:"deferred"`
 	Items           []keyProvisionItem `json:"items"`
 }
 
 func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 	request, ok := s.keyAutomationRequest(w, r)
 	if !ok {
+		return
+	}
+	if s.ReadOnly {
+		s.fail(w, http.StatusServiceUnavailable, "只读实例不支持批量创建 Key")
+		return
+	}
+	if request.All && !request.OnlyWithoutKey {
+		s.fail(w, http.StatusBadRequest, "全局补齐只能处理仅无 Key 的账号")
 		return
 	}
 	dryRunValue := r.URL.Query().Get("dry_run")
@@ -169,14 +239,50 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dryRun := dryRunValue == "true"
+	// channelID=0 是仅供这条全局写操作使用的 guard 槽位；它不会与任何真实渠道冲突。
+	if err := s.guard.acquire(0, s.syncMinInterval()); err != nil {
+		code := http.StatusTooManyRequests
+		if errors.Is(err, errSyncRunning) {
+			code = http.StatusConflict
+		}
+		s.fail(w, code, "批量创建 Key 正在执行或间隔未到: "+err.Error())
+		return
+	}
+	reachedUpstream := false
+	defer func() { s.guard.release(0, reachedUpstream && !dryRun) }()
 	s.withConn(w, r, func(conn *pgx.Conn) {
+		locked, err := store.TryKeyAutomationLock(r.Context(), conn)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, "取得 Key 补齐锁失败: "+err.Error())
+			return
+		}
+		if !locked {
+			s.fail(w, http.StatusConflict, "另一实例正在批量创建 Key")
+			return
+		}
+		defer func() {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := store.UnlockKeyAutomation(unlockCtx, conn); err != nil {
+				s.Logger.Error("释放 Key 补齐锁失败", "err", err)
+			}
+		}()
 		targets, err := keyAutomationTargets(r, conn, request)
 		if err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := validateKeyAutomationTargetLimit(targets); err != nil {
+			s.fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		result := keyProvisionBatchResult{Items: []keyProvisionItem{}}
+		remainingCreates := collector.DefaultKeyProvisionCreateLimit
+		remainingSecrets := collector.DefaultKeySecretResolveLimit
 		for _, account := range targets {
+			if !dryRun && (remainingCreates == 0 || remainingSecrets == 0) {
+				break
+			}
 			item := keyProvisionItem{ChannelID: account.ChannelID, AccountID: account.ID}
 			if account.Status != "active" {
 				item.Status, item.Error = "skipped", "账号已停用"
@@ -184,9 +290,11 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 				result.Items = append(result.Items, item)
 				continue
 			}
+			reachedUpstream = true
 			got, err := s.ProvisionKeys(r.Context(), conn, account.ChannelID, account.ID,
 				collector.KeyProvisionRequest{
 					Model: request.Model, OnlyWithoutKeys: request.OnlyWithoutKey, DryRun: dryRun,
+					MaxCreates: remainingCreates, MaxSecretResolves: remainingSecrets,
 				})
 			item.KeyProvisionResult = got
 			switch {
@@ -208,7 +316,15 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 			result.WouldCreate += got.WouldCreate
 			result.Created += got.Created
 			result.Failed += got.Failed
+			result.Deferred += got.Deferred
 			result.Items = append(result.Items, item)
+			if !dryRun {
+				remainingCreates -= got.Created
+				remainingSecrets -= got.SecretResolves
+				if err != nil || got.Failed > 0 || got.Deferred > 0 {
+					break
+				}
+			}
 		}
 		result.Count = len(result.Items)
 		s.ok(w, result)

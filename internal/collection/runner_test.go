@@ -15,6 +15,12 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
+type fixedKeyResolver struct{}
+
+func (fixedKeyResolver) ResolveKeySecret(context.Context, collector.Session, string) (string, error) {
+	return "resolved-secret", nil
+}
+
 func TestRunnerUnknownFamilyFailsBeforeCredentialLoad(t *testing.T) {
 	loaded := false
 	r := &Runner{
@@ -95,7 +101,7 @@ func TestProvisionRemoteKeysCreatesOnlyMissingModelGroup(t *testing.T) {
 	result, err := provisionRemoteKeys(
 		context.Background(), adapter,
 		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
-		collector.KeyProvisionRequest{Model: "gpt-5.5"},
+		&collector.KeyProvisionRequest{Model: "gpt-5.5"},
 		nil,
 		func(key collector.Key) error {
 			imported = append(imported, key)
@@ -111,6 +117,197 @@ func TestProvisionRemoteKeysCreatesOnlyMissingModelGroup(t *testing.T) {
 	}
 	if len(imported) != 1 || imported[0].KeyRef != "2" || imported[0].GroupRef != "vip" {
 		t.Fatalf("登记回调 = %+v，期望新建 vip Key", imported)
+	}
+}
+
+func TestProvisionRemoteKeysStopsAfterRegistrationFailure(t *testing.T) {
+	var createdGroups []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/token":
+			items := make([]map[string]any, 0, len(createdGroups))
+			for index, group := range createdGroups {
+				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"page": 1, "page_size": 100, "total": len(items), "items": items,
+			}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1,"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,
+				 "enable_groups":["default","vip"]}]}`))
+		case "POST /api/token/":
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			createdGroups = append(createdGroups, request["group"].(string))
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := collector.NewClient(0)
+	client.HC = srv.Client()
+	adapter := collector.NewNewAPIAdapter(client)
+	result, err := provisionRemoteKeys(
+		context.Background(), adapter,
+		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
+		&collector.KeyProvisionRequest{Model: "gpt-5.5"},
+		nil,
+		func(collector.Key) error { return errors.New("本地登记失败") },
+	)
+	if err == nil {
+		t.Fatal("本地登记失败必须中止补齐")
+	}
+	if result.Created != 0 || result.Failed != 1 {
+		t.Fatalf("补齐结果 = %+v，期望 created=0/failed=1", result)
+	}
+	if len(createdGroups) != 1 {
+		t.Fatalf("远端创建次数 = %d，登记失败后不应继续下一分组", len(createdGroups))
+	}
+}
+
+func TestProvisionRemoteKeysSkipsExistingKeyBeforeImport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"page": 1, "page_size": 100, "total": 1,
+				"items": []map[string]any{{"id": 1, "group": "default", "remain_quota": 10}},
+			}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,"enable_groups":["default"]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := collector.NewClient(0)
+	client.HC = srv.Client()
+	adapter := collector.NewNewAPIAdapter(client)
+	importCalled := false
+	result, err := provisionRemoteKeys(
+		context.Background(), adapter,
+		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
+		&collector.KeyProvisionRequest{OnlyWithoutKeys: true},
+		func([]collector.Key, []collector.Group) error {
+			importCalled = true
+			return nil
+		},
+		func(collector.Key) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SkippedReason == "" || importCalled {
+		t.Fatalf("已有远端 Key 时应直接跳过且不读取明文：result=%+v import=%v", result, importCalled)
+	}
+}
+
+func TestProvisionRemoteKeysRespectsCreateLimit(t *testing.T) {
+	var createdGroups []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/token":
+			items := make([]map[string]any, 0, len(createdGroups))
+			for index, group := range createdGroups {
+				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"page": 1, "page_size": 100, "total": len(items), "items": items,
+			}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1,"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,
+				 "enable_groups":["default","vip"]}]}`))
+		case "POST /api/token/":
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			createdGroups = append(createdGroups, request["group"].(string))
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := collector.NewClient(0)
+	client.HC = srv.Client()
+	adapter := collector.NewNewAPIAdapter(client)
+	result, err := provisionRemoteKeys(
+		context.Background(), adapter,
+		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
+		&collector.KeyProvisionRequest{Model: "gpt-5.5", MaxCreates: 1},
+		nil,
+		func(collector.Key) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || result.Deferred != 1 || len(createdGroups) != 1 {
+		t.Fatalf("补齐结果 = %+v，远端创建=%v，期望仅创建一把并报告一把待处理", result, createdGroups)
+	}
+}
+
+func TestProvisionRemoteKeysUsesLimitReducedDuringDiscovery(t *testing.T) {
+	var createdGroups []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/token":
+			items := make([]map[string]any, 0, len(createdGroups))
+			for index, group := range createdGroups {
+				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"page": 1, "page_size": 100, "total": len(items), "items": items,
+			}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1,"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,
+				 "enable_groups":["default","vip"]}]}`))
+		case "POST /api/token/":
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			createdGroups = append(createdGroups, request["group"].(string))
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := collector.NewClient(0)
+	client.HC = srv.Client()
+	adapter := collector.NewNewAPIAdapter(client)
+	request := &collector.KeyProvisionRequest{Model: "gpt-5.5", MaxCreates: 2}
+	result, err := provisionRemoteKeys(
+		context.Background(), adapter,
+		collector.Session{BaseURL: srv.URL, Token: "session", QuotaPerUnit: 1},
+		request,
+		func([]collector.Key, []collector.Group) error {
+			request.MaxCreates = 1
+			return nil
+		},
+		func(collector.Key) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || result.Deferred != 1 || len(createdGroups) != 1 {
+		t.Fatalf("发现阶段收缩上限后仍创建过多 Key：result=%+v created=%v", result, createdGroups)
 	}
 }
 
@@ -182,7 +379,7 @@ VALUES ('runner-import-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&c
 		AccountID: accountID, ChannelID: channelID, Family: collector.FamilyNewAPI,
 		BaseURL: server.URL, AccessToken: "session-token", ExternalUserID: "42",
 		UserIDHeaderName: "New-API-User", QuotaPerUnit: 1,
-	}})
+	}}, collector.KeyImportRequest{})
 	if err != nil {
 		t.Fatalf("导入 Key: %v", err)
 	}
@@ -195,6 +392,58 @@ VALUES ('runner-import-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&c
 	}
 	if count != 2 {
 		t.Fatalf("Key 行数 = %d，期望 2", count)
+	}
+}
+
+func TestImportFetchedKeysReusesInsertedKeyIDForDuplicateRef(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	base := "https://runner-duplicate-key-ref.example.invalid"
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+        (SELECT id FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1))`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1)`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE base_url=$1`, base)
+
+	var channelID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, site_family, base_url, status)
+VALUES ('runner-duplicate-key-ref','newapi',$1,'enabled') RETURNING id`, base).Scan(&channelID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+            (SELECT id FROM upstream_accounts WHERE channel_id=$1)`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id=$1`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE id=$1`, channelID)
+	}()
+	accountID, err := store.CreateAccount(ctx, conn, store.Account{ChannelID: channelID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &Runner{}
+	secretBudget := collector.DefaultKeySecretResolveLimit
+	result, err := runner.importFetchedKeys(ctx, conn, store.Channel{ID: channelID}, collector.Credential{
+		AccountID: accountID,
+	}, collector.Session{}, fixedKeyResolver{}, []collector.Key{
+		{KeyRef: "same-ref"}, {KeyRef: "same-ref"},
+	}, &secretBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Imported != 1 || result.Skipped != 1 || result.Failed != 0 {
+		t.Fatalf("导入结果 = %+v，期望 imported=1/skipped=1/failed=0", result)
 	}
 }
 
@@ -291,6 +540,86 @@ SELECT k.secret, k.external_ref, g.group_ref
 	}
 	if secret != "created-secret" || externalRef != "501" || groupRef != "vip" {
 		t.Fatalf("登记结果 = secret:%q ref:%q group:%q", secret, externalRef, groupRef)
+	}
+}
+
+func TestProvisionKeysDoesNotCreateAfterSecretBudgetIsConsumed(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	base := "https://runner-provision-secret-budget.example.invalid"
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+        (SELECT id FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1))`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1)`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE base_url=$1`, base)
+
+	var channelID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, site_family, base_url, status)
+VALUES ('runner-provision-secret-budget','newapi',$1,'enabled') RETURNING id`, base).Scan(&channelID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+            (SELECT id FROM upstream_accounts WHERE channel_id=$1)`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id=$1`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE id=$1`, channelID)
+	}()
+	accountID, err := store.CreateAccount(ctx, conn, store.Account{ChannelID: channelID, ExternalUserID: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	creates := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/user/self":
+			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
+		case "GET /api/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{
+				"id": 1, "group": "default", "remain_quota": 100,
+			}}})
+		case "GET /api/pricing":
+			_, _ = w.Write([]byte(`{"group_ratio":{"default":1,"vip":0.8},"data":[
+				{"model_name":"gpt-5.5","quota_type":0,"model_ratio":1,
+				 "enable_groups":["default","vip"]}]}`))
+		case "POST /api/token/1/key":
+			_, _ = w.Write([]byte(`{"data":{"key":"existing-secret"}}`))
+		case "POST /api/token/":
+			creates++
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := collector.NewClient(0)
+	client.HC = server.Client()
+	runner := &Runner{Client: client}
+	result, err := runner.ProvisionKeys(ctx, conn, store.Channel{
+		ID: channelID, SiteFamily: string(collector.FamilyNewAPI), BaseURL: server.URL,
+	}, collector.Credential{
+		AccountID: accountID, ChannelID: channelID, Family: collector.FamilyNewAPI,
+		BaseURL: server.URL, AccessToken: "session", ExternalUserID: "42",
+		UserIDHeaderName: "New-API-User", QuotaPerUnit: 1,
+	}, collector.KeyProvisionRequest{Model: "gpt-5.5", MaxSecretResolves: 1})
+	if err == nil {
+		t.Fatal("明文预算耗尽时必须拒绝继续创建")
+	}
+	if creates != 0 || result.Created != 0 || result.Imported != 1 {
+		t.Fatalf("预算耗尽后不应创建远端 Key：result=%+v creates=%d", result, creates)
 	}
 }
 

@@ -85,6 +85,34 @@ try {
   const navURL = await page.evaluate(() => location.pathname);
   check('点侧栏导航同步更新地址栏', navURL === '/admin/ui/import', navURL);
 
+  // ── 4bis. Key 自动化入口：免密 SPA 验收也必须覆盖新增按钮与安全默认值 ──
+  const keysResp = await page.goto(`${BASE}/admin/ui/keys`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() =>
+    document.querySelector('#pane-keys')?.classList.contains('on') === true,
+    { timeout: 5000 });
+  const keyButtons = await page.$$eval('#btn-import-keys, #btn-provision-keys', bs => bs.map(b => b.id));
+  check('Key 管理页显示同步与批量补齐入口',
+    keysResp.status() === 200
+      && keyButtons.includes('btn-import-keys')
+      && keyButtons.includes('btn-provision-keys'),
+    `HTTP ${keysResp.status()} ${keyButtons.join(', ')}`);
+
+  await page.click('#btn-import-keys');
+  await page.waitForFunction(() =>
+    document.querySelector('.drawer-t')?.textContent.includes('同步已有 Key'),
+    { timeout: 5000 });
+  const importScope = await page.$eval('#key-auto-channel option[value="0"]', o => o.textContent.trim());
+  check('同步已有 Key 要求选择渠道', importScope === '请选择渠道', importScope);
+  await page.click('.drawer-x');
+
+  await page.click('#btn-provision-keys');
+  await page.waitForFunction(() =>
+    document.querySelector('.drawer-t')?.textContent.includes('批量补齐 Key'),
+    { timeout: 5000 });
+  const onlyEmpty = await page.$eval('.drawer input[type="checkbox"]', input => input.checked);
+  check('批量补齐默认仅无 Key 账号', onlyEmpty);
+  await page.click('.drawer-x');
+
   // ── 5. 未知子路径回渠道列表，而不是白屏 ──
   await page.goto(`${BASE}/admin/ui/no-such-pane`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() =>

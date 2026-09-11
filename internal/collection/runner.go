@@ -3,6 +3,7 @@ package collection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -89,6 +90,7 @@ func (r *Runner) adapter(ch store.Channel) (collector.Adapter, error) {
 // 让导入基础资源与 Key 可用性分开。
 func (r *Runner) ImportKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, creds []collector.Credential,
+	request collector.KeyImportRequest,
 ) (collector.KeyImportResult, error) {
 	var result collector.KeyImportResult
 	if len(creds) == 0 {
@@ -103,6 +105,10 @@ func (r *Runner) ImportKeys(
 		return result, fmt.Errorf("站型 %q 不支持自动读取 Key 明文", ch.SiteFamily)
 	}
 	refresher, _ := adapter.(collector.Refresher)
+	remainingSecrets := request.MaxSecretResolves
+	if remainingSecrets <= 0 {
+		remainingSecrets = collector.DefaultKeySecretResolveLimit
+	}
 
 	for _, cred := range creds {
 		if r.Auth != nil && refresher != nil {
@@ -122,7 +128,7 @@ func (r *Runner) ImportKeys(
 			r.logKeyImportFailure(ch, cred.AccountID, "list", "", err)
 			return result, fmt.Errorf("账号 %d 读取 Key 列表失败", cred.AccountID)
 		}
-		imported, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys)
+		imported, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys, &remainingSecrets)
 		mergeKeyImportResult(&result, imported)
 		if err != nil {
 			return result, err
@@ -156,8 +162,12 @@ func (r *Runner) ProvisionKeys(
 	if err != nil {
 		return result, fmt.Errorf("账号 %d 会话鉴权失败", cred.AccountID)
 	}
-	var imported, importFailed int
-	result, err = provisionRemoteKeys(ctx, adapter, session, request,
+	var imported, secretResolves int
+	remainingSecrets := request.MaxSecretResolves
+	if remainingSecrets <= 0 {
+		remainingSecrets = collector.DefaultKeySecretResolveLimit
+	}
+	result, err = provisionRemoteKeys(ctx, adapter, session, &request,
 		func(keys []collector.Key, groups []collector.Group) error {
 			if request.DryRun {
 				return nil
@@ -167,31 +177,43 @@ func (r *Runner) ProvisionKeys(
 					return err
 				}
 			}
-			got, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys)
-			imported += got.Imported
-			importFailed += got.Failed + got.Deferred
-			return err
-		},
-		func(key collector.Key) error {
-			got, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, []collector.Key{key})
-			imported += got.Imported
-			importFailed += got.Failed + got.Deferred
+			got, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys, &remainingSecrets)
 			if err != nil {
 				return err
 			}
-			if got.Imported != 1 {
+			if got.Failed > 0 || got.Deferred > 0 {
+				return fmt.Errorf("已有 Key 同步不完整：失败 %d，把待重试 %d", got.Failed, got.Deferred)
+			}
+			imported += got.Imported
+			secretResolves += got.SecretResolves
+			if remainingSecrets == 0 {
+				return fmt.Errorf("已有 Key 已用尽本次明文读取预算，拒绝继续远端创建")
+			}
+			if request.MaxCreates <= 0 || request.MaxCreates > remainingSecrets {
+				request.MaxCreates = remainingSecrets
+			}
+			return nil
+		},
+		func(key collector.Key) error {
+			got, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, []collector.Key{key}, &remainingSecrets)
+			if err != nil {
+				return err
+			}
+			if got.Imported != 1 || got.Failed > 0 || got.Deferred > 0 {
 				return fmt.Errorf("新建 Key 未能登记")
 			}
+			imported += got.Imported
+			secretResolves += got.SecretResolves
 			return nil
 		})
 	result.Imported = imported
-	result.Failed += importFailed
+	result.SecretResolves = secretResolves
 	return result, err
 }
 
 func (r *Runner) importFetchedKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, cred collector.Credential,
-	session collector.Session, resolver collector.KeySecretResolver, keys []collector.Key,
+	session collector.Session, resolver collector.KeySecretResolver, keys []collector.Key, remainingSecrets *int,
 ) (collector.KeyImportResult, error) {
 	result := collector.KeyImportResult{Found: len(keys)}
 	existing, err := store.KeyRefIndex(ctx, conn, cred.AccountID)
@@ -201,6 +223,7 @@ func (r *Runner) importFetchedKeys(
 	}
 	for index, key := range keys {
 		if key.KeyRef == "" {
+			r.logKeyImportFailure(ch, cred.AccountID, "validate_ref", "", errors.New("empty key reference"))
 			result.Failed++
 			continue
 		}
@@ -213,6 +236,14 @@ func (r *Runner) importFetchedKeys(
 			result.Skipped++
 			continue
 		}
+		if remainingSecrets != nil && *remainingSecrets <= 0 {
+			result.Deferred += len(keys) - index
+			break
+		}
+		if remainingSecrets != nil {
+			(*remainingSecrets)--
+		}
+		result.SecretResolves++
 		secret, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
@@ -225,15 +256,21 @@ func (r *Runner) importFetchedKeys(
 		}
 		groupID, err := importedGroupID(ctx, conn, ch.ID, key.GroupRef)
 		if err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "lookup_group", key.KeyRef, err)
 			result.Failed++
 			continue
 		}
-		if _, err := store.CreateKey(ctx, conn, cred.AccountID, secret, key.KeyRef, groupID); err != nil {
+		if key.GroupRef != "" && groupID == nil && r.Logger != nil {
+			r.Logger.Warn("导入上游 Key 时未找到分组，将以未归组登记",
+				"channel_id", ch.ID, "account_id", cred.AccountID, "key_ref", key.KeyRef)
+		}
+		keyID, err := store.CreateKey(ctx, conn, cred.AccountID, secret, key.KeyRef, groupID)
+		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "create", key.KeyRef, err)
 			result.Failed++
 			continue
 		}
-		existing[key.KeyRef] = 0
+		existing[key.KeyRef] = keyID
 		result.Imported++
 	}
 	return result, nil
@@ -245,6 +282,7 @@ func mergeKeyImportResult(dst *collector.KeyImportResult, src collector.KeyImpor
 	dst.Skipped += src.Skipped
 	dst.Failed += src.Failed
 	dst.Deferred += src.Deferred
+	dst.SecretResolves += src.SecretResolves
 }
 
 func (r *Runner) logKeyImportFailure(
@@ -331,7 +369,7 @@ func selectProvisionGroups(
 
 func provisionRemoteKeys(
 	ctx context.Context, adapter collector.Adapter, session collector.Session,
-	request collector.KeyProvisionRequest, onDiscovered func([]collector.Key, []collector.Group) error,
+	request *collector.KeyProvisionRequest, onDiscovered func([]collector.Key, []collector.Group) error,
 	onCreated func(collector.Key) error,
 ) (collector.KeyProvisionResult, error) {
 	var result collector.KeyProvisionResult
@@ -348,15 +386,15 @@ func provisionRemoteKeys(
 		return result, err
 	}
 	result.Found = len(keys)
-	if onDiscovered != nil {
-		if err := onDiscovered(keys, groups); err != nil {
-			return result, err
-		}
-	}
 	missing, reason := selectProvisionGroups(keys, groups, request.Model, request.OnlyWithoutKeys)
 	if reason != "" {
 		result.SkippedReason = reason
 		return result, nil
+	}
+	if onDiscovered != nil {
+		if err := onDiscovered(keys, groups); err != nil {
+			return result, err
+		}
 	}
 	result.MatchedGroups = countProvisionGroups(groups, request.Model)
 	result.ExistingGroups = result.MatchedGroups - len(missing)
@@ -364,14 +402,25 @@ func provisionRemoteKeys(
 	if request.DryRun {
 		return result, nil
 	}
+	if onCreated == nil {
+		return result, fmt.Errorf("新建 Key 的本地登记器未配置")
+	}
 
-	for _, group := range missing {
+	maxCreates := request.MaxCreates
+	if maxCreates <= 0 {
+		maxCreates = collector.DefaultKeyProvisionCreateLimit
+	}
+	for index, group := range missing {
+		if result.Created >= maxCreates {
+			result.Deferred = len(missing) - index
+			break
+		}
 		before := keyRefs(keys)
 		if err := provisioner.CreateRemoteKey(ctx, session, collector.RemoteKeyRequest{
 			Name: "gateway-auto", GroupRef: group.GroupRef,
 		}); err != nil {
 			result.Failed++
-			continue
+			return result, fmt.Errorf("创建分组 %s 的 Key: %w", group.GroupRef, err)
 		}
 		after, err := adapter.FetchKeys(ctx, session)
 		if err != nil {
@@ -379,10 +428,13 @@ func provisionRemoteKeys(
 			return result, fmt.Errorf("创建后核对 Key 列表: %w", err)
 		}
 		created, ok := singleCreatedKey(before, after, group.GroupRef)
-		if !ok || onCreated(created) != nil {
+		if !ok {
 			result.Failed++
-			keys = after
-			continue
+			return result, fmt.Errorf("创建后无法唯一确认分组 %s 的 Key", group.GroupRef)
+		}
+		if err := onCreated(created); err != nil {
+			result.Failed++
+			return result, fmt.Errorf("新建 Key 本地登记失败: %w", err)
 		}
 		result.Created++
 		keys = after

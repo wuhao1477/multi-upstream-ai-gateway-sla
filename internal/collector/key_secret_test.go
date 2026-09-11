@@ -108,6 +108,8 @@ func TestResolveKeySecretRejectsMissingOrMaskedKey(t *testing.T) {
 	}
 }
 
+// 来源：NewAPI bdef117 controller/token.go:AddToken 接收 Token JSON 并由 /api/token/ 注册：
+// https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/controller/token.go
 func TestNewAPICreateRemoteKeyUsesTokenEndpointAndGroup(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +138,8 @@ func TestNewAPICreateRemoteKeyUsesTokenEndpointAndGroup(t *testing.T) {
 	}
 }
 
+// 来源：Sub2API cdb5cfa handler/api_key_handler.go:CreateAPIKeyRequest 要求 group_id 为 *int64：
+// https://github.com/Wei-Shaw/sub2api/blob/cdb5cfaf6c8cb08612ef552a4458d8d0b5850184/backend/internal/handler/api_key_handler.go
 func TestSub2APICreateRemoteKeyUsesNumericGroupID(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,5 +165,26 @@ func TestSub2APICreateRemoteKeyUsesNumericGroupID(t *testing.T) {
 	}
 	if body["name"] != "gateway-auto" || body["group_id"] != float64(17) || body["quota"] != float64(0) {
 		t.Fatalf("创建载荷 = %#v", body)
+	}
+}
+
+func TestSub2APICreateRemoteKeyRejectsNonNumericGroupBeforeRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	adapter := NewSub2APIAdapter(NewClient(0))
+	adapter.C.HC = srv.Client()
+	err := adapter.CreateRemoteKey(context.Background(), Session{
+		BaseURL: srv.URL, Token: "jwt-token",
+	}, RemoteKeyRequest{Name: "gateway-auto", GroupRef: "g-1"})
+	if err == nil {
+		t.Fatal("非数值 Sub2API 分组必须在发请求前被拒绝")
+	}
+	if requests != 0 {
+		t.Fatalf("非数值分组不应触达创建端点，实际请求 %d 次", requests)
 	}
 }

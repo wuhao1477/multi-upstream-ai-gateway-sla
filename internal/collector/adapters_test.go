@@ -280,6 +280,8 @@ func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
 }
 
 func TestNewAPIFetchKeysReadsEveryPage(t *testing.T) {
+	// 来源：NewAPI bdef117 common/page_info.go（p=1 起，size 是 token 专用页大小）：
+	// https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/common/page_info.go
 	var pages []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages = append(pages, r.URL.Query().Get("p"))
@@ -526,12 +528,12 @@ func sub2apiSite(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"code":0,"data":{"id":"u-1","email":"a@b.c"}}`))
 		case "/api/v1/keys":
 			_, _ = w.Write([]byte(`{"code":0,"data":[
-				{"id":"k-1","group_id":"g-1","quota":12.5,"quota_used":2.5,
+				{"id":1,"group_id":7,"quota":12.5,"quota_used":2.5,
 				 "current_concurrency":3,"rate_limit_1d":100,"usage_1d":20,
 				 "window_1d_start":"2026-08-28T00:00:00Z"}]}`))
 		case "/api/v1/groups/available":
 			_, _ = w.Write([]byte(`{"code":0,"data":[
-				{"id":"g-1","rate_multiplier":0.5,"rpm_limit":60,
+				{"id":7,"rate_multiplier":0.5,"rpm_limit":60,
 				 "subscription_type":"monthly","platform":"openai",
 				 "is_exclusive":false,"peak_rate_enabled":true,
 				 "peak_rate_multiplier":1.5,"peak_start":"18:00","peak_end":"23:00",
@@ -543,6 +545,8 @@ func sub2apiSite(t *testing.T) *httptest.Server {
 }
 
 func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
+	// 来源：Sub2API cdb5cfa API Key DTO 将 id 与 group_id 声明为数值型 ID：
+	// https://github.com/Wei-Shaw/sub2api/blob/cdb5cfaf6c8cb08612ef552a4458d8d0b5850184/backend/internal/handler/dto/types.go
 	srv := sub2apiSite(t)
 	defer srv.Close()
 
@@ -624,6 +628,26 @@ func TestSub2APIFetchGroups(t *testing.T) {
 	}
 	if len(g.AvailableModels) != 2 {
 		t.Errorf("可用模型 = %v", g.AvailableModels)
+	}
+}
+
+func TestSub2APIGroupRefMatchesKeyGroupID(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	session := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+	keys, err := ad.FetchKeys(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := ad.FetchGroups(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || len(groups) != 1 || keys[0].GroupRef != groups[0].GroupRef || groups[0].GroupRef != "7" {
+		t.Fatalf("Key 分组=%q，group id=%q，期望同为数值标识 7", keys[0].GroupRef, groups[0].GroupRef)
 	}
 }
 

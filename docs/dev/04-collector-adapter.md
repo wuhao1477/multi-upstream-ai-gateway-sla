@@ -167,7 +167,7 @@ type ManualReserve struct {
 
 | 项 | 约定 |
 | --- | --- |
-| 分页 | 统一 `page`(从 1)/`page_size`(默认 100)；适配器内部循环取完再返回，**不把分页暴露给调用方** |
+| 分页 | 按站型使用上游原生参数，适配器内部循环取完再返回，**不把分页暴露给调用方**：NewAPI 系为 `p`（从 1）/`size`（最大 100）；Sub2API 为 `page`（从 1）/`page_size`（最大 1000） |
 | 并发 | 单渠道内部保持顺序；不同渠道使用最多 4 个 worker 并发，慢渠道不阻塞其它渠道。**每个 worker 峰值占两条数据库连接**（整轮持有的渠道 advisory lock + 临时的凭证读取/host 限速/结果写入），故 DSN 未写 `pool_max_conns` 时连接池下限抬到 `store.MinPoolConns`；调大 worker 数必须同步抬高它，否则整轮采集会阻塞到 120s 超时（`internal/collection/service.go` 有编译期断言） |
 | 站内请求间隔 | `collector_request_interval_ms`，默认 200ms；由 PostgreSQL 的 `collector_host_rate_limits` 原子预留请求时隙，手动采集、周期采集与站型探测跨进程共享 |
 | 失败重试 | 调度键为 `(channel_id, capability)`；30s 起指数退避，最大为正常周期与 30min 的较小值，并加 ±20% jitter；成功后清零失败次数，不影响其它渠道或已成功能力 |
@@ -288,6 +288,12 @@ type SubscriptionQuota struct {
 | `FetchPricing` | `/api/pricing`（**公开**） | `quota_type`、`model_ratio`、`model_price`、`completion_ratio`、`cache_ratio`、顶层 `group_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
 | `FetchModelCatalog` | `/api/pricing` | `model_name` + 上列价格字段 | `channel_model_catalog`（含 `billing_unit`） | FR-126 |
 
+> **Key 分页依据（2026-09-11 源码复核）**：NewAPI `bdef117` 的
+> `common/page_info.go:GetPageQuery` 将 `p=0` 规范为第 1 页，并优先读取
+> `page_size`、再读取 token 专用的 `size`；本项目只登记 NewAPI/rix-api
+> 站型，故 `FetchKeys` 从 `p=1&size=100` 开始。Sub2API `cdb5cfa` 的
+> `/api/v1/keys` 列表遵循 `page`/`page_size`。
+
 **`/api/pricing` 的真实响应形状**（第 46 轮实测 20 个可达站点，**20/20 为下述形状，0 个为旧形状**）
 
 ```jsonc
@@ -336,6 +342,11 @@ type SubscriptionQuota struct {
 | `FetchAccount` | `/api/v1/auth/me` | 用户ID、邮箱、角色 | FR-020 |
 | `FetchKeys` | `/api/v1/keys` | `quota`、`quota_used`、`expires_at`、`rate_limit_5h/1d/7d`、`usage_5h/1d/7d`、`window_*_start`、`current_concurrency` | FR-020～032 |
 | `FetchGroups` | `/api/v1/groups/available` | `id`、`rate_multiplier`、可用模型字段 | FR-010/123/124 |
+
+> **分组标识依据（2026-09-11 源码复核）**：Sub2API `cdb5cfa` 的
+> `CreateAPIKeyRequest.GroupID` 与 API Key DTO 的 `group_id` 均为 `*int64`。
+> 因此补齐只对数值型 `groups/available.id` 发起创建；不符合该形态的兼容站会
+> 在创建前报告失败，不猜测或改写分组标识。
 
 **源码级订阅模型（sub2api `63cef60`，ent schema 为准 —— 比空账号更完整）** — 4 张核心表逐字段确认 FR-033/034：
 
