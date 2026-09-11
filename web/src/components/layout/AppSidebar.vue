@@ -18,7 +18,6 @@ const res = useResourcesStore()
 /** 角标：各分栏的规模。空值渲染成空串而不是 0 —— "还没拉"和"确实是 0"不一样。 */
 function badge(p: PaneName): string {
   if (p === 'channels') return channels.count > 0 ? String(channels.count) : ''
-  if (p === 'detail') return channels.currentID === null ? '' : `#${channels.currentID}`
   if (p === 'accounts') return res.accounts.length > 0 ? String(res.accounts.length) : ''
   if (p === 'keys') return res.keys.length > 0 ? String(res.keys.length) : ''
   if (p === 'creds') return creds.count > 0 ? String(creds.count) : ''
@@ -44,6 +43,10 @@ const sections = computed(() => {
 function go(p: PaneName): void {
   void router.push({ name: p })
 }
+
+function isActive(p: PaneName): boolean {
+  return route.name === p || route.meta.parent === p
+}
 </script>
 
 <template>
@@ -64,7 +67,7 @@ function go(p: PaneName): void {
         v-for="p in s.panes"
         :key="p"
         class="nav-item"
-        :class="{ active: route.name === p }"
+        :class="{ active: isActive(p) }"
         :data-pane="p"
         @click="go(p)"
       >

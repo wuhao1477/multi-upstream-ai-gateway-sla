@@ -30,7 +30,7 @@ import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import type { Channel } from '@/api/types'
 import { totalBalance, totalQuota, usd, usdFine } from '@/utils/money'
-import { fmtAgo } from '@/utils/format'
+import { familyLabel, fmtAgo, statusLabel } from '@/utils/format'
 
 const router = useRouter()
 const channels = useChannelsStore()
@@ -170,9 +170,8 @@ async function create(): Promise<void> {
   }
 }
 
-async function open(id: number, chName: string): Promise<void> {
-  await router.push({ name: 'detail' })
-  await channels.select(id, chName)
+async function open(id: number): Promise<void> {
+  await router.push({ name: 'channel-detail', params: { id: String(id) } })
 }
 
 /** 跳到 Key 管理页并带上这个渠道的筛选 —— 不用到那边再选一次。 */
@@ -278,13 +277,13 @@ function blocked(c: Channel): string {
                       </button>
                     </td>
                     <td data-col="name">
-                      <button class="linkish strong" :data-ch-name="c.id" :data-ch="c.id" @click="open(c.id, c.name)">
+                      <button class="linkish strong" :data-ch-name="c.id" :data-ch="c.id" @click="open(c.id)">
                         {{ c.name }}
                       </button>
                       <span class="dim cell-sub" :title="c.base_url">{{ c.base_url }}</span>
                     </td>
                     <td data-col="family">
-                      <span class="badge">{{ c.site_family }}</span>
+                      <span class="badge">{{ familyLabel(c.site_family) }}</span>
                       <!-- 阻断性问题就摆在站型旁边：站型未识别 = 没有适配器可用，
                            这个渠道无论如何都采不到任何东西（04 §7） -->
                       <span v-if="blocked(c) !== ''" class="badge bad" :data-ch-blocked="c.id">{{
@@ -314,7 +313,7 @@ function blocked(c: Channel): string {
                     </td>
                     <td :data-ch-status="c.id" data-col="status">
                       <span class="badge" :class="c.status === 'enabled' ? 'ok' : 'bad'">{{
-                        c.status === 'enabled' ? '启用' : '停用'
+                        statusLabel(c.status)
                       }}</span>
                       <!-- 停用原因就显示在状态旁边：停用是要人来解除的，
                            看不到原因就解不了（FR-095） -->
@@ -327,7 +326,7 @@ function blocked(c: Channel): string {
                       </span>
                     </td>
                     <td data-col="acts" class="acts">
-                      <button class="btn ghost sm" :data-ch-detail="c.id" @click="open(c.id, c.name)">
+                      <button class="btn ghost sm" :data-ch-detail="c.id" @click="open(c.id)">
                         详情
                       </button>
                       <details class="more">

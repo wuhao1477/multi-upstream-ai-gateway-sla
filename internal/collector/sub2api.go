@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -209,6 +210,24 @@ func (a *Sub2APIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error
 		out = append(out, k)
 	}
 	return out, nil
+}
+
+// ResolveKeySecret 读取 Sub2API Key 详情中的明文。
+// Sub2API 没有 NewAPI 的独立 reveal 路径，详情接口直接返回 key。
+func (a *Sub2APIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef string) (string, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(keyRef), 10, 64)
+	if err != nil || id <= 0 {
+		return "", fmt.Errorf("上游 Key 标识无效")
+	}
+	m, _, err := a.C.getJSONAuth(ctx, s, "/api/v1/keys/"+strconv.FormatInt(id, 10))
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(asString(unwrapData(m)["key"]))
+	if key == "" || strings.Contains(key, "*") {
+		return "", fmt.Errorf("上游未返回可用 Key 明文")
+	}
+	return key, nil
 }
 
 // FetchGroups 取分组倍率、可用模型与限流（04 §3.2 /api/v1/groups/available）。

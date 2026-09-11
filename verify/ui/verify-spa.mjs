@@ -63,7 +63,21 @@ try {
   check('在子路径上刷新不丢分栏', stillCreds.on && stillCreds.url === '/admin/ui/creds',
     JSON.stringify(stillCreds));
 
-  // ── 3. 点导航会改地址栏（分栏可分享链接）──
+  // ── 3. 渠道详情是渠道管理的二级路由，不是侧栏一级项 ──
+  const detailResp = await page.goto(`${BASE}/admin/ui/channels/1`, { waitUntil: 'domcontentloaded' });
+  const detailState = await page.evaluate(() => ({
+    on: document.querySelector('#pane-detail')?.classList.contains('on') === true,
+    detailNav: document.querySelector('.nav-item[data-pane="detail"]') !== null,
+    channelsActive: document.querySelector('.nav-item[data-pane="channels"]')?.classList.contains('active') === true,
+  }));
+  check('直接访问渠道详情二级路由', detailResp.status() === 200 && detailState.on,
+    `HTTP ${detailResp.status()} pane-detail.on=${detailState.on}`);
+  check('渠道详情不出现在侧栏一级菜单', !detailState.detailNav,
+    `detailNav=${detailState.detailNav}`);
+  check('渠道详情页面高亮渠道管理', detailState.channelsActive,
+    `channelsActive=${detailState.channelsActive}`);
+
+  // ── 4. 点导航会改地址栏（分栏可分享链接）──
   await page.click('.nav-item[data-pane="import"]');
   await page.waitForFunction(() =>
     document.querySelector('#pane-import')?.classList.contains('on') === true,
@@ -71,7 +85,7 @@ try {
   const navURL = await page.evaluate(() => location.pathname);
   check('点侧栏导航同步更新地址栏', navURL === '/admin/ui/import', navURL);
 
-  // ── 4. 未知子路径回渠道列表，而不是白屏 ──
+  // ── 5. 未知子路径回渠道列表，而不是白屏 ──
   await page.goto(`${BASE}/admin/ui/no-such-pane`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() =>
     document.querySelector('#pane-channels')?.classList.contains('on') === true,
@@ -79,7 +93,7 @@ try {
   const fallbackURL = await page.evaluate(() => location.pathname);
   check('未知子路径回落到渠道列表', fallbackURL === '/admin/ui/', fallbackURL);
 
-  // ── 5. 900px 断点：侧栏折成顶部横排，且不占满整屏 ──
+  // ── 6. 900px 断点：侧栏折成顶部横排，且不占满整屏 ──
   await page.setViewport({ width: 480, height: 900 });
   await page.goto(`${BASE}/admin/ui`, { waitUntil: 'domcontentloaded' });
   const narrow = await page.evaluate(() => {

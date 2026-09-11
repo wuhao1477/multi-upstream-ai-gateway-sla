@@ -7,7 +7,7 @@
  * 「账号」指的是**上游站点上的账号**，不是登录本网关的人 —— P1 没有平台
  * 用户实体（gateway_clients 已在 022 迁移里 DROP），那属于 P2 的 FR-120。
  */
-export type PaneName = 'channels' | 'detail' | 'accounts' | 'keys' | 'creds' | 'import'
+export type PaneName = 'channels' | 'accounts' | 'keys' | 'creds' | 'import'
 
 export interface PaneMeta {
   /** 侧栏里的短名。 */
@@ -25,12 +25,6 @@ export const PANES: Record<PaneName, PaneMeta> = {
     nav: '渠道管理',
     title: '渠道管理',
     note: '接入与运行状态；资产概览可二级展开',
-    section: '上游资源',
-  },
-  detail: {
-    nav: '渠道详情',
-    title: '渠道详情',
-    note: '总览 / 账号 / Key / 分组 / 模型目录',
     section: '上游资源',
   },
   accounts: {
@@ -62,7 +56,6 @@ export const PANES: Record<PaneName, PaneMeta> = {
 /** 侧栏顺序。 */
 export const PANE_ORDER: PaneName[] = [
   'channels',
-  'detail',
   'accounts',
   'keys',
   'creds',

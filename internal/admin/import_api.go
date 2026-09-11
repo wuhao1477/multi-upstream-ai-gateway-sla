@@ -155,6 +155,13 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 				if err := s.importOne(r.Context(), conn, accounts[i], detects[i], it); err != nil {
 					it.Status = "failed"
 					it.Reason = shortErr(err)
+					continue
+				}
+				if s.ImportKeys != nil && accounts[i].HasCredential() && it.AccountID > 0 {
+					keyResult, keyErr := s.ImportKeys(
+						r.Context(), conn, it.ChannelID, it.AccountID,
+					)
+					applyKeyImportOutcome(it, keyResult, keyErr)
 				}
 			}
 			finishImport(res)
@@ -231,10 +238,18 @@ func (s *Server) importOne(
 			it.Status = "skipped"
 			it.Reason = fmt.Sprintf("已存在同地址的渠道 #%d", c.ID)
 			it.ChannelID = c.ID
+			it.AccountID, err = importAccountID(ctx, tx, c.ID, a.UserID())
+			if err != nil {
+				return err
+			}
 			return nil
 		}
 		// 补齐后提交 —— 同一个事务，补不全就整体回滚。
 		if err := s.repairChannel(ctx, tx, c.ID, a, want, d, missing); err != nil {
+			return err
+		}
+		it.AccountID, err = importAccountID(ctx, tx, c.ID, a.UserID())
+		if err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -283,6 +298,7 @@ func (s *Server) importOne(
 	if err != nil {
 		return fmt.Errorf("建账号: %w", err)
 	}
+	it.AccountID = accountID
 
 	// 有凭证就一并登记 —— 否则运维还要逐站手填上百次。
 	// cred_type 与必需字段都走注册表的同一处判定（与 saveCredential 同一函数），
@@ -471,7 +487,38 @@ func finishImport(res *collector.HubImportResult) {
 		if strings.Contains(it.Warning, "没有凭证") {
 			res.NoCredential++
 		}
+		res.KeysFound += it.KeysFound
+		res.KeysImported += it.KeysImported
+		res.KeysSkipped += it.KeysSkipped
+		res.KeysFailed += it.KeysFailed
 	}
+}
+
+func applyKeyImportOutcome(
+	it *collector.HubImportItem, result collector.KeyImportResult, err error,
+) {
+	it.KeysFound += result.Found
+	it.KeysImported += result.Imported
+	it.KeysSkipped += result.Skipped
+	it.KeysFailed += result.Failed
+	if err != nil {
+		appendImportWarning(it,
+			"自动导入 Key 失败，渠道、账号和凭证已保留；请到 Key 管理检查")
+		return
+	}
+	if result.Failed > 0 {
+		appendImportWarning(it, fmt.Sprintf(
+			"自动导入 Key：发现 %d 把，新增 %d 把，已有 %d 把，失败 %d 把；请到 Key 管理检查失败项",
+			result.Found, result.Imported, result.Skipped, result.Failed))
+	}
+}
+
+func appendImportWarning(it *collector.HubImportItem, warning string) {
+	if it.Warning == "" {
+		it.Warning = warning
+		return
+	}
+	it.Warning += "；" + warning
 }
 
 // shortErr 截短错误信息。

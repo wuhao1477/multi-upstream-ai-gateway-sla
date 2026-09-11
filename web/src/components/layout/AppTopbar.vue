@@ -4,14 +4,18 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import type { PaneName } from '@/router/panes'
 import { PANES } from '@/router/panes'
-
 const route = useRoute()
 const auth = useAuthStore()
 
 const meta = computed(() => {
-  const n = route.name
-  if (typeof n === 'string' && n in PANES) return PANES[n as PaneName]
-  return { nav: '', title: '', note: '' }
+  const name = route.name
+  const base = typeof name === 'string' && name in PANES ? PANES[name as PaneName] : undefined
+  const title = route.meta.title ?? base?.title
+  const note = route.meta.note ?? base?.note
+  return {
+    title: typeof title === 'string' ? title : '',
+    note: typeof note === 'string' ? note : '',
+  }
 })
 </script>
 

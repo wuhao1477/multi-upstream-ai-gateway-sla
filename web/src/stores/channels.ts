@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import * as adminApi from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { Channel, InventoryResp, SiteFamilyInfo, SyncItem, SyncResult } from '@/api/types'
+import { familyLabel } from '@/utils/format'
 import { useResourcesStore } from './resources'
 import { useToastStore } from './toast'
 
@@ -88,12 +89,12 @@ export const useChannelsStore = defineStore('channels', () => {
       const d = await adminApi.createChannel(input)
       let msg = `渠道已创建：#${d.id}`
       if (d.detected) {
-        msg += `\n探测到站型 ${d.detected.family}`
+        msg += `\n探测到站型 ${familyLabel(d.detected.family)}`
         if (d.detected.version !== undefined && d.detected.version !== '') {
           msg += ` ${d.detected.version}`
         }
         if (d.detected.quota_per_unit !== undefined) {
-          msg += `\nquota_per_unit=${d.detected.quota_per_unit}`
+          msg += `\n额度换算基数=${d.detected.quota_per_unit}`
         }
       }
       if (d.warning !== undefined && d.warning !== '') msg += `\n⚠️ ${d.warning}`

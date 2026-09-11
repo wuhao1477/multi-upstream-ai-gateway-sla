@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
@@ -30,6 +32,90 @@ func TestRunnerUnknownFamilyFailsBeforeCredentialLoad(t *testing.T) {
 	}
 	if loaded {
 		t.Fatal("未知站型不应读取凭证")
+	}
+}
+
+func TestImportKeysSkipsExistingExternalRefAndCreatesNewKey(t *testing.T) {
+	dsn := os.Getenv("SLA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("需要 SLA_TEST_DSN 指向可写的测试库")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接测试库: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	base := "https://runner-import-keys.example.invalid"
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+        (SELECT id FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1))`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id IN
+        (SELECT id FROM channels WHERE base_url=$1)`, base)
+	_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE base_url=$1`, base)
+
+	var channelID int64
+	if err := conn.QueryRow(ctx, `
+INSERT INTO channels (name, site_family, base_url, status)
+VALUES ('runner-import-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&channelID); err != nil {
+		t.Fatalf("创建测试渠道: %v", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_keys WHERE account_id IN
+            (SELECT id FROM upstream_accounts WHERE channel_id=$1)`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM upstream_accounts WHERE channel_id=$1`, channelID)
+		_, _ = conn.Exec(ctx, `DELETE FROM channels WHERE id=$1`, channelID)
+	}()
+
+	accountID, err := store.CreateAccount(ctx, conn, store.Account{ChannelID: channelID, ExternalUserID: "42"})
+	if err != nil {
+		t.Fatalf("创建测试账号: %v", err)
+	}
+	if _, err := store.CreateKey(ctx, conn, accountID, "existing-secret", "101", nil); err != nil {
+		t.Fatalf("创建已有 Key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/user/self":
+			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
+		case "GET /api/token":
+			_, _ = w.Write([]byte(`{"data":[
+                {"id":101,"remain_quota":90,"used_quota":10,"expired_time":-1},
+                {"id":102,"remain_quota":80,"used_quota":20,"expired_time":-1}
+            ]}`))
+		case "POST /api/token/102/key":
+			_, _ = w.Write([]byte(`{"data":{"key":"new-secret"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := collector.NewClient(0)
+	client.HC = server.Client()
+	runner := &Runner{Client: client}
+	result, err := runner.ImportKeys(ctx, conn, store.Channel{
+		ID: channelID, SiteFamily: string(collector.FamilyNewAPI), BaseURL: server.URL,
+	}, []collector.Credential{{
+		AccountID: accountID, ChannelID: channelID, Family: collector.FamilyNewAPI,
+		BaseURL: server.URL, AccessToken: "session-token", ExternalUserID: "42",
+		UserIDHeaderName: "New-API-User", QuotaPerUnit: 1,
+	}})
+	if err != nil {
+		t.Fatalf("导入 Key: %v", err)
+	}
+	if result.Found != 2 || result.Skipped != 1 || result.Imported != 1 || result.Failed != 0 {
+		t.Fatalf("Key 导入结果 = %+v，期望 found=2/skipped=1/imported=1/failed=0", result)
+	}
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM upstream_keys WHERE account_id=$1`, accountID).Scan(&count); err != nil {
+		t.Fatalf("统计 Key: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("Key 行数 = %d，期望 2", count)
 	}
 }
 

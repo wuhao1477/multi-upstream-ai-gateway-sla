@@ -23,7 +23,7 @@ import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { sharesWallet } from '@/utils/money'
-import { fmtTime } from '@/utils/format'
+import { fmtTime, statusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -66,8 +66,7 @@ function channelName(id: number): string {
 }
 
 async function openChannel(id: number): Promise<void> {
-  await router.push({ name: 'detail' })
-  await channels.select(id, channelName(id))
+  await router.push({ name: 'channel-detail', params: { id: String(id) } })
 }
 
 const colCount = computed(
@@ -238,7 +237,7 @@ function openDisable(a: Account): void {
             </td>
             <td data-col="status">
               <span class="badge" :class="a.status === 'active' ? 'ok' : 'bad'">{{
-                a.status === 'active' ? '启用' : '停用'
+                statusLabel(a.status)
               }}</span>
               <span v-if="a.disabled_reason !== undefined" class="dim cell-sub">{{
                 a.disabled_reason

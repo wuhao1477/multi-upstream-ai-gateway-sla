@@ -22,12 +22,22 @@ const router = createRouter({
   history: createWebHistory('/admin/ui/'),
   routes: [
     { path: '/', name: 'channels', component: ChannelsView },
-    { path: '/detail', name: 'detail', component: DetailView },
+    {
+      path: '/channels/:id(\\d+)',
+      name: 'channel-detail',
+      component: DetailView,
+      meta: {
+        parent: 'channels',
+        title: '渠道详情',
+        note: '总览 / 账号 / Key / 分组 / 模型目录',
+      },
+    },
     { path: '/accounts', name: 'accounts', component: AccountsView },
     { path: '/keys', name: 'keys', component: KeysView },
     // 旧入口。「账号与 Key」拆成了两个分栏，收藏夹里的链接不该变成 404 ——
     // 账号是它原来的主要内容，所以落到账号页。
     { path: '/register', redirect: '/accounts' },
+    { path: '/detail', redirect: '/' },
     { path: '/creds', name: 'creds', component: CredsView },
     { path: '/import', name: 'import', component: ImportView },
     // 未知路径回渠道列表，而不是留个空白页

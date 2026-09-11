@@ -52,6 +52,9 @@ type Server struct {
 	//
 	// ⚠️ 同上收 `store.DBTX`。
 	SaveDetected func(ctx context.Context, db store.DBTX, channelID int64, d collector.DetectResult) error
+	// ImportKeys 在渠道基础事务提交后读取并登记上游 Key。它是可选能力：
+	// Key 读取失败不得影响渠道、账号与凭证导入。
+	ImportKeys func(ctx context.Context, conn *pgx.Conn, channelID, accountID int64) (collector.KeyImportResult, error)
 
 	guard  *syncGuard
 	tokens *tokenStore

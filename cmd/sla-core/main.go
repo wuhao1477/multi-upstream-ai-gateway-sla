@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/admin"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
@@ -163,6 +165,26 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 		return runner.Sync(ctx, ch, nil)
 	}
 	credStore := store.NewCredentialStore(pool)
+	srv.ImportKeys = func(
+		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
+	) (collector.KeyImportResult, error) {
+		ch, err := store.GetChannel(ctx, conn, channelID)
+		if err != nil {
+			return collector.KeyImportResult{}, err
+		}
+		creds, err := credStore.ListByChannel(ctx, conn, ch)
+		if err != nil {
+			return collector.KeyImportResult{}, err
+		}
+		for _, cred := range creds {
+			if cred.AccountID != accountID {
+				continue
+			}
+			cred.QuotaPerUnit = store.QuotaPerUnit(ctx, conn, channelID)
+			return runner.ImportKeys(ctx, conn, ch, []collector.Credential{cred})
+		}
+		return collector.KeyImportResult{}, fmt.Errorf("账号 %d 没有可用采集凭证", accountID)
+	}
 	// 注入收 DBTX 的那一版（SaveTx，不是 Save）：管理面的写入要能被调用方
 	// 收进事务。Save 那个自取连接的变体留给采集侧的续期路径（不变式 S-1）。
 	srv.SaveCredential = credStore.SaveTx

@@ -61,6 +61,12 @@ try {
       n => document.querySelector('#pane-' + n)?.classList.contains('on'),
       { timeout: 5000 }, name);
   };
+  const openDetail = async id => {
+    await page.goto(`${BASE}/admin/ui/channels/${id}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.querySelector('#pane-detail')?.classList.contains('on') === true,
+      { timeout: 8000 });
+  };
   // fill()：选中渠道时会把渠道 ID 预填进登记表单。
   // 用真实键盘事件更新 v-model，避免直接改 DOM 与 Vue 状态不同步。
   const fill = async (sel, val) => {
@@ -186,7 +192,7 @@ try {
   const createToast = await page.$eval('#toast', el => el.textContent);
   check('界面创建渠道成功', /渠道已创建/.test(createToast),
     createToast.replace(/\n/g, ' | ').slice(0, 100));
-  check('创建时自动探测出站型 newapi', /newapi/.test(createToast));
+  check('创建时自动探测出站型 NewAPI 系', /NewAPI 系/.test(createToast));
   // 断言"读到了上游此刻真实声明的那个值",不是断言某个固定数字 ——
   // quota_per_unit 逐站不同,写死等于把 mock 的常量搬进真上游验收。
   const qpuHit = new RegExp(`quota_per_unit=${UP_QPU}\\b`).test(createToast);
@@ -289,12 +295,12 @@ try {
     /未登记采集凭证|前置条件不满足/.test(preCredMsg),
     preCredMsg.replace(/\s+/g, ' ').slice(0, 90));
   // 单看文案不足以判定修好了 —— 修复前的 502 也带同样的"未登记采集凭证"。
-  // 真正的区别是它现在按"未打上游"归类：带结构化 items 且标 skipped
+  // 真正的区别是它现在按"未打上游"归类：带结构化 items 且标"跳过"
   // （旧路径没有 items，只渲染一行光秃秃的"采集失败"）。
   const preCredRows = await page.$$eval('#sync-result tbody tr',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('前置失败按"未触达上游"归类（items 标 skipped）',
-    preCredRows.some(r => r.includes('skipped')),
+  check('前置失败按"未触达上游"归类（items 标跳过）',
+    preCredRows.some(r => r.includes('跳过')),
     preCredRows.length ? JSON.stringify(preCredRows[0]) : '无 items（旧 502 路径）');
 
   // ── 6. 界面登记两个账号与四把 Key，并验证明文不回显（AC-37）──
@@ -402,7 +408,7 @@ try {
   const credToast = await page.$eval('#toast', el => el.textContent);
   check('界面登记采集凭证成功', /凭证已登记/.test(credToast),
     credToast.replace(/\n/g, ' | ').slice(0, 80));
-  check('凭证类型判定为 newapi_access_token', /newapi_access_token/.test(credToast));
+  check('凭证类型判定为 NewAPI 系访问令牌', /NewAPI 系访问令牌/.test(credToast));
   const credRow = await page.$$eval('#cred-list tbody tr',
     rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
   check('凭证列表已渲染且不含令牌内容',
@@ -464,7 +470,7 @@ try {
   //
   // 注意这是本次会话的**第二次**点采集（5bis 缺凭证失败过一次）。
   // 它能成功本身就是断言：前置失败没有起算最小间隔窗口。
-  await pane('detail');
+  await openDetail(newChannelId);
   await page.click('#btn-sync');
   await page.waitForFunction(
     () => document.querySelector('#sync-result table') !== null, { timeout: 90000 });
@@ -473,11 +479,10 @@ try {
   check('采集结果表已渲染', syncRows.length >= 5, `${syncRows.length} 项`);
 
   const byCap = Object.fromEntries(syncRows.map(r => [r[0], r[2]]));
-  check('account 采集成功', byCap['account'] === 'ok', byCap['account']);
-  check('groups 采集成功', byCap['groups'] === 'ok', byCap['groups']);
-  check('keys 采集成功', byCap['keys'] === 'ok', byCap['keys']);
-  check('model_catalog 采集成功', byCap['model_catalog'] === 'ok',
-    byCap['model_catalog']);
+  check('账号采集成功', byCap['账号'] === '成功', byCap['账号']);
+  check('分组采集成功', byCap['分组'] === '成功', byCap['分组']);
+  check('密钥采集成功', byCap['密钥'] === '成功', byCap['密钥']);
+  check('模型目录采集成功', byCap['模型目录'] === '成功', byCap['模型目录']);
   await page.screenshot({ path: `${SHOT}/05-sync.png`, fullPage: true });
 
   // ── 8. 查看分组、目录、Key ──
@@ -774,7 +779,7 @@ try {
     withAmount.length === 0 || withAmount.every(t => /确认/.test(t)),
     withAmount.length === 0 ? '本轮无账号采到余额（站型可能不提供）' : withAmount.join(' | '));
   await page.screenshot({ path: `${SHOT}/10-accounts.png`, fullPage: true });
-  await pane('detail');
+  await openDetail(newChannelId);
 
   // ── 10. 限流：立刻再点一次采集应被拒（429，且不打上游）──
   await page.click('#btn-sync');
@@ -796,10 +801,9 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  // 六项：渠道管理 / 渠道详情 / 账号管理 / Key 管理 / 采集凭证 / 批量导入。
-  // 原来是五项 ——「账号与 Key」一个分栏管两个对象，拆成两个之后
-  // 「在哪登记、在哪管理」不再是两个地方。
-  check('侧栏导航项齐全', layout.navs === 6, `${layout.navs} 项`);
+  // 五项：渠道管理 / 账号管理 / Key 管理 / 采集凭证 / 批量导入。
+  // 渠道详情是渠道管理的二级页面，不占用一级菜单位置。
+  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //

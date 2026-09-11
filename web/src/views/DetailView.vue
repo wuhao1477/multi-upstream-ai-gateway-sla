@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
 import UiStat from '@/components/ui/UiStat.vue'
@@ -12,11 +13,18 @@ import RegisterDrawers from '@/components/res/RegisterDrawers.vue'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import type { ItemStatus } from '@/api/types'
-import { fmtAgo } from '@/utils/format'
+import {
+  anomalyLabel,
+  capabilityLabel,
+  fmtAgo,
+  statusLabel,
+  supportLevelLabel,
+} from '@/utils/format'
 import { totalBalance, totalQuota, usd, usdFine } from '@/utils/money'
 
 const channels = useChannelsStore()
 const res = useResourcesStore()
+const route = useRoute()
 
 type SubView = 'accounts' | 'keys' | 'groups' | 'catalog'
 const view = ref<SubView>('accounts')
@@ -43,6 +51,18 @@ watch(
   },
 )
 
+const routeChannelID = computed(() => Number(route.params.id))
+
+watch(
+  [() => channels.loaded, routeChannelID],
+  ([loaded, id]) => {
+    if (!loaded || !Number.isInteger(id) || id <= 0) return
+    const channel = channels.list.find((item) => item.id === id)
+    if (channel !== undefined) void channels.select(channel.id, channel.name)
+  },
+  { immediate: true },
+)
+
 const chID = computed(() => channels.currentID ?? 0)
 const accounts = computed(() => res.channelAccounts(chID.value))
 const keys = computed(() => res.channelKeys(chID.value))
@@ -58,18 +78,6 @@ function statusClass(s: ItemStatus): string {
   return 'bad'
 }
 
-const ANOMALY_LABEL: Record<string, string> = {
-  delisted_model: '疑似下架模型',
-  stale_data: '数据陈旧',
-  degraded_missing_fields: '价格待人工录入',
-  unregistered_key: '上游有、库里没登记的 Key',
-  credential_invalid: '采集凭证失效',
-  credential_missing: '未登记采集凭证',
-  site_family_unknown: '站型未识别',
-  never_collected: '从未采集成功',
-  key_unusable: 'Key 已停用或过期',
-}
-
 /**
  * 异常项按"要不要马上处理"分成两档。
  *
@@ -83,10 +91,6 @@ const BLOCKING = new Set([
   'site_family_unknown',
   'never_collected',
 ])
-
-function anomalyLabel(kind: string): string {
-  return ANOMALY_LABEL[kind] ?? kind
-}
 
 function openAddKey(accountID: number): void {
   drawerAccount.value = accountID
@@ -206,11 +210,11 @@ function openAddKey(accountID: number): void {
                        拿它当 key 会撞成同一个（Vue 会在控制台报重复 key）。 -->
                   <tr v-for="(i, idx) in channels.syncResult.items" :key="idx">
                     <td>
-                      <code>{{ i.capability ?? '-' }}</code>
+                      <code>{{ capabilityLabel(i.capability) }}</code>
                     </td>
-                    <td><code>{{ i.support ?? '-' }}</code></td>
+                    <td><code>{{ supportLevelLabel(i.support) }}</code></td>
                     <td>
-                      <span class="badge" :class="statusClass(i.status)">{{ i.status }}</span>
+                      <span class="badge" :class="statusClass(i.status)">{{ statusLabel(i.status) }}</span>
                     </td>
                     <td class="n">{{ i.rows ?? '' }}</td>
                     <td class="n dim">{{ i.elapsed_ms === undefined ? '' : `${i.elapsed_ms} ms` }}</td>

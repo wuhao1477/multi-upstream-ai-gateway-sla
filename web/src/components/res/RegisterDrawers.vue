@@ -17,6 +17,7 @@ import * as adminApi from '@/api/admin'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
+import { familyLabel } from '@/utils/format'
 
 /**
  * ⚠️ 属性名是 `channelId` / `accountId`，**不是 `channelID`**。
@@ -172,7 +173,7 @@ async function createKey(): Promise<void> {
       <select id="acc-channel" v-model="accChannel">
         <option value="">请选择…</option>
         <option v-for="c in channels.list" :key="c.id" :value="String(c.id)">
-          {{ c.name }}（#{{ c.id }} · {{ c.site_family }}）
+          {{ c.name }}（#{{ c.id }} · {{ familyLabel(c.site_family) }}）
         </option>
       </select>
     </UiField>
