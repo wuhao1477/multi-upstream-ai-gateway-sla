@@ -147,6 +147,7 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 	// 并发只会带来锁争用与更难排查的失败，而导入是低频操作。
 	if !dryRun {
 		s.withConn(w, r, func(conn *pgx.Conn) {
+			remainingSecrets := collector.DefaultKeySecretResolveLimit
 			for i := range res.Items {
 				it := &res.Items[i]
 				if it.Status != "detected" {
@@ -158,10 +159,16 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if s.ImportKeys != nil && accounts[i].HasCredential() && it.AccountID > 0 {
+					if remainingSecrets == 0 {
+						appendImportWarning(it, "自动导入 Key 已达到本次明文读取上限，请在 Key 管理按渠道继续同步")
+						continue
+					}
 					keyResult, keyErr := s.ImportKeys(
 						r.Context(), conn, it.ChannelID, it.AccountID,
+						collector.KeyImportRequest{MaxSecretResolves: remainingSecrets},
 					)
 					applyKeyImportOutcome(it, keyResult, keyErr)
+					remainingSecrets -= keyResult.SecretResolves
 				}
 			}
 			finishImport(res)

@@ -207,6 +207,60 @@ export interface GroupModelsResp {
   models: string[]
 }
 
+export interface KeyImportItem {
+  channel_id: number
+  account_id: number
+  status: string
+  error?: string
+  found: number
+  imported: number
+  skipped: number
+  failed: number
+  deferred: number
+}
+
+export interface KeyImportBatchResult {
+  count: number
+  found: number
+  imported: number
+  skipped: number
+  failed: number
+  deferred: number
+  /** 因明文读取预算耗尽而尚未处理的账号数；deferred 本身只统计 Key。 */
+  deferred_accounts: number
+  items: KeyImportItem[]
+}
+
+export interface KeyProvisionItem {
+  channel_id: number
+  account_id: number
+  status: string
+  error?: string
+  found: number
+  imported: number
+  matched_groups: number
+  existing_groups: number
+  would_create: number
+  created: number
+  failed: number
+  deferred: number
+  skipped_reason?: string
+}
+
+export interface KeyProvisionBatchResult {
+  count: number
+  skipped_accounts: number
+  found: number
+  imported: number
+  matched_groups: number
+  existing_groups: number
+  would_create: number
+  created: number
+  failed: number
+  deferred: number
+  items: KeyProvisionItem[]
+}
+
 export interface CatalogResp {
   channel_id: number
   total: number

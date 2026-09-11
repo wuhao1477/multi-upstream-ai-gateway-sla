@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 )
@@ -279,6 +280,86 @@ func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
 	}
 }
 
+func TestNewAPIFetchKeysReadsEveryPage(t *testing.T) {
+	// 来源：NewAPI bdef117 common/page_info.go（p=1 起，size 是 token 专用页大小）：
+	// https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/common/page_info.go
+	var pages []string
+	var sizes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("p"))
+		sizes = append(sizes, r.URL.Query().Get("size"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("p") {
+		case "", "1":
+			_, _ = w.Write([]byte(`{"data":{"page":1,"page_size":2,"total":3,"items":[
+				{"id":11,"remain_quota":10,"expired_time":-1},
+				{"id":12,"remain_quota":10,"expired_time":-1}]}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"data":{"page":2,"page_size":2,"total":3,"items":[
+				{"id":13,"remain_quota":10,"expired_time":-1}]}}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "New-API-User", ExternalUserID: "42", QuotaPerUnit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望完整读取 3 把", len(keys))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
+	}
+	if len(sizes) != 2 || sizes[0] != "100" || sizes[1] != "100" {
+		t.Fatalf("请求页大小 = %v，期望每页 100", sizes)
+	}
+}
+
+func TestNewAPIFetchKeysReadsBareArrayPagesUntilEmpty(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("p")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":31,"remain_quota":10},{"id":32,"remain_quota":10}]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"data":[{"id":33,"remain_quota":10}]}`))
+		case "3":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		UserIDHeader: "New-API-User", ExternalUserID: "42", QuotaPerUnit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望裸数组分页完整读取 3 把", len(keys))
+	}
+	if len(pages) != 3 || pages[0] != "1" || pages[1] != "2" || pages[2] != "3" {
+		t.Fatalf("请求页码 = %v，期望 [1 2 3]", pages)
+	}
+}
+
 func TestNewAPIFetchKeys(t *testing.T) {
 	srv := newAPISite(t)
 	defer srv.Close()
@@ -322,6 +403,33 @@ func TestNewAPIFetchKeys(t *testing.T) {
 	// 明文不得出现在 KeyRef 里（FR-094）
 	if k.KeyRef == "" {
 		t.Error("KeyRef 应有脱敏引用值")
+	}
+}
+
+func TestNewAPIFetchGroupsSortsGroupRefs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"group_ratio":{"zeta":1,"alpha":0.8,"beta":1.2},
+			"data":[{"model_name":"gpt-5.5","enable_groups":["all"]}]}`))
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	for attempt := 0; attempt < 100; attempt++ {
+		groups, err := ad.FetchGroups(context.Background(), Session{
+			Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs := make([]string, 0, len(groups))
+		for _, group := range groups {
+			refs = append(refs, group.GroupRef)
+		}
+		if !sort.StringsAreSorted(refs) {
+			t.Fatalf("第 %d 次分组顺序不稳定：%v", attempt, refs)
+		}
 	}
 }
 
@@ -453,12 +561,12 @@ func sub2apiSite(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"code":0,"data":{"id":"u-1","email":"a@b.c"}}`))
 		case "/api/v1/keys":
 			_, _ = w.Write([]byte(`{"code":0,"data":[
-				{"id":"k-1","group_id":"g-1","quota":12.5,"quota_used":2.5,
+				{"id":1,"group_id":7,"quota":12.5,"quota_used":2.5,
 				 "current_concurrency":3,"rate_limit_1d":100,"usage_1d":20,
 				 "window_1d_start":"2026-08-28T00:00:00Z"}]}`))
 		case "/api/v1/groups/available":
 			_, _ = w.Write([]byte(`{"code":0,"data":[
-				{"id":"g-1","rate_multiplier":0.5,"rpm_limit":60,
+				{"id":7,"rate_multiplier":0.5,"rpm_limit":60,
 				 "subscription_type":"monthly","platform":"openai",
 				 "is_exclusive":false,"peak_rate_enabled":true,
 				 "peak_rate_multiplier":1.5,"peak_start":"18:00","peak_end":"23:00",
@@ -470,6 +578,8 @@ func sub2apiSite(t *testing.T) *httptest.Server {
 }
 
 func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
+	// 来源：Sub2API cdb5cfa API Key DTO 将 id 与 group_id 声明为数值型 ID：
+	// https://github.com/Wei-Shaw/sub2api/blob/cdb5cfaf6c8cb08612ef552a4458d8d0b5850184/backend/internal/handler/dto/types.go
 	srv := sub2apiSite(t)
 	defer srv.Close()
 
@@ -500,6 +610,47 @@ func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
 	}
 }
 
+func TestSub2APIFetchKeysReadsEveryPage(t *testing.T) {
+	// 来源：Sub2API cdb5cfa response.Paginated 的 data.pages 字段：
+	// https://github.com/Wei-Shaw/sub2api/blob/cdb5cfaf6c8cb08612ef552a4458d8d0b5850184/backend/internal/pkg/response/response.go
+	var pages []string
+	var pageSizes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		pageSizes = append(pageSizes, r.URL.Query().Get("page_size"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":1,"page_size":2,"pages":2,"items":[
+				{"id":21,"quota":10},{"id":22,"quota":10}]}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":2,"page_size":2,"pages":2,"items":[
+				{"id":23,"quota":10}]}}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	keys, err := ad.FetchKeys(context.Background(), Session{
+		Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 {
+		t.Fatalf("Key 数 = %d，期望完整读取 3 把", len(keys))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
+	}
+	if len(pageSizes) != 2 || pageSizes[0] != "1000" || pageSizes[1] != "1000" {
+		t.Fatalf("请求页大小 = %v，期望每页 1000", pageSizes)
+	}
+}
+
 func TestSub2APIFetchGroups(t *testing.T) {
 	srv := sub2apiSite(t)
 	defer srv.Close()
@@ -520,10 +671,31 @@ func TestSub2APIFetchGroups(t *testing.T) {
 	}
 }
 
+func TestSub2APIGroupRefMatchesKeyGroupID(t *testing.T) {
+	srv := sub2apiSite(t)
+	defer srv.Close()
+
+	ad := NewSub2APIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	session := Session{Family: FamilySub2API, BaseURL: srv.URL, Token: "jwt"}
+	keys, err := ad.FetchKeys(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := ad.FetchGroups(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || len(groups) != 1 || keys[0].GroupRef != groups[0].GroupRef || groups[0].GroupRef != "7" {
+		t.Fatalf("Key 分组=%q，group id=%q，期望同为数值标识 7", keys[0].GroupRef, groups[0].GroupRef)
+	}
+}
+
 func TestSub2APIGroupWithoutModelsExplainsDegradation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"g-1"}]}`))
+		// Sub2API 的真实 Group.ID 是 int64；这里只省略 models，专测降级标记。
+		_, _ = w.Write([]byte(`{"code":0,"data":[{"id":7}]}`))
 	}))
 	defer srv.Close()
 
@@ -556,8 +728,8 @@ func TestSub2APIPartialGroupCatalogIsPresenceUnreliable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"data":[
-			{"id":"complete","available_models":["m1"]},
-			{"id":"missing"}
+			{"id":7,"available_models":["m1"]},
+			{"id":8}
 		]}`))
 	}))
 	defer srv.Close()

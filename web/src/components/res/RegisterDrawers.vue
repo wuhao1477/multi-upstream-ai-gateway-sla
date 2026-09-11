@@ -228,8 +228,8 @@ async function createKey(): Promise<void> {
       <input id="key-ref" v-model="keyRef" placeholder="用于把采到的用量写回这把 Key" />
     </UiField>
     <p class="note">
-      <code>external_ref</code> 是采集匹配所需：采集只能拿到上游的 key id，拿不到明文，
-      没有它用量写不回对应 Key，这把 Key 会一直显示「未采集」。
+      手工登记时建议填写 <code>external_ref</code>，采集会用它匹配上游 Key；
+      「同步已有 Key」会自动读取并登记该标识。
     </p>
     <UiField label="所属分组" for="key-group">
       <select id="key-group" v-model="keyGroup" :disabled="keyGroupOptions.length === 0">

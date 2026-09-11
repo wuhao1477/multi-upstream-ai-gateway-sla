@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,136 @@ func unavailableUpstreamHandler() http.Handler {
 	mux := http.NewServeMux()
 	s.UpstreamRoutes(mux)
 	return mux
+}
+
+func TestKeyAutomationRequiresExplicitScope(t *testing.T) {
+	h := unavailableUpstreamHandler()
+	for _, path := range []string{"/admin/keys/import", "/admin/keys/provision?dry_run=true"} {
+		code, body := do(t, h, "test-admin-token", http.MethodPost, path, `{}`)
+		if code != http.StatusBadRequest || !strings.Contains(body, "channel_id") {
+			t.Fatalf("POST %s = %d %s，期望缺少明确范围时返回 400", path, code, body)
+		}
+	}
+}
+
+func TestKeyAutomationRejectsMalformedJSON(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token", http.MethodPost,
+		"/admin/keys/import", `{"account_id":`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "请求体解析失败") {
+		t.Fatalf("畸形 JSON = %d %s，期望返回解析错误", code, body)
+	}
+}
+
+func TestProvisionKeysRequiresExplicitDryRun(t *testing.T) {
+	h := unavailableUpstreamHandler()
+	for _, path := range []string{"/admin/keys/provision", "/admin/keys/provision?dry_run=maybe"} {
+		code, body := do(t, h, "test-admin-token", http.MethodPost, path,
+			`{"all":true,"only_without_keys":true}`)
+		if code != http.StatusBadRequest || !strings.Contains(body, "dry_run") {
+			t.Fatalf("POST %s = %d %s，期望拒绝不明确的执行模式", path, code, body)
+		}
+	}
+}
+
+func TestReadOnlyServerRejectsKeyAutomationBeforeCallback(t *testing.T) {
+	s := NewServer(unavailableDB{}, "test-admin-token", nil, nil)
+	s.ReadOnly = true
+	called := false
+	s.ImportKeys = func(context.Context, *pgx.Conn, int64, int64, collector.KeyImportRequest) (collector.KeyImportResult, error) {
+		called = true
+		return collector.KeyImportResult{}, nil
+	}
+	s.ProvisionKeys = func(
+		context.Context, *pgx.Conn, int64, int64, collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error) {
+		called = true
+		return collector.KeyProvisionResult{}, nil
+	}
+	mux := http.NewServeMux()
+	s.UpstreamRoutes(mux)
+	for _, path := range []string{"/admin/keys/import", "/admin/keys/provision?dry_run=false"} {
+		code, body := do(t, mux, "test-admin-token", http.MethodPost, path, `{"all":true}`)
+		if code != http.StatusServiceUnavailable || !strings.Contains(body, "只读") {
+			t.Fatalf("POST %s = %d %s，期望只读实例拒绝", path, code, body)
+		}
+	}
+	if called {
+		t.Fatal("只读实例不应调用 Key 自动化回调")
+	}
+}
+
+func TestImportKeysRejectsAllScope(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token", http.MethodPost,
+		"/admin/keys/import", `{"all":true}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "渠道") {
+		t.Fatalf("全局同步 = %d %s，期望要求明确渠道", code, body)
+	}
+}
+
+func TestProvisionAllScopeRequiresOnlyWithoutKeys(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token", http.MethodPost,
+		"/admin/keys/provision?dry_run=true", `{"all":true,"only_without_keys":false}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "仅无 Key") {
+		t.Fatalf("全局补齐 = %d %s，期望要求仅无 Key 过滤", code, body)
+	}
+}
+
+func TestKeyAutomationTargetLimit(t *testing.T) {
+	targets := make([]store.Account, maxKeyAutomationAccounts+1)
+	if err := validateKeyAutomationTargetLimit(targets); err == nil {
+		t.Fatal("超过账号上限的自动化请求必须被拒绝")
+	}
+	if err := validateKeyAutomationTargetLimit(targets[:maxKeyAutomationAccounts]); err != nil {
+		t.Fatalf("上限内的自动化请求不应被拒绝：%v", err)
+	}
+}
+
+func TestProvisionKeysExpandsChannelToEveryAccount(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	s, h, token := httpServer(t)
+	base := "https://provision-channel-accounts.example.invalid"
+	wipeCRUD(ctx, t, conn, base)
+	defer wipeCRUD(context.Background(), t, conn, base)
+	channelID := newChannel(t, h, token, "批量补齐渠道", base)
+	first := newAccount(t, h, token, channelID)
+	second := newAccount(t, h, token, channelID)
+
+	var called []int64
+	s.ProvisionKeys = func(
+		_ context.Context, _ *pgx.Conn, gotChannelID, accountID int64,
+		request collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error) {
+		if gotChannelID != channelID || !request.DryRun || request.Model != "gpt-5.5" {
+			t.Fatalf("补齐参数错误：channel=%d request=%+v", gotChannelID, request)
+		}
+		called = append(called, accountID)
+		return collector.KeyProvisionResult{MatchedGroups: 1, WouldCreate: 1}, nil
+	}
+	code, body := do(t, h, token, http.MethodPost,
+		"/admin/keys/provision?dry_run=true",
+		fmt.Sprintf(`{"channel_id":%d,"model":"gpt-5.5"}`, channelID))
+	if code != http.StatusOK {
+		t.Fatalf("批量补齐预览 = %d %s", code, body)
+	}
+	sort.Slice(called, func(i, j int) bool { return called[i] < called[j] })
+	want := []int64{first, second}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	if !slices.Equal(called, want) {
+		t.Fatalf("调用账号 = %v，期望 %v", called, want)
+	}
+	var result keyProvisionBatchResult
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 2 || result.MatchedGroups != 2 || result.WouldCreate != 2 {
+		t.Fatalf("批量结果 = %+v", result)
+	}
 }
 
 func newAccount(t *testing.T, h http.Handler, tok string, channelID int64) int64 {

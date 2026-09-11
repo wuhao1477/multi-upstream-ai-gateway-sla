@@ -40,6 +40,8 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
+	mux.Handle("POST /admin/keys/import", h(s.importKeys))
+	mux.Handle("POST /admin/keys/provision", h(s.provisionKeys))
 	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
 	mux.Handle("POST /admin/keys/{id}/disable", h(s.disableKey))
@@ -321,6 +323,16 @@ func (g *syncGuard) release(channelID int64, armWindow bool) {
 	}
 }
 
+func (s *Server) syncMinInterval() time.Duration {
+	minInterval := 60 * time.Second
+	if s.Snapshot != nil {
+		if v, err := s.Snapshot().Int("sync_min_interval_s"); err == nil && v > 0 {
+			minInterval = time.Duration(v) * time.Second
+		}
+	}
+	return minInterval
+}
+
 // disabledSyncMessage 判定"已停用的渠道不采集"，返回给运维看的原因。
 //
 // 这条守卫此前不存在，症状是**"停用"只改了台账上的一个字段**：2026-08-31 放弃
@@ -369,13 +381,7 @@ func (s *Server) syncChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	minInterval := 60 * time.Second
-	if s.Snapshot != nil {
-		if v, err := s.Snapshot().Int("sync_min_interval_s"); err == nil && v > 0 {
-			minInterval = time.Duration(v) * time.Second
-		}
-	}
-	if err := s.guard.acquire(id, minInterval); err != nil {
+	if err := s.guard.acquire(id, s.syncMinInterval()); err != nil {
 		// 限流与互斥分别返 429 / 409（09 §5.0bis）：
 		// **不排队** —— 手动刷新重复点击应立即得到反馈而非静默堆积
 		code := http.StatusTooManyRequests

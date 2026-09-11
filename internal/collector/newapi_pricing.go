@@ -3,6 +3,7 @@ package collector
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -112,11 +113,19 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 				mod.CacheRatio, mod.HasCache = cr, true
 			}
 			for _, g := range asSlice(m["enable_groups"]) {
-				if ref := asString(g); ref != "" {
+				ref := asString(g)
+				if ref == "all" {
+					for usable := range out.GroupRatios {
+						mod.EnableGroups = append(mod.EnableGroups, usable)
+						out.GroupModels[usable] = append(out.GroupModels[usable], name)
+					}
+				} else if ref != "" {
 					mod.EnableGroups = append(mod.EnableGroups, ref)
 					out.GroupModels[ref] = append(out.GroupModels[ref], name)
 				}
 			}
+			sort.Strings(mod.EnableGroups)
+			mod.EnableGroups = slices.Compact(mod.EnableGroups)
 			out.Models = append(out.Models, mod)
 		}
 
@@ -151,6 +160,7 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].Name < out.Models[j].Name })
 	for ref := range out.GroupModels {
 		sort.Strings(out.GroupModels[ref])
+		out.GroupModels[ref] = slices.Compact(out.GroupModels[ref])
 	}
 	return out, nil
 }

@@ -20,6 +20,7 @@ import UiField from '@/components/ui/UiField.vue'
 import UiStat from '@/components/ui/UiStat.vue'
 import UiSegmented from '@/components/ui/UiSegmented.vue'
 import KeyTable from '@/components/res/KeyTable.vue'
+import KeyAutomationDrawer from '@/components/res/KeyAutomationDrawer.vue'
 import RegisterDrawers from '@/components/res/RegisterDrawers.vue'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
@@ -44,6 +45,7 @@ const view = ref<ViewMode>('flat')
 const cols = ref<string[]>([])
 const collapsed = ref<Set<string>>(new Set())
 const drawer = ref<'account' | 'key' | null>(null)
+const automation = ref<'import' | 'provision' | null>(null)
 
 const VIEW_KEY = 'sla.keys.view'
 const COLS_KEY = 'sla.keys.cols'
@@ -186,6 +188,12 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
         <div class="spacer"></div>
         <button class="btn outline sm" id="btn-keys-reload" :disabled="res.loading" @click="res.reload()">
           {{ res.loading ? '刷新中…' : '刷新' }}
+        </button>
+        <button class="btn outline sm" id="btn-import-keys" @click="automation = 'import'">
+          同步已有 Key
+        </button>
+        <button class="btn outline sm" id="btn-provision-keys" @click="automation = 'provision'">
+          批量补齐 Key
         </button>
         <button class="btn" id="btn-new-key" @click="drawer = 'key'">+ 登记 Key</button>
       </template>
@@ -331,7 +339,7 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
       <UiEmpty v-if="!res.loaded && res.error === ''">加载中…</UiEmpty>
       <UiEmpty v-else-if="res.error !== ''">加载失败：{{ res.error }}</UiEmpty>
       <UiEmpty v-else-if="res.keys.length === 0">
-        还没有任何上游 Key。点右上角「登记 Key」创建第一把。
+        还没有任何上游 Key。可同步账号已有 Key、批量补齐，或手工登记。
       </UiEmpty>
       <UiEmpty v-else-if="shown.length === 0">没有符合当前筛选条件的 Key</UiEmpty>
 
@@ -384,6 +392,13 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
       :channel-id="filter.channelID"
       :account-id="filter.accountID"
       @close="drawer = null"
+    />
+    <KeyAutomationDrawer
+      :mode="automation"
+      :channel-id="filter.channelID"
+      :account-id="filter.accountID"
+      @close="automation = null"
+      @changed="res.reload()"
     />
   </div>
 </template>
