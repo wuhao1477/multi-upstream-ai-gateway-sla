@@ -120,6 +120,7 @@ type HubImportItem struct {
 	KeysImported int    `json:"keys_imported,omitempty"`
 	KeysSkipped  int    `json:"keys_skipped,omitempty"`
 	KeysFailed   int    `json:"keys_failed,omitempty"`
+	KeysDeferred int    `json:"keys_deferred,omitempty"`
 }
 
 // HubImportResult 是整次导入的汇总。
@@ -135,6 +136,7 @@ type HubImportResult struct {
 	KeysImported int             `json:"keys_imported"`
 	KeysSkipped  int             `json:"keys_skipped"`
 	KeysFailed   int             `json:"keys_failed"`
+	KeysDeferred int             `json:"keys_deferred"`
 	Items        []HubImportItem `json:"items"`
 }
 

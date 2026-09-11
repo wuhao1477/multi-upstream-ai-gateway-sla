@@ -218,6 +218,7 @@ type KeyImportResult struct {
 	Imported int
 	Skipped  int
 	Failed   int
+	Deferred int
 }
 
 // Group 是分组数据（FR-123/124）。

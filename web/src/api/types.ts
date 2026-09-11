@@ -283,6 +283,7 @@ export interface HubImportItem {
   keys_imported?: number
   keys_skipped?: number
   keys_failed?: number
+  keys_deferred?: number
 }
 
 /** 整次导入的汇总。 */
@@ -298,5 +299,6 @@ export interface HubImportResult {
   keys_imported: number
   keys_skipped: number
   keys_failed: number
+  keys_deferred: number
   items: HubImportItem[]
 }

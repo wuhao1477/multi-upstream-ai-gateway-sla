@@ -121,45 +121,57 @@ func (r *Runner) ImportKeys(
 			r.logKeyImportFailure(ch, cred.AccountID, "list", "", err)
 			return result, fmt.Errorf("账号 %d 读取 Key 列表失败", cred.AccountID)
 		}
+		result.Found += len(keys)
 		existing, err := store.KeyRefIndex(ctx, conn, cred.AccountID)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "lookup_existing", "", err)
 			return result, err
 		}
+		handled := 0
 		for _, key := range keys {
-			result.Found++
 			if key.KeyRef == "" {
 				r.logKeyImportFailure(ch, cred.AccountID, "validate_ref", "", fmt.Errorf("empty key reference"))
 				result.Failed++
+				handled++
 				continue
 			}
 			if keyID, found := existing[key.KeyRef]; found {
 				if err := updateImportedKey(ctx, conn, ch.ID, keyID, key); err != nil {
 					r.logKeyImportFailure(ch, cred.AccountID, "update_existing", key.KeyRef, err)
 					result.Failed++
+					handled++
 					continue
 				}
 				result.Skipped++
+				handled++
 				continue
 			}
 			secret, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
 			if err != nil {
 				r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
+				if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+					result.Deferred += len(keys) - handled
+					break
+				}
 				result.Failed++
+				handled++
 				continue
 			}
 			groupID, err := importedGroupID(ctx, conn, ch.ID, key.GroupRef)
 			if err != nil {
 				r.logKeyImportFailure(ch, cred.AccountID, "lookup_group", key.KeyRef, err)
 				result.Failed++
+				handled++
 				continue
 			}
 			if _, err := store.CreateKey(ctx, conn, cred.AccountID, secret, key.KeyRef, groupID); err != nil {
 				r.logKeyImportFailure(ch, cred.AccountID, "create", key.KeyRef, err)
 				result.Failed++
+				handled++
 				continue
 			}
 			result.Imported++
+			handled++
 		}
 	}
 	return result, nil

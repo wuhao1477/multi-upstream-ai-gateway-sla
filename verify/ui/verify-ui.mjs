@@ -195,7 +195,7 @@ try {
   check('创建时自动探测出站型 NewAPI 系', /NewAPI 系/.test(createToast));
   // 断言"读到了上游此刻真实声明的那个值",不是断言某个固定数字 ——
   // quota_per_unit 逐站不同,写死等于把 mock 的常量搬进真上游验收。
-  const qpuHit = new RegExp(`quota_per_unit=${UP_QPU}\\b`).test(createToast);
+  const qpuHit = new RegExp(`额度换算基数=${UP_QPU}\\b`).test(createToast);
   check('探测读到上游真实声明的 quota_per_unit（未写死）',
     qpuHit && UP_QPU > 0, `上游声明 ${UP_QPU}，界面回显${qpuHit ? '一致' : '不一致'}`);
 

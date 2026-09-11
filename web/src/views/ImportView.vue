@@ -118,6 +118,7 @@ function statusClass(s: string): string {
             <UiStat label="新导入密钥" :value="result.keys_imported" />
             <UiStat label="已有密钥" :value="result.keys_skipped" />
             <UiStat label="密钥失败" :value="result.keys_failed" />
+            <UiStat label="待重试密钥" :value="result.keys_deferred" />
           </div>
           <div class="tw" style="margin-top: 14px">
             <table>
@@ -160,6 +161,9 @@ function statusClass(s: string): string {
                       新增 {{ i.keys_imported ?? 0 }} · 已有 {{ i.keys_skipped ?? 0 }}
                       <template v-if="(i.keys_failed ?? 0) > 0">
                         · 失败 {{ i.keys_failed }}
+                      </template>
+                      <template v-if="(i.keys_deferred ?? 0) > 0">
+                        · 待重试 {{ i.keys_deferred }}
                       </template>
                     </template>
                     <span v-else>—</span>

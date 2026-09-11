@@ -491,6 +491,7 @@ func finishImport(res *collector.HubImportResult) {
 		res.KeysImported += it.KeysImported
 		res.KeysSkipped += it.KeysSkipped
 		res.KeysFailed += it.KeysFailed
+		res.KeysDeferred += it.KeysDeferred
 	}
 }
 
@@ -501,7 +502,13 @@ func applyKeyImportOutcome(
 	it.KeysImported += result.Imported
 	it.KeysSkipped += result.Skipped
 	it.KeysFailed += result.Failed
+	it.KeysDeferred += result.Deferred
 	if err != nil {
+		if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+			appendImportWarning(it,
+				"读取上游 Key 时触发限流，未处理部分请稍后重试")
+			return
+		}
 		appendImportWarning(it,
 			"自动导入 Key 失败，渠道、账号和凭证已保留；请到 Key 管理检查")
 		return
@@ -510,6 +517,10 @@ func applyKeyImportOutcome(
 		appendImportWarning(it, fmt.Sprintf(
 			"自动导入 Key：发现 %d 把，新增 %d 把，已有 %d 把，失败 %d 把；请到 Key 管理检查失败项",
 			result.Found, result.Imported, result.Skipped, result.Failed))
+	}
+	if result.Deferred > 0 {
+		appendImportWarning(it,
+			fmt.Sprintf("可能触发上游限流：%d 把 Key 待稍后重试", result.Deferred))
 	}
 }
 
