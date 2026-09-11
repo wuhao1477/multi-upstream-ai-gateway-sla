@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import * as adminApi from '@/api/admin'
 import type { CredentialItem } from '@/api/types'
+import { credentialTypeLabel } from '@/utils/format'
 import { useToastStore } from './toast'
 
 export const useCredentialsStore = defineStore('credentials', () => {
@@ -31,7 +32,7 @@ export const useCredentialsStore = defineStore('credentials', () => {
       // 后端回 cred_type + note，两者都要展示：cred_type 是判定结果
       // （运维据此确认"填的字段被认成了哪种凭证"），note 是续期方式提示。
       const o = (d ?? {}) as { cred_type?: string; note?: string }
-      const kind = o.cred_type ?? '未知类型'
+      const kind = credentialTypeLabel(o.cred_type)
       toast.show(`凭证已登记（${kind}）\n${o.note ?? ''}`, 'ok')
       await load()
       return true

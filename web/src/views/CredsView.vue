@@ -8,7 +8,7 @@ import type { Account } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
 import { useCredentialsStore } from '@/stores/credentials'
 import { useToastStore } from '@/stores/toast'
-import { fmtTime } from '@/utils/format'
+import { credentialTypeLabel, familyLabel, fmtTime, statusLabel } from '@/utils/format'
 
 const channels = useChannelsStore()
 const creds = useCredentialsStore()
@@ -147,12 +147,12 @@ async function save(): Promise<void> {
                   <code>{{ c.account_id }}</code>
                 </td>
                 <td>
-                  <span class="badge">{{ c.site_family }}</span>
+                  <span class="badge">{{ familyLabel(c.site_family) }}</span>
                 </td>
-                <td class="dim">{{ c.cred_type }}</td>
+                <td class="dim">{{ credentialTypeLabel(c.cred_type) }}</td>
                 <td>
                   <span class="badge" :class="c.status === 'valid' ? 'ok' : 'warn'">{{
-                    c.status
+                    statusLabel(c.status)
                   }}</span>
                 </td>
                 <!-- 只报"有没有"，不报内容 -->

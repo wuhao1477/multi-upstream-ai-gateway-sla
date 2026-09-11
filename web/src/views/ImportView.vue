@@ -5,9 +5,14 @@ import UiStat from '@/components/ui/UiStat.vue'
 import * as adminApi from '@/api/admin'
 import type { HubImportResult } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
+import { useCredentialsStore } from '@/stores/credentials'
+import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
+import { declaredFamilyLabel, familyLabel, importStatusLabel } from '@/utils/format'
 
 const channels = useChannelsStore()
+const creds = useCredentialsStore()
+const res = useResourcesStore()
 const toast = useToastStore()
 
 const file = ref<File | null>(null)
@@ -38,7 +43,7 @@ async function run(dry: boolean): Promise<void> {
     const raw = await file.value.text()
     const d = await adminApi.importHub(raw, dry)
     result.value = d
-    if (!dry) await channels.load()
+    if (!dry) await Promise.all([channels.load(), res.reload(), creds.load()])
     // 服务端 finishImport 把 would_import 也计进 imported，没有单独字段
     toast.show(
       `${dry ? '试运行完成' : '导入完成'}：${d.imported} 个${dry ? '可入库' : '已入库'} / ` +
@@ -109,6 +114,11 @@ function statusClass(s: string): string {
             <UiStat label="站型声明不符" :value="result.family_mismatches" />
             <UiStat label="有人机验证" :value="result.shielded_sites" />
             <UiStat label="缺凭证" :value="result.without_credential" />
+            <UiStat label="发现密钥" :value="result.keys_found" />
+            <UiStat label="新导入密钥" :value="result.keys_imported" />
+            <UiStat label="已有密钥" :value="result.keys_skipped" />
+            <UiStat label="密钥失败" :value="result.keys_failed" />
+            <UiStat label="待重试密钥" :value="result.keys_deferred" />
           </div>
           <div class="tw" style="margin-top: 14px">
             <table>
@@ -118,6 +128,7 @@ function statusClass(s: string): string {
                   <th>地址</th>
                   <th>探测站型</th>
                   <th>结果</th>
+                  <th>密钥</th>
                   <th>说明</th>
                 </tr>
               </thead>
@@ -130,19 +141,33 @@ function statusClass(s: string): string {
                       v-if="i.detected_family !== undefined"
                       class="badge"
                       :class="i.family_mismatch === true ? 'warn' : ''"
-                      >{{ i.detected_family }}</span
+                      >{{ familyLabel(i.detected_family) }}</span
                     >
                     <span v-else class="dim">—</span>
                     <span
                       v-if="i.family_mismatch === true"
                       class="dim"
                       style="font-size: 11px"
+                      :data-declared-family="i.declared_family"
                       title="导出声明与探测不符，以探测为准"
-                      >声明 {{ i.declared_family }}</span
+                      >声明 {{ declaredFamilyLabel(i.declared_family) }}</span
                     >
                   </td>
                   <td>
-                    <span class="badge" :class="statusClass(i.status)">{{ i.status }}</span>
+                    <span class="badge" :class="statusClass(i.status)">{{ importStatusLabel(i.status) }}</span>
+                  </td>
+                  <td class="dim">
+                    <template v-if="i.keys_found !== undefined">
+                      发现 {{ i.keys_found }}<br />
+                      新增 {{ i.keys_imported ?? 0 }} · 已有 {{ i.keys_skipped ?? 0 }}
+                      <template v-if="(i.keys_failed ?? 0) > 0">
+                        · 失败 {{ i.keys_failed }}
+                      </template>
+                      <template v-if="(i.keys_deferred ?? 0) > 0">
+                        · 待重试 {{ i.keys_deferred }}
+                      </template>
+                    </template>
+                    <span v-else>—</span>
                   </td>
                   <td class="dim" style="font-size: 12px">
                     {{ i.reason ?? '' }}

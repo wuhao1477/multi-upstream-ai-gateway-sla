@@ -81,7 +81,7 @@ export function balanceView(a: Account): BalanceView {
       kind: 'abnormal',
       text: amount,
       tone: state === 'critical' ? 'warn' : 'bad',
-      title: `最近确认余额 ${amount}，当前状态：${STATE_LABEL[state] ?? state}`,
+      title: `最近确认余额 ${amount}，当前状态：${STATE_LABEL[state] ?? '未知状态'}`,
     }
   }
   return {
@@ -95,7 +95,8 @@ export function balanceView(a: Account): BalanceView {
 /** 余额状态的中文短名，给徽标用。空串表示没有信号，不渲染徽标。 */
 export function balanceStateLabel(state: string | undefined): string {
   if (state === undefined || state === '' || state === 'normal') return ''
-  return STATE_LABEL[state] ?? state
+  // 未知枚举仍保留在原始数据中供诊断；可见文本必须保持中文。
+  return STATE_LABEL[state] ?? '未知状态'
 }
 
 /**
@@ -272,30 +273,9 @@ export function totalQuota(keys: Key[]): QuotaTotal {
 /** 限流文案。两个都没有时返回 '—' —— 那是"该站型没暴露"，不是"没有限制"。 */
 export function rateLimitText(k: Key): string {
   const parts: string[] = []
-  if (k.rpm_limit !== undefined) parts.push(`${k.rpm_limit} rpm`)
+  if (k.rpm_limit !== undefined) parts.push(`${k.rpm_limit} 次/分钟`)
   if (k.concurrency_limit !== undefined) parts.push(`${k.concurrency_limit} 并发`)
   return parts.length === 0 ? '—' : parts.join(' / ')
-}
-
-// ── Key 状态 ────────────────────────────────────────────────────────────────
-
-/**
- * Key 状态的中文短名（upstream_keys.status 的 CHECK 枚举，FR-031）。
- *
- * 直接把库里的枚举名摊给运维是不行的：`revoked` 与 `expired` 的处置动作
- * 完全不同（前者要重新登记一把，后者要去上游续期），而英文枚举名读起来
- * 一样是"不能用了"。未知取值原样透出 —— 加了新状态而没加映射时，
- * 让它露出来比显示成"未知"更容易被发现。
- */
-const KEY_STATUS_LABEL: Record<string, string> = {
-  active: '可用',
-  revoked: '已停用',
-  expired: '已过期',
-  insufficient_perm: '权限不足',
-}
-
-export function keyStatusLabel(s: string): string {
-  return KEY_STATUS_LABEL[s] ?? s
 }
 
 export const RATE_LIMIT_HINT =

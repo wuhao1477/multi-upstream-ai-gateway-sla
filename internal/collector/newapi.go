@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,6 +170,27 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 		out = append(out, k)
 	}
 	return out, nil
+}
+
+// ResolveKeySecret 通过 NewAPI 专用接口读取 Key 明文。
+//
+// /api/token/{id}/key 是读取接口，不能误用 /api/user/token；后者会重新生成
+// 系统访问令牌并作废当前凭证。
+// 形态来源：https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/newApiFamily/default/tokenKeyResolver.ts
+func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef string) (string, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(keyRef), 10, 64)
+	if err != nil || id <= 0 {
+		return "", fmt.Errorf("上游 Key 标识无效")
+	}
+	m, _, err := a.C.postJSONAuth(ctx, s, "/api/token/"+strconv.FormatInt(id, 10)+"/key")
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(asString(unwrapData(m)["key"]))
+	if key == "" || strings.Contains(key, "*") {
+		return "", fmt.Errorf("上游未返回可用 Key 明文")
+	}
+	return key, nil
 }
 
 // FetchGroups 由 /api/pricing 派生分组（04 §3.1 + 第 46 轮实测修正）。

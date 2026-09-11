@@ -24,9 +24,9 @@ import type { Key } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
-import { RATE_LIMIT_HINT, keyStatusLabel, rateLimitText } from '@/utils/money'
+import { RATE_LIMIT_HINT, rateLimitText } from '@/utils/money'
 import { KEY_OPTIONAL_COLS } from '@/utils/keyfilter'
-import { fmtAgo, fmtTime } from '@/utils/format'
+import { fmtAgo, fmtTime, keyStatusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -71,8 +71,7 @@ function channelName(id: number): string {
 
 /** 跳到该渠道的详情。先切路由再 select —— 反过来会让详情页短暂显示上一个渠道。 */
 async function openChannel(id: number): Promise<void> {
-  await router.push({ name: 'detail' })
-  await channels.select(id, channelName(id))
+  await router.push({ name: 'channel-detail', params: { id: String(id) } })
 }
 
 /** 编辑行的 colspan。列数算错只是子行宽度不对，但会露出一格空白，很显眼。 */
@@ -253,7 +252,7 @@ async function runPending(): Promise<void> {
                 {{ k.expired_time === undefined ? '永不过期' : fmtTime(k.expired_time) }}
               </td>
               <td v-if="!compact" data-col="status">
-                <span class="badge" :class="k.status === 'active' ? 'ok' : 'bad'" :title="k.status">{{
+                <span class="badge" :class="k.status === 'active' ? 'ok' : 'bad'" :data-key-status="k.status" :title="keyStatusLabel(k.status)">{{
                   keyStatusLabel(k.status)
                 }}</span>
               </td>

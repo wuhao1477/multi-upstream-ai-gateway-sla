@@ -39,9 +39,9 @@ export function unitLabel(u: string | undefined | null): string | null {
     case 'per_1m_token':
       return '×倍率'
     case 'per_1k_token':
-      return '×倍率(1k)'
+      return '×倍率（千令牌）'
     case 'per_token':
-      return '×倍率(token)'
+      return '×倍率（每令牌）'
     default:
       return null
   }
@@ -51,4 +51,135 @@ export function unitLabel(u: string | undefined | null): string | null {
 export function unitChip(u: string): string {
   if (u === 'unknown') return '口径未知'
   return unitLabel(u) ?? '口径未知'
+}
+
+const FAMILY_LABEL: Record<string, string> = {
+  newapi: 'NewAPI 系',
+  'new-api': 'NewAPI 系',
+  'one-api': 'NewAPI 系',
+  sub2api: 'Sub2API 系',
+  'sub2-api': 'Sub2API 系',
+  unknown: '未识别',
+}
+
+const DECLARED_FAMILY_LABEL: Record<string, string> = {
+  oneapi: 'OneAPI',
+  newapi: 'NewAPI',
+  'new-api': 'NewAPI',
+  anyrouter: 'AnyRouter',
+  veloera: 'Veloera',
+  onehub: 'OneHub',
+  donehub: 'DoneHub',
+  vapi: 'VAPI',
+  voapi: 'VoAPI',
+  'voapi(v1/v2)': 'VoAPI（v1/v2）',
+  superapi: 'SuperAPI',
+  rixapi: 'RixAPI',
+  neoapi: 'NeoAPI',
+  wonggongyi: 'WongGongyi',
+  sub2api: 'Sub2API',
+  'sub2-api': 'Sub2API',
+  aihubmix: 'AiHubMix',
+  sharedchat: 'SharedChat',
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  enabled: '启用',
+  disabled: '停用',
+  active: '启用',
+  revoked: '已停用',
+  expired: '已过期',
+  insufficient_perm: '权限不足',
+  valid: '有效',
+  invalid: '无效',
+  ok: '成功',
+  partial: '部分成功',
+  failed: '失败',
+  unsupported: '不支持',
+  skipped: '跳过',
+  imported: '已导入',
+  would_import: '可导入',
+  detected: '已探测',
+}
+
+const CAPABILITY_LABEL: Record<string, string> = {
+  account: '账号',
+  keys: '密钥',
+  groups: '分组',
+  pricing: '价格',
+  model_catalog: '模型目录',
+}
+
+const SUPPORT_LABEL: Record<string, string> = {
+  supported: '支持',
+  degraded: '部分支持',
+  unsupported: '不支持',
+}
+
+const CREDENTIAL_TYPE_LABEL: Record<string, string> = {
+  newapi_access_token: 'NewAPI 系访问令牌',
+  sub2api_jwt: 'Sub2API 系 JWT',
+}
+
+const KEY_STATUS_LABEL: Record<string, string> = {
+  active: '可用',
+  revoked: '已停用',
+  expired: '已过期',
+  insufficient_perm: '权限不足',
+}
+
+const ANOMALY_LABEL: Record<string, string> = {
+  delisted_model: '疑似下架模型',
+  stale_data: '数据陈旧',
+  degraded_missing_fields: '价格待人工录入',
+  unregistered_key: '上游有、库里没登记的密钥',
+  credential_invalid: '采集凭证失效',
+  credential_missing: '未登记采集凭证',
+  site_family_unknown: '站型未识别',
+  never_collected: '从未采集成功',
+  key_unusable: '密钥已停用或过期',
+}
+
+function mappedLabel(value: string | undefined | null, labels: Record<string, string>, fallback: string): string {
+  // 新枚举的原值仍保留在数据、筛选条件和 data-* 属性中；用户可见区域不直接显示英文。
+  if (value === undefined || value === null || value === '') return fallback
+  return labels[value] ?? fallback
+}
+
+export function familyLabel(value: string | undefined | null): string {
+  return mappedLabel(value, FAMILY_LABEL, '未知站型')
+}
+
+export function declaredFamilyLabel(value: string | undefined | null): string {
+  const normalized = value?.trim().toLowerCase()
+  return mappedLabel(normalized, DECLARED_FAMILY_LABEL, '导出声明未识别')
+}
+
+export function statusLabel(value: string | undefined | null): string {
+  return mappedLabel(value, STATUS_LABEL, '未知状态')
+}
+
+export function importStatusLabel(value: string | undefined | null): string {
+  return mappedLabel(value, STATUS_LABEL, '未知结果')
+}
+
+export function capabilityLabel(value: string | undefined | null): string {
+  return mappedLabel(value, CAPABILITY_LABEL, '未知能力')
+}
+
+export function supportLevelLabel(value: string | undefined | null): string {
+  return mappedLabel(value, SUPPORT_LABEL, '未知支持级别')
+}
+
+export function credentialTypeLabel(value: string | undefined | null): string {
+  return mappedLabel(value, CREDENTIAL_TYPE_LABEL, '未知凭证类型')
+}
+
+export function keyStatusLabel(value: string | undefined | null): string {
+  // 未知枚举仍保留在 data-* 属性和日志中；可见文本遵守管理界面的中文要求。
+  return mappedLabel(value, KEY_STATUS_LABEL, '未知状态')
+}
+
+export function anomalyLabel(value: string | undefined | null): string {
+  return mappedLabel(value, ANOMALY_LABEL, '未知异常')
 }

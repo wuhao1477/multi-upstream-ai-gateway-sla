@@ -126,8 +126,18 @@ func authHeaders(s Session) http.Header {
 
 // getJSONAuth 带鉴权取 JSON，返回解析后的 map 与原始字节。
 func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[string]any, []byte, error) {
+	return c.doJSONAuth(ctx, s, http.MethodGet, path)
+}
+
+func (c *Client) postJSONAuth(ctx context.Context, s Session, path string) (map[string]any, []byte, error) {
+	return c.doJSONAuth(ctx, s, http.MethodPost, path)
+}
+
+func (c *Client) doJSONAuth(
+	ctx context.Context, s Session, method, path string,
+) (map[string]any, []byte, error) {
 	url := strings.TrimRight(s.BaseURL, "/") + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -135,7 +145,7 @@ func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[s
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("GET %s: %w", path, err)
+		return nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -146,15 +156,15 @@ func (c *Client) getJSONAuth(ctx context.Context, s Session, path string) (map[s
 	if resp.StatusCode == http.StatusUnauthorized {
 		// 401 单列：调用方据此触发续期或人工重登（04 §5 第 2/4 层）
 		return nil, raw, newHTTPError(resp,
-			fmt.Sprintf("%v: GET %s", ErrUnauthorized, path), ErrUnauthorized)
+			fmt.Sprintf("%v: %s %s", ErrUnauthorized, method, path), ErrUnauthorized)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, raw, newHTTPError(resp, fmt.Sprintf("GET %s 返回 %d: %s",
-			path, resp.StatusCode, snippet(raw)), nil)
+		return nil, raw, newHTTPError(resp, fmt.Sprintf("%s %s 返回 %d: %s",
+			method, path, resp.StatusCode, snippet(raw)), nil)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, raw, fmt.Errorf("解析 %s 响应失败（非 JSON）: %s", path, snippet(raw))
+		return nil, raw, fmt.Errorf("解析 %s %s 响应失败（非 JSON）: %s", method, path, snippet(raw))
 	}
 	return m, raw, nil
 }

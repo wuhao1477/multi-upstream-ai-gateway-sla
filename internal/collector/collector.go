@@ -204,6 +204,23 @@ type Key struct {
 	Meta         SourceMeta
 }
 
+// KeySecretResolver 按上游 Key 标识读取明文，仅供导入流程使用。
+//
+// 常规 FetchKeys 只返回脱敏引用，避免采集响应携带明文；导入时若站点提供
+// 专用读取接口，才通过这个可选能力取得明文并立即交给存储层。
+type KeySecretResolver interface {
+	ResolveKeySecret(ctx context.Context, s Session, keyRef string) (string, error)
+}
+
+// KeyImportResult 是一次账号 Key 导入的计数结果。
+type KeyImportResult struct {
+	Found    int
+	Imported int
+	Skipped  int
+	Failed   int
+	Deferred int
+}
+
 // Group 是分组数据（FR-123/124）。
 type Group struct {
 	GroupRef string // → channel_groups.group_ref

@@ -97,6 +97,49 @@ func detected() collector.DetectResult {
 	}
 }
 
+func TestKeyImportFailureDoesNotChangeImportedStatus(t *testing.T) {
+	item := collector.HubImportItem{Status: "imported"}
+	secret := "not-for-response"
+	applyKeyImportOutcome(&item, collector.KeyImportResult{}, fmt.Errorf("读取失败: %s", secret))
+
+	if item.Status != "imported" {
+		t.Fatalf("Key 导入失败不应改变基础导入状态，得到 %q", item.Status)
+	}
+	if !strings.Contains(item.Warning, "Key") {
+		t.Fatalf("缺少 Key 提醒：%q", item.Warning)
+	}
+	if strings.Contains(item.Warning, secret) {
+		t.Fatalf("提醒泄露了 Key 相关敏感文本：%q", item.Warning)
+	}
+}
+
+func TestKeyImportRateLimitShowsRetryWarning(t *testing.T) {
+	item := collector.HubImportItem{Status: "imported"}
+	applyKeyImportOutcome(&item, collector.KeyImportResult{
+		Found: 5, Deferred: 3,
+	}, &collector.HTTPError{StatusCode: 429, Message: "rate limited"})
+
+	if item.KeysDeferred != 3 {
+		t.Fatalf("待重试 Key 数 = %d，期望 3", item.KeysDeferred)
+	}
+	if !strings.Contains(item.Warning, "限流") || !strings.Contains(item.Warning, "稍后重试") {
+		t.Fatalf("限流提醒不完整：%q", item.Warning)
+	}
+}
+
+func TestFinishImportAggregatesKeyCounts(t *testing.T) {
+	res := &collector.HubImportResult{Items: []collector.HubImportItem{
+		{Status: "imported", KeysFound: 3, KeysImported: 2, KeysSkipped: 1, KeysFailed: 0, KeysDeferred: 0},
+		{Status: "skipped", KeysFound: 2, KeysImported: 0, KeysSkipped: 1, KeysFailed: 1, KeysDeferred: 1},
+	}}
+
+	finishImport(res)
+	if res.Imported != 1 || res.Skipped != 1 || res.KeysFound != 5 ||
+		res.KeysImported != 2 || res.KeysSkipped != 2 || res.KeysFailed != 1 || res.KeysDeferred != 1 {
+		t.Fatalf("导入汇总错误：%+v", res)
+	}
+}
+
 func TestUnknownImportedChannelNeedsFamilyRepair(t *testing.T) {
 	if !needsFamilyRepair("unknown", collector.FamilyNewAPI) {
 		t.Fatal("已有渠道为 unknown、探测得到 newapi 时必须补写站型")

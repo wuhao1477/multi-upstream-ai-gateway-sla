@@ -110,10 +110,17 @@ type HubImportItem struct {
 	DetectedFamily Family `json:"detected_family,omitempty"`
 	Mismatch       bool   `json:"family_mismatch,omitempty"`
 	ChannelID      int64  `json:"channel_id,omitempty"`
-	Status         string `json:"status"` // imported | skipped | failed
-	Reason         string `json:"reason,omitempty"`
+	// AccountID 只供导入完成后定位该条目的账号，不进入响应。
+	AccountID int64  `json:"-"`
+	Status    string `json:"status"` // imported | skipped | failed
+	Reason    string `json:"reason,omitempty"`
 	// Warning 记录可用但需注意的情形（如开盾站点采集不可行）。
-	Warning string `json:"warning,omitempty"`
+	Warning      string `json:"warning,omitempty"`
+	KeysFound    int    `json:"keys_found,omitempty"`
+	KeysImported int    `json:"keys_imported,omitempty"`
+	KeysSkipped  int    `json:"keys_skipped,omitempty"`
+	KeysFailed   int    `json:"keys_failed,omitempty"`
+	KeysDeferred int    `json:"keys_deferred,omitempty"`
 }
 
 // HubImportResult 是整次导入的汇总。
@@ -125,6 +132,11 @@ type HubImportResult struct {
 	Mismatches   int             `json:"family_mismatches"`
 	Shielded     int             `json:"shielded_sites"`
 	NoCredential int             `json:"without_credential"`
+	KeysFound    int             `json:"keys_found"`
+	KeysImported int             `json:"keys_imported"`
+	KeysSkipped  int             `json:"keys_skipped"`
+	KeysFailed   int             `json:"keys_failed"`
+	KeysDeferred int             `json:"keys_deferred"`
 	Items        []HubImportItem `json:"items"`
 }
 

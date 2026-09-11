@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
  * 侧栏导航图标。内联 SVG 而非图标库：管理面要在内网/离线环境能开，
- * 且六个图标不值得引一个依赖。线条取自 lucide（与参考仓库同源）。
+ * 且五个图标不值得引一个依赖。线条取自 lucide（与参考仓库同源）。
  */
-defineProps<{ name: 'channels' | 'detail' | 'accounts' | 'keys' | 'creds' | 'import' }>()
+defineProps<{ name: 'channels' | 'accounts' | 'keys' | 'creds' | 'import' }>()
 </script>
 
 <template>
@@ -12,10 +12,6 @@ defineProps<{ name: 'channels' | 'detail' | 'accounts' | 'keys' | 'creds' | 'imp
       <rect x="2" y="3" width="20" height="6" rx="2" />
       <rect x="2" y="15" width="20" height="6" rx="2" />
       <path d="M6 6h.01M6 18h.01" />
-    </template>
-    <template v-else-if="name === 'detail'">
-      <path d="M3 3v18h18" />
-      <path d="m7 15 4-5 3 3 4-6" />
     </template>
     <!-- 账号=人形（钱的归属方），Key=钥匙。两个对象在界面上到处并列出现，
          图标不同才能让人在扫侧栏时不用读字 -->

@@ -279,6 +279,11 @@ export interface HubImportItem {
   reason?: string
   /** 可用但需注意：开盾站点、导出里没凭证。 */
   warning?: string
+  keys_found?: number
+  keys_imported?: number
+  keys_skipped?: number
+  keys_failed?: number
+  keys_deferred?: number
 }
 
 /** 整次导入的汇总。 */
@@ -290,5 +295,10 @@ export interface HubImportResult {
   family_mismatches: number
   shielded_sites: number
   without_credential: number
+  keys_found: number
+  keys_imported: number
+  keys_skipped: number
+  keys_failed: number
+  keys_deferred: number
   items: HubImportItem[]
 }
