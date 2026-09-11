@@ -2,9 +2,9 @@
 
 一个面向个人和内网环境的多上游 AI 渠道管理系统。它把不同站型的渠道、账号、Key、分组、额度和模型目录统一采集到 PostgreSQL，并提供管理 UI、手动采集和周期采集。
 
-当前发布版本：`v1.0.1` · 当前交付阶段：**P1 上游采集与管理**
+当前发布版本：`v1.0.2` · 当前交付阶段：**P1 上游采集与管理**
 
-[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.1](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.1) · [Apache-2.0](LICENSE)
+[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.2](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.2) · [Apache-2.0](LICENSE)
 
 ## P1 已交付什么
 
@@ -18,9 +18,9 @@
 - 手动采集、周期采集、部分成功和 `degraded` 能力标记
 - 资产总览、异常项、管理 API 和 Vue 管理 UI
 
-## 明确不在 v1.0.1
+## 明确不在本版本
 
-P1 不包含请求转发、账本、候选调度、SLA 接管、容量保留、告警、压测、订阅台账或多租户。`/v1/*` 是后续 P2 的数据面入口；当前版本可通过 Caddy 访问 `/healthz`，管理面走本机回环端口。
+P1 不包含请求转发、账本、候选调度、SLA 接管、容量保留、告警、压测、订阅台账或多租户。`/v1/*` 是后续 P2 的数据面入口；当前版本只有管理面与 `/healthz`，都走本机回环端口，不对外监听。
 
 ## 5 分钟启动
 
@@ -31,7 +31,7 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-把生成的随机值分别填入 `.env` 的 `POSTGRES_PASSWORD` 和 `ADMIN_TOKEN`。不要把 `.env`、上游 Key 或采集凭证提交到 Git。
+把生成的随机值填入 `.env` 的 `ADMIN_TOKEN`，并把 `DATABASE_URL` 指向一个**已存在的外部 PostgreSQL 16+**（本栈不自带数据库；账号需有建表权限，首次启动会自动跑迁移）。不要把 `.env`、上游 Key 或采集凭证提交到 Git。
 
 公开 GHCR 镜像无需登录；如果所在环境要求认证，再使用具备 `read:packages` 权限的令牌登录。
 
@@ -41,40 +41,35 @@ openssl rand -hex 32
 docker compose pull
 docker compose up -d
 docker compose ps
-curl -k https://localhost/healthz
+curl http://127.0.0.1:18081/healthz
 ```
 
-管理界面地址：<http://127.0.0.1:8080/admin/ui/>。在界面中输入 `.env` 的 `ADMIN_TOKEN`，然后创建渠道、账号、采集凭证和上游 Key。
+管理界面地址：<http://127.0.0.1:18081/admin/ui/>。在界面中输入 `.env` 的 `ADMIN_TOKEN`，然后创建渠道、账号、采集凭证和上游 Key。
 
 ## 架构
 
 ```text
-管理 UI/API ──> sla-core-a :8080 ─┐
-                                  ├── PostgreSQL 16
-管理 UI/API ──> sla-core-b :8080 ┘
-
-客户端 ────────> Caddy :80/:443 ──> /healthz（P1）
-                              └──> /v1/*（P2）
-
-collector ───────────────────────> PostgreSQL + 上游管理接口
+管理 UI/API ──> 127.0.0.1:18081 ──> sla-core :8080 ─┐
+                                                     ├── 外部 PostgreSQL 16+
+collector ──────────────────────────────────────────┘      （DATABASE_URL）
+                    └──> 上游站点管理接口
 ```
 
-- `sla-core-a/b` 共享 PostgreSQL；启动时自动执行迁移和配置种子。
+- 数据库在栈外：备份、升级和高可用由那一侧负责，`docker compose down` 不会碰到数据。
+- `sla-core` 与 `collector` 共享同一个库；启动时由 PG 咨询锁选主，只有一个执行迁移。
 - `collector` 使用同一镜像中的 `/collector`，负责周期采集，不发布宿主机端口。
-- Caddy 只代理 `/healthz` 和未来的 `/v1/*`；`/admin/*`、`/metrics` 不经 Caddy。
-- 管理端口只绑定 `127.0.0.1`，默认是 `8080`。
+- 管理端口只绑定 `127.0.0.1`，默认是 `18081` —— 对外暴露请在前面放反向代理，并**只放行 `/healthz`**。
+- ⚠️ 本栈是**单实例**：重启即中断，不承诺 AC-27 的进程级冗余。需要它就得加第二个 `sla-core` 与一层带健康探测的 LB。
 
 ## 配置
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1` | 发布镜像版本 |
-| `POSTGRES_PASSWORD` | 无 | 必填；建议 `openssl rand -hex 32` |
-| `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌 |
-| `ADMIN_PORT` | `8080` | 本机管理端口 |
-| `SITE_ADDRESS` | `localhost` | Caddy 站点名；默认使用自签证书 |
-| `HTTP_PORT` | `80` | Caddy HTTP 端口 |
-| `HTTPS_PORT` | `443` | Caddy HTTPS 端口 |
+| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.2` | 发布镜像版本 |
+| `DATABASE_URL` | 无 | 必填；外部 PostgreSQL 16+ 连接串 |
+| `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌，建议 `openssl rand -hex 32` |
+| `ADMIN_PORT` | `18081` | 本机管理端口，只绑 `127.0.0.1` |
+| `SLA_COLLECTOR` | 空（关） | 非空时 `sla-core` 进程内跑周期采集；用它可以省掉 `collector` 容器 |
 
 上游 Key 和采集凭证是运行时数据，使用管理界面登记，不写进环境变量。
 
@@ -82,14 +77,13 @@ collector ───────────────────────>
 
 ```bash
 docker compose ps
-docker compose logs --tail=200 sla-core-a sla-core-b collector
-docker compose logs -f caddy
+docker compose logs --tail=200 sla-core collector
 docker compose stop
 docker compose start
-docker compose exec -T postgres pg_dump -U sla -d sla > sla-backup.sql
+pg_dump "$DATABASE_URL" > sla-backup.sql
 ```
 
-`docker compose down -v` 会删除 PostgreSQL 数据卷，只能在明确放弃数据时使用。升级或回滚时修改 `.env` 的 `SLA_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
+备份直接打外部库，不经过 compose；栈里没有任何数据卷，`docker compose down` 不会丢数据。升级或回滚时修改 `.env` 的 `SLA_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
 
 完整的备份恢复、安全边界和排障说明见 [部署指南](docs/DEPLOYMENT.md)。
 
@@ -119,10 +113,10 @@ docker compose -f deploy/docker-compose.yml down -v
 Release 工作流由 Tag 触发，构建 Linux amd64/arm64 二进制并推送多架构 GHCR 镜像：
 
 ```text
-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1
+ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.2
 ```
 
-当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.1](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.1) 与 [发布工作流](.github/workflows/release.yml)。
+当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.2](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.2) 与 [发布工作流](.github/workflows/release.yml)。
 
 ## 文档地图
 
