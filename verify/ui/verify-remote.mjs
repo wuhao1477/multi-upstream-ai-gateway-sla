@@ -232,7 +232,7 @@ try {
     trs.forEach(tr => {
       const cell = tr.querySelector('td[data-col="family"]');
       const badge = cell?.querySelector('.badge');
-      const fam = badge?.dataset.family || badge?.innerText.trim() || cell?.innerText.trim() || '';
+      const fam = badge?.dataset.family ?? badge?.innerText.trim() ?? cell?.innerText.trim() ?? '';
       c[fam] = (c[fam] || 0) + 1;
     });
     return c;

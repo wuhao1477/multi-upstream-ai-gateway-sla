@@ -20,7 +20,7 @@
 
 | 入口 | 跑什么 | 需要 |
 | --- | --- | --- |
-| `ui-stack.sh` | 真 Chrome 点管理界面：SPA 18 项 + 功能 58 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 18 项并打印跳过了什么） |
+| `ui-stack.sh` | 真 Chrome 点管理界面：SPA 17 项 + 功能 58 项 + Key 明文不进日志 1 项 | Chrome、node、PG；**`HUB_FILE`**（缺了就降级只跑 SPA 17 项并打印跳过了什么） |
 | `ui-stack.sh --keep` | 同一套栈，起完停在前台供**人工**点验，打印真上游地址与凭证 | 同上但不需要 Chrome；`HUB_FILE` 必填（手点的意义就是对真站点点） |
 | `test-arm-cloud.sh` | 把云端 arm64 镜像拉回本地真机验收 | gh、docker、`HUB_FILE` |
 | `remote-stack.sh` | 连内网真库的只读验收 32 项（起栈/拆栈/防打在旧进程上） | Chrome、node、`DATABASE_URL` 到得了 <internal-db-host> |
