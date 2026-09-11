@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// 端点形态来自 all-api-hub 当前适配器：
+// https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/newApiFamily/default/tokenKeyResolver.ts
+// 以及 NewAPI 的路由/控制器源码链接（见该文件注释）。
 func TestNewAPIResolveKeySecretUsesPostRevealEndpoint(t *testing.T) {
 	var method, path, authorization string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +44,8 @@ func TestNewAPIResolveKeySecretUsesPostRevealEndpoint(t *testing.T) {
 	}
 }
 
+// 端点形态来自 all-api-hub 当前 Sub2API 适配器：
+// https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/sub2api/index.ts
 func TestSub2APIResolveKeySecretReadsDetailKey(t *testing.T) {
 	var method, path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

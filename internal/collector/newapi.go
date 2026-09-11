@@ -176,6 +176,7 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 //
 // /api/token/{id}/key 是读取接口，不能误用 /api/user/token；后者会重新生成
 // 系统访问令牌并作废当前凭证。
+// 形态来源：https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/newApiFamily/default/tokenKeyResolver.ts
 func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef string) (string, error) {
 	id, err := strconv.ParseInt(strings.TrimSpace(keyRef), 10, 64)
 	if err != nil || id <= 0 {

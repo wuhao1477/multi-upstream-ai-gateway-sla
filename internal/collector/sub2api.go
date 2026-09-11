@@ -214,6 +214,7 @@ func (a *Sub2APIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error
 
 // ResolveKeySecret 读取 Sub2API Key 详情中的明文。
 // Sub2API 没有 NewAPI 的独立 reveal 路径，详情接口直接返回 key。
+// 形态来源：https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/sub2api/index.ts
 func (a *Sub2APIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef string) (string, error) {
 	id, err := strconv.ParseInt(strings.TrimSpace(keyRef), 10, 64)
 	if err != nil || id <= 0 {

@@ -95,6 +95,7 @@ export function balanceView(a: Account): BalanceView {
 /** 余额状态的中文短名，给徽标用。空串表示没有信号，不渲染徽标。 */
 export function balanceStateLabel(state: string | undefined): string {
   if (state === undefined || state === '' || state === 'normal') return ''
+  // 未知枚举仍保留在原始数据中供诊断；可见文本必须保持中文。
   return STATE_LABEL[state] ?? '未知状态'
 }
 

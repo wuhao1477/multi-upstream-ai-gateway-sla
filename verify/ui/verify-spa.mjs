@@ -77,6 +77,16 @@ try {
   check('渠道详情页面高亮渠道管理', detailState.channelsActive,
     `channelsActive=${detailState.channelsActive}`);
 
+  await page.goto(`${BASE}/admin/ui/channels/999999`, { waitUntil: 'domcontentloaded' });
+  const missingDetail = await page.evaluate(() => ({
+    empty: document.querySelector('#detail-empty')?.textContent || '',
+    detailName: document.querySelector('#detail-name') !== null,
+  }));
+  check('不存在的渠道详情不显示旧渠道数据',
+    (/渠道不存在或已删除/.test(missingDetail.empty) || /先在/.test(missingDetail.empty))
+      && !missingDetail.detailName,
+    JSON.stringify(missingDetail));
+
   // ── 4. 点导航会改地址栏（分栏可分享链接）──
   await page.click('.nav-item[data-pane="import"]');
   await page.waitForFunction(() =>

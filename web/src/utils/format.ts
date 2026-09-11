@@ -57,10 +57,30 @@ const FAMILY_LABEL: Record<string, string> = {
   newapi: 'NewAPI 系',
   'new-api': 'NewAPI 系',
   'one-api': 'NewAPI 系',
-  veloera: 'NewAPI 系',
   sub2api: 'Sub2API 系',
   'sub2-api': 'Sub2API 系',
   unknown: '未识别',
+}
+
+const DECLARED_FAMILY_LABEL: Record<string, string> = {
+  oneapi: 'OneAPI',
+  newapi: 'NewAPI',
+  'new-api': 'NewAPI',
+  anyrouter: 'AnyRouter',
+  veloera: 'Veloera',
+  onehub: 'OneHub',
+  donehub: 'DoneHub',
+  vapi: 'VAPI',
+  voapi: 'VoAPI',
+  'voapi(v1/v2)': 'VoAPI（v1/v2）',
+  superapi: 'SuperAPI',
+  rixapi: 'RixAPI',
+  neoapi: 'NeoAPI',
+  wonggongyi: 'WongGongyi',
+  sub2api: 'Sub2API',
+  'sub2-api': 'Sub2API',
+  aihubmix: 'AiHubMix',
+  sharedchat: 'SharedChat',
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -121,12 +141,18 @@ const ANOMALY_LABEL: Record<string, string> = {
 }
 
 function mappedLabel(value: string | undefined | null, labels: Record<string, string>, fallback: string): string {
+  // 新枚举的原值仍保留在数据、筛选条件和 data-* 属性中；用户可见区域不直接显示英文。
   if (value === undefined || value === null || value === '') return fallback
   return labels[value] ?? fallback
 }
 
 export function familyLabel(value: string | undefined | null): string {
   return mappedLabel(value, FAMILY_LABEL, '未知站型')
+}
+
+export function declaredFamilyLabel(value: string | undefined | null): string {
+  const normalized = value?.trim().toLowerCase()
+  return mappedLabel(normalized, DECLARED_FAMILY_LABEL, '导出声明未识别')
 }
 
 export function statusLabel(value: string | undefined | null): string {
@@ -150,6 +176,7 @@ export function credentialTypeLabel(value: string | undefined | null): string {
 }
 
 export function keyStatusLabel(value: string | undefined | null): string {
+  // 未知枚举仍保留在 data-* 属性和日志中；可见文本遵守管理界面的中文要求。
   return mappedLabel(value, KEY_STATUS_LABEL, '未知状态')
 }
 

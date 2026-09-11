@@ -134,6 +134,16 @@ export const useChannelsStore = defineStore('channels', () => {
     await loadInventory()
   }
 
+  function clearSelection(): void {
+    syncRequest++
+    currentID.value = null
+    currentName.value = ''
+    inventory.value = null
+    syncResult.value = null
+    syncError.value = ''
+    syncing.value = false
+  }
+
   async function loadInventory(): Promise<void> {
     const id = currentID.value
     if (id === null) return
@@ -203,6 +213,7 @@ export const useChannelsStore = defineStore('channels', () => {
     create,
     patch,
     select,
+    clearSelection,
     sync,
   }
 })

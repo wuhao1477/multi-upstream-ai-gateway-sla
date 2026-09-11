@@ -8,7 +8,7 @@ import { useChannelsStore } from '@/stores/channels'
 import { useCredentialsStore } from '@/stores/credentials'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
-import { familyLabel, importStatusLabel } from '@/utils/format'
+import { declaredFamilyLabel, familyLabel, importStatusLabel } from '@/utils/format'
 
 const channels = useChannelsStore()
 const creds = useCredentialsStore()
@@ -148,7 +148,7 @@ function statusClass(s: string): string {
                       class="dim"
                       style="font-size: 11px"
                       title="导出声明与探测不符，以探测为准"
-                      >声明 {{ familyLabel(i.declared_family) }}</span
+                      >声明 {{ declaredFamilyLabel(i.declared_family) }}</span
                     >
                   </td>
                   <td>

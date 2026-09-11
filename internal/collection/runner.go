@@ -4,6 +4,7 @@ package collection
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,7 @@ type Runner struct {
 	Client          *collector.Client
 	Sink            collector.Sink
 	Auth            *collector.Authenticator
+	Logger          *slog.Logger
 	LoadCredentials func(context.Context, store.Channel) ([]collector.Credential, error)
 }
 
@@ -27,6 +29,7 @@ func NewRunner(pool *store.Pool, client *collector.Client) *Runner {
 		Client: client,
 		Sink:   store.NewCollectorSink(pool),
 		Auth:   collector.NewAuthenticator(credentials),
+		Logger: slog.Default(),
 		LoadCredentials: func(ctx context.Context, ch store.Channel) ([]collector.Credential, error) {
 			conn, release, err := pool.Acquire(ctx)
 			if err != nil {
@@ -104,29 +107,35 @@ func (r *Runner) ImportKeys(
 		if r.Auth != nil && refresher != nil {
 			cred, err = r.Auth.EnsureFresh(ctx, cred, refresher, time.Now())
 			if err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "renew", "", err)
 				return result, fmt.Errorf("账号 %d 凭证续期失败", cred.AccountID)
 			}
 		}
 		session, err := adapter.Authenticate(ctx, cred)
 		if err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "authenticate", "", err)
 			return result, fmt.Errorf("账号 %d 会话鉴权失败", cred.AccountID)
 		}
 		keys, err := adapter.FetchKeys(ctx, session)
 		if err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "list", "", err)
 			return result, fmt.Errorf("账号 %d 读取 Key 列表失败", cred.AccountID)
 		}
 		existing, err := store.KeyRefIndex(ctx, conn, cred.AccountID)
 		if err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "lookup_existing", "", err)
 			return result, err
 		}
 		for _, key := range keys {
 			result.Found++
 			if key.KeyRef == "" {
+				r.logKeyImportFailure(ch, cred.AccountID, "validate_ref", "", fmt.Errorf("empty key reference"))
 				result.Failed++
 				continue
 			}
 			if keyID, found := existing[key.KeyRef]; found {
 				if err := updateImportedKey(ctx, conn, ch.ID, keyID, key); err != nil {
+					r.logKeyImportFailure(ch, cred.AccountID, "update_existing", key.KeyRef, err)
 					result.Failed++
 					continue
 				}
@@ -135,15 +144,18 @@ func (r *Runner) ImportKeys(
 			}
 			secret, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
 			if err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
 				result.Failed++
 				continue
 			}
 			groupID, err := importedGroupID(ctx, conn, ch.ID, key.GroupRef)
 			if err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "lookup_group", key.KeyRef, err)
 				result.Failed++
 				continue
 			}
 			if _, err := store.CreateKey(ctx, conn, cred.AccountID, secret, key.KeyRef, groupID); err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "create", key.KeyRef, err)
 				result.Failed++
 				continue
 			}
@@ -151,6 +163,25 @@ func (r *Runner) ImportKeys(
 		}
 	}
 	return result, nil
+}
+
+func (r *Runner) logKeyImportFailure(
+	ch store.Channel, accountID int64, stage, keyRef string, err error,
+) {
+	if r.Logger == nil {
+		return
+	}
+	attrs := []any{
+		"channel_id", ch.ID,
+		"account_id", accountID,
+		"key_ref", keyRef,
+		"stage", stage,
+		"error_type", fmt.Sprintf("%T", err),
+	}
+	if status, _, ok := collector.HTTPFailure(err); ok {
+		attrs = append(attrs, "http_status", status)
+	}
+	r.Logger.Warn("导入上游 Key 失败", attrs...)
 }
 
 func importedGroupID(

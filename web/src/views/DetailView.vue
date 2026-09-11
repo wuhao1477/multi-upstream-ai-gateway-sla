@@ -52,13 +52,24 @@ watch(
 )
 
 const routeChannelID = computed(() => Number(route.params.id))
+const channelMissing = computed(
+  () =>
+    channels.loaded &&
+    Number.isInteger(routeChannelID.value) &&
+    routeChannelID.value > 0 &&
+    channels.list.every((item) => item.id !== routeChannelID.value),
+)
 
 watch(
   [() => channels.loaded, routeChannelID],
   ([loaded, id]) => {
     if (!loaded || !Number.isInteger(id) || id <= 0) return
     const channel = channels.list.find((item) => item.id === id)
-    if (channel !== undefined) void channels.select(channel.id, channel.name)
+    if (channel === undefined) {
+      channels.clearSelection()
+      return
+    }
+    void channels.select(channel.id, channel.name)
   },
   { immediate: true },
 )
@@ -101,7 +112,7 @@ function openAddKey(accountID: number): void {
 <template>
   <div class="pane on" id="pane-detail">
     <UiCard v-if="channels.currentID === null" id="detail-empty">
-      <UiEmpty>先在「渠道管理」里选一个渠道</UiEmpty>
+      <UiEmpty>{{ channelMissing ? '渠道不存在或已删除，请返回「渠道管理」' : '先在「渠道管理」里选一个渠道' }}</UiEmpty>
     </UiCard>
 
     <template v-else>

@@ -50,13 +50,18 @@ all-api-hub 账号侧适配 17 种站型：OneAPI、NewAPI、AnyRouter、Veloera
 | 站点探测 | `GET /api/status` | 站点类型/版本线索 |
 | 账号余额 | `GET /api/user/self` | `quota`（钱包余额）、`access_token` |
 | 用量统计 | `GET /api/log/self`、`GET /api/log/self/stat` | 精确今日消耗 `quota`、请求/Token 数 |
-| Key 管理 | `GET/POST /api/token`、`PUT/DELETE /api/token/:id`、`GET /api/token/{id}/key` | 自动建 Key；Key DTO 含 `remain_quota`、`used_quota`、`unlimited_quota`、`expired_time`、`group`、`model_limits/models` |
+| Key 管理 | `GET/POST /api/token`、`PUT/DELETE /api/token/:id`、`POST /api/token/{id}/key` | 自动建 Key；Key DTO 含 `remain_quota`、`used_quota`、`unlimited_quota`、`expired_time`、`group`、`model_limits/models` |
 | 分组倍率 | `GET /api/user/self/groups`、`/api/group`、`/api/user_group_map` | 用户组、分组倍率 |
 | 模型价格 | `GET /api/pricing` | 模型倍率/价格（服务 FR-010 系采集） |
 | 模型列表 | `GET /api/user/models`、`/api/available_model` | 可用模型 |
 | 签到 | `POST /api/user/checkin`、`GET /api/user/check_in_status` | 含 Turnstile 处理 |
 
 Sub2API 系（envelope `{code,message,data}`）：`/api/v1/auth/me`（balance）、`/api/v1/keys`（**`quota`、`quota_used`、`expires_at`**、group.`rate_multiplier`）、`/api/v1/groups/available|rates`、`/api/v1/usage/stats`、`/api/v1/auth/refresh`。
+
+Key 明文读取的当前来源：all-api-hub 的 NewAPI 适配器调用
+[`POST /api/token/{id}/key`](https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/newApiFamily/default/tokenKeyResolver.ts)，
+Sub2API 适配器调用 [`GET /api/v1/keys/{id}`](https://github.com/qixing-jk/all-api-hub/blob/main/src/services/apiService/sub2api/index.ts)。
+两者都不是备份 JSON 的字段；导入器必须先建立会话，再按上游 Key 标识读取。
 
 ### 3. FR-033/034 字段覆盖判定
 
