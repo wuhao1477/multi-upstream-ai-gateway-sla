@@ -10,19 +10,13 @@
 - 一台能访问 GHCR 的 Linux/macOS 主机。
 - 80、443 和管理端口（默认 8080）没有被其他程序占用。
 
-仓库当前为私有仓库，GHCR 镜像默认需要登录：
-
-```bash
-echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
-```
-
-Token 需要 `read:packages` 权限。不要把 Token 写入仓库或 `.env`。
+公开仓库和 GHCR 镜像无需登录即可访问。如果所在环境要求认证，再使用具备 `read:packages` 权限的令牌登录；不要把 Token 写入仓库或 `.env`。
 
 ### 首次启动
 
 ```bash
 git clone https://github.com/wuhao1477/multi-upstream-ai-gateway-sla.git
-cd multi-upstream-ai-gateway-sla-public
+cd multi-upstream-ai-gateway-sla
 cp .env.example .env
 ```
 
@@ -91,7 +85,7 @@ collector ───────────────────────�
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0` | 要运行的发布镜像，可用于升级/回滚 |
+| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1` | 要运行的发布镜像，可用于升级/回滚 |
 | `POSTGRES_PASSWORD` | 是 | 无 | PostgreSQL 密码；不要使用默认值 |
 | `ADMIN_TOKEN` | 是 | 无 | 管理 API 令牌；不会写入 `config_params` |
 | `ADMIN_PORT` | 否 | `8080` | 本机管理 UI/API 端口 |
@@ -140,7 +134,7 @@ docker compose down
 修改 `.env` 中的 `SLA_IMAGE`，然后拉取并重建容器：
 
 ```bash
-SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0
+SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1
 docker compose pull
 docker compose up -d
 curl -k https://localhost/healthz
@@ -190,8 +184,8 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ## 10. 发布信息
 
-- Release：[v1.0.0](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.0)
-- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0`
+- Release：[v1.0.1](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.1)
+- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1`
 - 发布工作流：[`.github/workflows/release.yml`](../.github/workflows/release.yml)
 - P1 验收记录：[P1 release readiness](acceptance/P1-release-readiness.md)
 
