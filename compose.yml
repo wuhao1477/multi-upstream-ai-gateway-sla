@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
 
   sla-core-a: &core
-    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.0}
+    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.1}
     environment: *core-env
     depends_on:
       postgres:
