@@ -73,9 +73,10 @@ async function syncExisting(): Promise<void> {
   busy.value = true
   try {
     const result = await adminApi.importKeys(request())
+    const issues = result.failed + result.deferred + result.deferred_accounts
     toast.show(
-      `同步完成：发现 ${result.found}，新增 ${result.imported}，已有 ${result.skipped}，失败 ${result.failed + result.deferred}`,
-      result.failed + result.deferred > 0 ? 'bad' : 'ok',
+      `同步完成：发现 ${result.found}，新增 ${result.imported}，已有 ${result.skipped}，失败 ${result.failed}，待重试 Key ${result.deferred}，待处理账号 ${result.deferred_accounts}`,
+      issues > 0 ? 'bad' : 'ok',
     )
     emit('changed')
     emit('close')
@@ -154,8 +155,8 @@ async function applyProvision(): Promise<void> {
       <UiField v-if="groupMode === 'model'" label="模型名称" for="key-auto-model">
         <input id="key-auto-model" v-model="model" placeholder="例如 gpt-5.5" />
       </UiField>
-      <label class="chk">
-        <input v-model="onlyWithoutKeys" type="checkbox" />
+      <label class="chk" for="key-auto-only-without-keys">
+        <input id="key-auto-only-without-keys" v-model="onlyWithoutKeys" type="checkbox" />
         仅处理远端没有任何 Key 的账号
       </label>
       <p class="note">未勾选时也只补缺少对应分组 Key 的账号，不会重复创建同组 Key。</p>

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 )
@@ -283,8 +284,10 @@ func TestNewAPIFetchKeysReadsEveryPage(t *testing.T) {
 	// 来源：NewAPI bdef117 common/page_info.go（p=1 起，size 是 token 专用页大小）：
 	// https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/common/page_info.go
 	var pages []string
+	var sizes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages = append(pages, r.URL.Query().Get("p"))
+		sizes = append(sizes, r.URL.Query().Get("size"))
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("p") {
 		case "", "1":
@@ -314,6 +317,9 @@ func TestNewAPIFetchKeysReadsEveryPage(t *testing.T) {
 	}
 	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
 		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
+	}
+	if len(sizes) != 2 || sizes[0] != "100" || sizes[1] != "100" {
+		t.Fatalf("请求页大小 = %v，期望每页 100", sizes)
 	}
 }
 
@@ -397,6 +403,33 @@ func TestNewAPIFetchKeys(t *testing.T) {
 	// 明文不得出现在 KeyRef 里（FR-094）
 	if k.KeyRef == "" {
 		t.Error("KeyRef 应有脱敏引用值")
+	}
+}
+
+func TestNewAPIFetchGroupsSortsGroupRefs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"group_ratio":{"zeta":1,"alpha":0.8,"beta":1.2},
+			"data":[{"model_name":"gpt-5.5","enable_groups":["all"]}]}`))
+	}))
+	defer srv.Close()
+
+	ad := NewNewAPIAdapter(NewClient(0))
+	ad.C.HC = srv.Client()
+	for attempt := 0; attempt < 100; attempt++ {
+		groups, err := ad.FetchGroups(context.Background(), Session{
+			Family: FamilyNewAPI, BaseURL: srv.URL, Token: "tok",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs := make([]string, 0, len(groups))
+		for _, group := range groups {
+			refs = append(refs, group.GroupRef)
+		}
+		if !sort.StringsAreSorted(refs) {
+			t.Fatalf("第 %d 次分组顺序不稳定：%v", attempt, refs)
+		}
 	}
 }
 
@@ -578,16 +611,20 @@ func TestSub2APIFetchKeysUsesUSDDirectly(t *testing.T) {
 }
 
 func TestSub2APIFetchKeysReadsEveryPage(t *testing.T) {
+	// 来源：Sub2API cdb5cfa response.Paginated 的 data.pages 字段：
+	// https://github.com/Wei-Shaw/sub2api/blob/cdb5cfaf6c8cb08612ef552a4458d8d0b5850184/backend/internal/pkg/response/response.go
 	var pages []string
+	var pageSizes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages = append(pages, r.URL.Query().Get("page"))
+		pageSizes = append(pageSizes, r.URL.Query().Get("page_size"))
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("page") {
 		case "1":
-			_, _ = w.Write([]byte(`{"code":0,"data":{"page":1,"page_size":2,"total":3,"total_pages":2,"items":[
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":1,"page_size":2,"pages":2,"items":[
 				{"id":21,"quota":10},{"id":22,"quota":10}]}}`))
 		case "2":
-			_, _ = w.Write([]byte(`{"code":0,"data":{"page":2,"page_size":2,"total":3,"total_pages":2,"items":[
+			_, _ = w.Write([]byte(`{"code":0,"data":{"page":2,"page_size":2,"pages":2,"items":[
 				{"id":23,"quota":10}]}}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
@@ -608,6 +645,9 @@ func TestSub2APIFetchKeysReadsEveryPage(t *testing.T) {
 	}
 	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
 		t.Fatalf("请求页码 = %v，期望 [1 2]", pages)
+	}
+	if len(pageSizes) != 2 || pageSizes[0] != "1000" || pageSizes[1] != "1000" {
+		t.Fatalf("请求页大小 = %v，期望每页 1000", pageSizes)
 	}
 }
 
@@ -654,7 +694,8 @@ func TestSub2APIGroupRefMatchesKeyGroupID(t *testing.T) {
 func TestSub2APIGroupWithoutModelsExplainsDegradation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"g-1"}]}`))
+		// Sub2API 的真实 Group.ID 是 int64；这里只省略 models，专测降级标记。
+		_, _ = w.Write([]byte(`{"code":0,"data":[{"id":7}]}`))
 	}))
 	defer srv.Close()
 
@@ -687,8 +728,8 @@ func TestSub2APIPartialGroupCatalogIsPresenceUnreliable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"data":[
-			{"id":"complete","available_models":["m1"]},
-			{"id":"missing"}
+			{"id":7,"available_models":["m1"]},
+			{"id":8}
 		]}`))
 	}))
 	defer srv.Close()

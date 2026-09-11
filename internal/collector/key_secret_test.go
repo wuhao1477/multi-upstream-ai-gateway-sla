@@ -108,6 +108,29 @@ func TestResolveKeySecretRejectsMissingOrMaskedKey(t *testing.T) {
 	}
 }
 
+func TestKeyImportResultUsesJSONFieldNames(t *testing.T) {
+	raw, err := json.Marshal(KeyImportResult{
+		Found: 1, Imported: 2, Skipped: 3, Failed: 4, Deferred: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"found", "imported", "skipped", "failed", "deferred"} {
+		if _, ok := fields[name]; !ok {
+			t.Fatalf("KeyImportResult JSON 缺少 %q：%s", name, raw)
+		}
+	}
+	for _, name := range []string{"Found", "Imported", "Skipped", "Failed", "Deferred"} {
+		if _, ok := fields[name]; ok {
+			t.Fatalf("KeyImportResult JSON 不应使用 Go 字段名 %q：%s", name, raw)
+		}
+	}
+}
+
 // 来源：NewAPI bdef117 controller/token.go:AddToken 接收 Token JSON 并由 /api/token/ 注册：
 // https://github.com/QuantumNous/new-api/blob/bdef117505247769268b209665fb3ad7554c3da7/controller/token.go
 func TestNewAPICreateRemoteKeyUsesTokenEndpointAndGroup(t *testing.T) {

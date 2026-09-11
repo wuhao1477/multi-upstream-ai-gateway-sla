@@ -25,6 +25,13 @@ type keyAutomationRequest struct {
 
 const maxKeyAutomationAccounts = 20
 
+// Key 自动化与渠道 sync 共用同一进程内 guard，但两个操作不能互相消耗
+// 采集间隔：补齐预览是只读上游查询，不应被导入窗口挡住，反之亦然。
+const (
+	keyImportGuardSlot    int64 = -1
+	keyProvisionGuardSlot int64 = -2
+)
+
 func decodeKeyAutomationRequest(r *http.Request) (keyAutomationRequest, error) {
 	var request keyAutomationRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -91,13 +98,32 @@ type keyImportItem struct {
 }
 
 type keyImportBatchResult struct {
-	Count    int             `json:"count"`
-	Found    int             `json:"found"`
-	Imported int             `json:"imported"`
-	Skipped  int             `json:"skipped"`
-	Failed   int             `json:"failed"`
-	Deferred int             `json:"deferred"`
-	Items    []keyImportItem `json:"items"`
+	Count            int             `json:"count"`
+	Found            int             `json:"found"`
+	Imported         int             `json:"imported"`
+	Skipped          int             `json:"skipped"`
+	Failed           int             `json:"failed"`
+	Deferred         int             `json:"deferred"`
+	DeferredAccounts int             `json:"deferred_accounts"`
+	Items            []keyImportItem `json:"items"`
+}
+
+func deferredImportAccounts(total, processed int) int {
+	if processed >= total {
+		return 0
+	}
+	return total - processed
+}
+
+func mergeKeyProvisionBatchResult(dst *keyProvisionBatchResult, src collector.KeyProvisionResult) {
+	dst.Found += src.Found
+	dst.Imported += src.Imported
+	dst.MatchedGroups += src.MatchedGroups
+	dst.ExistingGroups += src.ExistingGroups
+	dst.WouldCreate += src.WouldCreate
+	dst.Created += src.Created
+	dst.Failed += src.Failed
+	dst.Deferred += src.Deferred
 }
 
 func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +143,7 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotImplemented, "Key 自动导入未配置")
 		return
 	}
-	if err := s.guard.acquire(0, s.syncMinInterval()); err != nil {
+	if err := s.guard.acquire(keyImportGuardSlot, s.syncMinInterval()); err != nil {
 		code := http.StatusTooManyRequests
 		if errors.Is(err, errSyncRunning) {
 			code = http.StatusConflict
@@ -126,7 +152,7 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reachedUpstream := false
-	defer func() { s.guard.release(0, reachedUpstream) }()
+	defer func() { s.guard.release(keyImportGuardSlot, reachedUpstream) }()
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		locked, err := store.TryKeyAutomationLock(r.Context(), conn)
 		if err != nil {
@@ -155,9 +181,9 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		result := keyImportBatchResult{Items: []keyImportItem{}}
 		remainingSecrets := collector.DefaultKeySecretResolveLimit
-		for _, account := range targets {
+		for index, account := range targets {
 			if remainingSecrets == 0 {
-				result.Deferred++
+				result.DeferredAccounts += deferredImportAccounts(len(targets), index)
 				break
 			}
 			item := keyImportItem{ChannelID: account.ChannelID, AccountID: account.ID}
@@ -172,7 +198,6 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 			item.KeyImportResult = got
 			if err != nil {
 				item.Status, item.Error = "failed", shortErr(err)
-				result.Failed++
 			} else if got.Failed > 0 || got.Deferred > 0 {
 				item.Status = "partial"
 			} else {
@@ -239,8 +264,7 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dryRun := dryRunValue == "true"
-	// channelID=0 是仅供这条全局写操作使用的 guard 槽位；它不会与任何真实渠道冲突。
-	if err := s.guard.acquire(0, s.syncMinInterval()); err != nil {
+	if err := s.guard.acquire(keyProvisionGuardSlot, s.syncMinInterval()); err != nil {
 		code := http.StatusTooManyRequests
 		if errors.Is(err, errSyncRunning) {
 			code = http.StatusConflict
@@ -249,7 +273,7 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reachedUpstream := false
-	defer func() { s.guard.release(0, reachedUpstream && !dryRun) }()
+	defer func() { s.guard.release(keyProvisionGuardSlot, reachedUpstream && !dryRun) }()
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		locked, err := store.TryKeyAutomationLock(r.Context(), conn)
 		if err != nil {
@@ -300,7 +324,6 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case err != nil:
 				item.Status, item.Error = "failed", shortErr(err)
-				result.Failed++
 			case got.SkippedReason != "":
 				item.Status = "skipped"
 				result.SkippedAccounts++
@@ -309,14 +332,7 @@ func (s *Server) provisionKeys(w http.ResponseWriter, r *http.Request) {
 			default:
 				item.Status = "ok"
 			}
-			result.Found += got.Found
-			result.Imported += got.Imported
-			result.MatchedGroups += got.MatchedGroups
-			result.ExistingGroups += got.ExistingGroups
-			result.WouldCreate += got.WouldCreate
-			result.Created += got.Created
-			result.Failed += got.Failed
-			result.Deferred += got.Deferred
+			mergeKeyProvisionBatchResult(&result, got)
 			result.Items = append(result.Items, item)
 			if !dryRun {
 				remainingCreates -= got.Created

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
 // 最小间隔是给上游挡请求的。本地前置失败没打上游，不该消耗窗口 ——
@@ -74,6 +76,51 @@ func TestSyncGuardZeroIntervalNeverThrottles(t *testing.T) {
 
 	if err := g.acquire(ch, 0); err != nil {
 		t.Fatalf("间隔 0 应不限流，得到 %v", err)
+	}
+}
+
+func TestKeyAutomationOperationsUseSeparateGuardSlots(t *testing.T) {
+	g := newSyncGuard()
+	if err := g.acquire(keyImportGuardSlot, time.Minute); err != nil {
+		t.Fatalf("导入槽位首次 acquire 应成功，得到 %v", err)
+	}
+	g.release(keyImportGuardSlot, true)
+
+	if err := g.acquire(keyProvisionGuardSlot, time.Minute); err != nil {
+		t.Fatalf("补齐预览不应被导入窗口阻塞，得到 %v", err)
+	}
+	g.release(keyProvisionGuardSlot, false)
+
+	if err := g.acquire(keyImportGuardSlot, time.Minute); !errors.Is(err, errSyncTooSoon) {
+		t.Fatalf("导入槽位自身仍应遵守间隔，得到 %v", err)
+	}
+}
+
+func TestDeferredImportAccountsCountRemainingTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		total, processed, want int
+	}{
+		{name: "all remaining", total: 5, processed: 2, want: 3},
+		{name: "none remaining", total: 2, processed: 2, want: 0},
+		{name: "processed cannot exceed total", total: 2, processed: 3, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deferredImportAccounts(tc.total, tc.processed); got != tc.want {
+				t.Fatalf("deferredImportAccounts(%d, %d) = %d，期望 %d",
+					tc.total, tc.processed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeKeyProvisionBatchResultCountsFailureOnce(t *testing.T) {
+	var batch keyProvisionBatchResult
+	mergeKeyProvisionBatchResult(&batch, collector.KeyProvisionResult{
+		Found: 1, Failed: 1, Created: 0,
+	})
+	if batch.Found != 1 || batch.Failed != 1 {
+		t.Fatalf("批量失败计数 = %+v，期望 found=1/failed=1", batch)
 	}
 }
 

@@ -261,11 +261,11 @@ type KeyImportRequest struct {
 
 // KeyImportResult 是一次账号 Key 导入的计数结果。
 type KeyImportResult struct {
-	Found          int
-	Imported       int
-	Skipped        int
-	Failed         int
-	Deferred       int
+	Found          int `json:"found"`
+	Imported       int `json:"imported"`
+	Skipped        int `json:"skipped"`
+	Failed         int `json:"failed"`
+	Deferred       int `json:"deferred"`
 	SecretResolves int `json:"-"`
 }
 

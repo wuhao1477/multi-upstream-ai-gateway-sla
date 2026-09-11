@@ -109,7 +109,7 @@ try {
   await page.waitForFunction(() =>
     document.querySelector('.drawer-t')?.textContent.includes('批量补齐 Key'),
     { timeout: 5000 });
-  const onlyEmpty = await page.$eval('.drawer input[type="checkbox"]', input => input.checked);
+  const onlyEmpty = await page.$eval('#key-auto-only-without-keys', input => input.checked);
   check('批量补齐默认仅无 Key 账号', onlyEmpty);
   await page.click('.drawer-x');
 

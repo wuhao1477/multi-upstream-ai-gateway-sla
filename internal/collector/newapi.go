@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +253,7 @@ func (a *NewAPIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, er
 		}
 		out = append(out, g)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].GroupRef < out[j].GroupRef })
 	return out, nil
 }
 

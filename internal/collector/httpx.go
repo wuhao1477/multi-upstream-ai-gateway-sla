@@ -356,6 +356,11 @@ func fetchAllKeyItems(
 			return nil, fmt.Errorf("Key 分页未推进：请求第 %d 页，响应第 %d 页", page, int(responsePage))
 		}
 		totalPages, hasTotalPages := asFloat(data["total_pages"])
+		if !hasTotalPages {
+			// Sub2API 的 PaginatedData 使用 pages；部分 NewAPI 二开使用
+			// total_pages，两个字段语义相同。
+			totalPages, hasTotalPages = asFloat(data["pages"])
+		}
 		total, hasTotal := asFloat(data["total"])
 		hasMore := hasTotalPages && page < int(totalPages)
 		if !hasTotalPages && hasTotal {

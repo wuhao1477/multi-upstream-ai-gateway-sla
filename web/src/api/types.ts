@@ -226,6 +226,8 @@ export interface KeyImportBatchResult {
   skipped: number
   failed: number
   deferred: number
+  /** 因明文读取预算耗尽而尚未处理的账号数；deferred 本身只统计 Key。 */
+  deferred_accounts: number
   items: KeyImportItem[]
 }
 
