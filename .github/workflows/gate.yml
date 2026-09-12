@@ -12,11 +12,16 @@ name: gate
 # 真正的代价在开 PR 那一刻：13 道检查第一次同时面对 17 个提交，红了也不知道
 # 是哪一个引入的。分支上就跑，才有"哪一提交弄红的"这个信息。
 
+# ⚠️ **2026-09-12 补 `codex/release-*` 作为 PR 目标**：发版走的是
+# "修复分支 → PR 进 codex/release-vX.Y.Z 预览分支 → 整合后再进 main"。
+# 而此前 PR 触发只认 `branches: [main]`，于是**进预览分支的 PR 一道检查都不跑**
+# —— 与上面那条 feat 分支的教训完全同型：不是"CI 是绿的"，是"CI 没看过"，
+# 代价同样推迟到预览分支合 main 的那一刻。
 on:
   push:
     branches: [main, 'feat/**']
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/release-*']
   workflow_dispatch:
 
 jobs:
@@ -169,14 +174,14 @@ jobs:
       # ubuntu-latest 自带 Chrome（/usr/bin/google-chrome），故只需装 puppeteer-core。
       # ui-stack.sh 自己会先编前端再 go build（顺序反了会把空目录编进二进制）。
       #
-      # ⚠️ **CI 里只跑得到 SPA 那 14 项**（路由/断点/缓存/占位文件）。
-      #    功能与数据那 57 项（建渠道、探测站型、登记凭证、采集、分组、目录、
+      # ⚠️ **CI 里只跑得到 SPA 那 21 项**（路由/断点/缓存/占位文件）。
+      #    功能与数据那 92 项（建渠道、探测站型、登记凭证、采集、分组、目录、
       #    Key、限流、批量导入试运行）要真上游凭证，而真上游令牌**不进
       #    GitHub secrets**（CLAUDE.md §1 的 CI 表；那是别人家站点的真凭证）。
       #    无 HUB_FILE 时 ui-stack.sh 自动降级并打印跳过了什么 —— 看到这一步绿，
       #    读作"前端工程化性质没退化"，**不能**读作"加渠道商功能验过了"。
-      #    那 57 项的结论只能来自本地跑，写进 PR/提交说明。
-      - name: 管理界面浏览器验收（真 Chrome，CI 只覆盖免密的 SPA 14 项）
+      #    那 92 项的结论只能来自本地跑，写进 PR/提交说明。
+      - name: 管理界面浏览器验收（真 Chrome，CI 只覆盖免密的 SPA 21 项）
         run: make test-ui
 
       # FR-112 不可存列断言已作为单测实现（internal/store 的

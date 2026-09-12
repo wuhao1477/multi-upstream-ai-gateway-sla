@@ -377,6 +377,14 @@ TESTS=(
   TestListKeysIncludesGroupAndMultiplier
   TestPatchAccountCanClearEditableFields
   TestPatchKeyCanClearGroup
+  # Key 自动化的范围展开。前两条要真库（要有真的 channels/upstream_accounts 行
+  # 才能验"展开成哪些账号"）。
+  # ⚠️ TestProvisionKeysExpandsChannelToEveryAccount 是 2026-09-11 随 Key 自动化
+  # 一起加的，但**没被加进这个列表**，于是它在任何地方都只会 t.Skip ——
+  # 写了一年也发现不了范围展开错了。2026-09-12 一并锚定进来。
+  TestProvisionKeysExpandsChannelToEveryAccount
+  TestProvisionKeysExpandsEverySelectedChannel
+  TestKeyAutomationRejectsAccountOutsideChannelScope
 )
 PAT="^($(IFS='|'; echo "${TESTS[*]}"))\$"
 EXPECT=${#TESTS[@]}

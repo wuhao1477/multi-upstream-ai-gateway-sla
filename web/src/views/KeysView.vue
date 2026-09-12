@@ -22,6 +22,7 @@ import UiSegmented from '@/components/ui/UiSegmented.vue'
 import KeyTable from '@/components/res/KeyTable.vue'
 import KeyAutomationDrawer from '@/components/res/KeyAutomationDrawer.vue'
 import RegisterDrawers from '@/components/res/RegisterDrawers.vue'
+import ScopePicker from '@/components/res/ScopePicker.vue'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import {
@@ -54,11 +55,17 @@ const COLS_KEY = 'sla.keys.cols'
 function restore(): void {
   const q = route.query
   const s = (k: string): string => (typeof q[k] === 'string' ? (q[k] as string) : '')
-  const n = (k: string): number => Number(s(k)) || 0
+  // 多选写成 ?channel=3,7。垃圾值（空串、非数、负数）一律丢掉而不是报错：
+  // 这串是可以被人手改的，改坏了顶多是筛选没生效，不该白屏。
+  const ids = (k: string): number[] =>
+    s(k)
+      .split(',')
+      .map(Number)
+      .filter((v) => Number.isInteger(v) && v > 0)
   filter.value = {
     q: s('q'),
-    channelID: n('channel'),
-    accountID: n('account'),
+    channelIDs: ids('channel'),
+    accountIDs: ids('account'),
     status: s('status'),
     groupRef: s('group'),
     quota: (s('quota') || 'all') as typeof filter.value.quota,
@@ -87,8 +94,8 @@ function syncURL(): void {
   const f = filter.value
   const q: Record<string, string> = {}
   if (f.q.trim() !== '') q.q = f.q.trim()
-  if (f.channelID !== 0) q.channel = String(f.channelID)
-  if (f.accountID !== 0) q.account = String(f.accountID)
+  if (f.channelIDs.length > 0) q.channel = f.channelIDs.join(',')
+  if (f.accountIDs.length > 0) q.account = f.accountIDs.join(',')
   if (f.status !== '') q.status = f.status
   if (f.groupRef !== '') q.group = f.groupRef
   if (f.quota !== 'all') q.quota = f.quota
@@ -151,18 +158,17 @@ const groupOptions = computed(() => {
   return [...s].sort()
 })
 
-const accountOptions = computed(() =>
-  filter.value.channelID === 0 ? res.accounts : res.channelAccounts(filter.value.channelID),
-)
-
-/** 换渠道时清掉已选账号：它多半属于别的渠道，留着会筛出零条且看不出原因。 */
+/** 换渠道时剔掉不在新范围里的账号：留着会筛出零条且看不出原因。 */
 watch(
-  () => filter.value.channelID,
-  (ch) => {
-    if (ch === 0 || filter.value.accountID === 0) return
-    const a = res.accountByID.get(filter.value.accountID)
-    if (a !== undefined && a.channel_id !== ch) filter.value.accountID = 0
+  () => filter.value.channelIDs,
+  (chs) => {
+    if (chs.length === 0 || filter.value.accountIDs.length === 0) return
+    filter.value.accountIDs = filter.value.accountIDs.filter((id) => {
+      const a = res.accountByID.get(id)
+      return a === undefined || chs.includes(a.channel_id)
+    })
   },
+  { deep: true },
 )
 
 function reset(): void {
@@ -249,18 +255,23 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
           <input id="key-q" v-model="filter.q" placeholder="搜索前缀 / 上游标识 / 分组 / 账号…" />
         </div>
         <UiField label="渠道" for="key-f-channel">
-          <select id="key-f-channel" v-model.number="filter.channelID">
-            <option :value="0">全部渠道</option>
-            <option v-for="c in channels.list" :key="c.id" :value="c.id">{{ c.name }}</option>
-          </select>
+          <ScopePicker
+            id="key-f-channel"
+            kind="channel"
+            multi
+            v-model="filter.channelIDs"
+            placeholder="全部渠道"
+          />
         </UiField>
         <UiField label="账号" for="key-f-account">
-          <select id="key-f-account" v-model.number="filter.accountID">
-            <option :value="0">全部账号</option>
-            <option v-for="a in accountOptions" :key="a.id" :value="a.id">
-              {{ res.accountLabel(a.id) }}
-            </option>
-          </select>
+          <ScopePicker
+            id="key-f-account"
+            kind="account"
+            multi
+            v-model="filter.accountIDs"
+            :scope="filter.channelIDs"
+            placeholder="全部账号"
+          />
         </UiField>
         <UiField label="状态" for="key-f-status">
           <select id="key-f-status" v-model="filter.status">
@@ -389,14 +400,14 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
 
     <RegisterDrawers
       :mode="drawer"
-      :channel-id="filter.channelID"
-      :account-id="filter.accountID"
+      :channel-ids="filter.channelIDs"
+      :account-ids="filter.accountIDs"
       @close="drawer = null"
     />
     <KeyAutomationDrawer
       :mode="automation"
-      :channel-id="filter.channelID"
-      :account-id="filter.accountID"
+      :channel-ids="filter.channelIDs"
+      :account-ids="filter.accountIDs"
       @close="automation = null"
       @changed="res.reload()"
     />
