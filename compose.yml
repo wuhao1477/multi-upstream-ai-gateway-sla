@@ -18,7 +18,7 @@ x-core-env: &core-env
 
 services:
   sla-core:
-    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.4}
+    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.5}
     # entrypoint 与 user 跟 Dockerfile 里的值一致，显式写出来是为了
     # 以后改 Dockerfile 时不会静默改掉这里的行为。
     entrypoint: ["/sla-core"]
@@ -46,7 +46,7 @@ services:
       start_period: 30s
 
   collector:
-    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.4}
+    image: ${SLA_IMAGE:-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.5}
     # ⚠️ 必须用 entrypoint 而非 command：Dockerfile 的 ENTRYPOINT 是 /sla-core，
     #    command 只覆盖 CMD → 实际执行 `/sla-core /collector`，sla-core 忽略
     #    多余参数照常启动，于是"采集器"容器里跑的其实是第二个管理面。
