@@ -12,11 +12,16 @@ name: gate
 # 真正的代价在开 PR 那一刻：13 道检查第一次同时面对 17 个提交，红了也不知道
 # 是哪一个引入的。分支上就跑，才有"哪一提交弄红的"这个信息。
 
+# ⚠️ **2026-09-12 补 `codex/release-*` 作为 PR 目标**：发版走的是
+# "修复分支 → PR 进 codex/release-vX.Y.Z 预览分支 → 整合后再进 main"。
+# 而此前 PR 触发只认 `branches: [main]`，于是**进预览分支的 PR 一道检查都不跑**
+# —— 与上面那条 feat 分支的教训完全同型：不是"CI 是绿的"，是"CI 没看过"，
+# 代价同样推迟到预览分支合 main 的那一刻。
 on:
   push:
     branches: [main, 'feat/**']
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/release-*']
   workflow_dispatch:
 
 jobs:
