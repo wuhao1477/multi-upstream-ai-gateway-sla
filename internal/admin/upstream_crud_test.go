@@ -103,6 +103,54 @@ func TestProvisionAllScopeRequiresOnlyWithoutKeys(t *testing.T) {
 	}
 }
 
+// 单数 channel_id / account_id 是已发布的契约，界面改多选之后它仍要等价可用。
+// 归一到复数切片这一步若漏了，旧调用方会静默落到"没有任何范围"的分支上。
+func TestKeyAutomationMergesSingularScopeIntoPlural(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		single int64
+		many   []int64
+		want   []int64
+	}{
+		{"只有单数", 7, nil, []int64{7}},
+		{"只有复数", 0, []int64{3, 9}, []int64{3, 9}},
+		{"单复并存且重复", 3, []int64{9, 3}, []int64{3, 9}},
+		{"0 表示未指定", 0, nil, []int64{}},
+		{"复数里的 0 被丢弃", 0, []int64{0, 4}, []int64{4}},
+	} {
+		if got := mergeScopeIDs(tc.single, tc.many); !slices.Equal(got, tc.want) {
+			t.Fatalf("%s：mergeScopeIDs(%d, %v) = %v，期望 %v",
+				tc.name, tc.single, tc.many, got, tc.want)
+		}
+	}
+}
+
+func TestKeyAutomationValidationReadsPluralScope(t *testing.T) {
+	if err := validateKeyAutomationRequest(
+		keyAutomationRequest{ChannelIDs: []int64{2, 5}}); err != nil {
+		t.Fatalf("多渠道范围不应被拒绝：%v", err)
+	}
+	if err := validateKeyAutomationRequest(
+		keyAutomationRequest{AccountIDs: []int64{-1}}); err == nil {
+		t.Fatal("负数账号 id 必须被拒绝")
+	}
+	if err := validateKeyAutomationRequest(keyAutomationRequest{}); err == nil {
+		t.Fatal("既无范围又无 all=true 必须被拒绝")
+	}
+}
+
+// 同步已有 Key 的"必须选具体渠道"判据要看范围而不是看 all 这一位 ——
+// 只给 account_ids 是合法的（账号本身就唯一确定了渠道）。
+func TestImportKeysAcceptsAccountOnlyScope(t *testing.T) {
+	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token", http.MethodPost,
+		"/admin/keys/import", `{"account_ids":[42]}`)
+	// 501 = 这台测试服务器没挂 ImportKeys 回调，即范围校验已经放行。
+	// 断言"不是 400"才是重点，写死 501 只是为了让它变化时有人看到。
+	if code != http.StatusNotImplemented {
+		t.Fatalf("只给账号范围 = %d %s，期望通过范围校验后卡在未配置回调", code, body)
+	}
+}
+
 func TestKeyAutomationTargetLimit(t *testing.T) {
 	targets := make([]store.Account, maxKeyAutomationAccounts+1)
 	if err := validateKeyAutomationTargetLimit(targets); err == nil {
@@ -158,6 +206,89 @@ func TestProvisionKeysExpandsChannelToEveryAccount(t *testing.T) {
 	}
 	if result.Count != 2 || result.MatchedGroups != 2 || result.WouldCreate != 2 {
 		t.Fatalf("批量结果 = %+v", result)
+	}
+}
+
+// 多选渠道要把**每个**被选中渠道的账号都展开，且不碰没被选中的渠道。
+// 漏掉后半条的症状最贵：补齐会打到没人要求的站点上，而那是别人家的站。
+func TestProvisionKeysExpandsEverySelectedChannel(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	s, h, token := httpServer(t)
+	bases := []string{
+		"https://provision-multi-a.example.invalid",
+		"https://provision-multi-b.example.invalid",
+		"https://provision-multi-untouched.example.invalid",
+	}
+	for _, base := range bases {
+		wipeCRUD(ctx, t, conn, base)
+		defer wipeCRUD(context.Background(), t, conn, base)
+	}
+	channelA := newChannel(t, h, token, "多选渠道 A", bases[0])
+	channelB := newChannel(t, h, token, "多选渠道 B", bases[1])
+	channelC := newChannel(t, h, token, "未选中的渠道", bases[2])
+	want := []int64{newAccount(t, h, token, channelA), newAccount(t, h, token, channelB)}
+	untouched := newAccount(t, h, token, channelC)
+
+	var called []int64
+	s.ProvisionKeys = func(
+		_ context.Context, _ *pgx.Conn, _, accountID int64, _ collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error) {
+		called = append(called, accountID)
+		return collector.KeyProvisionResult{MatchedGroups: 1, WouldCreate: 1}, nil
+	}
+	code, body := do(t, h, token, http.MethodPost, "/admin/keys/provision?dry_run=true",
+		fmt.Sprintf(`{"channel_ids":[%d,%d]}`, channelA, channelB))
+	if code != http.StatusOK {
+		t.Fatalf("多渠道补齐预览 = %d %s", code, body)
+	}
+	slices.Sort(called)
+	slices.Sort(want)
+	if !slices.Equal(called, want) {
+		t.Fatalf("调用账号 = %v，期望 %v（未选中的 #%d 不该被碰）", called, want, untouched)
+	}
+}
+
+// 指名的账号必须落在渠道范围内。静默筛掉会让人以为它已经处理过了。
+func TestKeyAutomationRejectsAccountOutsideChannelScope(t *testing.T) {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	s, h, token := httpServer(t)
+	// 必须挂上回调，否则请求在 501「未配置」就返回了，根本走不到范围展开 ——
+	// 那样这条会因为"不是 400"而红在错误的原因上。回调本身一旦被调用即失败：
+	// 跨渠道账号绝不该抵达上游。
+	s.ProvisionKeys = func(
+		_ context.Context, _ *pgx.Conn, _, accountID int64, _ collector.KeyProvisionRequest,
+	) (collector.KeyProvisionResult, error) {
+		t.Fatalf("范围外账号 #%d 不该被处理", accountID)
+		return collector.KeyProvisionResult{}, nil
+	}
+	bases := []string{
+		"https://scope-owner.example.invalid",
+		"https://scope-foreign.example.invalid",
+	}
+	for _, base := range bases {
+		wipeCRUD(ctx, t, conn, base)
+		defer wipeCRUD(context.Background(), t, conn, base)
+	}
+	owner := newChannel(t, h, token, "范围内渠道", bases[0])
+	foreign := newChannel(t, h, token, "范围外渠道", bases[1])
+	foreignAccount := newAccount(t, h, token, foreign)
+
+	code, body := do(t, h, token, http.MethodPost, "/admin/keys/provision?dry_run=true",
+		fmt.Sprintf(`{"channel_ids":[%d],"account_ids":[%d]}`, owner, foreignAccount))
+	if code != http.StatusBadRequest || !strings.Contains(body, "不属于") {
+		t.Fatalf("跨渠道账号 = %d %s，期望 400 并说明不属于该渠道", code, body)
 	}
 }
 

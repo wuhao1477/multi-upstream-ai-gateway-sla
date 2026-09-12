@@ -15,12 +15,20 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
+// Key 自动化的范围请求。
+//
+// 复数字段（channel_ids / account_ids）是界面现在发的形状 —— 渠道与账号在
+// 界面上都是多选。单数字段保留：它们是已发布的契约（docs/dev/09 §5bis），
+// 而且"选一个渠道"是这两个端点最常见的调用方式。decode 时把单数**归一进**
+// 复数切片，下游只看复数 —— 两条路径并存才会出"到底哪个说了算"的分叉。
 type keyAutomationRequest struct {
-	ChannelID      int64  `json:"channel_id"`
-	AccountID      int64  `json:"account_id"`
-	All            bool   `json:"all"`
-	Model          string `json:"model"`
-	OnlyWithoutKey bool   `json:"only_without_keys"`
+	ChannelID      int64   `json:"channel_id"`
+	AccountID      int64   `json:"account_id"`
+	ChannelIDs     []int64 `json:"channel_ids"`
+	AccountIDs     []int64 `json:"account_ids"`
+	All            bool    `json:"all"`
+	Model          string  `json:"model"`
+	OnlyWithoutKey bool    `json:"only_without_keys"`
 }
 
 const maxKeyAutomationAccounts = 20
@@ -32,20 +40,39 @@ const (
 	keyProvisionGuardSlot int64 = -2
 )
 
+// mergeScopeIDs 把单数 id 归一进复数切片并去重，顺带保持稳定顺序。
+// 0 视为"未指定"（旧契约就是这么用的），负数留给校验去拒绝。
+func mergeScopeIDs(single int64, many []int64) []int64 {
+	out := make([]int64, 0, len(many)+1)
+	seen := make(map[int64]bool, len(many)+1)
+	for _, id := range append([]int64{single}, many...) {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 func decodeKeyAutomationRequest(r *http.Request) (keyAutomationRequest, error) {
 	var request keyAutomationRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return request, err
 	}
 	request.Model = strings.TrimSpace(request.Model)
+	request.ChannelIDs = mergeScopeIDs(request.ChannelID, request.ChannelIDs)
+	request.AccountIDs = mergeScopeIDs(request.AccountID, request.AccountIDs)
 	return request, nil
 }
 
 func validateKeyAutomationRequest(request keyAutomationRequest) error {
-	if request.ChannelID < 0 || request.AccountID < 0 {
-		return fmt.Errorf("channel_id 与 account_id 不可为负")
+	for _, id := range append(append([]int64{}, request.ChannelIDs...), request.AccountIDs...) {
+		if id < 0 {
+			return fmt.Errorf("channel_id 与 account_id 不可为负")
+		}
 	}
-	if request.ChannelID == 0 && request.AccountID == 0 && !request.All {
+	if len(request.ChannelIDs) == 0 && len(request.AccountIDs) == 0 && !request.All {
 		return fmt.Errorf("必须指定 channel_id、account_id，或明确传 all=true")
 	}
 	return nil
@@ -64,22 +91,57 @@ func (s *Server) keyAutomationRequest(w http.ResponseWriter, r *http.Request) (k
 	return request, true
 }
 
+// keyAutomationTargets 把范围请求展开成具体账号。
+//
+// 一次查全量再在内存里过滤，而不是按渠道逐个查库：多选渠道时后者是 N 次
+// 往返，而账号表是"数百行"这个量级（store/channels.go 的 ListAccounts
+// 本身就支持 channel_id <= 0 取全部）。
 func keyAutomationTargets(
 	r *http.Request, conn *pgx.Conn, request keyAutomationRequest,
 ) ([]store.Account, error) {
-	accounts, err := store.ListAccounts(r.Context(), conn, request.ChannelID)
+	channelScope := int64(0)
+	if len(request.ChannelIDs) == 1 {
+		channelScope = request.ChannelIDs[0]
+	}
+	accounts, err := store.ListAccounts(r.Context(), conn, channelScope)
 	if err != nil {
 		return nil, err
 	}
-	if request.AccountID == 0 {
+	if channelScope == 0 && len(request.ChannelIDs) > 0 {
+		accounts = filterAccountsByChannels(accounts, request.ChannelIDs)
+	}
+	if len(request.AccountIDs) == 0 {
 		return accounts, nil
 	}
+	// 指名了账号：逐个核对它确实落在渠道范围内。跨渠道的账号不是"筛掉就好"，
+	// 它意味着调用方对归属的理解是错的 —— 静默忽略会让人以为已经处理过了。
+	byID := make(map[int64]store.Account, len(accounts))
 	for _, account := range accounts {
-		if account.ID == request.AccountID {
-			return []store.Account{account}, nil
+		byID[account.ID] = account
+	}
+	targets := make([]store.Account, 0, len(request.AccountIDs))
+	for _, id := range request.AccountIDs {
+		account, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("account_id %d 不属于指定 channel_id", id)
+		}
+		targets = append(targets, account)
+	}
+	return targets, nil
+}
+
+func filterAccountsByChannels(accounts []store.Account, channelIDs []int64) []store.Account {
+	wanted := make(map[int64]bool, len(channelIDs))
+	for _, id := range channelIDs {
+		wanted[id] = true
+	}
+	out := make([]store.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if wanted[account.ChannelID] {
+			out = append(out, account)
 		}
 	}
-	return nil, fmt.Errorf("account_id %d 不属于指定 channel_id", request.AccountID)
+	return out
 }
 
 func validateKeyAutomationTargetLimit(targets []store.Account) error {
@@ -135,7 +197,9 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusServiceUnavailable, "只读实例不支持 Key 自动同步")
 		return
 	}
-	if request.All {
+	// 看范围而不是看 all 这一位：多选之后"有没有明确范围"才是真正的判据，
+	// 而 all=true 只是"调用方承认自己没给范围"的一种写法。
+	if len(request.ChannelIDs) == 0 && len(request.AccountIDs) == 0 {
 		s.fail(w, http.StatusBadRequest, "同步已有 Key 必须选择具体渠道")
 		return
 	}

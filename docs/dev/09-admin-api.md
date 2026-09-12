@@ -265,8 +265,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现；与周期采集共用同一 Runner | **P1** |
 | `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
 | `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；PATCH 替换 `secret` 即完成轮换；可设 `channel_group_id` | **P1** |
-| `POST /admin/keys/import` | 按指定渠道或账号读取上游已有 Key 并登记；`deferred` 统计未读取的 Key，`deferred_accounts` 统计因明文读取预算未处理的账号 | **P1** |
-| `POST /admin/keys/provision?dry_run=true\|false` | 按账号的全部分组或指定模型分组补齐远端 Key；可筛选仅处理没有任何远端 Key 的账号。执行前必须预览，服务端限制单次创建与明文读取数量 | **P1** |
+| `POST /admin/keys/import` | 按指定渠道或账号读取上游已有 Key 并登记；`deferred` 统计未读取的 Key，`deferred_accounts` 统计因明文读取预算未处理的账号。**范围字段**：`channel_ids[]` / `account_ids[]`（界面用的多选形状）与旧的单数 `channel_id` / `account_id` 等价 —— 服务端把单数归一进复数，下游只看复数；两者都缺即 `400`（本端点不接受无范围调用，`all` 这一位对它无效） | **P1** |
+| `POST /admin/keys/provision?dry_run=true\|false` | 按账号的全部分组或指定模型分组补齐远端 Key；可筛选仅处理没有任何远端 Key 的账号。执行前必须预览，服务端限制单次创建与明文读取数量。范围字段同上；不给任何范围时必须显式 `all=true` 且 `only_without_keys=true` | **P1** |
 | `POST /admin/keys/{id}/disable` | Key 停用（FR-122，承 FR-004/095 的 Key 层） | **P1** |
 | `GET /admin/keys/{id}/usage?from=&to=` | Key 用量历史（FR-125）：读 `collector_snapshots(scope_type='key')` 的 payload 时序，返回剩余/已用/请求数曲线 | **P1** |
 | `GET /admin/channel-groups?channel_id=` | 分组列表含 `group_ref`、`rate_multiplier`、可用模型数、`fetched_at`（FR-123） | **P1** |

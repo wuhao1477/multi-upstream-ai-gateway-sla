@@ -13,30 +13,30 @@
 import { computed, ref, watch } from 'vue'
 import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiField from '@/components/ui/UiField.vue'
+import ScopePicker from '@/components/res/ScopePicker.vue'
 import * as adminApi from '@/api/admin'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
-import { familyLabel } from '@/utils/format'
 
 /**
- * ⚠️ 属性名是 `channelId` / `accountId`，**不是 `channelID`**。
+ * ⚠️ 属性名是 `channelIds` / `accountIds`，**不是 `channelIDs`**。
  *
- * 模板里写的是 `:channel-id="…"`，而 Vue 的 camelize 把 `channel-id` 变成
- * `channelId` —— 与 `channelID` 不相等，于是那个绑定会**静默地落进 attrs**，
+ * 模板里写的是 `:channel-ids="…"`，而 Vue 的 camelize 把 `channel-ids` 变成
+ * `channelIds` —— 与 `channelIDs` 不相等，于是那个绑定会**静默地落进 attrs**，
  * 组件收到 undefined。表现是抽屉打开但一个字段都没预填，没有任何报错，
  * TS 也不报（模板里的 kebab 名不参与类型检查）。这里踩过一次。
  *
- * 仓库里其它地方的 `xxxID` 命名照旧 —— 那些是 TS 变量与 store 字段，
+ * 仓库里其它地方的 `xxxIDs` 命名照旧 —— 那些是 TS 变量与 store 字段，
  * 不经过 kebab↔camel 这一道转换。只有**组件属性**受这条限制。
  */
 const props = defineProps<{
   /** 'account' | 'key' | null（关闭）。 */
   mode: 'account' | 'key' | null
-  /** 预置的渠道；0 = 让用户自己选。 */
-  channelId?: number
-  /** 预置的账号（仅 mode==='key'）；0 = 让用户自己选。 */
-  accountId?: number
+  /** Key 管理页当前的渠道筛选；取第一个作为预置值，空 = 让用户自己选。 */
+  channelIds?: number[]
+  /** 同上，账号（仅 mode==='key'）。 */
+  accountIds?: number[]
 }>()
 const emit = defineEmits<{ close: []; created: [] }>()
 
@@ -44,68 +44,74 @@ const channels = useChannelsStore()
 const res = useResourcesStore()
 const toast = useToastStore()
 
-const accChannel = ref('')
+/**
+ * 三个选择器都收 `number[]`（ScopePicker 的统一形状），但这两张表单
+ * **本质是单选**：账号只能挂在一个渠道下，Key 只能挂在一个账号下。
+ * 所以选择器都以 `multi=false` 渲染，数组长度不会超过 1。
+ */
+const accChannelIDs = ref<number[]>([])
 const accUID = ref('')
 const accWallet = ref('')
-const keyChannel = ref('')
-const keyAccount = ref('')
+const keyChannelIDs = ref<number[]>([])
+const keyAccountIDs = ref<number[]>([])
 const keySecret = ref('')
 const keyRef = ref('')
 const keyGroup = ref('')
 const busy = ref(false)
 
+const accChannelID = computed(() => accChannelIDs.value[0] ?? 0)
+const keyChannelID = computed(() => keyChannelIDs.value[0] ?? 0)
+const keyAccountID = computed(() => keyAccountIDs.value[0] ?? 0)
+
 /** 打开时重置并吃掉上下文。不重置的话，上一次填了一半的明文会留在下一次。 */
 watch(
-  () => [props.mode, props.channelId, props.accountId],
+  () => [props.mode, props.channelIds, props.accountIds],
   () => {
-    const ch = props.channelId === undefined || props.channelId === 0 ? '' : String(props.channelId)
+    const ch = props.channelIds?.[0] ?? 0
     if (props.mode === 'account') {
-      accChannel.value = ch
+      accChannelIDs.value = ch === 0 ? [] : [ch]
       accUID.value = ''
       accWallet.value = ''
     } else if (props.mode === 'key') {
-      const acc = props.accountId === undefined || props.accountId === 0 ? '' : String(props.accountId)
-      keyAccount.value = acc
+      const acc = props.accountIds?.[0] ?? 0
+      keyAccountIDs.value = acc === 0 ? [] : [acc]
       // 由账号反推渠道：Key 挂在账号上，渠道是它的推论，不该让人再选一次
-      const a = acc === '' ? undefined : res.accountByID.get(Number(acc))
-      keyChannel.value = a !== undefined ? String(a.channel_id) : ch
+      const a = acc === 0 ? undefined : res.accountByID.get(acc)
+      const inferred = a?.channel_id ?? ch
+      keyChannelIDs.value = inferred === 0 ? [] : [inferred]
       keySecret.value = ''
       keyRef.value = ''
       keyGroup.value = ''
     }
   },
-  { immediate: true },
+  { immediate: true, deep: true },
 )
 
-/** 选了渠道之后，账号下拉只列该渠道的账号 —— 跨渠道挂 Key 是建不出来的。 */
-const keyAccountOptions = computed(() => {
-  const ch = Number(keyChannel.value)
-  if (!Number.isFinite(ch) || ch <= 0) return res.accounts
-  return res.channelAccounts(ch)
-})
-
-const keyGroupOptions = computed(() => {
-  const ch = Number(keyChannel.value)
-  return Number.isFinite(ch) && ch > 0 ? res.channelGroups(ch) : []
-})
+const keyGroupOptions = computed(() =>
+  keyChannelID.value > 0 ? res.channelGroups(keyChannelID.value) : [],
+)
 
 /** 换渠道时清掉已选账号：留着的话会是别的渠道的账号，提交必然 400。 */
-watch(keyChannel, () => {
-  const acc = Number(keyAccount.value)
-  if (!Number.isFinite(acc)) return
-  const a = res.accountByID.get(acc)
-  if (a !== undefined && String(a.channel_id) !== keyChannel.value) keyAccount.value = ''
+watch(keyChannelID, (ch) => {
+  const a = res.accountByID.get(keyAccountID.value)
+  if (a !== undefined && a.channel_id !== ch) keyAccountIDs.value = []
+})
+
+/** 反过来：先选账号时把渠道补上 —— 分组下拉是按渠道列的，缺了它就永远是空。 */
+watch(keyAccountID, (id) => {
+  const a = res.accountByID.get(id)
+  if (a !== undefined && a.channel_id !== keyChannelID.value) keyChannelIDs.value = [a.channel_id]
 })
 
 const needsUID = computed(() => {
-  const ch = channels.list.find((c) => c.id === Number(accChannel.value))
+  const ch = channels.list.find((c) => c.id === accChannelID.value)
   if (ch === undefined) return false
   return channels.families.find((f) => f.family === ch.site_family)?.requires_external_user_id === true
 })
 
 async function createAccount(): Promise<void> {
-  const ch = Number(accChannel.value)
-  if (!Number.isFinite(ch) || ch <= 0) {
+  const ch = accChannelID.value
+  if (ch <= 0) {
     toast.show('请选择渠道', 'bad')
     return
   }
@@ -129,8 +135,8 @@ async function createAccount(): Promise<void> {
 }
 
 async function createKey(): Promise<void> {
-  const acc = Number(keyAccount.value)
-  if (!Number.isFinite(acc) || acc <= 0) {
+  const acc = keyAccountID.value
+  if (acc <= 0) {
     toast.show('请选择账号', 'bad')
     return
   }
@@ -170,12 +176,7 @@ async function createKey(): Promise<void> {
     @close="emit('close')"
   >
     <UiField label="所属渠道" for="acc-channel">
-      <select id="acc-channel" v-model="accChannel">
-        <option value="">请选择…</option>
-        <option v-for="c in channels.list" :key="c.id" :value="String(c.id)">
-          {{ c.name }}（#{{ c.id }} · {{ familyLabel(c.site_family) }}）
-        </option>
-      </select>
+      <ScopePicker id="acc-channel" kind="channel" v-model="accChannelIDs" />
     </UiField>
     <UiField label="上游用户 ID" for="acc-uid">
       <input id="acc-uid" v-model="accUID" :placeholder="needsUID ? '本站型必填' : '可选'" />
@@ -205,20 +206,22 @@ async function createKey(): Promise<void> {
     @close="emit('close')"
   >
     <UiField label="所属渠道" for="key-channel">
-      <select id="key-channel" v-model="keyChannel">
-        <option value="">全部渠道</option>
-        <option v-for="c in channels.list" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
-      </select>
+      <ScopePicker
+        id="key-channel"
+        kind="channel"
+        v-model="keyChannelIDs"
+        placeholder="全部渠道"
+      />
     </UiField>
     <UiField label="所属账号" for="key-account">
-      <select id="key-account" v-model="keyAccount">
-        <option value="">请选择…</option>
-        <option v-for="a in keyAccountOptions" :key="a.id" :value="String(a.id)">
-          {{ res.accountLabel(a.id) }}
-        </option>
-      </select>
+      <ScopePicker
+        id="key-account"
+        kind="account"
+        v-model="keyAccountIDs"
+        :scope="keyChannelIDs"
+      />
     </UiField>
-    <p v-if="keyAccountOptions.length === 0" class="note bad">
+    <p v-if="keyChannelID > 0 && res.channelAccounts(keyChannelID).length === 0" class="note bad">
       该渠道还没有账号。Key 必须挂在账号下，请先登记账号。
     </p>
     <UiField label="上游 Key（明文，仅此一次提交）" for="key-secret">
@@ -240,7 +243,7 @@ async function createKey(): Promise<void> {
         </option>
       </select>
     </UiField>
-    <p v-if="keyChannel === ''" class="note">选定渠道后才能选分组 —— 分组是渠道下的概念。</p>
+    <p v-if="keyChannelID === 0" class="note">选定渠道后才能选分组 —— 分组是渠道下的概念。</p>
     <p v-else-if="keyGroupOptions.length === 0" class="note">
       该渠道还没有采到分组。分组由采集获得（FR-123），先跑一次采集再来选，或者先留空。
     </p>
