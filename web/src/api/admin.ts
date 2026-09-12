@@ -171,9 +171,16 @@ export function disableKey(id: number): Promise<{ status: string }> {
   return api<{ status: string }>(`/admin/keys/${id}/disable`, { method: 'POST' })
 }
 
+/**
+ * Key 自动化的范围。
+ *
+ * 用数组而不是单个 id：界面上渠道与账号都是多选（ScopePicker）。后端仍收
+ * `channel_id` / `account_id` 两个单数字段（旧契约，见 docs/dev/09 §5bis），
+ * 但界面一律只发复数版 —— 两套都发的话，"到底哪个说了算"迟早会分叉。
+ */
 export interface KeyAutomationInput {
-  channel_id: number
-  account_id: number
+  channel_ids: number[]
+  account_ids: number[]
   all: boolean
   model: string
   only_without_keys: boolean

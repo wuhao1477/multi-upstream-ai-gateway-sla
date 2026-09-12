@@ -92,7 +92,49 @@ try {
     const open = await page.evaluate(s => document.querySelector(s)
       ?.closest('details')?.open === true, sel);
     if (!open) await page.click(sel);
+    // 等菜单**落位**再返回。Chrome 的 toggle 事件比 click 晚约一帧（实测 13ms），
+    // 而定位就在 toggle 里做 —— 不等它，量到的是"还没落位"的静态位置，
+    // 断言会红在一个早就修好的形态上。菜单收起时 placeMenus 会清掉 style，
+    // 所以 style.left 非空确实等于"这一次已经落位"。
+    await page.waitForFunction(s => {
+      const m = document.querySelector(s)?.closest('details')?.querySelector('.more-menu');
+      return m != null && m.style.left !== '';
+    }, { timeout: 5000 }, sel);
   };
+  // 渠道 / 账号选择器（ScopePicker）。它们不再是 <select>，所以 page.select
+  // 用不了 —— 是"触发按钮 + 列表弹窗"：点按钮开弹窗、点行选中，多选还要点确定。
+  // 单选点完一行弹窗自己关，多选不关（要让人接着挑）。
+  const pick = async (id, ids, multi = false) => {
+    await page.click(`#${id}`);
+    await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+    for (const v of ids) {
+      await page.waitForSelector(`[data-pick-row="${v}"]`, { visible: true, timeout: 5000 });
+      await page.click(`[data-pick-row="${v}"]`);
+    }
+    if (multi) await page.click('[data-pick-ok]');
+    await page.waitForFunction(
+      () => document.querySelector('.picker') === null, { timeout: 5000 });
+  };
+  // 选择器按钮上现在显示的是什么（未选时是占位符）。
+  const picked = sel => page.$eval(`${sel} .picker-sum`, el => el.textContent.trim());
+  // 「更多」菜单到底看不看得见：命中测试而不是量尺寸。
+  // 量 getBoundingClientRect 只能证明"它有个矩形"，被 overflow 裁掉的元素
+  // 矩形照样在 —— 那正是这个 bug 修复前的样子。elementFromPoint 打的是
+  // 真实的合成结果：裁掉了、被盖住了、飘出视口了，都会落空。
+  const menuVisible = sel => page.evaluate(s => {
+    const menu = document.querySelector(s)?.closest('details')?.querySelector('.more-menu');
+    if (menu === null || menu === undefined) return { ok: false, why: '菜单不在 DOM 上' };
+    const r = menu.getBoundingClientRect();
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+    const inView = r.top >= 0 && r.left >= 0
+      && r.bottom <= window.innerHeight && r.right <= window.innerWidth;
+    const hit = document.elementFromPoint(x, y);
+    return {
+      ok: inView && menu.contains(hit),
+      why: `rect=${JSON.stringify(r.toJSON())} 视口=${window.innerWidth}x${window.innerHeight}`
+        + ` 命中=${hit === null ? 'null' : hit.className || hit.tagName}`,
+    };
+  }, sel);
   // 统一确认框。同一时刻只会开一个，故按 [data-confirm-ok] 取即可。
   const confirmOK = async () => {
     await page.waitForSelector('[data-confirm-ok]', { visible: true, timeout: 5000 });
@@ -271,6 +313,13 @@ try {
   // （「未登记采集凭证」），原始 kind 不再出现在文本里 —— 拿
   // /credential_missing/ 去 grep textContent 会永远为假，而那看起来像功能坏了。
   // 属性是给机器读的稳定契约，文案是给人读的，两者本就该分开。
+  // 先等总览这一轮 XHR 落地。openDetail 只等到分栏切过来，而 inventory 是
+  // 切过来之后才发的请求 —— 中间那几十毫秒里 #inv-anomalies 是空的，于是
+  // 这条会随机红在 kinds=[] 上，而它下面那条（读同一块的文案）反而是绿的。
+  // 那不是功能坏了，是断言比数据快。2026-09-12 补。
+  await page.waitForFunction(
+    () => (document.querySelector('#inv-anomalies')?.children.length ?? 0) > 0,
+    { timeout: 8000 });
   const anomKinds = await page.$$eval('#inv-anomalies [data-anom]',
     els => els.map(e => e.getAttribute('data-anom')));
   const anomText = await page.$eval('#inv-anomalies', el => el.textContent);
@@ -314,13 +363,12 @@ try {
   // ── 6. 界面登记两个账号与四把 Key，并验证明文不回显（AC-37）──
   //
   // 「账号与 Key」分栏已拆成「账号管理」与「Key 管理」两个分栏，登记表单
-  // 下沉到抽屉：渠道与账号都是**下拉选择**，不再要求把 id 从列表抄进输入框。
-  // 所以这里用 page.select 而不是 fill —— 往 <select> 里 type 不会报错，
-  // 但也什么都不会发生（症状是"填了却没填进去"）。
+  // 下沉到抽屉：渠道与账号都是**选择**而不是手抄 id。
+  // 选择器是 ScopePicker（按钮 + 列表弹窗），不是 <select> —— 所以走 pick()。
   await pane('accounts');
   const addAccount = async () => {
     await openDrawer('#btn-new-account', '#acc-channel');
-    await page.select('#acc-channel', String(newChannelId));
+    await pick('acc-channel', [newChannelId]);
     // 必须填**真的**上游用户 ID：SaveAccount 先按 external_user_id 匹配账号行，
     // 匹配不上才退回"该渠道只有一个账号就用它"。填个假 uid 一样能过，
     // 但过的是兜底分支 —— 匹配逻辑本身就没被验到。
@@ -330,13 +378,22 @@ try {
       () => /账号已创建/.test(document.querySelector('#toast').textContent),
       { timeout: 8000 });
   };
-  // 渠道下拉必须真的列出了刚建的那个渠道 —— 它是"不再手抄 ID"的前提。
+  // 选择器必须真的列出了刚建的那个渠道 —— 它是"不再手抄 ID"的前提。
   await openDrawer('#btn-new-account', '#acc-channel');
-  const chOptionExists = await page.evaluate(
-    id => document.querySelector(`#acc-channel option[value="${id}"]`) !== null,
+  await page.click('#acc-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  const chRow = await page.evaluate(
+    id => document.querySelector(`[data-pick-row="${id}"]`)?.innerText ?? '',
     newChannelId);
-  check('登记账号时渠道来自下拉选择（不再手抄渠道 ID）', chOptionExists,
-    `渠道 #${newChannelId} ${chOptionExists ? '在下拉里' : '不在下拉里'}`);
+  check('登记账号时渠道来自选择器（不再手抄渠道 ID）', chRow !== '',
+    `渠道 #${newChannelId} ${chRow === '' ? '不在选择器里' : '在选择器里'}`);
+  // 名字相似的站点只能靠域名区分，所以域名必须**在行里**而不是只在 title 上。
+  // 这条是这次改造的全部理由：选错渠道 = 把同步/补齐打到别人家站点上。
+  const upHost = new URL(UP_URL).host;
+  check('渠道行同时给出名称与域名（名字相似时靠域名分辨）',
+    chRow.includes(upHost) && chRow.includes(`#${newChannelId}`),
+    `行内容=${chRow.replace(/\s+/g, ' ')} 期望含 ${upHost}`);
+  await page.click('[data-pick-cancel]');
   await page.click('.drawer-x');
 
   await addAccount();
@@ -431,10 +488,10 @@ try {
   const keyRefs = [UP_KEYREF, `${UP_KEYREF}-2`, `${UP_KEYREF}-3`, `${UP_KEYREF}-4`];
   for (let i = 0; i < keySecrets.length; i++) {
     await openDrawer('#btn-new-key', '#key-account');
-    // 账号同样是下拉。选渠道会把账号下拉限定到该渠道 —— 跨渠道挂 Key
+    // 账号同样是选择器。选渠道会把账号列表限定到该渠道 —— 跨渠道挂 Key
     // 本来就建不出来，让它在界面上也选不出来。
-    await page.select('#key-channel', String(newChannelId));
-    await page.select('#key-account', accountIDs[i < 2 ? 0 : 1]);
+    await pick('key-channel', [newChannelId]);
+    await pick('key-account', [accountIDs[i < 2 ? 0 : 1]]);
     await fill('#key-secret', keySecrets[i]);
     await fill('#key-ref', keyRefs[i]);
     await page.click('#btn-key');
@@ -738,8 +795,7 @@ try {
   await page.waitForFunction(
     () => document.querySelector('.drawer-t')?.textContent.includes('同步已有 Key'),
     { timeout: 5000 });
-  check('同步已有 Key 抽屉要求选择渠道',
-    await page.$eval('#key-auto-channel option[value="0"]', o => o.textContent.trim()) === '请选择渠道');
+  check('同步已有 Key 抽屉要求选择渠道', await picked('#key-auto-channel') === '请选择渠道');
   await page.click('.drawer-x');
 
   await page.click('#btn-provision-keys');
@@ -748,10 +804,22 @@ try {
     { timeout: 5000 });
   const onlyEmpty = await page.$eval('#key-auto-only-without-keys', input => input.checked);
   check('批量补齐默认仅处理无 Key 账号', onlyEmpty);
+
+  // 自动化抽屉里的渠道/账号都是多选：一次挑一批站点比开 N 次抽屉快。
+  // 这里只验选择行为，不点「预览/执行补齐」—— 那会真的去动上游。
+  await page.click('#key-auto-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  await page.click('[data-pick-all]');
+  const autoPicked = await page.$eval('[data-pick-count]', el => el.textContent.trim());
+  await page.click('[data-pick-ok]');
+  const autoSummary = await picked('#key-auto-channel');
+  check('Key 自动化的渠道范围支持全选（弹窗内批量勾选）',
+    /已选 [1-9]/.test(autoPicked) && autoSummary !== '全部渠道',
+    `弹窗计数=${autoPicked} 按钮=${autoSummary}`);
   await page.click('.drawer-x');
 
   // 按渠道筛选后，剩下的必须**都属于**这个渠道 —— 不是"数量对得上"。
-  await page.select('#key-f-channel', String(newChannelId));
+  await pick('key-f-channel', [newChannelId], true);
   await sleep(400);
   const filteredRows = await page.$$eval('#pane-keys tr[data-key-row]',
     rs => rs.map(r => r.querySelector('td[data-col="channel"]')?.textContent.trim()));
@@ -785,6 +853,59 @@ try {
   check('重置筛选恢复全量', afterReset === groupedCount || afterReset > groupedCount,
     `重置后 ${afterReset} 行（筛选时 ${groupedCount} 行）`);
   await page.screenshot({ path: `${SHOT}/09-keys-grouped.png`, fullPage: true });
+
+  // ── 8quater. 选择器弹窗与「更多」菜单 ──
+  //
+  // 账号在 P1 **没有名字列**（只有 id 与 external_user_id），渠道名则成批相似。
+  // 所以选择器行里必须同时有 #id 与所属渠道域名 —— 这是把「同步/补齐 Key」
+  // 打到正确站点上的唯一依据。
+  await page.click('#key-f-account');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  const accRows = await page.$$eval('[data-pick-row]',
+    rs => rs.map(r => r.innerText.replace(/\s+/g, ' ')));
+  check('账号选择器逐行给出 #id 与所属渠道域名',
+    accRows.length >= 2 && accRows.every(t => /#\d+/.test(t) && t.includes(upHost)),
+    JSON.stringify(accRows));
+
+  // 弹窗内搜索。65 个渠道 / 几十个账号时，不能搜就只能靠滚。
+  await page.type('#key-f-account-q', `#${accountIDs[0]}`, { delay: 2 });
+  await sleep(200);
+  const searched = await page.$$eval('[data-pick-row]', rs => rs.map(r => r.dataset.pickRow));
+  check('选择器弹窗内可搜索并真的收敛到命中行',
+    searched.length === 1 && searched[0] === String(accountIDs[0]),
+    `搜 #${accountIDs[0]} 命中 ${JSON.stringify(searched)}`);
+
+  await page.click('#key-f-account-q', { clickCount: 3 });
+  await page.keyboard.press('Backspace');
+  await sleep(200);
+  await page.click('[data-pick-all]');
+  const allCount = await page.$eval('[data-pick-count]', el => el.textContent.trim());
+  await page.click('[data-pick-invert]');
+  const invCount = await page.$eval('[data-pick-count]', el => el.textContent.trim());
+  check('选择器弹窗支持全选与反选',
+    /已选 [1-9]/.test(allCount) && /已选 0 /.test(invCount),
+    `全选后=${allCount} 反选后=${invCount}`);
+  await page.click('[data-pick-cancel]');
+
+  // 行内「更多」菜单**整块可见**。修复前它是 position:absolute，而表格容器
+  // .tw 有 overflow-x:auto（宽表格要横向滚动，于是 overflow-y 也算成 auto）——
+  // 菜单从按钮往下展开必然越过表格下边缘，最后一行点开等于什么都没有。
+  // 断言用命中测试而不是量矩形：被裁掉的元素矩形照样在（见 menuVisible 注释）。
+  await page.click('[data-seg="flat"]');
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pane-keys tr[data-key-row]').length > 0, { timeout: 5000 });
+  const lastMore = await page.$$eval('#pane-keys [data-key-more]',
+    bs => bs[bs.length - 1].dataset.keyMore);
+  await openMore(`[data-key-more="${lastMore}"]`);
+  const lastMenu = await menuVisible(`[data-key-more="${lastMore}"]`);
+  check('表格最后一行的「更多」菜单整块可见（不被表格容器裁掉）', lastMenu.ok, lastMenu.why);
+  await page.click(`[data-key-more="${lastMore}"]`);
+
+  // 同一段 CSS 也管卡片头里的「列设置」，顺带验一次它没被这次改动带歪。
+  await openMore('#btn-cols');
+  const colsMenu = await menuVisible('#btn-cols');
+  check('卡片头的「列设置」浮窗同样整块可见', colsMenu.ok, colsMenu.why);
+  await page.click('#btn-cols');
 
   // ── 8ter. 账号页：余额三件事同格（金额 / 状态 / 确认时刻）──
   //

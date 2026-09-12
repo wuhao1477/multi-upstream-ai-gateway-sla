@@ -101,8 +101,19 @@ try {
   await page.waitForFunction(() =>
     document.querySelector('.drawer-t')?.textContent.includes('同步已有 Key'),
     { timeout: 5000 });
-  const importScope = await page.$eval('#key-auto-channel option[value="0"]', o => o.textContent.trim());
+  // 渠道/账号改成了选择器（ScopePicker）：触发按钮 + 列表弹窗，不再是 <select>。
+  // 未选中时按钮上显示占位符，「同步已有 Key」的占位符就是那句要求。
+  const importScope = await page.$eval('#key-auto-channel .picker-sum', el => el.textContent.trim());
   check('同步已有 Key 要求选择渠道', importScope === '请选择渠道', importScope);
+  // 点开必须真的弹出列表。免密路径下库里没有渠道，所以断言停在"弹窗开了且
+  // 明说没有可选项"——**不要**在这里断言行内容：SPA 这套跑的是空库，
+  // 行的形态（域名、#id）只能由带真上游的那套验（CLAUDE.md §1）。
+  await page.click('#key-auto-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  const pickerText = await page.$eval('.picker', el => el.innerText.replace(/\s+/g, ' '));
+  check('渠道选择器点开即弹出列表弹窗',
+    pickerText.includes('选择渠道') && pickerText.includes('按域名核对'), pickerText.slice(0, 80));
+  await page.click('[data-pick-cancel]');
   await page.click('.drawer-x');
 
   await page.click('#btn-provision-keys');

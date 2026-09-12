@@ -3,24 +3,28 @@ import { computed, ref, watch } from 'vue'
 import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiField from '@/components/ui/UiField.vue'
 import UiStat from '@/components/ui/UiStat.vue'
+import ScopePicker from '@/components/res/ScopePicker.vue'
 import * as adminApi from '@/api/admin'
 import type { KeyProvisionBatchResult } from '@/api/types'
-import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 
+/**
+ * ⚠️ 属性名是 `channelIds` / `accountIds`（模板里写 `:channel-ids`）。
+ * 理由与 RegisterDrawers 顶部那段一样：写成 `channelIDs` 会静默落进 attrs。
+ */
 const props = defineProps<{
   mode: 'import' | 'provision' | null
-  channelId?: number
-  accountId?: number
+  channelIds?: number[]
+  accountIds?: number[]
 }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
-const channels = useChannelsStore()
 const resources = useResourcesStore()
 const toast = useToastStore()
-const channelID = ref(0)
-const accountID = ref(0)
+/** 渠道与账号都是多选：一次把同一批站点全挑上，比开 N 次抽屉快得多。 */
+const channelIDs = ref<number[]>([])
+const accountIDs = ref<number[]>([])
 const groupMode = ref<'all' | 'model'>('all')
 const model = ref('')
 const onlyWithoutKeys = ref(true)
@@ -28,45 +32,48 @@ const busy = ref(false)
 const preview = ref<KeyProvisionBatchResult | null>(null)
 
 watch(
-  () => [props.mode, props.channelId, props.accountId],
+  () => [props.mode, props.channelIds, props.accountIds],
   () => {
-    channelID.value = props.channelId ?? 0
-    accountID.value = props.accountId ?? 0
+    channelIDs.value = [...(props.channelIds ?? [])]
+    accountIDs.value = [...(props.accountIds ?? [])]
     groupMode.value = 'all'
     model.value = ''
     onlyWithoutKeys.value = true
     preview.value = null
   },
-  { immediate: true },
+  { immediate: true, deep: true },
 )
 
-const accounts = computed(() =>
-  channelID.value === 0 ? resources.accounts : resources.channelAccounts(channelID.value),
+/** 缩小渠道范围时剔掉落在范围外的账号：它们提交上去只会换回 400。 */
+watch(
+  channelIDs,
+  (chs) => {
+    if (chs.length === 0 || accountIDs.value.length === 0) return
+    accountIDs.value = accountIDs.value.filter((id) => {
+      const account = resources.accountByID.get(id)
+      return account === undefined || chs.includes(account.channel_id)
+    })
+  },
+  { deep: true },
 )
 
-watch(channelID, () => {
-  const account = resources.accountByID.get(accountID.value)
-  if (account !== undefined && channelID.value !== 0 && account.channel_id !== channelID.value) {
-    accountID.value = 0
-  }
-})
-
-watch([channelID, accountID, groupMode, model, onlyWithoutKeys], () => {
+watch([channelIDs, accountIDs, groupMode, model, onlyWithoutKeys], () => {
   preview.value = null
-})
+}, { deep: true })
 
 function request(): adminApi.KeyAutomationInput {
   return {
-    channel_id: channelID.value,
-    account_id: accountID.value,
-    all: props.mode === 'provision' && channelID.value === 0 && accountID.value === 0,
+    channel_ids: [...channelIDs.value],
+    account_ids: [...accountIDs.value],
+    all:
+      props.mode === 'provision' && channelIDs.value.length === 0 && accountIDs.value.length === 0,
     model: groupMode.value === 'model' ? model.value.trim() : '',
     only_without_keys: onlyWithoutKeys.value,
   }
 }
 
 async function syncExisting(): Promise<void> {
-  if (channelID.value === 0) {
+  if (channelIDs.value.length === 0) {
     toast.show('请选择渠道', 'bad')
     return
   }
@@ -119,6 +126,17 @@ async function applyProvision(): Promise<void> {
     busy.value = false
   }
 }
+
+/** 范围摘要。一次最多 20 个账号是后端硬上限，选超了要在点下去之前就知道。 */
+const scopeHint = computed(() => {
+  if (accountIDs.value.length > 0) return `将处理 ${accountIDs.value.length} 个账号`
+  if (channelIDs.value.length === 0) return '未限定范围：按全部渠道的账号处理'
+  const total = channelIDs.value.reduce(
+    (sum, id) => sum + resources.channelAccounts(id).length,
+    0,
+  )
+  return `${channelIDs.value.length} 个渠道下共 ${total} 个账号`
+})
 </script>
 
 <template>
@@ -129,21 +147,25 @@ async function applyProvision(): Promise<void> {
     @close="emit('close')"
   >
     <UiField label="渠道范围" for="key-auto-channel">
-      <select id="key-auto-channel" v-model.number="channelID">
-        <option :value="0">{{ mode === 'import' ? '请选择渠道' : '全部渠道' }}</option>
-        <option v-for="channel in channels.list" :key="channel.id" :value="channel.id">
-          {{ channel.name }}
-        </option>
-      </select>
+      <ScopePicker
+        id="key-auto-channel"
+        kind="channel"
+        multi
+        v-model="channelIDs"
+        :placeholder="mode === 'import' ? '请选择渠道' : '全部渠道'"
+      />
     </UiField>
     <UiField label="账号范围" for="key-auto-account">
-      <select id="key-auto-account" v-model.number="accountID">
-        <option :value="0">全部账号</option>
-        <option v-for="account in accounts" :key="account.id" :value="account.id">
-          {{ resources.accountLabel(account.id) }}
-        </option>
-      </select>
+      <ScopePicker
+        id="key-auto-account"
+        kind="account"
+        multi
+        v-model="accountIDs"
+        :scope="channelIDs"
+        placeholder="全部账号"
+      />
     </UiField>
+    <p class="note" id="key-auto-scope">{{ scopeHint }}</p>
 
     <template v-if="mode === 'provision'">
       <UiField label="目标分组" for="key-auto-group-mode">

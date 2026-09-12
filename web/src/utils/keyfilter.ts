@@ -34,10 +34,16 @@ export type ExpiryFilter = 'all' | 'expiring' | 'expired'
 export interface KeyFilter {
   /** 关键字。匹配前缀、上游标识、分组名 —— **不匹配明文**（我们本来也拿不到）。 */
   q: string
-  /** 渠道 ID；0 = 全部。 */
-  channelID: number
-  /** 账号 ID；0 = 全部。 */
-  accountID: number
+  /**
+   * 渠道 ID 集合；**空数组 = 全部**。
+   *
+   * 原来是单个 `channelID`，用 0 表示"全部" —— 换成数组是因为选择器支持多选
+   * （ScopePicker）。刻意不留"0 表示全部"那个约定：空数组自己就说明了一切，
+   * 而 0 这个哨兵值得在每个读它的地方复述一遍含义。
+   */
+  channelIDs: number[]
+  /** 账号 ID 集合；空数组 = 全部。 */
+  accountIDs: number[]
   /** 状态；'' = 全部。 */
   status: string
   /** 分组名；'' = 全部。'__none__' = 未归组。 */
@@ -51,8 +57,8 @@ export interface KeyFilter {
 export function emptyKeyFilter(): KeyFilter {
   return {
     q: '',
-    channelID: 0,
-    accountID: 0,
+    channelIDs: [],
+    accountIDs: [],
     status: '',
     groupRef: '',
     quota: 'all',
@@ -64,8 +70,8 @@ export function emptyKeyFilter(): KeyFilter {
 export function isFilterActive(f: KeyFilter): boolean {
   return (
     f.q.trim() !== '' ||
-    f.channelID !== 0 ||
-    f.accountID !== 0 ||
+    f.channelIDs.length > 0 ||
+    f.accountIDs.length > 0 ||
     f.status !== '' ||
     f.groupRef !== '' ||
     f.quota !== 'all' ||
@@ -98,8 +104,8 @@ function matchQuota(k: Key, mode: QuotaFilter): boolean {
 }
 
 export function matchKey(k: Key, f: KeyFilter, accountLabel: (id: number) => string): boolean {
-  if (f.channelID !== 0 && k.channel_id !== f.channelID) return false
-  if (f.accountID !== 0 && k.account_id !== f.accountID) return false
+  if (f.channelIDs.length > 0 && !f.channelIDs.includes(k.channel_id)) return false
+  if (f.accountIDs.length > 0 && !f.accountIDs.includes(k.account_id)) return false
   if (f.status !== '' && k.status !== f.status) return false
   if (f.groupRef !== '') {
     const g = k.group_ref ?? ''
