@@ -23,7 +23,7 @@ import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { sharesWallet } from '@/utils/money'
-import { fmtTime, statusLabel } from '@/utils/format'
+import { credentialTypeLabel, fmtTime, statusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -45,7 +45,7 @@ const props = withDefaults(
   { showChannel: false, expandable: true, compact: false, emptyText: '还没有账号' },
 )
 
-const emit = defineEmits<{ addKey: [accountID: number] }>()
+const emit = defineEmits<{ addKey: [accountID: number]; editCred: [accountID: number] }>()
 
 const router = useRouter()
 const channels = useChannelsStore()
@@ -69,11 +69,16 @@ async function openChannel(id: number): Promise<void> {
   await router.push({ name: 'channel-detail', params: { id: String(id) } })
 }
 
+/**
+ * 展开行的 colspan。按"哪些列真的渲染了"逐项加，不要写成一个基数加减 ——
+ * 加一列时那个基数是最容易漏改的东西，而漏改的表现是展开区错位一格。
+ */
 const colCount = computed(
   () =>
-    (props.showChannel ? 8 : 7) +
-    (props.expandable ? 1 : 0) -
-    (props.compact ? 1 : 0),
+    6 + // 账号 / 上游用户 ID / 账号余额 / Key 数 / 状态 / 动作
+    (props.compact ? 0 : 2) + // 余额组 + 采集凭证，紧凑模式都砍掉
+    (props.showChannel ? 1 : 0) +
+    (props.expandable ? 1 : 0),
 )
 
 function toggle(id: number): void {
@@ -180,6 +185,10 @@ function openDisable(a: Account): void {
                二者不可相加也不互相蕴含 -->
           <th data-col="balance" class="n">账号余额</th>
           <th data-col="keys" class="n">Key 数</th>
+          <!-- 采集凭证跟着账号行走（UNIQUE(account_id)，023 迁移）。
+               它回答的是"这个账号采不采得了" —— 原先要去另一个分栏反查
+               "谁不在列表里"才知道。 -->
+          <th v-if="!compact" data-col="cred">采集凭证</th>
           <th data-col="status">状态</th>
           <th data-col="acts"></th>
         </tr>
@@ -235,6 +244,30 @@ function openDisable(a: Account): void {
               >
               <span v-if="!compact" class="dim cell-sub">可用 / 总数</span>
             </td>
+            <td v-if="!compact" data-col="cred">
+              <!-- 缺凭证用红而不是灰：它不是"这一格没数据"，是**这个账号采不了**，
+                   和渠道总览里 credential_missing 被划进阻断性异常是同一条理由。 -->
+              <span
+                v-if="a.cred_type === undefined"
+                class="badge bad"
+                :data-account-cred="a.id"
+                data-cred="missing"
+                >未登记</span
+              >
+              <template v-else>
+                <span
+                  class="badge"
+                  :class="a.cred_status === 'valid' ? 'ok' : 'warn'"
+                  :data-account-cred="a.id"
+                  data-cred="has"
+                  >{{ statusLabel(a.cred_status) }}</span
+                >
+                <span class="dim cell-sub">{{ credentialTypeLabel(a.cred_type) }}</span>
+                <span class="dim cell-sub">{{
+                  a.cred_expires_at === undefined ? '长期' : `到期 ${fmtTime(a.cred_expires_at)}`
+                }}</span>
+              </template>
+            </td>
             <td data-col="status">
               <span class="badge" :class="a.status === 'active' ? 'ok' : 'bad'">{{
                 statusLabel(a.status)
@@ -246,6 +279,14 @@ function openDisable(a: Account): void {
             <td data-col="acts" class="acts">
               <button class="btn ghost sm" :data-account-edit="a.id" @click="startEdit(a)">
                 编辑
+              </button>
+              <button
+                v-if="!compact"
+                class="btn ghost sm"
+                :data-account-cred-edit="a.id"
+                @click="emit('editCred', a.id)"
+              >
+                {{ a.cred_type === undefined ? '登记凭证' : '换凭证' }}
               </button>
               <button
                 v-if="!compact"

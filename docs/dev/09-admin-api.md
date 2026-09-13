@@ -263,7 +263,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channels`、`POST /admin/channels`、`PATCH /admin/channels/{id}` | 渠道 CRUD。此前只能经 `/admin/bindings` 间接建渠道，无独立管理面 | **P1** |
 | `GET /admin/channels/{id}/inventory` | **资产总览**：账号数 / Key 数 / 分组数 / 目录模型数 / 额度合计 / 最近同步时刻 / **异常项计数**（FR-128 展示面、FR-129 并入）。<br>**异常项的构成（第 45 轮定义——它被三处引用却从未定义）**：① 数据陈旧（`fetched_at` 超对应 `collector_*_interval` 的 2 倍）；② `Degraded` 结果的 `MissingFields` 待人工补录（[04 §3.4bis](./04-collector-adapter.md)）；③ 上游存在但库中未登记的 Key（[02 §1.3bis](./02-data-model.md)）；④ 疑似下架模型（`catalog_missing_rounds` 已达阈值）；⑤ 凭证状态非 `valid`（`collector_credentials.status`）；⑥ Key 状态非 `active` 或已过期。**逐类给出计数与可下钻的列表**，不合并为一个总数——否则运维看到"异常 7"却不知道该修什么 | **P1** |
 | `POST /admin/channels/{id}/sync` | **手动立即刷新**（FR-128）。**编排规范见 [§5.0bis](#50bis-sync-的编排规范p1-核心端点第-45-轮补)** —— 顺序、事务边界、部分失败语义、响应结构、限流缺一不可实现；与周期采集共用同一 Runner | **P1** |
-| `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
+| `GET /admin/accounts`、`POST /admin/accounts`、`PATCH /admin/accounts/{id}` | 账号 CRUD（`external_user_id`、`balance_group_key`、停用列）。列表行还带**该账号采集凭证的存在性与形态**：`cred_type` / `cred_status` / `cred_expires_at`，**绝不含令牌内容**（FR-094）。凭证与账号是 1:1（`collector_credentials` 上的 `UNIQUE(account_id)`，[023 迁移](../../migrations/023_account_credentials.sql)），所以它是账号行的一列而不是另一种资源；`cred_type` 缺席 = 没登记 = 这个账号采不了。⏭ 充值倍率 `topup_rate` 属 P3，本阶段不提供 | **P1** |
 | `GET /admin/keys`、`POST /admin/keys`、`PATCH /admin/keys/{id}` | 上游 Key CRUD（FR-122）。**明文只在 `POST`/`PATCH` 请求体中接收，响应与列表一律只回 `secret` 前缀**（FR-094）；PATCH 替换 `secret` 即完成轮换；可设 `channel_group_id` | **P1** |
 | `POST /admin/keys/import` | 按指定渠道或账号读取上游已有 Key 并登记；`deferred` 统计未读取的 Key，`deferred_accounts` 统计因明文读取预算未处理的账号。**范围字段**：`channel_ids[]` / `account_ids[]`（界面用的多选形状）与旧的单数 `channel_id` / `account_id` 等价 —— 服务端把单数归一进复数，下游只看复数；两者都缺即 `400`（本端点不接受无范围调用，`all` 这一位对它无效） | **P1** |
 | `POST /admin/keys/provision?dry_run=true\|false` | 按账号的全部分组或指定模型分组补齐远端 Key；可筛选仅处理没有任何远端 Key 的账号。执行前必须预览，服务端限制单次创建与明文读取数量。范围字段同上；不给任何范围时必须显式 `all=true` 且 `only_without_keys=true` | **P1** |
@@ -273,7 +273,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/channel-groups/{id}/models` | 该分组可获取的模型清单（FR-124），即"这把 Key 能用哪些模型"的答案 | **P1** |
 | `GET /admin/channels/{id}/catalog?stale=&q=` | 渠道模型目录（FR-126）：分页 + 按价格排序 + 按名称筛；`stale=true` 筛出 `last_seen_at` 停止更新的**疑似下架**模型 | **P1** |
 | `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
-| `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容） | **P1** |
+| `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容）。⚠️ 管理界面**只用 `POST`**：凭证是账号的属性，列表那一侧已由 `GET /admin/accounts` 的 `cred_*` 三列覆盖（2026-09-13 并栏）。`GET` 保留给脚本 | **P1** |
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
 

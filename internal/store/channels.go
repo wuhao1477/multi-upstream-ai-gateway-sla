@@ -219,6 +219,18 @@ type Account struct {
 	// 停用账号时要在确认框里写清影响面（"将影响 N 把 Key"），靠它。
 	KeysTotal  int `json:"keys_total"`
 	KeysActive int `json:"keys_active"`
+
+	// 采集凭证。**一个账号最多一条**（023 迁移的 idx_cred_account_unique），
+	// 所以它是账号的属性而不是另一种实体 —— 界面上也就不该是另一个分栏。
+	//
+	// 空的 CredType = 这个账号没登记凭证 = **它采不了**。这是账号页必须能
+	// 直接回答的问题：在此之前它只能去凭证分栏反查"谁不在列表里"。
+	//
+	// ⚠️ 只带**存在性与形态**，绝不带 access_token/refresh_token
+	// （FR-094 同源纪律：凭证内容一律不回显，见 saveCredential 的注释）。
+	CredType      string     `json:"cred_type,omitempty"`
+	CredStatus    string     `json:"cred_status,omitempty"`
+	CredExpiresAt *time.Time `json:"cred_expires_at,omitempty"`
 }
 
 // CreateAccount 登记账号。
@@ -250,7 +262,8 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
        COALESCE(a.balance_group_key,''),
        a.status, COALESCE(a.disabled_reason,''), a.disabled_until, a.created_at,
        b.last_confirmed_balance, COALESCE(b.balance_state,''), b.confirmed_at,
-       k.total, k.active
+       k.total, k.active,
+       COALESCE(cc.cred_type,''), COALESCE(cc.status,''), cc.token_expires_at
   FROM upstream_accounts a
   LEFT JOIN LATERAL (
     SELECT last_confirmed_balance, balance_state, confirmed_at
@@ -265,6 +278,10 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
            count(*) FILTER (WHERE status = 'active') AS active
       FROM upstream_keys WHERE account_id = a.id
   ) k ON true
+  -- 普通 LEFT JOIN 就够：collector_credentials 上有 UNIQUE(account_id)，
+  -- 一个账号最多配出一行，不会放大结果集。上面两个之所以用 LATERAL，
+  -- 是因为那两张表一个账号有多行、要挑一行/聚一次。
+  LEFT JOIN collector_credentials cc ON cc.account_id = a.id
  WHERE ($1 <= 0 OR a.channel_id = $1) ORDER BY a.id`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("列账号: %w", err)
@@ -277,7 +294,8 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
 			&a.BalanceGroupKey, &a.Status, &a.DisabledReason,
 			&a.DisabledUntil, &a.CreatedAt,
 			&a.BalanceUSD, &a.BalanceState, &a.BalanceConfirmedAt,
-			&a.KeysTotal, &a.KeysActive); err != nil {
+			&a.KeysTotal, &a.KeysActive,
+			&a.CredType, &a.CredStatus, &a.CredExpiresAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

@@ -49,19 +49,37 @@ try {
   }
 
   // ── 2. 直接访问 / 刷新子路径：后端回 index.html，前端路由接管 ──
-  const r2 = await page.goto(`${BASE}/admin/ui/creds`, { waitUntil: 'domcontentloaded' });
-  const credsOn = await page.evaluate(() =>
-    document.querySelector('#pane-creds')?.classList.contains('on') === true);
-  check('直接访问 /admin/ui/creds 命中采集凭证分栏（history 刷新可用）',
-    r2.status() === 200 && credsOn, `HTTP ${r2.status()} pane-creds.on=${credsOn}`);
+  //
+  // 这里原先用 /admin/ui/creds。采集凭证并进账号页之后它成了重定向，
+  // 重定向验不了"刷新后还在原路径" —— 换一个仍然存在的子路径来验这条性质，
+  // 旧入口本身在下一条单独验。
+  const r2 = await page.goto(`${BASE}/admin/ui/keys`, { waitUntil: 'domcontentloaded' });
+  const keysOn = await page.evaluate(() =>
+    document.querySelector('#pane-keys')?.classList.contains('on') === true);
+  check('直接访问 /admin/ui/keys 命中 Key 分栏（history 刷新可用）',
+    r2.status() === 200 && keysOn, `HTTP ${r2.status()} pane-keys.on=${keysOn}`);
 
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const stillCreds = await page.evaluate(() => ({
-    on: document.querySelector('#pane-creds')?.classList.contains('on') === true,
+  const stillKeys = await page.evaluate(() => ({
+    on: document.querySelector('#pane-keys')?.classList.contains('on') === true,
     url: location.pathname,
   }));
-  check('在子路径上刷新不丢分栏', stillCreds.on && stillCreds.url === '/admin/ui/creds',
-    JSON.stringify(stillCreds));
+  check('在子路径上刷新不丢分栏', stillKeys.on && stillKeys.url === '/admin/ui/keys',
+    JSON.stringify(stillKeys));
+
+  // ── 2bis. 旧的 /creds 收藏夹链接不许变成 404 或空白页 ──
+  // 凭证是账号的属性（UNIQUE(account_id)），并进账号页；那一页顶上就有
+  // 「缺采集凭证 N」与凭证筛选，所以落到账号页就是落到了对的地方。
+  const rCreds = await page.goto(`${BASE}/admin/ui/creds`, { waitUntil: 'domcontentloaded' });
+  const credsLanding = await page.evaluate(() => ({
+    on: document.querySelector('#pane-accounts')?.classList.contains('on') === true,
+    url: location.pathname,
+    credFilter: document.querySelector('#acc-f-cred') !== null,
+  }));
+  check('旧入口 /admin/ui/creds 落到账号页（凭证已并入账号）',
+    rCreds.status() === 200 && credsLanding.on &&
+    credsLanding.url === '/admin/ui/accounts' && credsLanding.credFilter,
+    `HTTP ${rCreds.status()} ${JSON.stringify(credsLanding)}`);
 
   // ── 3. 渠道详情是渠道管理的二级路由，不是侧栏一级项 ──
   const detailResp = await page.goto(`${BASE}/admin/ui/channels/1`, { waitUntil: 'domcontentloaded' });

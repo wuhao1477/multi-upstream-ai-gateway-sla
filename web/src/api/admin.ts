@@ -11,7 +11,6 @@ import type {
   Channel,
   ChannelGroup,
   CreateChannelResp,
-  CredentialItem,
   GroupModelsResp,
   HubImportResult,
   InventoryResp,
@@ -225,10 +224,9 @@ export function saveCredential(input: SaveCredentialInput): Promise<unknown> {
   return api<unknown>('/admin/collector/credentials', { method: 'POST', body: input })
 }
 
-/** 列凭证。只回"有没有"，不回内容。 */
-export function listCredentials(): Promise<ListResp<CredentialItem>> {
-  return api<ListResp<CredentialItem>>('/admin/collector/credentials')
-}
+// 这里原来还有一个 listCredentials()：凭证并进账号页后没有调用方了 ——
+// 凭证跟着 listAccounts 的行回来（UNIQUE(account_id)）。
+// 服务端 GET /admin/collector/credentials 仍在（09 §，供脚本用），只是界面不走它。
 
 // ── all-api-hub 导入 ─────────────────────────────────────────────────────────
 

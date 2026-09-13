@@ -26,12 +26,22 @@ const channels = useChannelsStore()
 const res = useResourcesStore()
 
 const filter = ref(emptyAccountFilter())
-const drawer = ref<'account' | 'key' | null>(null)
+const drawer = ref<'account' | 'key' | 'cred' | null>(null)
 const drawerAccount = ref(0)
 
 onMounted(() => {
   void res.load()
 })
+
+/**
+ * 抽屉的上下文。属性名是复数的 `channel-ids` / `account-ids`（理由见
+ * RegisterDrawers 顶部：写成单数会静默落进 attrs，表现是从账号行点「+ Key」
+ * 打开的抽屉不预填账号、无报错，TS 也不管）。用 computed 而不是模板里内联
+ * `[drawerAccount]`：内联字面量每次重渲染都是新数组，而那边的 watch 是
+ * deep 的 —— 在筛选框里敲一个字就会把填了一半的 Key 明文清掉。
+ */
+const drawerChannelIDs = computed(() => [filter.value.channelID])
+const drawerAccountIDs = computed(() => [drawerAccount.value])
 
 const shown = computed(() => filterAccounts(res.accounts, filter.value))
 const active = computed(() => isAccountFilterActive(filter.value))
@@ -45,6 +55,11 @@ const riskCount = computed(
       return s !== '' && s !== 'normal'
     }).length,
 )
+/**
+ * 缺凭证的账号数。它和「余额未采集」不是一回事，所以单独摆一格：
+ * 后者是"这次没采到"，前者是"**根本采不了**，而且不会自愈"。
+ */
+const noCredCount = computed(() => shown.value.filter((a) => a.cred_type === undefined).length)
 
 function reset(): void {
   filter.value = emptyAccountFilter()
@@ -53,6 +68,11 @@ function reset(): void {
 function openAddKey(accountID: number): void {
   drawerAccount.value = accountID
   drawer.value = 'key'
+}
+
+function openCred(accountID: number): void {
+  drawerAccount.value = accountID
+  drawer.value = 'cred'
 }
 </script>
 
@@ -79,6 +99,7 @@ function openAddKey(accountID: number): void {
         <UiStat label="独立钱包" :value="totals.wallets" />
         <UiStat label="余额未采集" :value="totals.unknown" />
         <UiStat label="余额状态异常" :value="riskCount" />
+        <UiStat label="缺采集凭证" :value="noCredCount" />
       </div>
       <p class="note">
         合计已按「余额组」去重（FR-022）：共用同一个上游钱包的账号只计一次，所以
@@ -122,6 +143,13 @@ function openAddKey(accountID: number): void {
             <option value="risk">状态异常</option>
           </select>
         </UiField>
+        <UiField label="采集凭证" for="acc-f-cred">
+          <select id="acc-f-cred" v-model="filter.cred">
+            <option value="all">全部凭证情况</option>
+            <option value="missing">未登记（采不了）</option>
+            <option value="has">已登记</option>
+          </select>
+        </UiField>
         <button class="btn outline sm" id="btn-acc-reset" :disabled="!active" @click="reset">
           重置
         </button>
@@ -133,13 +161,19 @@ function openAddKey(accountID: number): void {
         还没有任何上游账号。点右上角「登记账号」创建第一个。
       </UiEmpty>
       <UiEmpty v-else-if="shown.length === 0">没有符合当前筛选条件的账号</UiEmpty>
-      <AccountTable v-else :items="shown" show-channel @add-key="openAddKey" />
+      <AccountTable
+        v-else
+        :items="shown"
+        show-channel
+        @add-key="openAddKey"
+        @edit-cred="openCred"
+      />
     </UiCard>
 
     <RegisterDrawers
       :mode="drawer"
-      :channel-id="filter.channelID"
-      :account-id="drawerAccount"
+      :channel-ids="drawerChannelIDs"
+      :account-ids="drawerAccountIDs"
       @close="drawer = null"
       @created="drawerAccount = 0"
     />

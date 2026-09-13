@@ -3,7 +3,6 @@ import ChannelsView from '@/views/ChannelsView.vue'
 import DetailView from '@/views/DetailView.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import KeysView from '@/views/KeysView.vue'
-import CredsView from '@/views/CredsView.vue'
 import ImportView from '@/views/ImportView.vue'
 
 /**
@@ -38,7 +37,11 @@ const router = createRouter({
     // 账号是它原来的主要内容，所以落到账号页。
     { path: '/register', redirect: '/accounts' },
     { path: '/detail', redirect: '/' },
-    { path: '/creds', name: 'creds', component: CredsView },
+    // 「采集凭证」并进了账号页（凭证是账号的属性，见 panes.ts）。
+    // 不带 ?cred=missing 过去：账号页顶上就有「缺采集凭证 N」那一格和一个
+    // 凭证筛选，而 AccountsView 不做 URL 回写 —— 只读一个 query 参数会让
+    // 地址栏与屏幕上的筛选从此对不上，那种链接比没有更坏。
+    { path: '/creds', redirect: '/accounts' },
     { path: '/import', name: 'import', component: ImportView },
     // 未知路径回渠道列表，而不是留个空白页
     { path: '/:rest(.*)', redirect: '/' },

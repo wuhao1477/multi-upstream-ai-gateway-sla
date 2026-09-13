@@ -87,6 +87,17 @@ export interface Account {
   /** 该账号下的 Key 数。停用账号的确认框要写「将影响 N 把 Key」。 */
   keys_total: number
   keys_active: number
+
+  /**
+   * 采集凭证的**存在性与形态**，绝不含令牌内容（FR-094）。
+   *
+   * 库里 `collector_credentials` 有 UNIQUE(account_id)，一个账号最多一条 ——
+   * 凭证是账号的属性，所以它跟着账号行走，不再有独立的凭证分栏。
+   * `cred_type` 缺席 = 没登记 = **这个账号采不了**。
+   */
+  cred_type?: string
+  cred_status?: string
+  cred_expires_at?: string
 }
 
 export interface Key {
@@ -274,18 +285,6 @@ export interface CatalogResp {
    */
   units: Record<string, number>
   items: CatalogEntry[]
-}
-
-export interface CredentialItem {
-  account_id: number
-  channel_id: number
-  site_family: SiteFamily
-  cred_type: string
-  status: string
-  token_expires_at?: string
-  updated_at: string
-  /** 只报"有没有"，不报内容。 */
-  has_token: boolean
 }
 
 /**

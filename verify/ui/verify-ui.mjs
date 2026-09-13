@@ -415,6 +415,25 @@ try {
     keyCountCells.length >= 2 && keyCountCells.every(t => /\d+\s*\/\s*\d+/.test(t)),
     keyCountCells.join(' | '));
 
+  // 从账号行点「+ Key」必须**带着这一行的上下文**开抽屉 —— 那是抽屉取代
+  // 独立分栏的全部理由（RegisterDrawers 顶部那段）。断言读 data-picked 而不是
+  // 按钮文案：文案是 summary 拼出来的，改一次措辞就得改断言。
+  //
+  // 这条是补的：AccountsView / DetailView 曾把属性写成单数的 `:account-id`，
+  // 而 RegisterDrawers 收的是 `accountIds` —— 绑定静默落进 attrs，抽屉打开
+  // 但一个字段都不预填，无报错、TS 也不管。当时全套验收是绿的，因为只有
+  // Key 页那条路径被验过，而 Key 页恰好传对了。
+  await page.click(`[data-account-add-key="${accountIDs[0]}"]`);
+  await page.waitForSelector('#key-account', { visible: true, timeout: 5000 });
+  const prefill = await page.evaluate(() => ({
+    acc: document.querySelector('#key-account')?.getAttribute('data-picked') ?? '',
+    ch: document.querySelector('#key-channel')?.getAttribute('data-picked') ?? '',
+  }));
+  check('从账号行点「+ Key」预填该账号与其渠道（不必再手抄 ID）',
+    prefill.acc === String(accountIDs[0]) && prefill.ch === String(newChannelId),
+    `账号=${prefill.acc || '空'} 期望 ${accountIDs[0]}；渠道=${prefill.ch || '空'} 期望 ${newChannelId}`);
+  await page.click('.drawer-x');
+
   // 账号编辑与停用/启用必须在同一条真实管理路径中可用。
   const secondAccount = accountIDs[1];
   await page.click(`[data-account-edit="${secondAccount}"]`);
@@ -459,13 +478,26 @@ try {
     { timeout: 8000 }, secondAccount);
   check('账号编辑、停用与启用可用（AC-37）', true);
 
-  // 凭证现在按账号登记：真实上游令牌挂在第一个账号上。
-  await pane('creds');
-  await page.waitForFunction(
-    id => document.querySelector(`#cr-account option[value="${id}"]`) !== null,
-    { timeout: 8000 }, accountIDs[0]);
-  await page.select('#cr-account', accountIDs[0]);
-  await fill('#cr-token', UP_TOKEN);
+  // ── 采集凭证：登记入口与状态都在账号行上 ──
+  //
+  // 原先这是独立的「采集凭证」分栏。库里 collector_credentials 有
+  // UNIQUE(account_id)（023 迁移），一个账号最多一条 —— 凭证是账号的属性，
+  // 摆成分栏等于在界面上多编了一个实体；而那个分栏的账号下拉还绑在
+  // channels.currentID 上，直接开 /admin/ui/creds 是空的且不说为什么。
+  //
+  // 登记前先确认这一行**明说了采不了**：缺凭证不是"这一格没数据"。
+  const credBefore = await page.$eval(`[data-account-cred="${accountIDs[0]}"]`,
+    el => ({ state: el.dataset.cred, text: el.textContent.trim() }));
+  check('未登记凭证的账号在行上明确标出（不是留空）',
+    credBefore.state === 'missing' && credBefore.text.includes('未登记'),
+    `data-cred=${credBefore.state} 文案=${credBefore.text}`);
+
+  // 真实上游令牌挂在第一个账号上。入口是这一行的按钮 —— 点它就该带着这一行。
+  await openDrawer(`[data-account-cred-edit="${accountIDs[0]}"]`, '#cred-token');
+  const credPicked = await page.$eval('#cred-account', el => el.dataset.picked);
+  check('从账号行登记凭证时账号已预填', credPicked === String(accountIDs[0]),
+    `账号=${credPicked || '空'} 期望 ${accountIDs[0]}`);
+  await fill('#cred-token', UP_TOKEN);
   await page.click('#btn-cred');
   await page.waitForFunction(
     () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
@@ -474,11 +506,18 @@ try {
   check('界面登记采集凭证成功', /凭证已登记/.test(credToast),
     credToast.replace(/\n/g, ' | ').slice(0, 80));
   check('凭证类型判定为 NewAPI 系访问令牌', /NewAPI 系访问令牌/.test(credToast));
-  const credRow = await page.$$eval('#cred-list tbody tr',
-    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('凭证列表已渲染且不含令牌内容',
-    credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
-    credRow.length ? credRow[0].join(' / ') : '空');
+
+  // 登记后那一行要翻成"有凭证"，且整页任何位置都不得出现令牌原文
+  // （FR-094 同源纪律：凭证内容一律不回显）。
+  await page.waitForFunction(
+    id => document.querySelector(`[data-account-cred="${id}"]`)?.dataset.cred === 'has',
+    { timeout: 8000 }, accountIDs[0]);
+  const credCell = await page.$eval(`[data-account-cred="${accountIDs[0]}"]`,
+    el => el.closest('td').textContent.replace(/\s+/g, ' ').trim());
+  const credDOM = await page.evaluate(() => document.body.innerHTML);
+  check('账号行显示凭证状态与类型，且页面不含令牌原文',
+    /NewAPI 系访问令牌/.test(credCell) && !credDOM.includes(UP_TOKEN),
+    credCell);
 
   await pane('keys');
   const keySecrets = [
@@ -952,9 +991,10 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  // 五项：渠道管理 / 账号管理 / Key 管理 / 采集凭证 / 批量导入。
-  // 渠道详情是渠道管理的二级页面，不占用一级菜单位置。
-  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
+  // 四项：渠道管理 / 账号管理 / Key 管理 / 批量导入。
+  // 渠道详情是渠道管理的二级页面，「采集凭证」是账号的属性（并进了账号页），
+  // 两者都不占一级菜单位置。
+  check('侧栏导航项齐全', layout.navs === 4, `${layout.navs} 项`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //

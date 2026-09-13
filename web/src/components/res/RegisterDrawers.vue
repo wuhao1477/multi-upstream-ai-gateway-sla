@@ -1,14 +1,20 @@
 <script setup lang="ts">
 /**
- * 登记账号 / 登记 Key 的抽屉。
+ * 登记账号 / 登记 Key / 登记采集凭证的抽屉。
  *
  * 取代原先那个独立的「账号与 Key」分栏。旧做法要求人先去渠道列表抄一个
  * 渠道 ID、再回来粘进输入框；登记 Key 还要再抄一次账号 ID。抽屉从哪一行
  * 打开就带哪一行的上下文，渠道与账号都是**下拉选择**，不再有可抄错的数字。
  *
- * 两个表单放同一个组件里，是因为它们共享同一条链路：建完账号通常紧接着
- * 就要给它登记 Key。建账号成功后直接把新账号 id 交给 Key 表单，
- * 少一次"它是几号来着"。
+ * 三个表单放同一个组件里，是因为它们共享同一条链路：建完账号通常紧接着
+ * 就要给它登记凭证（没凭证采不了）与 Key。建账号成功后直接把新账号 id
+ * 交给后两个表单，少一次"它是几号来着"。
+ *
+ * 凭证表单原是独立的「采集凭证」分栏，2026-09-13 并到这里：库里
+ * `collector_credentials` 有 UNIQUE(account_id)（023 迁移），一个账号最多
+ * 一条 —— 凭证是账号的**属性**而不是另一种实体。旧分栏还有两处硬伤：
+ * 它的账号下拉绑在 `channels.currentID` 上，直接开 /admin/ui/creds 会是空的
+ * 且不说为什么；而它只列**有**凭证的账号，于是"哪些账号采不了"两边都答不出。
  */
 import { computed, ref, watch } from 'vue'
 import UiDrawer from '@/components/ui/UiDrawer.vue'
@@ -18,6 +24,7 @@ import * as adminApi from '@/api/admin'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
+import { credentialTypeLabel, statusLabel } from '@/utils/format'
 
 /**
  * ⚠️ 属性名是 `channelIds` / `accountIds`，**不是 `channelIDs`**。
@@ -31,8 +38,8 @@ import { useToastStore } from '@/stores/toast'
  * 不经过 kebab↔camel 这一道转换。只有**组件属性**受这条限制。
  */
 const props = defineProps<{
-  /** 'account' | 'key' | null（关闭）。 */
-  mode: 'account' | 'key' | null
+  /** 'account' | 'key' | 'cred' | null（关闭）。 */
+  mode: 'account' | 'key' | 'cred' | null
   /** Key 管理页当前的渠道筛选；取第一个作为预置值，空 = 让用户自己选。 */
   channelIds?: number[]
   /** 同上，账号（仅 mode==='key'）。 */
@@ -57,11 +64,17 @@ const keyAccountIDs = ref<number[]>([])
 const keySecret = ref('')
 const keyRef = ref('')
 const keyGroup = ref('')
+const credAccountIDs = ref<number[]>([])
+const credToken = ref('')
+const credRefresh = ref('')
 const busy = ref(false)
 
 const accChannelID = computed(() => accChannelIDs.value[0] ?? 0)
 const keyChannelID = computed(() => keyChannelIDs.value[0] ?? 0)
 const keyAccountID = computed(() => keyAccountIDs.value[0] ?? 0)
+const credAccountID = computed(() => credAccountIDs.value[0] ?? 0)
+/** 选中账号现有的凭证（若有）。用来提示"提交会覆盖"，而不是静默替换。 */
+const credCurrent = computed(() => res.accountByID.get(credAccountID.value))
 
 /** 打开时重置并吃掉上下文。不重置的话，上一次填了一半的明文会留在下一次。 */
 watch(
@@ -82,6 +95,11 @@ watch(
       keySecret.value = ''
       keyRef.value = ''
       keyGroup.value = ''
+    } else if (props.mode === 'cred') {
+      const acc = props.accountIds?.[0] ?? 0
+      credAccountIDs.value = acc === 0 ? [] : [acc]
+      credToken.value = ''
+      credRefresh.value = ''
     }
   },
   { immediate: true, deep: true },
@@ -162,6 +180,45 @@ async function createKey(): Promise<void> {
     await res.reload()
   } catch (e) {
     toast.fail('登记 Key 失败', e)
+  } finally {
+    busy.value = false
+  }
+}
+
+/**
+ * 登记/更新采集凭证。站型与 cred_type 由**服务端**按渠道站型判定
+ * （saveCredential → collector 注册表），前端不猜 —— 猜错的后果是
+ * cred_type 空串进库，校验绿、采集时才炸。
+ */
+async function saveCred(): Promise<void> {
+  const acc = credAccountID.value
+  if (acc <= 0) {
+    toast.show('请选择账号', 'bad')
+    return
+  }
+  if (credToken.value.trim() === '') {
+    toast.show('访问令牌必填', 'bad')
+    return
+  }
+  busy.value = true
+  try {
+    const d = await adminApi.saveCredential({
+      account_id: acc,
+      access_token: credToken.value.trim(),
+      refresh_token: credRefresh.value.trim(),
+    })
+    // 回的 cred_type 是**判定结果**（运维据此确认填的字段被认成了哪种凭证），
+    // note 是续期方式提示。两个都要给。
+    const o = (d ?? {}) as { cred_type?: string; note?: string }
+    toast.show(`凭证已登记（${credentialTypeLabel(o.cred_type)}）\n${o.note ?? ''}`, 'ok')
+    // 与登记 Key 同理：秘密字段用完即清，先关抽屉再等那一轮重拉。
+    credToken.value = ''
+    credRefresh.value = ''
+    emit('close')
+    emit('created')
+    await res.reload()
+  } catch (e) {
+    toast.fail('登记凭证失败', e)
   } finally {
     busy.value = false
   }
@@ -249,6 +306,51 @@ async function createKey(): Promise<void> {
     </p>
     <template #footer>
       <button class="btn" id="btn-key" :disabled="busy" @click="createKey">登记 Key</button>
+      <button class="btn outline" @click="emit('close')">取消</button>
+    </template>
+  </UiDrawer>
+
+  <UiDrawer
+    :open="mode === 'cred'"
+    title="登记采集凭证"
+    desc="没有凭证就采不到这个账号的任何数据。凭证内容一律不回显（FR-094）。"
+    @close="emit('close')"
+  >
+    <UiField label="账号" for="cred-account">
+      <ScopePicker id="cred-account" kind="account" v-model="credAccountIDs" />
+    </UiField>
+    <!-- 已有凭证时必须明说会覆盖：NewAPI 的长期令牌**不能运行时重生**
+         （重生会作废正在用的那个），所以"顺手再填一次"是有代价的动作。 -->
+    <p v-if="credCurrent?.cred_type !== undefined" class="note warn" id="cred-overwrite">
+      该账号已登记
+      <b>{{ credentialTypeLabel(credCurrent.cred_type) }}</b>
+      （{{ statusLabel(credCurrent.cred_status) }}）—— 提交将<b>覆盖</b>它。
+    </p>
+    <UiField label="访问令牌 / JWT" for="cred-token">
+      <input
+        id="cred-token"
+        v-model="credToken"
+        type="password"
+        placeholder="NewAPI 系统令牌 或 JWT"
+        autocomplete="off"
+      />
+    </UiField>
+    <UiField label="refresh_token（Sub2API 可选）" for="cred-refresh">
+      <input
+        id="cred-refresh"
+        v-model="credRefresh"
+        type="password"
+        placeholder="用于 24h JWT 自动续期"
+        autocomplete="off"
+      />
+    </UiField>
+    <p class="note">
+      站型与凭证类型由服务端按渠道判定，不用在这里选。各家族的续期方式不同（04 §5）：
+      NewAPI 长期令牌<b>不可运行时重新生成</b>（会作废正在用的那个）；
+      Sub2API 24h JWT 用 refresh 续期、同账号串行。
+    </p>
+    <template #footer>
+      <button class="btn" id="btn-cred" :disabled="busy" @click="saveCred">登记凭证</button>
       <button class="btn outline" @click="emit('close')">取消</button>
     </template>
   </UiDrawer>
