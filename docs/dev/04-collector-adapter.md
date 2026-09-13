@@ -728,9 +728,18 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 | `webdav_url` | 取回时按上面那条路径规则解析；为空即"没配置"，定时循环直接跳过（不报错，没配置不是故障） |
 | `webdav_username` / `webdav_password` | Basic 鉴权的两半。密码明文存（FR-113 一期），**只在去 WebDAV 的那个请求里出现**，读接口一律只回 `has_webdav_password` |
 | `backup_password` | 解信封用；远端是明文备份时留空。同样只回 `has_backup_password`。⚠️ 写入时**空串 = 保持原值**：界面上这两个框每次打开都是空的，当清空处理的话，一次"只改间隔"的保存就会把密码抹掉，而症状要等下一轮同步 401 才出现 |
-| `last_run_at` | 上一轮结束的时刻。**它同时是定时判据**：`now - last_run_at >= interval_minutes` 才跑；为 `NULL`（从未跑过）即立刻跑 |
-| `last_error` | 上一轮的失败原因，空串 = 成功。成功时必须清掉，否则界面会一直挂着一条早就修好的报错 |
-| `last_result` | 上一轮的**汇总计数**（total/imported/skipped/failed/…，外加 `applied` 标明那一轮到底落没落库）。**不存逐站明细**：明细里有站点地址，而这一行会一直留在库里 |
+
+每一轮的记录另存 `hub_sync_runs`（同 §7ter 的表，[02 §7](./02-data-model.md)）。
+配置表上**不留** `last_*` 那几列：那是同一件事的两份存放，迟早分叉 —— 分叉的表现是
+定时器按一个时间走、界面显示另一个。
+
+| 列 | 读写规则 |
+| --- | --- |
+| `started_at` / `finished_at` | 这一轮的起止。**`max(started_at)` 同时是定时判据**：`now - max(started_at) >= interval_minutes` 才跑；表为空（从未跑过）即立刻跑 |
+| `trigger` | `schedule`（定时器自己醒来）或 `manual`（人在界面上点）。排查时的第一个问题就是"这轮是谁触发的" |
+| `applied` | 这一轮到底落没落库。`report` 模式下的"入库 68"其实一个渠道都没建，不记它的话历史里两种轮次看起来一模一样。**失败的那轮一律记 `false`** —— 不管配置是什么，它都没建出东西 |
+| `error` | 失败原因，空串 = 这轮成功。**失败也要进表**：它是界面上唯一能看见"为什么一直没同步"的地方，只记成功的话这张表在出事时正好是空的 |
+| `result` | 整份导入结果，**含逐站明细**：打开一条历史要回答的正是"哪个站点失败了、为什么"。代价用保留条数兜住 —— 写入时裁到最近 50 条（约半个月，6 小时一轮）。列表接口回的是 `result - 'items'`，明细只在单条详情里给，否则几十行明细会一起挤进一个列表响应 |
 
 **验收**：解密侧的夹具由**上游自己的** `encryptWebdavBackupContent` 产出
 （`verify/fixtures/all-api-hub-encrypted-backup.json`，重新生成见

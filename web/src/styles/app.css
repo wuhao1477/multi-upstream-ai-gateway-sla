@@ -457,6 +457,13 @@ td.x {
 tbody tr:hover {
   background: color-mix(in oklab, var(--muted) 50%, transparent);
 }
+/* 整行可点的表（同步历史点开看详情）。hover 底色是所有表都有的，
+   光靠它看不出"这一行能点" —— 指针形状才是那个信号。
+   .picker-table 里本来就有一条同样的规则，但那条绑在弹窗上，
+   给普通表复用那个类名会让人以为这张表也是个选择器。 */
+tbody tr.clickable {
+  cursor: pointer;
+}
 /* 已展开的父行高亮：展开区在下面几十行开外时，回头找"我展开的是哪一行" */
 tbody tr.open > td {
   background: color-mix(in oklab, var(--primary) 7%, transparent);

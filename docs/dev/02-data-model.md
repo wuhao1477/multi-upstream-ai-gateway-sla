@@ -2829,11 +2829,24 @@ CREATE TABLE hub_sync_config (
   interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
   apply_mode       TEXT NOT NULL DEFAULT 'report'
                      CHECK (apply_mode IN ('report','import')),
-  last_run_at      TIMESTAMPTZ,
-  last_error       TEXT NOT NULL DEFAULT '',    -- 空串 = 上一轮成功；从未跑过看 last_run_at IS NULL
-  last_result      JSONB,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 每一轮同步的记录。配置表上**不留** last_* 三列：那是同一件事的两份存放，
+-- 迟早分叉。"上次同步"与定时判据一律由本表最新一行推导。
+-- result 存整份导入结果（含逐站明细）—— 打开一条历史要回答的正是"哪个站点
+-- 失败了、为什么"；代价用保留条数兜住（写入时裁到最近 N 条）。
+CREATE TABLE hub_sync_runs (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  started_at   TIMESTAMPTZ NOT NULL,
+  finished_at  TIMESTAMPTZ NOT NULL,
+  trigger      TEXT NOT NULL CHECK (trigger IN ('schedule','manual')),
+  applied      BOOLEAN NOT NULL,               -- 这轮到底落没落库
+  error        TEXT NOT NULL DEFAULT '',       -- 空串 = 这轮成功
+  result       JSONB
+);
+
+CREATE INDEX idx_hub_sync_runs_recent ON hub_sync_runs (started_at DESC, id DESC);
 
 -- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (

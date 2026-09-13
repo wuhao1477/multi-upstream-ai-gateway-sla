@@ -972,11 +972,20 @@ CREATE TABLE hub_sync_config (
   interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
   apply_mode       TEXT NOT NULL DEFAULT 'report'
                      CHECK (apply_mode IN ('report','import')),
-  last_run_at      TIMESTAMPTZ,
-  last_error       TEXT NOT NULL DEFAULT '',    -- 空串 = 上一轮成功；从未跑过看 last_run_at IS NULL
-  last_result      JSONB,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE hub_sync_runs (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  started_at   TIMESTAMPTZ NOT NULL,
+  finished_at  TIMESTAMPTZ NOT NULL,
+  trigger      TEXT NOT NULL CHECK (trigger IN ('schedule','manual')),
+  applied      BOOLEAN NOT NULL,               -- 这轮到底落没落库
+  error        TEXT NOT NULL DEFAULT '',       -- 空串 = 这轮成功
+  result       JSONB
+);
+
+CREATE INDEX idx_hub_sync_runs_recent ON hub_sync_runs (started_at DESC, id DESC);
 
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

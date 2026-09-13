@@ -302,23 +302,33 @@ export interface HubSyncConfig {
   interval_minutes: number
   /** report = 只拉取比对不落库；import = 等同「正式导入」。 */
   apply_mode: 'report' | 'import'
+  /**
+   * 上次同步的时刻。取自同步历史最新一行 —— 配置里不存第二份，
+   * 存了迟早与历史表分叉（定时器按一个时间走、界面显示另一个）。
+   * 详情与历史看 `HubSyncRun`。
+   */
   last_run_at?: string
-  /** 非空 = 上一轮失败，这是界面上唯一能看见"为什么一直没同步"的地方。 */
-  last_error?: string
-  /** 上一轮的汇总计数（只有计数，没有逐站明细）。 */
-  last_result?: {
-    total: number
-    imported: number
-    skipped: number
-    failed: number
-    family_mismatches: number
-    shielded_sites: number
-    without_credential: number
-    keys_found: number
-    keys_imported: number
-    /** 那一轮是不是真的落了库。 */
-    applied: boolean
-  }
+}
+
+/**
+ * 一轮同步的记录。
+ *
+ * **列表里的 `result` 不带 `items`**（服务端 `result - 'items'` 剥掉了）：
+ * 几十行逐站明细一起回等于把上兆 JSON 塞进一个列表响应。要明细就单独取一条。
+ */
+export interface HubSyncRun {
+  id: number
+  started_at: string
+  finished_at: string
+  /** 这轮跑了多久。服务端算好，省得每个调用方各减一遍。 */
+  elapsed_ms: number
+  /** schedule = 定时器自己醒来跑的；manual = 人点的。 */
+  trigger: 'schedule' | 'manual'
+  /** 这轮到底落没落库。report 模式下的数字不代表建出了渠道。 */
+  applied: boolean
+  /** 非空 = 这轮失败，也是界面上唯一能看见"为什么一直没同步"的地方。 */
+  error?: string
+  result?: Omit<HubImportResult, 'items'> & { items?: HubImportItem[] }
 }
 
 /**

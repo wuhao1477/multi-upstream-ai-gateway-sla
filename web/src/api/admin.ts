@@ -14,6 +14,7 @@ import type {
   GroupModelsResp,
   HubImportResult,
   HubSyncConfig,
+  HubSyncRun,
   InventoryResp,
   Key,
   KeyImportBatchResult,
@@ -264,6 +265,19 @@ export function runHubSync(apply: boolean): Promise<HubImportResult> {
   return api<HubImportResult>(`/admin/hub-sync/run?apply=${apply ? 'true' : 'false'}`, {
     method: 'POST',
   })
+}
+
+/**
+ * 同步历史（倒序）。返回的 `result` 里**没有** items —— 明细走 getHubSyncRun。
+ */
+export function listHubSyncRuns(limit?: number): Promise<ListResp<HubSyncRun>> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`
+  return api<ListResp<HubSyncRun>>(`/admin/hub-sync/runs${qs}`)
+}
+
+/** 单条记录，含逐站明细。界面上点开一行看的就是它。 */
+export function getHubSyncRun(id: number): Promise<HubSyncRun> {
+  return api<HubSyncRun>(`/admin/hub-sync/runs/${id}`)
 }
 
 export interface SaveHubSyncInput {

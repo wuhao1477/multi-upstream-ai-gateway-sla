@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,13 +52,14 @@ func (s *Server) hubSyncClient() *http.Client {
 	return &http.Client{Timeout: hubSyncHTTPTimeout}
 }
 
-// RunHubSync 跑一轮同步，并把结果记回 hub_sync_config。
+// RunHubSync 跑一轮同步，并把这一轮记进 hub_sync_runs。
 //
 // forceImport 为 true 时忽略 apply_mode 直接落库 —— 界面上那个"立即导入"按钮用，
 // 定时器永远传 false（定时器只按配置走，不自己加码）。
 func (s *Server) RunHubSync(
-	ctx context.Context, forceImport bool,
+	ctx context.Context, trigger string, forceImport bool,
 ) (*collector.HubImportResult, error) {
+	startedAt := time.Now()
 	conn, release, err := s.DB.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("获取连接失败: %w", err)
@@ -74,26 +76,25 @@ func (s *Server) RunHubSync(
 	res, runErr := s.runHubSyncOnce(ctx, cfg, forceImport)
 
 	// 成败都要记：失败那条是界面上唯一能看见"为什么一直没同步"的地方。
-	msg := ""
-	if runErr != nil {
-		msg = runErr.Error()
+	run := store.HubSyncRun{
+		StartedAt:  startedAt,
+		FinishedAt: time.Now(),
+		Trigger:    trigger,
+		Applied:    forceImport || cfg.ApplyMode == store.HubSyncModeImport,
 	}
-	var payload json.RawMessage
+	if runErr != nil {
+		run.Error = runErr.Error()
+		// 失败的那轮没有落库，不管配置是什么 —— 记成 applied=true 会让历史里
+		// 那一行看起来"建过渠道了"，而其实一个都没建。
+		run.Applied = false
+	}
 	if res != nil {
-		// 只留汇总计数，不留逐站明细：明细里有站点地址，而这一行会一直留在库里。
-		summary := map[string]any{
-			"total": res.Total, "imported": res.Imported, "skipped": res.Skipped,
-			"failed": res.Failed, "family_mismatches": res.Mismatches,
-			"shielded_sites": res.Shielded, "without_credential": res.NoCredential,
-			"keys_found": res.KeysFound, "keys_imported": res.KeysImported,
-			"applied": forceImport || cfg.ApplyMode == store.HubSyncModeImport,
-		}
-		if b, err := json.Marshal(summary); err == nil {
-			payload = b
+		if b, err := json.Marshal(res); err == nil {
+			run.Result = b
 		}
 	}
 	if conn, release, err := s.DB.Acquire(ctx); err == nil {
-		if err := store.RecordHubSyncRun(ctx, conn, time.Now(), msg, payload); err != nil {
+		if _, err := store.InsertHubSyncRun(ctx, conn, run); err != nil {
 			s.Logger.Warn("记录 all-api-hub 同步结果失败", "err", err)
 		}
 		release()
@@ -163,7 +164,7 @@ func (s *Server) hubSyncTickOnce(ctx context.Context) {
 	defer unlock()
 
 	s.Logger.Info("all-api-hub 定时同步开始", "apply_mode", cfg.ApplyMode)
-	res, err := s.RunHubSync(ctx, false)
+	res, err := s.RunHubSync(ctx, store.HubSyncTriggerSchedule, false)
 	if err != nil {
 		s.Logger.Warn("all-api-hub 定时同步失败", "err", err)
 		return
@@ -220,20 +221,64 @@ func (s *Server) HubSyncRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /admin/hub-sync", s.requireToken(http.HandlerFunc(s.getHubSync)))
 	mux.Handle("PUT /admin/hub-sync", s.requireToken(http.HandlerFunc(s.putHubSync)))
 	mux.Handle("POST /admin/hub-sync/run", s.requireToken(http.HandlerFunc(s.runHubSyncNow)))
+	mux.Handle("GET /admin/hub-sync/runs", s.requireToken(http.HandlerFunc(s.listHubSyncRuns)))
+	mux.Handle("GET /admin/hub-sync/runs/{id}",
+		s.requireToken(http.HandlerFunc(s.getHubSyncRun)))
+}
+
+// listHubSyncRuns 历史列表（倒序，不含逐站明细）。
+func (s *Server) listHubSyncRuns(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			s.fail(w, http.StatusBadRequest, "limit 必须是正整数")
+			return
+		}
+		limit = n
+	}
+	s.withConn(w, r, func(conn *pgx.Conn) {
+		runs, err := store.ListHubSyncRuns(r.Context(), conn, limit)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		items := make([]hubSyncRunView, 0, len(runs))
+		for _, run := range runs {
+			items = append(items, hubSyncRunViewOf(run))
+		}
+		s.ok(w, map[string]any{"count": len(items), "items": items})
+	})
+}
+
+// getHubSyncRun 单条记录，含逐站明细 —— 界面上点开一行看的就是它。
+func (s *Server) getHubSyncRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.pathID(w, r)
+	if !ok {
+		return
+	}
+	s.withConn(w, r, func(conn *pgx.Conn) {
+		run, err := store.GetHubSyncRun(r.Context(), conn, id)
+		if err != nil {
+			s.mapNotFound(w, err)
+			return
+		}
+		s.ok(w, hubSyncRunViewOf(run))
+	})
 }
 
 // hubSyncView 是回给界面的形态。**两个密码只报有没有**（FR-094 同源纪律）。
 type hubSyncView struct {
-	WebDAVURL         string          `json:"webdav_url"`
-	WebDAVUsername    string          `json:"webdav_username"`
-	HasWebDAVPassword bool            `json:"has_webdav_password"`
-	HasBackupPassword bool            `json:"has_backup_password"`
-	Enabled           bool            `json:"enabled"`
-	IntervalMinutes   int             `json:"interval_minutes"`
-	ApplyMode         string          `json:"apply_mode"`
-	LastRunAt         *time.Time      `json:"last_run_at,omitempty"`
-	LastError         string          `json:"last_error,omitempty"`
-	LastResult        json.RawMessage `json:"last_result,omitempty"`
+	WebDAVURL         string `json:"webdav_url"`
+	WebDAVUsername    string `json:"webdav_username"`
+	HasWebDAVPassword bool   `json:"has_webdav_password"`
+	HasBackupPassword bool   `json:"has_backup_password"`
+	Enabled           bool   `json:"enabled"`
+	IntervalMinutes   int    `json:"interval_minutes"`
+	ApplyMode         string `json:"apply_mode"`
+	// 上次同步的时刻。取自 hub_sync_runs 最新一行，配置表上不存第二份。
+	// 详情与历史走 /admin/hub-sync/runs。
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
 }
 
 func hubSyncViewOf(c store.HubSyncConfig) hubSyncView {
@@ -246,10 +291,38 @@ func hubSyncViewOf(c store.HubSyncConfig) hubSyncView {
 		IntervalMinutes:   c.IntervalMinutes,
 		ApplyMode:         c.ApplyMode,
 		LastRunAt:         c.LastRunAt,
-		LastError:         c.LastError,
 	}
-	if len(c.LastResult) > 0 && string(c.LastResult) != "null" {
-		v.LastResult = c.LastResult
+	return v
+}
+
+// hubSyncRunView 是一条同步记录的形态。
+//
+// Result 在列表里已被剥掉 items（store.ListHubSyncRuns 里做的），详情接口才带全 ——
+// 几十行明细一起回等于把上兆 JSON 塞进一个列表响应。
+type hubSyncRunView struct {
+	ID         int64     `json:"id"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	// 毫秒。前端要显示"这轮跑了多久"，算一次比让每个调用方各减一遍稳妥。
+	ElapsedMS int64           `json:"elapsed_ms"`
+	Trigger   string          `json:"trigger"`
+	Applied   bool            `json:"applied"`
+	Error     string          `json:"error,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+}
+
+func hubSyncRunViewOf(r store.HubSyncRun) hubSyncRunView {
+	v := hubSyncRunView{
+		ID:         r.ID,
+		StartedAt:  r.StartedAt,
+		FinishedAt: r.FinishedAt,
+		ElapsedMS:  r.FinishedAt.Sub(r.StartedAt).Milliseconds(),
+		Trigger:    r.Trigger,
+		Applied:    r.Applied,
+		Error:      r.Error,
+	}
+	if len(r.Result) > 0 && string(r.Result) != "null" {
+		v.Result = r.Result
 	}
 	return v
 }
@@ -333,7 +406,8 @@ func (s *Server) putHubSync(w http.ResponseWriter, r *http.Request) {
 
 // runHubSyncNow 手动跑一轮。?apply=true 强制落库（界面上的"立即导入"）。
 func (s *Server) runHubSyncNow(w http.ResponseWriter, r *http.Request) {
-	res, err := s.RunHubSync(r.Context(), r.URL.Query().Get("apply") == "true")
+	res, err := s.RunHubSync(r.Context(), store.HubSyncTriggerManual,
+		r.URL.Query().Get("apply") == "true")
 	if err != nil {
 		switch {
 		case errors.Is(err, collector.ErrHubBackupNotFound):

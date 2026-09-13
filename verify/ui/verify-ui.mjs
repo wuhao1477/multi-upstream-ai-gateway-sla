@@ -1164,11 +1164,24 @@ try {
         { timeout: 8000 });
       return page.$eval('#toast', el => el.textContent);
     };
+    // ⚠️ 超时必须**小于** puppeteer 的 protocolTimeout（默认 180s）。
+    // waitForFunction 是一次长挂起的 Runtime.callFunctionOn：timeout 给到 300s
+    // 的话，180s 上限先到，抛的是 ProtocolError 而不是 TimeoutError —— 报错里
+    // 只有一句"callFunctionOn timed out"，看不出页面当时到底显示了什么。
+    // 真上游那轮实测 ~30s，150s 足够宽。
     const runHubSync = async () => {
       await page.click('#btn-hubsync-run');
-      await page.waitForFunction(
-        () => /同步完成|同步失败/.test(document.querySelector('#toast')?.textContent || ''),
-        { timeout: 300000 });
+      try {
+        await page.waitForFunction(
+          () => /同步完成|同步失败/.test(document.querySelector('#toast')?.textContent || ''),
+          { timeout: 150000 });
+      } catch (e) {
+        // 超时本身不该让整个脚本崩掉：把页面当时的状态带出来，
+        // 让断言红在"toast 是什么"上，而不是红在一句协议错误上。
+        const shown = await page.$eval('#toast',
+          el => `${el.textContent} [visible=${el.style.display !== 'none'}]`).catch(() => '(读不到)');
+        return `等待同步结果超时（${e.name}）；当前 toast=${shown}`;
+      }
       return page.$eval('#toast', el => el.textContent);
     };
 
@@ -1219,7 +1232,68 @@ try {
     check('WebDAV 与解密密码不回显到界面',
       !hubDom.includes(DAV_PASS) && !hubDom.includes(DAV_ENC_PASSWORD),
       '已确认 DOM 内无两个密码原文');
-    await page.screenshot({ path: `${SHOT}/11c-hubsync.png`, fullPage: true });
+    // ── 同步历史与详情弹窗 ──
+    //
+    // 上面刚跑了三轮（明文成功 / 加密成功 / 密码错失败），历史里就该有三行，
+    // 且最新那行是失败的那一轮。**失败也要进历史** —— 它是界面上唯一能看见
+    // "为什么一直没同步"的地方，只记成功的话这张表在出事时正好是空的。
+    await page.waitForFunction(
+      () => document.querySelectorAll('#hubsync-runs tbody tr').length >= 3,
+      { timeout: 10000 });
+    const runRows = await page.$$eval('#hubsync-runs tbody tr', trs =>
+      trs.map(tr => ({
+        id: tr.getAttribute('data-hubsync-run'),
+        cells: [...tr.querySelectorAll('td')].map(td => td.innerText.replace(/\s+/g, ' ').trim()),
+      })));
+    check('同步历史列出最近每一轮（成功与失败都进）',
+      runRows.length >= 3 && /失败/.test(runRows[0].cells.join(' ')) &&
+      runRows.slice(1, 3).every(r => /成功/.test(r.cells.join(' '))),
+      runRows.slice(0, 3).map(r => r.cells.slice(0, 4).join('/')).join(' | '));
+    // report 模式下"入库 68"一个渠道都没建 —— 两种轮次在数字上看起来一模一样，
+    // 所以"是否落库"必须单独成列，不能只靠数字。
+    check('历史行区分"落没落库"与触发方式',
+      runRows.every(r => /未落库|已落库/.test(r.cells.join(' '))) &&
+      runRows.every(r => /手动|定时/.test(r.cells.join(' '))),
+      runRows[0].cells.slice(0, 4).join(' / '));
+
+    // 点最老那一行（明文那轮，110 个站点）看详情。
+    // 这条同时验着一个容易写错的设计：**列表里的 result 被剥掉了 items**，
+    // 点开时必须重新取整条 —— 直接把列表那条塞进弹窗的话明细永远是空的，
+    // 而弹窗看起来完全正常。
+    const plainRun = runRows[runRows.length - 1];
+    await page.click(`[data-hubsync-run="${plainRun.id}"]`);
+    await page.waitForSelector('#hubsync-detail', { visible: true, timeout: 8000 });
+    await page.waitForFunction(
+      () => document.querySelectorAll('#hubsync-detail tbody tr').length > 1,
+      { timeout: 8000 });
+    const detailRows = await page.$$eval('#hubsync-detail tbody tr', trs => trs.length);
+    const detailHead = await page.$eval('#hubsync-detail .drawer-d',
+      el => el.innerText.replace(/\s+/g, ' ').trim());
+    check('点历史行弹出详情，且带列表里没有的逐站明细',
+      detailRows === hubAccounts.length && /未落库|已落库/.test(detailHead),
+      `明细 ${detailRows} 行（备份 ${hubAccounts.length} 条）；抬头=${detailHead.slice(0, 60)}`);
+    await page.screenshot({ path: `${SHOT}/11d-hubsync-detail.png`, fullPage: true });
+    await page.click('#hubsync-detail .drawer-x');
+    await page.waitForFunction(
+      () => document.querySelector('#hubsync-detail') === null, { timeout: 5000 });
+
+    // 失败那轮的详情要写清错在哪 —— 只标一个红"失败"，人还得去翻服务端日志。
+    await page.click(`[data-hubsync-run="${runRows[0].id}"]`);
+    await page.waitForSelector('#hubsync-detail-error', { visible: true, timeout: 8000 });
+    const detailErr = await page.$eval('#hubsync-detail-error', el => el.innerText);
+    check('失败那轮的详情写明失败原因', /密码/.test(detailErr),
+      detailErr.replace(/\s+/g, ' ').slice(0, 80));
+    await page.click('#hubsync-detail .drawer-x');
+
+    // 勾选框不该被全局的 input{width:100%;height:36px} 拉成一整格方块。
+    // 量的是它渲染出来的尺寸，不是"有没有加上那个 class" —— 后者改个类名就失效。
+    const chkBox = await page.$eval('#hs-enabled', el => {
+      const r = el.getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    check('定时开关渲染成正常大小的勾选框（没被全局 input 规则拉开）',
+      chkBox.w > 0 && chkBox.w <= 28 && chkBox.h > 0 && chkBox.h <= 28,
+      `${chkBox.w}×${chkBox.h}px`);
   }
 
   // ── 12bis. 渠道编辑与停用（PATCH /admin/channels/{id} 的界面入口）──
