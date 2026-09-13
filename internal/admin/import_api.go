@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -40,9 +41,25 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if s.Detect == nil {
-		s.fail(w, http.StatusServiceUnavailable, "站型探测未配置，无法导入")
+	res, err := s.ImportHub(r.Context(), backup, dryRun)
+	if err != nil {
+		s.fail(w, http.StatusServiceUnavailable, err.Error())
 		return
+	}
+	s.ok(w, res)
+}
+
+// ImportHub 是导入的**全部**逻辑：探测 → （可选）落库 → 汇总。
+//
+// 从 HTTP 处理函数里抽出来，是因为它现在有两个调用方：手工上传那一个，
+// 和 WebDAV 定时同步那一个（hubsync.go）。抽的是整段而不是留两份相似代码 ——
+// 这段里「以探测为准、同 base_url 跳过、明文读取预算、失败原子性」每一条都是
+// 踩出来的，复制一份意味着下次只修其中一份。
+func (s *Server) ImportHub(
+	ctx context.Context, backup *collector.HubBackup, dryRun bool,
+) (*collector.HubImportResult, error) {
+	if s.Detect == nil {
+		return nil, errors.New("站型探测未配置，无法导入")
 	}
 
 	accounts := backup.Accounts.Accounts
@@ -53,7 +70,7 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 
 	// 探测阶段：并发跑，只打公开端点。
 	// 整体给一个宽超时 —— 上百个站点里总有慢的，但不能无限等。
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
 
 	// 探测结果按下标存进一个预分配切片，与下面 `res.Items[idx] = item` 同一个道理：
@@ -146,39 +163,42 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 	// 不并发是刻意的 —— 建渠道/账号/凭证是三张表的关联写入，
 	// 并发只会带来锁争用与更难排查的失败，而导入是低频操作。
 	if !dryRun {
-		s.withConn(w, r, func(conn *pgx.Conn) {
-			remainingSecrets := collector.DefaultKeySecretResolveLimit
-			for i := range res.Items {
-				it := &res.Items[i]
-				if it.Status != "detected" {
-					continue
-				}
-				if err := s.importOne(r.Context(), conn, accounts[i], detects[i], it); err != nil {
-					it.Status = "failed"
-					it.Reason = shortErr(err)
-					continue
-				}
-				if s.ImportKeys != nil && accounts[i].HasCredential() && it.AccountID > 0 {
-					if remainingSecrets == 0 {
-						appendImportWarning(it, "自动导入 Key 已达到本次明文读取上限，请在 Key 管理按渠道继续同步")
-						continue
-					}
-					keyResult, keyErr := s.ImportKeys(
-						r.Context(), conn, it.ChannelID, it.AccountID,
-						collector.KeyImportRequest{MaxSecretResolves: remainingSecrets},
-					)
-					applyKeyImportOutcome(it, keyResult, keyErr)
-					remainingSecrets -= keyResult.SecretResolves
-				}
+		conn, release, err := s.DB.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("获取连接失败: %w", err)
+		}
+		defer release()
+
+		remainingSecrets := collector.DefaultKeySecretResolveLimit
+		for i := range res.Items {
+			it := &res.Items[i]
+			if it.Status != "detected" {
+				continue
 			}
-			finishImport(res)
-			s.Logger.Info("all-api-hub 导入完成",
-				"total", res.Total, "imported", res.Imported,
-				"skipped", res.Skipped, "failed", res.Failed,
-				"mismatches", res.Mismatches)
-			s.ok(w, res)
-		})
-		return
+			if err := s.importOne(ctx, conn, accounts[i], detects[i], it); err != nil {
+				it.Status = "failed"
+				it.Reason = shortErr(err)
+				continue
+			}
+			if s.ImportKeys != nil && accounts[i].HasCredential() && it.AccountID > 0 {
+				if remainingSecrets == 0 {
+					appendImportWarning(it, "自动导入 Key 已达到本次明文读取上限，请在 Key 管理按渠道继续同步")
+					continue
+				}
+				keyResult, keyErr := s.ImportKeys(
+					ctx, conn, it.ChannelID, it.AccountID,
+					collector.KeyImportRequest{MaxSecretResolves: remainingSecrets},
+				)
+				applyKeyImportOutcome(it, keyResult, keyErr)
+				remainingSecrets -= keyResult.SecretResolves
+			}
+		}
+		finishImport(res)
+		s.Logger.Info("all-api-hub 导入完成",
+			"total", res.Total, "imported", res.Imported,
+			"skipped", res.Skipped, "failed", res.Failed,
+			"mismatches", res.Mismatches)
+		return res, nil
 	}
 
 	// dry_run：只报探测结果，不落库。
@@ -189,7 +209,7 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	finishImport(res)
-	s.ok(w, res)
+	return res, nil
 }
 
 // importOne 建渠道 + 探测快照 + 账号 + 凭证，**四处同生共死**。

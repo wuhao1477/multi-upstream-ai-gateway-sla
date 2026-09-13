@@ -2815,6 +2815,26 @@ CREATE TABLE collector_host_rate_limits (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- all-api-hub 的 WebDAV 定时同步配置（单行，id=1 钉死）。
+-- 不进 config_params：那张表留 prev_value 且 /admin/config 会回显值，
+-- 等于把 WebDAV 密码与备份解密密码摊进审计历史和接口响应。
+-- 凭证类一律"明文存库、只报存在性、不回显内容"，与 collector_credentials 同源。
+CREATE TABLE hub_sync_config (
+  id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  webdav_url       TEXT NOT NULL DEFAULT '',
+  webdav_username  TEXT NOT NULL DEFAULT '',
+  webdav_password  TEXT NOT NULL DEFAULT '',    -- 明文（FR-113 一期）
+  backup_password  TEXT NOT NULL DEFAULT '',    -- all-api-hub 的备份加密密码，明文备份时留空
+  enabled          BOOLEAN NOT NULL DEFAULT false,
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
+  apply_mode       TEXT NOT NULL DEFAULT 'report'
+                     CHECK (apply_mode IN ('report','import')),
+  last_run_at      TIMESTAMPTZ,
+  last_error       TEXT NOT NULL DEFAULT '',    -- 空串 = 上一轮成功；从未跑过看 last_run_at IS NULL
+  last_result      JSONB,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -288,6 +288,40 @@ export interface CatalogResp {
 }
 
 /**
+ * all-api-hub 的 WebDAV 定时同步配置。
+ *
+ * **两个密码只回 has_*，永远拿不到内容**（FR-094 同源纪律）。所以界面上那两个
+ * 输入框每次打开都是空的，而"空"的意思是"不改"，不是"清空"。
+ */
+export interface HubSyncConfig {
+  webdav_url: string
+  webdav_username: string
+  has_webdav_password: boolean
+  has_backup_password: boolean
+  enabled: boolean
+  interval_minutes: number
+  /** report = 只拉取比对不落库；import = 等同「正式导入」。 */
+  apply_mode: 'report' | 'import'
+  last_run_at?: string
+  /** 非空 = 上一轮失败，这是界面上唯一能看见"为什么一直没同步"的地方。 */
+  last_error?: string
+  /** 上一轮的汇总计数（只有计数，没有逐站明细）。 */
+  last_result?: {
+    total: number
+    imported: number
+    skipped: number
+    failed: number
+    family_mismatches: number
+    shielded_sites: number
+    without_credential: number
+    keys_found: number
+    keys_imported: number
+    /** 那一轮是不是真的落了库。 */
+    applied: boolean
+  }
+}
+
+/**
  * 建渠道时的探测结果。注意这是 createChannel 里**手工拼的 map**，
  * 不是 collector.DetectResult 的序列化（后者没有 json tag），字段名只有这四个。
  */

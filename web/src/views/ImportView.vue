@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiStat from '@/components/ui/UiStat.vue'
+import HubSyncCard from '@/components/res/HubSyncCard.vue'
 import * as adminApi from '@/api/admin'
 import type { HubImportResult } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
@@ -69,6 +70,10 @@ function statusClass(s: string): string {
 
 <template>
   <div class="pane on" id="pane-import">
+    <!-- 定时同步排在手工导入前面：配好之后就不用再手工上传了，
+         而手工那条路是它的兜底（WebDAV 不通、或者只想导一次）。 -->
+    <HubSyncCard />
+
     <UiCard>
       <template #header>
         <h2 class="card-t">导入 all-api-hub 备份</h2>

@@ -13,6 +13,11 @@ const TOKEN = process.env.ADMIN_TOKEN || 'local-verify-token';
 const SHOT = process.env.SHOTS || '/tmp/sla-ui-shots';
 // all-api-hub 备份文件。批量导入试运行用它,同时它也是上游凭证的来源。
 const HUB_FILE = process.env.HUB_FILE || '';
+// ui-stack.sh 起的真 WebDAV 容器的坐标。没有它时整段 WebDAV 同步验收跳过。
+const DAV_BASE = process.env.DAV_BASE || '';
+const DAV_USER = process.env.DAV_USER || '';
+const DAV_PASS = process.env.DAV_PASS || '';
+const DAV_ENC_PASSWORD = process.env.DAV_ENC_PASSWORD || '';
 
 // 真上游。由 ui-stack.sh 跑 verify/pick-upstream.mjs 现场探活后注入 ——
 // 验收不构造假上游(CLAUDE.md §1),所以这些值每次都可能不同,
@@ -70,7 +75,12 @@ try {
   // fill()：选中渠道时会把渠道 ID 预填进登记表单。
   // 用真实键盘事件更新 v-model，避免直接改 DOM 与 Vue 状态不同步。
   const fill = async (sel, val) => {
-    await page.click(sel, { clickCount: 3 });
+    await page.click(sel);
+    // 全选再删。原先是三击 + Backspace —— 三击在**长值**输入框里可能只选中一个
+    // "词"：实测把 http://127.0.0.1:18192/ 里的 18192 单独选走，于是新值被插进
+    // 旧值中间，拼出一个畸形地址（2026-09-13 WebDAV 同步验收红在这上面）。
+    // input.select() 选的是整个值，没有歧义；打字仍走真实键盘事件，v-model 照常更新。
+    await page.$eval(sel, el => el.select());
     await page.keyboard.press('Backspace');
     await page.type(sel, val, { delay: 2 });
   };
@@ -153,7 +163,9 @@ try {
   // 收集控制台错误 —— 页面报 JS 错等于功能不可用，即便 DOM 看着对
   const consoleErrors = [];
   page.on('console', m => {
-    if (m.type() === 'error') consoleErrors.push(m.text());
+    // 连 URL 一起记：只有状态码的话，想放行一条故意打出来的失败就只能按
+    // "429|422" 这种状态码放行，而那会把**真的** 429/422 一并放行。
+    if (m.type() === 'error') consoleErrors.push(`${m.text()} @${m.location()?.url ?? ''}`);
   });
   page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
   page.on('dialog', dialog => dialog.accept());
@@ -1125,6 +1137,91 @@ try {
     }
   }
 
+  // ── 12ter. all-api-hub 的 WebDAV 定时同步 ──
+  //
+  // 对手是 ui-stack.sh 起的**真 WebDAV 服务端**（Apache mod_dav），不是静态文件
+  // 服务器冒充的：要验的正是"我们发的 GET 能不能从 WebDAV 上把备份取回来"，
+  // Basic 鉴权、目录语义、PUT 上去的东西怎么读回来，只有真服务端说了算。
+  //
+  // 上面有两份：默认路径下是**真的 HUB_FILE**（明文），enc/ 下是仓库里那份
+  // **由 all-api-hub 自己的加密实现产出**的信封夹具。
+  if (DAV_BASE && HUB_FILE && existsSync(HUB_FILE)) {
+    await pane('import');
+    const hubAccounts = JSON.parse(readFileSync(HUB_FILE, 'utf8')).accounts?.accounts || [];
+
+    // 保存一次配置。地址给的是**目录**，服务端要自己补出上游的默认文件名
+    // all-api-hub-backup/all-api-hub-1-0.json —— 补错了的表现是 404，
+    // 而 404 会被报成"还没有备份"，一个看起来正常、于是没人会查的状态。
+    const saveHubSync = async (url, encPassword) => {
+      await fill('#hs-url', url);
+      await fill('#hs-user', DAV_USER);
+      await fill('#hs-pass', DAV_PASS);
+      await fill('#hs-enc', encPassword);
+      await page.click('#btn-hubsync-save');
+      await page.waitForFunction(
+        () => /同步配置已保存|保存同步配置失败/.test(
+          document.querySelector('#toast')?.textContent || ''),
+        { timeout: 8000 });
+      return page.$eval('#toast', el => el.textContent);
+    };
+    const runHubSync = async () => {
+      await page.click('#btn-hubsync-run');
+      await page.waitForFunction(
+        () => /同步完成|同步失败/.test(document.querySelector('#toast')?.textContent || ''),
+        { timeout: 300000 });
+      return page.$eval('#toast', el => el.textContent);
+    };
+
+    const savedToast = await saveHubSync(`${DAV_BASE}/`, DAV_ENC_PASSWORD);
+    check('保存 WebDAV 同步配置成功', /同步配置已保存/.test(savedToast),
+      savedToast.replace(/\s+/g, ' ').slice(0, 80));
+
+    // 明文备份这一路：目录 → 默认文件名 → 取回 → 解析出全部条目。
+    // 条目数与手工上传那条路必须一致 —— 同一份文件，两条入口。
+    const chCountNow = async () => {
+      await pane('channels');
+      await page.click('#btn-reload');
+      await sleep(400);
+      const txt = await page.$eval('#ch-count', el => el.innerText);
+      await pane('import');
+      return Number((txt.match(/\d+/) || [NaN])[0]);
+    };
+    const chBefore = await chCountNow();
+    const plainToast = await runHubSync();
+    check('从真 WebDAV 取回明文备份并读出全部条目（目录自动补默认文件名）',
+      new RegExp(`同步完成（未落库）：${hubAccounts.length} 个条目`).test(plainToast) ||
+      plainToast.includes(`${hubAccounts.length} 个条目`),
+      plainToast.replace(/\s+/g, ' ').slice(0, 110));
+    const chAfter = await chCountNow();
+    check('report 模式不落库（渠道数不变）', chAfter === chBefore,
+      `同步前 ${chBefore} 个渠道，同步后 ${chAfter} 个`);
+
+    // 加密这一路：enc/ 下那份信封由**上游自己的** encryptWebdavBackupContent 产出，
+    // 解得开才说明我方复刻的 PBKDF2-SHA256 + AES-256-GCM 参数是对的。
+    await saveHubSync(`${DAV_BASE}/enc/all-api-hub-1-0.json`, DAV_ENC_PASSWORD);
+    const encToast = await runHubSync();
+    check('从真 WebDAV 取回**加密**备份并解密成功（上游 PBKDF2+AES-GCM 信封）',
+      /同步完成/.test(encToast) && /1 个条目/.test(encToast),
+      encToast.replace(/\s+/g, ' ').slice(0, 110));
+
+    // 密码错必须红。没有这一条的话，上面那条绿只能说明"取回来了"——
+    // 万一解密被跳过、明文判定误把信封当明文放过去，它照样绿。
+    await saveHubSync(`${DAV_BASE}/enc/all-api-hub-1-0.json`, 'definitely-not-the-password');
+    const badToast = await runHubSync();
+    check('解密密码错时同步失败且说清是密码问题',
+      /同步失败/.test(badToast) && /密码/.test(badToast),
+      badToast.replace(/\s+/g, ' ').slice(0, 110));
+
+    // 两个密码一律不回显（FR-094 同源纪律）：整份 DOM 里不许出现它们。
+    await page.click('#btn-hubsync-reload');
+    await sleep(400);
+    const hubDom = await page.evaluate(() => document.body.innerHTML);
+    check('WebDAV 与解密密码不回显到界面',
+      !hubDom.includes(DAV_PASS) && !hubDom.includes(DAV_ENC_PASSWORD),
+      '已确认 DOM 内无两个密码原文');
+    await page.screenshot({ path: `${SHOT}/11c-hubsync.png`, fullPage: true });
+  }
+
   // ── 12bis. 渠道编辑与停用（PATCH /admin/channels/{id} 的界面入口）──
   //
   // 放在最后：编辑/停用会往 tbody 里插展开行，而前面若干断言按行数与行序取值。
@@ -1225,9 +1322,12 @@ try {
 
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
-  // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷
+  // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷。
+  // /admin/hub-sync/run 同理：12ter 里有两轮**故意**失败的同步（地址不通、
+  // 密码错），按**这个 URL** 放行而不是按它的状态码放行 —— 后者会把别处真的
+  // 5xx 一起放过去。
   const realErrors = consoleErrors.filter(e =>
-    !/429|422|favicon/.test(e));
+    !/429|422|favicon/.test(e) && !/hub-sync\/run/.test(e));
   check('页面无 JavaScript 错误', realErrors.length === 0,
     realErrors.slice(0, 2).join(' | ') || '无（已排除预期的 429/422 与 favicon）');
 

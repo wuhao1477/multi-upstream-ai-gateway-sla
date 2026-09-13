@@ -686,6 +686,58 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 
 ---
 
+## 7ter all-api-hub 的 WebDAV 备份：取回与解密（2026-09-13 加）
+
+定时同步（[09 §5 的 `/admin/hub-sync`](./09-admin-api.md)）取的就是 all-api-hub 扩展
+自己往 WebDAV 上传的那份备份。形态**不是猜的**，取自上游源码
+`src/services/webdav/webdavBackupEncryption.ts` 与 `webdavService.ts`
+（qixing-jk/all-api-hub，commit `85977e73`，2026-09-13）。
+
+**路径**：配置里给目录时，扩展的默认落点是
+`<url>/all-api-hub-backup/all-api-hub-1-0.json`（`ensureFilename`，其中 `1-0` 是
+它的 backup **path** 版本，与备份 schema 版本无关）；给 `.json` 直链则原样用。
+判据只看 URL 的 path —— `?token=a.json` 这种查询串不该被当成文件名。
+
+**取回**：HTTP `GET` + Basic 鉴权即可。我们是只读消费方，不上传、不建目录，
+所以用不到 `PROPFIND`/`MKCOL`，也就不需要引一个 WebDAV 客户端库。
+
+**载荷**：扩展的「备份加密」是**可选**的，所以两种形态都要能读，判据与它自己的
+`downloadBackup` 一致 —— 先试信封，不是信封就当明文。明文那份与手工导出**同一个
+形态**（上游的 `BackupFullV2`），因此解密后直接喂 `ParseHubBackup`，不需要第二套解析。
+
+**信封（v1）**：四个常量字段全中才认（明文备份也是 JSON，只看"能不能解析成 JSON"
+分不开两者）。
+
+```json
+{ "type": "all-api-hub-webdav-backup-encrypted", "v": 1,
+  "kdf": "PBKDF2", "cipher": "AES-GCM",
+  "iter": 250000, "salt": "<base64 16B>", "iv": "<base64 12B>", "ct": "<base64>" }
+```
+
+- **KDF**：PBKDF2-HMAC-**SHA256**，salt 与 iter 由信封给，派生 **256 位** AES 密钥。
+- **加解密**：AES-**256**-GCM，12 字节随机 IV，**无 AAD**。WebCrypto 把 16 字节认证
+  标签**附在密文尾部**，Go 的 `gcm.Open` 正是这个约定，所以 `ct` 整块传进去即可。
+- **我方多一条上限**：`iter` 来自远端文件而 PBKDF2 开销与它成正比，上游没有上限
+  （它跑在浏览器里、密码是用户当场输的），我们是无人值守的定时任务 —— 超过
+  500 万次直接拒绝，否则一个被改过的备份就能让进程空转几分钟。
+
+**落库**（[02 §7](./02-data-model.md) 的 `hub_sync_config`，单行）：
+
+| 列 | 读写规则 |
+| --- | --- |
+| `webdav_url` | 取回时按上面那条路径规则解析；为空即"没配置"，定时循环直接跳过（不报错，没配置不是故障） |
+| `webdav_username` / `webdav_password` | Basic 鉴权的两半。密码明文存（FR-113 一期），**只在去 WebDAV 的那个请求里出现**，读接口一律只回 `has_webdav_password` |
+| `backup_password` | 解信封用；远端是明文备份时留空。同样只回 `has_backup_password`。⚠️ 写入时**空串 = 保持原值**：界面上这两个框每次打开都是空的，当清空处理的话，一次"只改间隔"的保存就会把密码抹掉，而症状要等下一轮同步 401 才出现 |
+| `last_run_at` | 上一轮结束的时刻。**它同时是定时判据**：`now - last_run_at >= interval_minutes` 才跑；为 `NULL`（从未跑过）即立刻跑 |
+| `last_error` | 上一轮的失败原因，空串 = 成功。成功时必须清掉，否则界面会一直挂着一条早就修好的报错 |
+| `last_result` | 上一轮的**汇总计数**（total/imported/skipped/failed/…，外加 `applied` 标明那一轮到底落没落库）。**不存逐站明细**：明细里有站点地址，而这一行会一直留在库里 |
+
+**验收**：解密侧的夹具由**上游自己的** `encryptWebdavBackupContent` 产出
+（`verify/fixtures/all-api-hub-encrypted-backup.json`，重新生成见
+`verify/gen-hub-envelope.mjs`），不是我方重写一个加密器去自证 —— 那种自洽
+只能证明两边一起错（[CLAUDE.md §1](../../CLAUDE.md)）。取回侧对着
+`verify/ui-stack.sh` 起的**真 WebDAV 服务端**（Apache mod_dav）跑。
+
 ## 8. 与其他篇章的边界
 
 - **不含**请求链路能力：内容感知 TTFT、动态期限接管、mid-stream 取消传播、`errorMessage` 归并对账、同资源隐藏重试补算 —— 均属 `executor`/`ledger`（[01 §2](./01-architecture.md#2-sla-core-内部模块)、[00 硬约束 4/5/7](./00-overview-and-milestones.md#2-硬约束清单开发期不可违反)），本篇不涉及。

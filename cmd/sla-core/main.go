@@ -215,6 +215,7 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	srv.Routes(mux)
 	srv.UpstreamRoutes(mux)
 	srv.ImportRoutes(mux)
+	srv.HubSyncRoutes(mux)
 	srv.WebRoutes(mux)
 
 	httpSrv := &http.Server{
@@ -254,6 +255,17 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 				logger.Error("内置采集器退出", "err", err)
 			}
 		}()
+	}
+
+	// all-api-hub 的 WebDAV 定时同步。
+	//
+	// 跑在 sla-core 而不是 collector：它要 Detect 与 ImportKeys，而这两个只在
+	// 这里装配。循环自己读库判断开没开、到没到点，所以这里无条件起 —— 没配置
+	// WebDAV 地址时每分钟一条 SELECT，仅此而已。
+	//
+	// read-only 实例不启动：同步要写渠道台账，也要写 last_run_at。
+	if !readOnly {
+		go srv.StartHubSync(ctx)
 	}
 
 	errCh := make(chan error, 1)
