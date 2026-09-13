@@ -2,16 +2,15 @@
 import { ref } from 'vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiStat from '@/components/ui/UiStat.vue'
+import HubSyncCard from '@/components/res/HubSyncCard.vue'
 import * as adminApi from '@/api/admin'
 import type { HubImportResult } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
-import { useCredentialsStore } from '@/stores/credentials'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { declaredFamilyLabel, familyLabel, importStatusLabel } from '@/utils/format'
 
 const channels = useChannelsStore()
-const creds = useCredentialsStore()
 const res = useResourcesStore()
 const toast = useToastStore()
 
@@ -43,7 +42,9 @@ async function run(dry: boolean): Promise<void> {
     const raw = await file.value.text()
     const d = await adminApi.importHub(raw, dry)
     result.value = d
-    if (!dry) await Promise.all([channels.load(), res.reload(), creds.load()])
+    // 导入会一次建出渠道、账号与凭证。凭证不用单独再拉一轮 —— 它跟着
+    // 账号行走（UNIQUE(account_id)），res.reload() 就带回来了。
+    if (!dry) await Promise.all([channels.load(), res.reload()])
     // 服务端 finishImport 把 would_import 也计进 imported，没有单独字段
     toast.show(
       `${dry ? '试运行完成' : '导入完成'}：${d.imported} 个${dry ? '可入库' : '已入库'} / ` +
@@ -69,6 +70,10 @@ function statusClass(s: string): string {
 
 <template>
   <div class="pane on" id="pane-import">
+    <!-- 定时同步排在手工导入前面：配好之后就不用再手工上传了，
+         而手工那条路是它的兜底（WebDAV 不通、或者只想导一次）。 -->
+    <HubSyncCard />
+
     <UiCard>
       <template #header>
         <h2 class="card-t">导入 all-api-hub 备份</h2>

@@ -147,14 +147,27 @@ export interface AccountFilter {
   status: string
   /** 'all' | 'known'（已采到余额）| 'unknown'（未采集）| 'risk'（状态非 normal）。 */
   balance: 'all' | 'known' | 'unknown' | 'risk'
+  /**
+   * 'all' | 'has'（已登记）| 'missing'（没登记，**采不了**）。
+   *
+   * `missing` 是这一项存在的理由：凭证原来是独立分栏，那个列表只列**有**凭证
+   * 的账号，于是"哪些账号采不了"两边都答不上来 —— 恰好落在两页的缝里。
+   */
+  cred: 'all' | 'has' | 'missing'
 }
 
 export function emptyAccountFilter(): AccountFilter {
-  return { q: '', channelID: 0, status: '', balance: 'all' }
+  return { q: '', channelID: 0, status: '', balance: 'all', cred: 'all' }
 }
 
 export function isAccountFilterActive(f: AccountFilter): boolean {
-  return f.q.trim() !== '' || f.channelID !== 0 || f.status !== '' || f.balance !== 'all'
+  return (
+    f.q.trim() !== '' ||
+    f.channelID !== 0 ||
+    f.status !== '' ||
+    f.balance !== 'all' ||
+    f.cred !== 'all'
+  )
 }
 
 export function filterAccounts(accounts: Account[], f: AccountFilter): Account[] {
@@ -169,6 +182,8 @@ export function filterAccounts(accounts: Account[], f: AccountFilter): Account[]
       const s = a.balance_state ?? ''
       if (s === '' || s === 'normal') return false
     }
+    if (f.cred === 'has' && a.cred_type === undefined) return false
+    if (f.cred === 'missing' && a.cred_type !== undefined) return false
     if (q !== '') {
       const hay = [String(a.id), a.external_user_id ?? '', a.balance_group_key ?? '']
         .join(' ')

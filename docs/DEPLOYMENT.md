@@ -100,13 +100,16 @@ collector ───────────────────────�
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.5` | 要运行的发布镜像，可用于升级/回滚 |
+| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6` | 要运行的发布镜像，可用于升级/回滚 |
 | `DATABASE_URL` | 是 | 无 | 外部 PostgreSQL 16+ 连接串；库需已存在且账号可建表 |
 | `ADMIN_TOKEN` | 是 | 无 | 管理 API 令牌；不会写入 `config_params`。`collector` 不需要它，别顺手也注进去 |
 | `ADMIN_PORT` | 否 | `18081` | 本机管理 UI/API 端口，**只绑 `127.0.0.1`** |
 | `SLA_COLLECTOR` | 否 | 空（关） | 非空时 `sla-core` 进程内跑周期采集；开了它就可以删掉 `collector` 服务 |
 
 上游 Key 和采集凭证是运行时数据，从管理 UI/API 登记，不放在 `.env`。
+All API Hub 的 WebDAV 同步配置（地址、账号、两个密码、周期、是否落库）同理：
+存在 `hub_sync_config` 表，从「批量导入」分栏填写。两个密码明文存库但**接口只报
+有没有、不回显内容**，与采集凭证同一条纪律。
 
 ## 4. P1 首次使用
 
@@ -116,6 +119,8 @@ collector ───────────────────────�
 4. 登记上游 Key；列表和日志只显示脱敏前缀。
 5. 点击“立即采集”，检查账号、Key、分组、倍率、用量和模型目录。
 6. 在渠道详情查看资产总览和异常项。
+7. 用 All API Hub 管账号的话，可在「批量导入」里配 WebDAV 定时同步：填地址与账号，
+   扩展那边开了备份加密就再填一次解密密码。默认只比对不落库，确认无误再改成直接导入。
 
 支持的站型以管理界面的站型注册表和实际探测结果为准。上游没有提供某项能力时，采集结果会标记为 `degraded`，不会静默伪装成完整成功。
 
@@ -148,7 +153,7 @@ docker compose down
 修改 `.env` 中的 `SLA_IMAGE`，然后拉取并重建容器：
 
 ```bash
-SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.5
+SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:18081/healthz
@@ -198,8 +203,8 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ## 10. 发布信息
 
-- Release：[v1.0.5](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.5)
-- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.5`
+- Release：[v1.0.6](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.6)
+- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6`
 - 发布工作流：[`.github/workflows/release.yml`](../.github/workflows/release.yml)
 - P1 验收记录：[P1 release readiness](acceptance/P1-release-readiness.md)
 

@@ -13,6 +13,11 @@ const TOKEN = process.env.ADMIN_TOKEN || 'local-verify-token';
 const SHOT = process.env.SHOTS || '/tmp/sla-ui-shots';
 // all-api-hub 备份文件。批量导入试运行用它,同时它也是上游凭证的来源。
 const HUB_FILE = process.env.HUB_FILE || '';
+// ui-stack.sh 起的真 WebDAV 容器的坐标。没有它时整段 WebDAV 同步验收跳过。
+const DAV_BASE = process.env.DAV_BASE || '';
+const DAV_USER = process.env.DAV_USER || '';
+const DAV_PASS = process.env.DAV_PASS || '';
+const DAV_ENC_PASSWORD = process.env.DAV_ENC_PASSWORD || '';
 
 // 真上游。由 ui-stack.sh 跑 verify/pick-upstream.mjs 现场探活后注入 ——
 // 验收不构造假上游(CLAUDE.md §1),所以这些值每次都可能不同,
@@ -70,7 +75,12 @@ try {
   // fill()：选中渠道时会把渠道 ID 预填进登记表单。
   // 用真实键盘事件更新 v-model，避免直接改 DOM 与 Vue 状态不同步。
   const fill = async (sel, val) => {
-    await page.click(sel, { clickCount: 3 });
+    await page.click(sel);
+    // 全选再删。原先是三击 + Backspace —— 三击在**长值**输入框里可能只选中一个
+    // "词"：实测把 http://127.0.0.1:18192/ 里的 18192 单独选走，于是新值被插进
+    // 旧值中间，拼出一个畸形地址（2026-09-13 WebDAV 同步验收红在这上面）。
+    // input.select() 选的是整个值，没有歧义；打字仍走真实键盘事件，v-model 照常更新。
+    await page.$eval(sel, el => el.select());
     await page.keyboard.press('Backspace');
     await page.type(sel, val, { delay: 2 });
   };
@@ -153,7 +163,9 @@ try {
   // 收集控制台错误 —— 页面报 JS 错等于功能不可用，即便 DOM 看着对
   const consoleErrors = [];
   page.on('console', m => {
-    if (m.type() === 'error') consoleErrors.push(m.text());
+    // 连 URL 一起记：只有状态码的话，想放行一条故意打出来的失败就只能按
+    // "429|422" 这种状态码放行，而那会把**真的** 429/422 一并放行。
+    if (m.type() === 'error') consoleErrors.push(`${m.text()} @${m.location()?.url ?? ''}`);
   });
   page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
   page.on('dialog', dialog => dialog.accept());
@@ -415,6 +427,25 @@ try {
     keyCountCells.length >= 2 && keyCountCells.every(t => /\d+\s*\/\s*\d+/.test(t)),
     keyCountCells.join(' | '));
 
+  // 从账号行点「+ Key」必须**带着这一行的上下文**开抽屉 —— 那是抽屉取代
+  // 独立分栏的全部理由（RegisterDrawers 顶部那段）。断言读 data-picked 而不是
+  // 按钮文案：文案是 summary 拼出来的，改一次措辞就得改断言。
+  //
+  // 这条是补的：AccountsView / DetailView 曾把属性写成单数的 `:account-id`，
+  // 而 RegisterDrawers 收的是 `accountIds` —— 绑定静默落进 attrs，抽屉打开
+  // 但一个字段都不预填，无报错、TS 也不管。当时全套验收是绿的，因为只有
+  // Key 页那条路径被验过，而 Key 页恰好传对了。
+  await page.click(`[data-account-add-key="${accountIDs[0]}"]`);
+  await page.waitForSelector('#key-account', { visible: true, timeout: 5000 });
+  const prefill = await page.evaluate(() => ({
+    acc: document.querySelector('#key-account')?.getAttribute('data-picked') ?? '',
+    ch: document.querySelector('#key-channel')?.getAttribute('data-picked') ?? '',
+  }));
+  check('从账号行点「+ Key」预填该账号与其渠道（不必再手抄 ID）',
+    prefill.acc === String(accountIDs[0]) && prefill.ch === String(newChannelId),
+    `账号=${prefill.acc || '空'} 期望 ${accountIDs[0]}；渠道=${prefill.ch || '空'} 期望 ${newChannelId}`);
+  await page.click('.drawer-x');
+
   // 账号编辑与停用/启用必须在同一条真实管理路径中可用。
   const secondAccount = accountIDs[1];
   await page.click(`[data-account-edit="${secondAccount}"]`);
@@ -459,13 +490,26 @@ try {
     { timeout: 8000 }, secondAccount);
   check('账号编辑、停用与启用可用（AC-37）', true);
 
-  // 凭证现在按账号登记：真实上游令牌挂在第一个账号上。
-  await pane('creds');
-  await page.waitForFunction(
-    id => document.querySelector(`#cr-account option[value="${id}"]`) !== null,
-    { timeout: 8000 }, accountIDs[0]);
-  await page.select('#cr-account', accountIDs[0]);
-  await fill('#cr-token', UP_TOKEN);
+  // ── 采集凭证：登记入口与状态都在账号行上 ──
+  //
+  // 原先这是独立的「采集凭证」分栏。库里 collector_credentials 有
+  // UNIQUE(account_id)（023 迁移），一个账号最多一条 —— 凭证是账号的属性，
+  // 摆成分栏等于在界面上多编了一个实体；而那个分栏的账号下拉还绑在
+  // channels.currentID 上，直接开 /admin/ui/creds 是空的且不说为什么。
+  //
+  // 登记前先确认这一行**明说了采不了**：缺凭证不是"这一格没数据"。
+  const credBefore = await page.$eval(`[data-account-cred="${accountIDs[0]}"]`,
+    el => ({ state: el.dataset.cred, text: el.textContent.trim() }));
+  check('未登记凭证的账号在行上明确标出（不是留空）',
+    credBefore.state === 'missing' && credBefore.text.includes('未登记'),
+    `data-cred=${credBefore.state} 文案=${credBefore.text}`);
+
+  // 真实上游令牌挂在第一个账号上。入口是这一行的按钮 —— 点它就该带着这一行。
+  await openDrawer(`[data-account-cred-edit="${accountIDs[0]}"]`, '#cred-token');
+  const credPicked = await page.$eval('#cred-account', el => el.dataset.picked);
+  check('从账号行登记凭证时账号已预填', credPicked === String(accountIDs[0]),
+    `账号=${credPicked || '空'} 期望 ${accountIDs[0]}`);
+  await fill('#cred-token', UP_TOKEN);
   await page.click('#btn-cred');
   await page.waitForFunction(
     () => /凭证已登记|登记凭证失败/.test(document.querySelector('#toast').textContent),
@@ -474,11 +518,18 @@ try {
   check('界面登记采集凭证成功', /凭证已登记/.test(credToast),
     credToast.replace(/\n/g, ' | ').slice(0, 80));
   check('凭证类型判定为 NewAPI 系访问令牌', /NewAPI 系访问令牌/.test(credToast));
-  const credRow = await page.$$eval('#cred-list tbody tr',
-    rs => rs.map(r => [...r.querySelectorAll('td')].map(t => t.textContent.trim())));
-  check('凭证列表已渲染且不含令牌内容',
-    credRow.length >= 1 && !JSON.stringify(credRow).includes(UP_TOKEN),
-    credRow.length ? credRow[0].join(' / ') : '空');
+
+  // 登记后那一行要翻成"有凭证"，且整页任何位置都不得出现令牌原文
+  // （FR-094 同源纪律：凭证内容一律不回显）。
+  await page.waitForFunction(
+    id => document.querySelector(`[data-account-cred="${id}"]`)?.dataset.cred === 'has',
+    { timeout: 8000 }, accountIDs[0]);
+  const credCell = await page.$eval(`[data-account-cred="${accountIDs[0]}"]`,
+    el => el.closest('td').textContent.replace(/\s+/g, ' ').trim());
+  const credDOM = await page.evaluate(() => document.body.innerHTML);
+  check('账号行显示凭证状态与类型，且页面不含令牌原文',
+    /NewAPI 系访问令牌/.test(credCell) && !credDOM.includes(UP_TOKEN),
+    credCell);
 
   await pane('keys');
   const keySecrets = [
@@ -952,9 +1003,10 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  // 五项：渠道管理 / 账号管理 / Key 管理 / 采集凭证 / 批量导入。
-  // 渠道详情是渠道管理的二级页面，不占用一级菜单位置。
-  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
+  // 四项：渠道管理 / 账号管理 / Key 管理 / 批量导入。
+  // 渠道详情是渠道管理的二级页面，「采集凭证」是账号的属性（并进了账号页），
+  // 两者都不占一级菜单位置。
+  check('侧栏导航项齐全', layout.navs === 4, `${layout.navs} 项`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //
@@ -1085,6 +1137,165 @@ try {
     }
   }
 
+  // ── 12ter. all-api-hub 的 WebDAV 定时同步 ──
+  //
+  // 对手是 ui-stack.sh 起的**真 WebDAV 服务端**（Apache mod_dav），不是静态文件
+  // 服务器冒充的：要验的正是"我们发的 GET 能不能从 WebDAV 上把备份取回来"，
+  // Basic 鉴权、目录语义、PUT 上去的东西怎么读回来，只有真服务端说了算。
+  //
+  // 上面有两份：默认路径下是**真的 HUB_FILE**（明文），enc/ 下是仓库里那份
+  // **由 all-api-hub 自己的加密实现产出**的信封夹具。
+  if (DAV_BASE && HUB_FILE && existsSync(HUB_FILE)) {
+    await pane('import');
+    const hubAccounts = JSON.parse(readFileSync(HUB_FILE, 'utf8')).accounts?.accounts || [];
+
+    // 保存一次配置。地址给的是**目录**，服务端要自己补出上游的默认文件名
+    // all-api-hub-backup/all-api-hub-1-0.json —— 补错了的表现是 404，
+    // 而 404 会被报成"还没有备份"，一个看起来正常、于是没人会查的状态。
+    const saveHubSync = async (url, encPassword) => {
+      await fill('#hs-url', url);
+      await fill('#hs-user', DAV_USER);
+      await fill('#hs-pass', DAV_PASS);
+      await fill('#hs-enc', encPassword);
+      await page.click('#btn-hubsync-save');
+      await page.waitForFunction(
+        () => /同步配置已保存|保存同步配置失败/.test(
+          document.querySelector('#toast')?.textContent || ''),
+        { timeout: 8000 });
+      return page.$eval('#toast', el => el.textContent);
+    };
+    // ⚠️ 超时必须**小于** puppeteer 的 protocolTimeout（默认 180s）。
+    // waitForFunction 是一次长挂起的 Runtime.callFunctionOn：timeout 给到 300s
+    // 的话，180s 上限先到，抛的是 ProtocolError 而不是 TimeoutError —— 报错里
+    // 只有一句"callFunctionOn timed out"，看不出页面当时到底显示了什么。
+    // 真上游那轮实测 ~30s，150s 足够宽。
+    const runHubSync = async () => {
+      await page.click('#btn-hubsync-run');
+      try {
+        await page.waitForFunction(
+          () => /同步完成|同步失败/.test(document.querySelector('#toast')?.textContent || ''),
+          { timeout: 150000 });
+      } catch (e) {
+        // 超时本身不该让整个脚本崩掉：把页面当时的状态带出来，
+        // 让断言红在"toast 是什么"上，而不是红在一句协议错误上。
+        const shown = await page.$eval('#toast',
+          el => `${el.textContent} [visible=${el.style.display !== 'none'}]`).catch(() => '(读不到)');
+        return `等待同步结果超时（${e.name}）；当前 toast=${shown}`;
+      }
+      return page.$eval('#toast', el => el.textContent);
+    };
+
+    const savedToast = await saveHubSync(`${DAV_BASE}/`, DAV_ENC_PASSWORD);
+    check('保存 WebDAV 同步配置成功', /同步配置已保存/.test(savedToast),
+      savedToast.replace(/\s+/g, ' ').slice(0, 80));
+
+    // 明文备份这一路：目录 → 默认文件名 → 取回 → 解析出全部条目。
+    // 条目数与手工上传那条路必须一致 —— 同一份文件，两条入口。
+    const chCountNow = async () => {
+      await pane('channels');
+      await page.click('#btn-reload');
+      await sleep(400);
+      const txt = await page.$eval('#ch-count', el => el.innerText);
+      await pane('import');
+      return Number((txt.match(/\d+/) || [NaN])[0]);
+    };
+    const chBefore = await chCountNow();
+    const plainToast = await runHubSync();
+    check('从真 WebDAV 取回明文备份并读出全部条目（目录自动补默认文件名）',
+      new RegExp(`同步完成（未落库）：${hubAccounts.length} 个条目`).test(plainToast) ||
+      plainToast.includes(`${hubAccounts.length} 个条目`),
+      plainToast.replace(/\s+/g, ' ').slice(0, 110));
+    const chAfter = await chCountNow();
+    check('report 模式不落库（渠道数不变）', chAfter === chBefore,
+      `同步前 ${chBefore} 个渠道，同步后 ${chAfter} 个`);
+
+    // 加密这一路：enc/ 下那份信封由**上游自己的** encryptWebdavBackupContent 产出，
+    // 解得开才说明我方复刻的 PBKDF2-SHA256 + AES-256-GCM 参数是对的。
+    await saveHubSync(`${DAV_BASE}/enc/all-api-hub-1-0.json`, DAV_ENC_PASSWORD);
+    const encToast = await runHubSync();
+    check('从真 WebDAV 取回**加密**备份并解密成功（上游 PBKDF2+AES-GCM 信封）',
+      /同步完成/.test(encToast) && /1 个条目/.test(encToast),
+      encToast.replace(/\s+/g, ' ').slice(0, 110));
+
+    // 密码错必须红。没有这一条的话，上面那条绿只能说明"取回来了"——
+    // 万一解密被跳过、明文判定误把信封当明文放过去，它照样绿。
+    await saveHubSync(`${DAV_BASE}/enc/all-api-hub-1-0.json`, 'definitely-not-the-password');
+    const badToast = await runHubSync();
+    check('解密密码错时同步失败且说清是密码问题',
+      /同步失败/.test(badToast) && /密码/.test(badToast),
+      badToast.replace(/\s+/g, ' ').slice(0, 110));
+
+    // 两个密码一律不回显（FR-094 同源纪律）：整份 DOM 里不许出现它们。
+    await page.click('#btn-hubsync-reload');
+    await sleep(400);
+    const hubDom = await page.evaluate(() => document.body.innerHTML);
+    check('WebDAV 与解密密码不回显到界面',
+      !hubDom.includes(DAV_PASS) && !hubDom.includes(DAV_ENC_PASSWORD),
+      '已确认 DOM 内无两个密码原文');
+    // ── 同步历史与详情弹窗 ──
+    //
+    // 上面刚跑了三轮（明文成功 / 加密成功 / 密码错失败），历史里就该有三行，
+    // 且最新那行是失败的那一轮。**失败也要进历史** —— 它是界面上唯一能看见
+    // "为什么一直没同步"的地方，只记成功的话这张表在出事时正好是空的。
+    await page.waitForFunction(
+      () => document.querySelectorAll('#hubsync-runs tbody tr').length >= 3,
+      { timeout: 10000 });
+    const runRows = await page.$$eval('#hubsync-runs tbody tr', trs =>
+      trs.map(tr => ({
+        id: tr.getAttribute('data-hubsync-run'),
+        cells: [...tr.querySelectorAll('td')].map(td => td.innerText.replace(/\s+/g, ' ').trim()),
+      })));
+    check('同步历史列出最近每一轮（成功与失败都进）',
+      runRows.length >= 3 && /失败/.test(runRows[0].cells.join(' ')) &&
+      runRows.slice(1, 3).every(r => /成功/.test(r.cells.join(' '))),
+      runRows.slice(0, 3).map(r => r.cells.slice(0, 4).join('/')).join(' | '));
+    // report 模式下"入库 68"一个渠道都没建 —— 两种轮次在数字上看起来一模一样，
+    // 所以"是否落库"必须单独成列，不能只靠数字。
+    check('历史行区分"落没落库"与触发方式',
+      runRows.every(r => /未落库|已落库/.test(r.cells.join(' '))) &&
+      runRows.every(r => /手动|定时/.test(r.cells.join(' '))),
+      runRows[0].cells.slice(0, 4).join(' / '));
+
+    // 点最老那一行（明文那轮，110 个站点）看详情。
+    // 这条同时验着一个容易写错的设计：**列表里的 result 被剥掉了 items**，
+    // 点开时必须重新取整条 —— 直接把列表那条塞进弹窗的话明细永远是空的，
+    // 而弹窗看起来完全正常。
+    const plainRun = runRows[runRows.length - 1];
+    await page.click(`[data-hubsync-run="${plainRun.id}"]`);
+    await page.waitForSelector('#hubsync-detail', { visible: true, timeout: 8000 });
+    await page.waitForFunction(
+      () => document.querySelectorAll('#hubsync-detail tbody tr').length > 1,
+      { timeout: 8000 });
+    const detailRows = await page.$$eval('#hubsync-detail tbody tr', trs => trs.length);
+    const detailHead = await page.$eval('#hubsync-detail .drawer-d',
+      el => el.innerText.replace(/\s+/g, ' ').trim());
+    check('点历史行弹出详情，且带列表里没有的逐站明细',
+      detailRows === hubAccounts.length && /未落库|已落库/.test(detailHead),
+      `明细 ${detailRows} 行（备份 ${hubAccounts.length} 条）；抬头=${detailHead.slice(0, 60)}`);
+    await page.screenshot({ path: `${SHOT}/11d-hubsync-detail.png`, fullPage: true });
+    await page.click('#hubsync-detail .drawer-x');
+    await page.waitForFunction(
+      () => document.querySelector('#hubsync-detail') === null, { timeout: 5000 });
+
+    // 失败那轮的详情要写清错在哪 —— 只标一个红"失败"，人还得去翻服务端日志。
+    await page.click(`[data-hubsync-run="${runRows[0].id}"]`);
+    await page.waitForSelector('#hubsync-detail-error', { visible: true, timeout: 8000 });
+    const detailErr = await page.$eval('#hubsync-detail-error', el => el.innerText);
+    check('失败那轮的详情写明失败原因', /密码/.test(detailErr),
+      detailErr.replace(/\s+/g, ' ').slice(0, 80));
+    await page.click('#hubsync-detail .drawer-x');
+
+    // 勾选框不该被全局的 input{width:100%;height:36px} 拉成一整格方块。
+    // 量的是它渲染出来的尺寸，不是"有没有加上那个 class" —— 后者改个类名就失效。
+    const chkBox = await page.$eval('#hs-enabled', el => {
+      const r = el.getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    check('定时开关渲染成正常大小的勾选框（没被全局 input 规则拉开）',
+      chkBox.w > 0 && chkBox.w <= 28 && chkBox.h > 0 && chkBox.h <= 28,
+      `${chkBox.w}×${chkBox.h}px`);
+  }
+
   // ── 12bis. 渠道编辑与停用（PATCH /admin/channels/{id} 的界面入口）──
   //
   // 放在最后：编辑/停用会往 tbody 里插展开行，而前面若干断言按行数与行序取值。
@@ -1185,9 +1396,12 @@ try {
 
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
-  // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷
+  // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷。
+  // /admin/hub-sync/run 同理：12ter 里有两轮**故意**失败的同步（地址不通、
+  // 密码错），按**这个 URL** 放行而不是按它的状态码放行 —— 后者会把别处真的
+  // 5xx 一起放过去。
   const realErrors = consoleErrors.filter(e =>
-    !/429|422|favicon/.test(e));
+    !/429|422|favicon/.test(e) && !/hub-sync\/run/.test(e));
   check('页面无 JavaScript 错误', realErrors.length === 0,
     realErrors.slice(0, 2).join(' | ') || '无（已排除预期的 429/422 与 favicon）');
 

@@ -962,6 +962,31 @@ CREATE TABLE collector_host_rate_limits (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE hub_sync_config (
+  id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  webdav_url       TEXT NOT NULL DEFAULT '',
+  webdav_username  TEXT NOT NULL DEFAULT '',
+  webdav_password  TEXT NOT NULL DEFAULT '',    -- 明文（FR-113 一期）
+  backup_password  TEXT NOT NULL DEFAULT '',    -- all-api-hub 的备份加密密码，明文备份时留空
+  enabled          BOOLEAN NOT NULL DEFAULT false,
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
+  apply_mode       TEXT NOT NULL DEFAULT 'report'
+                     CHECK (apply_mode IN ('report','import')),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE hub_sync_runs (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  started_at   TIMESTAMPTZ NOT NULL,
+  finished_at  TIMESTAMPTZ NOT NULL,
+  trigger      TEXT NOT NULL CHECK (trigger IN ('schedule','manual')),
+  applied      BOOLEAN NOT NULL,               -- 这轮到底落没落库
+  error        TEXT NOT NULL DEFAULT '',       -- 空串 = 这轮成功
+  result       JSONB
+);
+
+CREATE INDEX idx_hub_sync_runs_recent ON hub_sync_runs (started_at DESC, id DESC);
+
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   account_id      BIGINT NOT NULL REFERENCES upstream_accounts(id),

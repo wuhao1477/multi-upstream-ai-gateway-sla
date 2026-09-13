@@ -87,6 +87,17 @@ export interface Account {
   /** 该账号下的 Key 数。停用账号的确认框要写「将影响 N 把 Key」。 */
   keys_total: number
   keys_active: number
+
+  /**
+   * 采集凭证的**存在性与形态**，绝不含令牌内容（FR-094）。
+   *
+   * 库里 `collector_credentials` 有 UNIQUE(account_id)，一个账号最多一条 ——
+   * 凭证是账号的属性，所以它跟着账号行走，不再有独立的凭证分栏。
+   * `cred_type` 缺席 = 没登记 = **这个账号采不了**。
+   */
+  cred_type?: string
+  cred_status?: string
+  cred_expires_at?: string
 }
 
 export interface Key {
@@ -276,16 +287,48 @@ export interface CatalogResp {
   items: CatalogEntry[]
 }
 
-export interface CredentialItem {
-  account_id: number
-  channel_id: number
-  site_family: SiteFamily
-  cred_type: string
-  status: string
-  token_expires_at?: string
-  updated_at: string
-  /** 只报"有没有"，不报内容。 */
-  has_token: boolean
+/**
+ * all-api-hub 的 WebDAV 定时同步配置。
+ *
+ * **两个密码只回 has_*，永远拿不到内容**（FR-094 同源纪律）。所以界面上那两个
+ * 输入框每次打开都是空的，而"空"的意思是"不改"，不是"清空"。
+ */
+export interface HubSyncConfig {
+  webdav_url: string
+  webdav_username: string
+  has_webdav_password: boolean
+  has_backup_password: boolean
+  enabled: boolean
+  interval_minutes: number
+  /** report = 只拉取比对不落库；import = 等同「正式导入」。 */
+  apply_mode: 'report' | 'import'
+  /**
+   * 上次同步的时刻。取自同步历史最新一行 —— 配置里不存第二份，
+   * 存了迟早与历史表分叉（定时器按一个时间走、界面显示另一个）。
+   * 详情与历史看 `HubSyncRun`。
+   */
+  last_run_at?: string
+}
+
+/**
+ * 一轮同步的记录。
+ *
+ * **列表里的 `result` 不带 `items`**（服务端 `result - 'items'` 剥掉了）：
+ * 几十行逐站明细一起回等于把上兆 JSON 塞进一个列表响应。要明细就单独取一条。
+ */
+export interface HubSyncRun {
+  id: number
+  started_at: string
+  finished_at: string
+  /** 这轮跑了多久。服务端算好，省得每个调用方各减一遍。 */
+  elapsed_ms: number
+  /** schedule = 定时器自己醒来跑的；manual = 人点的。 */
+  trigger: 'schedule' | 'manual'
+  /** 这轮到底落没落库。report 模式下的数字不代表建出了渠道。 */
+  applied: boolean
+  /** 非空 = 这轮失败，也是界面上唯一能看见"为什么一直没同步"的地方。 */
+  error?: string
+  result?: Omit<HubImportResult, 'items'> & { items?: HubImportItem[] }
 }
 
 /**

@@ -65,6 +65,9 @@ type Server struct {
 		ctx context.Context, conn *pgx.Conn, channelID, accountID int64,
 		request collector.KeyProvisionRequest,
 	) (collector.KeyProvisionResult, error)
+	// HubHTTP 取 all-api-hub WebDAV 备份用的客户端。留空则用默认带超时的那个。
+	// 存在的理由只有一个：验收要把它指向一台真 WebDAV 容器。
+	HubHTTP *http.Client
 
 	guard  *syncGuard
 	tokens *tokenStore

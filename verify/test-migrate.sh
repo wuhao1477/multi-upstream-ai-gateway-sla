@@ -429,6 +429,8 @@ STORE_TESTS=(
   TestSavePricingStoresSnapshotBeforeCountingRow
   TestCredentialsAreUniquePerAccount
   TestSameExternalKeyRefUpdatesItsOwnAccount
+  TestHubSyncRunsSurviveResultlessRow
+  TestHubSyncRunsPruneToKeepLimit
 )
 PAT="^($(IFS='|'; echo "${STORE_TESTS[*]}"))\$"
 EXPECT=${#STORE_TESTS[@]}

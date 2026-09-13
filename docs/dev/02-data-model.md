@@ -2815,6 +2815,39 @@ CREATE TABLE collector_host_rate_limits (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- all-api-hub 的 WebDAV 定时同步配置（单行，id=1 钉死）。
+-- 不进 config_params：那张表留 prev_value 且 /admin/config 会回显值，
+-- 等于把 WebDAV 密码与备份解密密码摊进审计历史和接口响应。
+-- 凭证类一律"明文存库、只报存在性、不回显内容"，与 collector_credentials 同源。
+CREATE TABLE hub_sync_config (
+  id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  webdav_url       TEXT NOT NULL DEFAULT '',
+  webdav_username  TEXT NOT NULL DEFAULT '',
+  webdav_password  TEXT NOT NULL DEFAULT '',    -- 明文（FR-113 一期）
+  backup_password  TEXT NOT NULL DEFAULT '',    -- all-api-hub 的备份加密密码，明文备份时留空
+  enabled          BOOLEAN NOT NULL DEFAULT false,
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
+  apply_mode       TEXT NOT NULL DEFAULT 'report'
+                     CHECK (apply_mode IN ('report','import')),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 每一轮同步的记录。配置表上**不留** last_* 三列：那是同一件事的两份存放，
+-- 迟早分叉。"上次同步"与定时判据一律由本表最新一行推导。
+-- result 存整份导入结果（含逐站明细）—— 打开一条历史要回答的正是"哪个站点
+-- 失败了、为什么"；代价用保留条数兜住（写入时裁到最近 N 条）。
+CREATE TABLE hub_sync_runs (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  started_at   TIMESTAMPTZ NOT NULL,
+  finished_at  TIMESTAMPTZ NOT NULL,
+  trigger      TEXT NOT NULL CHECK (trigger IN ('schedule','manual')),
+  applied      BOOLEAN NOT NULL,               -- 这轮到底落没落库
+  error        TEXT NOT NULL DEFAULT '',       -- 空串 = 这轮成功
+  result       JSONB
+);
+
+CREATE INDEX idx_hub_sync_runs_recent ON hub_sync_runs (started_at DESC, id DESC);
+
 -- 采集侧凭证（FR-011/113；ISSUE-002 §4 凭证生命周期）：各站型续期机制不同，明文存储
 CREATE TABLE collector_credentials (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -6,8 +6,13 @@
  *   渠道 = 从哪接入 · 账号 = 钱归谁 · Key = 用哪把凭证 · 分组/目录 = 能调什么
  * 「账号」指的是**上游站点上的账号**，不是登录本网关的人 —— P1 没有平台
  * 用户实体（gateway_clients 已在 022 迁移里 DROP），那属于 P2 的 FR-120。
+ *
+ * 「采集凭证」曾经是第五个分栏，2026-09-13 并进账号页：库里
+ * `collector_credentials` 有 UNIQUE(account_id)（023 迁移），一个账号最多
+ * 一条 —— 它是账号的属性，不是第五种对象，摆成分栏等于在界面上多编了一个
+ * 实体出来。凭证的登记与状态现在都在账号行上。
  */
-export type PaneName = 'channels' | 'accounts' | 'keys' | 'creds' | 'import'
+export type PaneName = 'channels' | 'accounts' | 'keys' | 'import'
 
 export interface PaneMeta {
   /** 侧栏里的短名。 */
@@ -30,7 +35,7 @@ export const PANES: Record<PaneName, PaneMeta> = {
   accounts: {
     nav: '账号管理',
     title: '上游账号',
-    note: '账号余额的归属方，不是平台登录用户',
+    note: '余额与采集凭证都归属在账号上，不是平台登录用户',
     section: '上游资源',
   },
   keys: {
@@ -38,12 +43,6 @@ export const PANES: Record<PaneName, PaneMeta> = {
     title: '上游 Key',
     note: '明文只进不出（FR-094）；配额是约束不是钱',
     section: '上游资源',
-  },
-  creds: {
-    nav: '采集凭证',
-    title: '采集凭证',
-    note: '没有凭证就无法采集',
-    section: '运维',
   },
   import: {
     nav: '批量导入',
@@ -58,6 +57,5 @@ export const PANE_ORDER: PaneName[] = [
   'channels',
   'accounts',
   'keys',
-  'creds',
   'import',
 ]

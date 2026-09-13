@@ -41,13 +41,15 @@ esac
 # （理由见 test-migrate.sh 顶部）。
 if [ -n "$KEEP" ]; then
   PORT="${PORT:-18290}"; PGPORT="${PGPORT:-18442}"
-  PGNAME=sladevpg; PREFIX=sla-dev; TOTAL=4
+  PGNAME=sladevpg; DAVNAME=sladevdav; DAVPORT="${DAVPORT:-18292}"
+  PREFIX=sla-dev; TOTAL=5
   # 固定令牌而非 $$：你要把它粘到界面里，每次都变就没法照着文档点。
   # 这是本地一次性栈，Ctrl-C 后数据库即销毁，不涉及任何真实凭证。
   TOKEN="${ADMIN_TOKEN:-dev-ui-token}"
 else
   PORT="${PORT:-18190}"; PGPORT="${PGPORT:-18441}"
-  PGNAME=slauipg; PREFIX=sla-ui; TOTAL=7
+  PGNAME=slauipg; DAVNAME=slauidav; DAVPORT="${DAVPORT:-18192}"
+  PREFIX=sla-ui; TOTAL=8
   TOKEN="ui-verify-$$"
 fi
 PGDATA="/tmp/${PREFIX}-pg"
@@ -76,6 +78,8 @@ cleanup() {
     #    与 8a7f5d7 那次同类（清理没做干净），只是漏在卷这一层：
     #    容器层每轮都收干净了，所以 `docker ps` 一直是空的，看不出来。
     docker rm -f -v "$PGNAME" >/dev/null 2>&1 || true
+    # WebDAV 容器同理带 -v：它也有匿名卷（/var/lib/dav）。
+    docker rm -f -v "$DAVNAME" >/dev/null 2>&1 || true
     # 收干净了没有，当场验一次：本脚本起的容器不该留下任何卷。
     if [ -n "${VOL_BEFORE:-}" ]; then
       VOL_AFTER=$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')
@@ -111,7 +115,7 @@ command -v pnpm >/dev/null || {
 # 真上游来源（CLAUDE.md §1）。
 #
 # ⚠️ 两种模式对缺 HUB_FILE 的处理**故意不同**：
-#    默认模式降级成"只跑免密的 SPA 那 21 项"——这是 CI 唯一能跑的形态，
+#    默认模式降级成"只跑免密的 SPA 那 22 项"——这是 CI 唯一能跑的形态，
 #    真上游令牌不进 GitHub secrets（CLAUDE.md §1 的 CI 表），云上拿不到凭证。
 #    降级必须**吵**，否则"CI 绿了"会被读成"功能验过了"，那正是本规则要防的假绿。
 #    --keep 则直接拒绝：手点的全部意义就是对真站点点，没上游起来也没得点。
@@ -189,7 +193,7 @@ step "探活选真上游（CLAUDE.md §1：不用假上游）"
 # 会换证书，写死等于把"它一定可用"这个假设又搬回来。
 if [ -n "$SPA_ONLY" ]; then
   echo "   ⚠️ 未给 HUB_FILE —— 降级为**只跑 SPA 免密验收**"
-  echo "      跳过的是功能与数据那 92 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
+  echo "      跳过的是功能与数据那 106 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
   echo "      分组 / 目录 / Key / 限流 / 批量导入试运行 / 改名停用启用）——它们要真上游凭证。"
   echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
   echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
@@ -206,6 +210,58 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
   UP_KEYREF="$(rd keyRef)"; UP_QPU="$(rd quotaPerUnit)"
   UP_MODELS="$(rd models)"; UP_PER_CALL="$(rd perCallModels)"
   echo "   ✅ 选中 ${UP_NAME}"
+fi
+
+# SPA_ONLY（无 HUB_FILE）时整段跳过：没有真备份可传，定时同步也就没什么可验。
+DAV_BASE=""; DAV_USER=""; DAV_PASS=""; DAV_ENC_PASSWORD=""
+if [ -z "$SPA_ONLY" ]; then
+  # ── 真 WebDAV 服务端：验 all-api-hub 的定时同步 ──
+  #
+  # 起一台**真的** WebDAV（Apache mod_dav），不是拿个静态文件服务器冒充：
+  # 要验的就是"我们发的 GET 能不能从 WebDAV 上把备份取回来"，而 Basic 鉴权、
+  # 目录语义、PUT 上去的文件怎么读回来，这些只有真服务端说了算。
+  # 这与 CLAUDE.md §1 让数据库用真 postgres 容器是同一条理由。
+  #
+  # 上面放两份东西：
+  #   · all-api-hub-backup/all-api-hub-1-0.json ← **真的** $HUB_FILE（明文备份）
+  #     —— 定时同步跑的就是它，110 个真站点，与手工导入那条路同一份输入。
+  #   · enc/all-api-hub-1-0.json ← 仓库里那份**上游自己加密**的信封夹具
+  #     —— 验解密这条路真的走得通（内容是合成的小备份，被测的是信封不是内容）。
+  step "起真 WebDAV（验 all-api-hub 定时同步）"
+  DAV_USER=slauser
+  DAV_PASS="dav-verify-$$"
+  DAV_BASE="http://127.0.0.1:${DAVPORT}"
+  ENC_FIXTURE=verify/fixtures/all-api-hub-encrypted-backup.json
+  docker rm -f -v "$DAVNAME" >/dev/null 2>&1 || true
+  docker run -d --name "$DAVNAME" -p "${DAVPORT}:80" \
+    -e AUTH_TYPE=Basic -e USERNAME="$DAV_USER" -e PASSWORD="$DAV_PASS" \
+    bytemark/webdav:2.4 >/dev/null
+  davready=false
+  for _ in $(seq 1 40); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' -u "${DAV_USER}:${DAV_PASS}" \
+          "${DAV_BASE}/" 2>/dev/null)" = "200" ]; then davready=true; break; fi
+    sleep 1
+  done
+  $davready || { echo "❌ WebDAV 容器未就绪"; docker logs "$DAVNAME" 2>&1 | tail -20; exit 1; }
+
+  # 真备份放默认路径；加密夹具放另一个目录，两条路各验各的。
+  curl -s -u "${DAV_USER}:${DAV_PASS}" -X MKCOL "${DAV_BASE}/all-api-hub-backup/" -o /dev/null
+  curl -s -u "${DAV_USER}:${DAV_PASS}" -X MKCOL "${DAV_BASE}/enc/" -o /dev/null
+  curl -sf -u "${DAV_USER}:${DAV_PASS}" -T "$HUB_FILE" \
+    "${DAV_BASE}/all-api-hub-backup/all-api-hub-1-0.json" -o /dev/null || {
+    echo "❌ 上传明文备份到 WebDAV 失败"; exit 1; }
+  # 夹具文件里除了信封还有明文与密码（给 Go 单测读），传上去的只能是 .envelope 那一段。
+  node -e '
+  const fs=require("fs");
+  const f=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+  process.stdout.write(JSON.stringify(f.envelope));' "$ENC_FIXTURE" |
+    curl -sf -u "${DAV_USER}:${DAV_PASS}" -T - \
+      "${DAV_BASE}/enc/all-api-hub-1-0.json" -o /dev/null || {
+    echo "❌ 上传加密夹具到 WebDAV 失败"; exit 1; }
+  DAV_ENC_PASSWORD="$(node -e '
+  const fs=require("fs");
+  process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).password);' "$ENC_FIXTURE")"
+  echo "   ✅ WebDAV 就绪（:${DAVPORT}，已放明文备份与加密夹具各一份）"
 fi
 
 step "起 sla-core"
@@ -290,7 +346,7 @@ BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
 if [ -n "$SPA_ONLY" ]; then
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（21 项）。功能与数据那 92 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密验收（22 项）。功能与数据那 106 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="
@@ -312,6 +368,10 @@ UP_MODELS="$UP_MODELS" \
 UP_PER_CALL="$UP_PER_CALL" \
 UP_KEYREF="$UP_KEYREF" \
 UI_KEY_SECRET="$UI_KEY_SECRET" \
+DAV_BASE="$DAV_BASE" \
+DAV_USER="$DAV_USER" \
+DAV_PASS="$DAV_PASS" \
+DAV_ENC_PASSWORD="$DAV_ENC_PASSWORD" \
 SHOTS=/tmp/sla-ui-shots \
 HUB_FILE="$HUB_FILE" \
   node verify-ui.mjs

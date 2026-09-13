@@ -28,7 +28,7 @@ const route = useRoute()
 
 type SubView = 'accounts' | 'keys' | 'groups' | 'catalog'
 const view = ref<SubView>('accounts')
-const drawer = ref<'account' | 'key' | null>(null)
+const drawer = ref<'account' | 'key' | 'cred' | null>(null)
 const drawerAccount = ref(0)
 /**
  * 重挂载计数。同一个 Tab 被再点一次时要重新拉数据，而分组/目录子组件是在
@@ -75,6 +75,14 @@ watch(
 )
 
 const chID = computed(() => channels.currentID ?? 0)
+/**
+ * 抽屉的上下文。属性名是复数的 `channel-ids` / `account-ids`（理由见
+ * RegisterDrawers 顶部：写成单数会静默落进 attrs，表现是抽屉打开却不预填、
+ * 无报错，TS 也不管）。用 computed 而不是模板里内联 `[chID]`：内联字面量
+ * 每次重渲染都是新数组，而那边的 watch 是 deep 的，会把填了一半的表单重置。
+ */
+const drawerChannelIDs = computed(() => [chID.value])
+const drawerAccountIDs = computed(() => [drawerAccount.value])
 const accounts = computed(() => res.channelAccounts(chID.value))
 const keys = computed(() => res.channelKeys(chID.value))
 /** 该渠道下账号余额的**去重合计**（FR-022）。它不是"渠道余额" —— 渠道没有钱包。 */
@@ -106,6 +114,16 @@ const BLOCKING = new Set([
 function openAddKey(accountID: number): void {
   drawerAccount.value = accountID
   drawer.value = 'key'
+}
+
+/**
+ * 登记/更换采集凭证。放在这一页是因为「缺凭证」正是上面那个阻断性异常
+ * （credential_missing）指向的东西 —— 看见它的人应当在**同一页**修得掉，
+ * 而不是被支去另一个分栏、还得先在那边把渠道重新选一遍。
+ */
+function openCred(accountID: number): void {
+  drawerAccount.value = accountID
+  drawer.value = 'cred'
 }
 </script>
 
@@ -276,6 +294,7 @@ function openAddKey(accountID: number): void {
               :items="accounts"
               empty-text="该渠道还没有账号。账号是余额的归属方，也是 Key 的挂载点 —— 先建一个。"
               @add-key="openAddKey"
+              @edit-cred="openCred"
             />
             <p class="note" v-if="accounts.length > 0">
               账号余额来自采集（balance_signals），<b>「未采集」不是 0</b>：可能是站型不提供
@@ -307,8 +326,8 @@ function openAddKey(accountID: number): void {
 
       <RegisterDrawers
         :mode="drawer"
-        :channel-id="chID"
-        :account-id="drawerAccount"
+        :channel-ids="drawerChannelIDs"
+        :account-ids="drawerAccountIDs"
         @close="drawer = null"
         @created="drawerAccount = 0"
       />

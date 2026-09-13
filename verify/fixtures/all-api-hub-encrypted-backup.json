@@ -1,0 +1,15 @@
+{
+  "_provenance": "由 all-api-hub 自己的 encryptWebdavBackupContent 产出；上游 qixing-jk/all-api-hub commit 85977e73fd96d4f3ee8fca51f8fd18e8aacd176c；生成于 2026-09-13。重新生成见 verify/gen-hub-envelope.mjs。",
+  "password": "correct horse battery staple",
+  "plaintext": "{\"version\":\"4.0\",\"timestamp\":1757000000000,\"accounts\":{\"accounts\":[{\"id\":\"a1\",\"site_name\":\"演示站\",\"site_url\":\"https://demo.example\",\"site_type\":\"NewAPI\"}]}}",
+  "envelope": {
+    "type": "all-api-hub-webdav-backup-encrypted",
+    "v": 1,
+    "kdf": "PBKDF2",
+    "cipher": "AES-GCM",
+    "iter": 250000,
+    "salt": "XJcdNudkLdgG8NF97eOKNQ==",
+    "iv": "0owC0ycul4QLQ5NI",
+    "ct": "p4u8/S2K3FSeV58K9j1BCEyRFQzfi3kQ7urx06kbg60liUmOdxzn3nZ4i7K+fa3bS5K0cIEaEI45Vq5zsLQ69QTp/WnwNYlPcfsuCqnhiKz1QeDiTZShfRe9fRkRIOeLmemYLt2nXxPFbvOZb+gfNjDvPhsdwAXa501l5lEZ8BIgZn9jNYgh1bOyLojhL630tht50WnH+WOQUP2W8QIvHk/euMCEqncGIhva9hb96Xw="
+  }
+}

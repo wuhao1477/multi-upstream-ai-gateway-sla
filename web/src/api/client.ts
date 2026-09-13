@@ -56,7 +56,8 @@ export class MissingTokenError extends ApiError {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
+  // PUT 是给 /admin/hub-sync 那种「整份配置覆盖」用的；改字段的接口一律 PATCH。
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   /** 对象会被 JSON 序列化；字符串按原样发送（导入端点直接发文件内容）。 */
   body?: unknown
   /**

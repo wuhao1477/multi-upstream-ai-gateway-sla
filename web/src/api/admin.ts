@@ -11,9 +11,10 @@ import type {
   Channel,
   ChannelGroup,
   CreateChannelResp,
-  CredentialItem,
   GroupModelsResp,
   HubImportResult,
+  HubSyncConfig,
+  HubSyncRun,
   InventoryResp,
   Key,
   KeyImportBatchResult,
@@ -225,10 +226,9 @@ export function saveCredential(input: SaveCredentialInput): Promise<unknown> {
   return api<unknown>('/admin/collector/credentials', { method: 'POST', body: input })
 }
 
-/** 列凭证。只回"有没有"，不回内容。 */
-export function listCredentials(): Promise<ListResp<CredentialItem>> {
-  return api<ListResp<CredentialItem>>('/admin/collector/credentials')
-}
+// 这里原来还有一个 listCredentials()：凭证并进账号页后没有调用方了 ——
+// 凭证跟着 listAccounts 的行回来（UNIQUE(account_id)）。
+// 服务端 GET /admin/collector/credentials 仍在（09 §，供脚本用），只是界面不走它。
 
 // ── all-api-hub 导入 ─────────────────────────────────────────────────────────
 
@@ -244,4 +244,50 @@ export function importHub(raw: string, dryRun: boolean): Promise<HubImportResult
     method: 'POST',
     body: raw,
   })
+}
+
+/** 读 all-api-hub 定时同步配置。两个密码只回 has_*，永远拿不到内容。 */
+export function getHubSync(): Promise<HubSyncConfig> {
+  return api<HubSyncConfig>('/admin/hub-sync')
+}
+
+/**
+ * 写配置。两个密码字段**留空 = 保持原值**（服务端 COALESCE(NULLIF(…))）——
+ * 界面上它们每次打开都是空的，若把空串当清空，任何一次只改间隔的保存都会顺手
+ * 把密码抹掉，而症状要等下一次定时同步 401 才出现。
+ */
+export function saveHubSync(input: SaveHubSyncInput): Promise<HubSyncConfig> {
+  return api<HubSyncConfig>('/admin/hub-sync', { method: 'PUT', body: input })
+}
+
+/** 立即跑一轮。apply 为真则强制落库，否则按配置里的 apply_mode 走。 */
+export function runHubSync(apply: boolean): Promise<HubImportResult> {
+  return api<HubImportResult>(`/admin/hub-sync/run?apply=${apply ? 'true' : 'false'}`, {
+    method: 'POST',
+  })
+}
+
+/**
+ * 同步历史（倒序）。返回的 `result` 里**没有** items —— 明细走 getHubSyncRun。
+ */
+export function listHubSyncRuns(limit?: number): Promise<ListResp<HubSyncRun>> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`
+  return api<ListResp<HubSyncRun>>(`/admin/hub-sync/runs${qs}`)
+}
+
+/** 单条记录，含逐站明细。界面上点开一行看的就是它。 */
+export function getHubSyncRun(id: number): Promise<HubSyncRun> {
+  return api<HubSyncRun>(`/admin/hub-sync/runs/${id}`)
+}
+
+export interface SaveHubSyncInput {
+  webdav_url: string
+  webdav_username: string
+  /** 留空 = 不改。 */
+  webdav_password: string
+  /** 留空 = 不改。 */
+  backup_password: string
+  enabled: boolean
+  interval_minutes: number
+  apply_mode: 'report' | 'import'
 }

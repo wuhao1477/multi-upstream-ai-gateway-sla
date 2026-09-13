@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import NavIcon from './NavIcon.vue'
 import ThemeSwitch from './ThemeSwitch.vue'
 import { useChannelsStore } from '@/stores/channels'
-import { useCredentialsStore } from '@/stores/credentials'
 import { useResourcesStore } from '@/stores/resources'
 import type { PaneName } from '@/router/panes'
 import { PANE_ORDER, PANES } from '@/router/panes'
@@ -12,7 +11,6 @@ import { PANE_ORDER, PANES } from '@/router/panes'
 const route = useRoute()
 const router = useRouter()
 const channels = useChannelsStore()
-const creds = useCredentialsStore()
 const res = useResourcesStore()
 
 /** 角标：各分栏的规模。空值渲染成空串而不是 0 —— "还没拉"和"确实是 0"不一样。 */
@@ -20,7 +18,6 @@ function badge(p: PaneName): string {
   if (p === 'channels') return channels.count > 0 ? String(channels.count) : ''
   if (p === 'accounts') return res.accounts.length > 0 ? String(res.accounts.length) : ''
   if (p === 'keys') return res.keys.length > 0 ? String(res.keys.length) : ''
-  if (p === 'creds') return creds.count > 0 ? String(creds.count) : ''
   return ''
 }
 

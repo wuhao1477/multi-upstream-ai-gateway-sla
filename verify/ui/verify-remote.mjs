@@ -556,18 +556,23 @@ try {
       '未找到可点开的非零分组按钮');
   }
 
-  // ── 7. 采集凭证：真库现有若干条，一条都不能回显内容 ──
-  await pane('creds');
-  await page.click('#btn-cred-reload');
+  // ── 7. 采集凭证：跟着账号行走，一条都不能回显内容 ──
+  //
+  // 凭证原先是独立分栏，已并进账号页（UNIQUE(account_id)，一个账号最多一条）。
+  // 条数仍从 /admin/collector/credentials 现取（那个接口还在，供脚本用），
+  // 但界面这一侧要数的是**账号行上标了"有凭证"的格子** —— 两边对得上，
+  // 才说明账号页真的把凭证带回来了，而不是少 join 了一张表。
+  await pane('accounts');
   await page.waitForFunction(
-    () => document.querySelectorAll('#cred-list tbody tr').length > 1,
-    { timeout: 20000 });
-  const creds = await page.$$eval('#cred-list tbody tr', trs =>
-    trs.map(tr => [...tr.querySelectorAll('td')].map(td => td.innerText.trim())));
-  check(`真库 ${CRED_TOTAL} 条采集凭证全部渲染`, creds.length === CRED_TOTAL,
-    `${creds.length} 条`);
-  const credDump = JSON.stringify(creds);
-  check('凭证列表只报"有/无"，不含令牌内容',
+    n => document.querySelectorAll('[data-account-cred]').length >= n,
+    { timeout: 20000 }, CRED_TOTAL);
+  const credCells = await page.$$eval('[data-account-cred]', els =>
+    els.map(el => ({ state: el.dataset.cred, text: el.closest('td').innerText.trim() })));
+  const credHas = credCells.filter(c => c.state === 'has');
+  check(`真库 ${CRED_TOTAL} 条采集凭证在账号行上全部标出`, credHas.length === CRED_TOTAL,
+    `标了 ${credHas.length} 个 / 账号 ${credCells.length} 行`);
+  const credDump = JSON.stringify(credCells);
+  check('账号行只报凭证状态与类型，不含令牌内容',
     !/sk-[A-Za-z0-9]{20,}/.test(credDump) && !/eyJ[A-Za-z0-9_-]{10,}/.test(credDump),
     '已确认无令牌串与 JWT');
   await page.screenshot({ path: `${SHOT}/05-real-creds.png`, fullPage: true });

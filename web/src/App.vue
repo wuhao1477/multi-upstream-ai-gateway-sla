@@ -5,24 +5,24 @@ import AppTopbar from '@/components/layout/AppTopbar.vue'
 import ToastHost from '@/components/layout/ToastHost.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useChannelsStore } from '@/stores/channels'
-import { useCredentialsStore } from '@/stores/credentials'
 import { useResourcesStore } from '@/stores/resources'
 
 const auth = useAuthStore()
 const channels = useChannelsStore()
-const creds = useCredentialsStore()
 const res = useResourcesStore()
 
 // 已经存过令牌就直接拉一轮：刷新后还要再点一次「刷新」是多余的一步。
 // 没有令牌则什么都不做 —— 空发请求只会换回 401，把真正该看的提示挤掉。
 //
 // 账号与 Key 也在这里拉：渠道列表的「账号 / Key / 资金概览」三列读的就是它们，
-// 懒加载的话首屏那三列全是「—」，看起来像后端没返回数据。三个请求换一屏
+// 懒加载的话首屏那三列全是「—」，看起来像后端没返回数据。两个请求换一屏
 // 有意义的台账，值。
+//
+// 采集凭证不再单独拉一轮：它跟着账号行走（UNIQUE(account_id)），
+// res.load() 已经把它带回来了。
 onMounted(() => {
   if (auth.hasToken) {
     void channels.load()
-    void creds.load()
     void res.load()
   }
   document.addEventListener('click', closeMenus, true)
