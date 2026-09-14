@@ -209,6 +209,28 @@ try {
   check('渠道列表可加载（空库显示空状态）', chCount > 0 || emptyState,
     emptyState ? '空库空状态' : `${chCount} 行`);
 
+  // 侧栏显示**正在跑的这个二进制**的版本。
+  //
+  // 三端逐字比对：`-ldflags` 注入的值 → `/admin/version` → DOM。
+  // 少任何一端这条都会退化 —— 只比 DOM 与 API 的话，不注入版本时两边都是
+  // main.version 的零值 "dev"，此时把界面上的版本号写死成 "dev" 照样绿；
+  // 而这条要防的正是"写死"与"编进前端构建期"这两种答非所问的实现
+  // （界面要回答的是"这台在跑哪一版"）。CORE_VERSION 由 ui-stack.sh 注入，
+  // 每次跑都不同。
+  const verWant = process.env.CORE_VERSION || '';
+  const verFromAPI = await page.evaluate(async () => {
+    const t = document.querySelector('#token').value;
+    const r = await fetch('/admin/version', { headers: { Authorization: `Bearer ${t}` } });
+    return (await r.json()).version ?? '';
+  });
+  const verInDOM = await page.waitForFunction(() => {
+    const el = document.querySelector('[data-app-version]');
+    return el && el.textContent.trim() !== '' ? el.textContent.trim() : null;
+  }, { timeout: 8000 }).then(h => h.jsonValue(), () => '');
+  check('侧栏显示正在运行的 sla-core 版本（取自后端，不是写死）',
+    verWant !== '' && verFromAPI === verWant && verInDOM === verWant,
+    `注入=${verWant} 后端=${verFromAPI} 界面=${verInDOM}`);
+
   // 站型下拉必须来自后端注册表（GET /admin/site-families），不是写死的四项。
   //
   // 逐项等值比对而不是数个数：数个数的话，把 v-for 删掉再写死四个 option
@@ -762,6 +784,40 @@ try {
   const quotaInformative = quotaCells.some(t => /\$/.test(t) || /不限额度/.test(t));
   check('Key 剩余配额已归一为美元显示，且四态可区分',
     quotaTyped && quotaInformative, quotaCells.join(' | '));
+
+  // 不限额的 Key 在配额列**改显所属账号余额**，并带「账号余额」口径注记。
+  //
+  // 期望由 API 现构造（余额每跑一次都不同，写死必然是错的），逐把比对；
+  // 断言里必须带上那条注记 —— 少了它，配额列里就出现一个没有出处的金额，
+  // 会被读成 Key 自己的配额，而这两个数不可加也不可比（utils/money 开头）。
+  // 空白全剥：注记与金额之间有没有空格取决于 Vue 的 whitespace condense，
+  // 不是我们的意图（同上面限流列的理由）。
+  const unlimitedWant = await page.evaluate(async cid => {
+    const t = document.querySelector('#token').value;
+    const h = { Authorization: `Bearer ${t}` };
+    const [ks, as] = await Promise.all([
+      fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+      fetch(`/admin/accounts?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+    ]);
+    const bal = new Map((as.items ?? []).map(a => [a.id, a.balance_usd]));
+    return (ks.items ?? [])
+      .filter(k => k.unlimited_quota === true)
+      .map(k => [String(k.id), bal.get(k.account_id) ?? null]);
+  }, newChannelId);
+  const quotaByID = new Map(
+    (await readKeyRows()).map(r => [r.id, r.quota.replace(/\s+/g, '')]));
+  // 采到余额的那些才有可比的期望；没采到余额的不限额 Key 退回「不限额度」，
+  // 它证明不了借显这件事，所以不计入 —— 一条"集合为空所以全过"的断言
+  // 是绿的，但它什么都没验（CLAUDE.md §1：验不了就说验不了）。
+  const borrowing = unlimitedWant.filter(([, b]) => typeof b === 'number');
+  const borrowGot = borrowing.map(([id]) => quotaByID.get(id) ?? '(缺行)');
+  const borrowWant = borrowing.map(([, b]) => `$${b.toFixed(2)}不限额账号余额`);
+  check('不限额 Key 的配额列显示所属账号余额并标注口径',
+    borrowing.length > 0 &&
+    JSON.stringify(borrowGot) === JSON.stringify(borrowWant),
+    borrowing.length === 0
+      ? `本站 ${unlimitedWant.length} 把不限额 Key 都没采到账号余额，这条无从验`
+      : `期望=${JSON.stringify(borrowWant)} 实际=${JSON.stringify(borrowGot)}`);
 
   // 配额与账号余额必须是**两个列**，不能共用一个"额度"字样。
   const keyHeaders = await page.$$eval('#detail-body thead th',
