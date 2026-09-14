@@ -100,7 +100,7 @@ collector ───────────────────────�
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6` | 要运行的发布镜像，可用于升级/回滚 |
+| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.7` | 要运行的发布镜像，可用于升级/回滚 |
 | `DATABASE_URL` | 是 | 无 | 外部 PostgreSQL 16+ 连接串；库需已存在且账号可建表 |
 | `ADMIN_TOKEN` | 是 | 无 | 管理 API 令牌；不会写入 `config_params`。`collector` 不需要它，别顺手也注进去 |
 | `ADMIN_PORT` | 否 | `18081` | 本机管理 UI/API 端口，**只绑 `127.0.0.1`** |
@@ -153,7 +153,7 @@ docker compose down
 修改 `.env` 中的 `SLA_IMAGE`，然后拉取并重建容器：
 
 ```bash
-SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6
+SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.7
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:18081/healthz
@@ -203,8 +203,8 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ## 10. 发布信息
 
-- Release：[v1.0.6](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.6)
-- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6`
+- Release：[v1.0.7](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.7)
+- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.7`
 - 发布工作流：[`.github/workflows/release.yml`](../.github/workflows/release.yml)
 - P1 验收记录：[P1 release readiness](acceptance/P1-release-readiness.md)
 
