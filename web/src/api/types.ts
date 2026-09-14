@@ -298,6 +298,22 @@ export interface ModelChannel {
   billing_unit?: string | null
   stale: boolean
   last_seen_at: string
+  /**
+   * 这个渠道下**能调到这个模型**的分组及各自的分组倍率。
+   *
+   * ⚠️ 上面那个 `input_price` 是模型自己的倍率，而实际计费是
+   * **模型倍率 × 分组倍率** —— 分组由这把 Key 所在的分组决定。实测两个真站点
+   * 的分组倍率跨度是 0.12~1.5 与 0.26~3.5，十倍以上。
+   *
+   * 空数组 = 还没采到分组。**不可当成"倍率 1"**：那是"不知道"，不是"不打折"。
+   */
+  groups: ModelGroup[]
+}
+
+export interface ModelGroup {
+  group_ref: string
+  /** 缺席 = 上游没给这个分组的倍率，同样不可当 1。 */
+  rate_multiplier?: number
 }
 
 /**

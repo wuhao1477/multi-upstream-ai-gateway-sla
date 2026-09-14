@@ -305,7 +305,7 @@ function openCred(accountID: number): void {
           <template v-else-if="view === 'keys'">
             <KeyTable
               :items="keys"
-              :cols="['ref', 'rate']"
+              :cols="['ref']"
               :show-account="true"
               empty-text="该渠道还没有 Key，先在「账号」页签给某个账号登记一把"
               @changed="res.reload()"

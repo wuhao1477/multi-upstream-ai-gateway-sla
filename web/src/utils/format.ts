@@ -53,6 +53,102 @@ export function unitChip(u: string): string {
   return unitLabel(u) ?? '口径未知'
 }
 
+/** 一个模型在某个计价口径下的输入价区间（跨渠道）。 */
+export interface PriceRange {
+  /** 'unknown' = billing_unit 缺失。 */
+  unit: string
+  min: number
+  max: number
+  /** 参与这段区间的渠道数（采到价格的那些）。 */
+  count: number
+}
+
+/**
+ * 把一个模型的逐渠道价格压成**按口径分组**的区间，给卡片用。
+ *
+ * ⚠️ **必须先按口径分组再取 min/max**：per_call 是每次调用的绝对美元价，
+ * per_1m_token 是倍率，两者数值区间重叠（实测按次 0.004~7 vs 倍率 0.01~175）。
+ * 混在一起求最小值，会让一个 $0.08/次 的模型显示成"最低 0.08"，
+ * 而同一行还有倍率 0.5 的渠道 —— 读者据此选型必然选错。
+ *
+ * 没采到价格的渠道**不计入**（不是当 0）：0 是"免费"，缺席是"不知道"。
+ * 某个口径下一个价格都没采到时，该口径不出现在返回值里。
+ */
+export function priceRanges(
+  channels: { input_price?: number; billing_unit?: string | null }[],
+): PriceRange[] {
+  const by = new Map<string, PriceRange>()
+  for (const c of channels) {
+    if (c.input_price === undefined || c.input_price === null) continue
+    const unit = c.billing_unit ?? 'unknown'
+    const cur = by.get(unit)
+    if (cur === undefined) {
+      by.set(unit, { unit, min: c.input_price, max: c.input_price, count: 1 })
+      continue
+    }
+    cur.min = Math.min(cur.min, c.input_price)
+    cur.max = Math.max(cur.max, c.input_price)
+    cur.count += 1
+  }
+  // 渠道数多的口径排前面：它更可能是这个模型的"常态"计价方式
+  return [...by.values()].sort((a, b) => b.count - a.count)
+}
+
+/** 某个分组下这个模型的**实际**价格（已乘分组倍率）。 */
+export interface EffectivePrice {
+  groupRef: string
+  /** 分组倍率本身。 */
+  groupRate: number
+  /** 模型价 × 分组倍率。 */
+  input: number
+  /** 输出价 × 分组倍率；模型没给输出价时为 null。 */
+  output: number | null
+}
+
+/**
+ * 把「模型自己的价」按分组倍率折算成**这把 Key 实际会被计的价**。
+ *
+ * 上游（NewAPI 系）的计费是 `模型倍率 × 分组倍率`，两个乘数都由上游给：
+ * 前者在 /api/pricing 的 model_ratio / model_price，后者在顶层 group_ratio。
+ * 只看前者选站，看到的数字与账单可以差一个数量级 —— 实测 2026-09-14：
+ * 钱多多 API 的分组倍率 0.26~3.5，VVCode 的 0.12~1.5。同一个模型换个分组，
+ * 价格差十几倍，而目录上那个数一动不动。
+ *
+ * 按 input 升序：选型时先想知道的是"最便宜能到多少、要用哪个分组"。
+ *
+ * 两个缺席都**跳过而不是当默认值**：
+ *  · 模型没采到价 → 乘出来的也是假的；
+ *  · 分组没采到倍率 → 当 1 会把一个未知折扣显示成"不打折"。
+ * 结果为空数组时，界面必须显示"未知"，不能显示模型自己的那个裸倍率。
+ */
+export function effectivePrices(c: {
+  input_price?: number
+  output_price?: number
+  groups?: { group_ref: string; rate_multiplier?: number }[]
+}): EffectivePrice[] {
+  if (c.input_price === undefined || c.input_price === null) return []
+  const out: EffectivePrice[] = []
+  for (const g of c.groups ?? []) {
+    if (g.rate_multiplier === undefined || g.rate_multiplier === null) continue
+    out.push({
+      groupRef: g.group_ref,
+      groupRate: g.rate_multiplier,
+      // 浮点相乘会留下 0.30000000000000004 这种尾巴，界面上很难看且没有意义。
+      // 六位小数足够：真站点的倍率最细到 0.12，模型倍率最细到 0.000x。
+      input: round6(c.input_price * g.rate_multiplier),
+      output:
+        c.output_price === undefined || c.output_price === null
+          ? null
+          : round6(c.output_price * g.rate_multiplier),
+    })
+  }
+  return out.sort((a, b) => a.input - b.input || a.groupRef.localeCompare(b.groupRef))
+}
+
+function round6(v: number): number {
+  return Math.round(v * 1e6) / 1e6
+}
+
 const FAMILY_LABEL: Record<string, string> = {
   newapi: 'NewAPI 系',
   'new-api': 'NewAPI 系',
