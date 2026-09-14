@@ -786,13 +786,25 @@ try {
       fetch(`/admin/channel-groups?channel_id=${cid}`, { headers: h }).then(r => r.json()),
     ]);
     const byID = new Map((gs.items ?? []).map(g => [g.id, g.rate_multiplier]));
-    const refByID = new Map((gs.items ?? []).map(g => [g.id, g.group_ref]));
+    const dynByID = new Map((gs.items ?? []).map(g => [g.id, g.rate_dynamic === true]));
+    const candByID = new Map((gs.items ?? []).map(g => [g.id, g.dynamic_candidates ?? []]));
+    const rateByRef = new Map((gs.items ?? []).map(g => [g.group_ref, g.rate_multiplier]));
     return (ks.items ?? []).map(k => {
       // auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
       // （NewAPI 源码显式排除 auto 自己）。group_ratio 照样给它一个倍率，
       // 期望里若照抄那个数，就是把"报一个与账单无关的数字"当成正确行为钉死。
-      if (k.channel_group_id !== undefined &&
-          refByID.get(k.channel_group_id) === 'auto') return '自动选组';
+      // 动态倍率的组：显示「动态倍率 ×min~max」而不是那个展示占位的固定数。
+      // 期望里的范围由**候选分组各自的倍率**现算 —— 照抄 auto 自己那个数就是
+      // 把"报一个与账单无关的数字"当成正确行为钉死。
+      const gid = k.channel_group_id;
+      if (gid !== undefined && dynByID.get(gid) === true) {
+        const cands = (candByID.get(gid) ?? [])
+          .map(ref => rateByRef.get(ref))
+          .filter(r => typeof r === 'number');
+        if (cands.length === 0) return '动态倍率';
+        const lo = Math.min(...cands), hi = Math.max(...cands);
+        return lo === hi ? `动态倍率 ×${lo}` : `动态倍率 ×${lo}~${hi}`;
+      }
       const r = k.channel_group_id === undefined ? undefined : byID.get(k.channel_group_id);
       return r === undefined || r === null ? '未知' : `×${r}`;
     });
@@ -1876,10 +1888,19 @@ try {
         '这一轮没有落在 auto 分组的 Key —— 这条无从验');
     } else {
       const autoChip = chipOf(autoKey.id)?.text ?? '';
-      check('分组为 auto 的 Key 显示「自动选组」而不是一个倍率数字',
-        autoChip.includes('自动选组') && !/×\d/.test(autoChip),
-        `chip=${JSON.stringify(autoChip)}（后端给的 rate_multiplier=` +
-        `${autoKey.rate_multiplier}，照它显示就是报一个与账单无关的数）`);
+      // 「动态倍率 ×a~b」里也有 × 和数字，所以判据不能是"没有 ×数字"，
+      // 而是**那个数不是 auto 自己那个占位倍率**。区间由后端给的候选区间来对。
+      const wantRange = autoKey.rate_min === undefined || autoKey.rate_max === undefined
+        ? '动态倍率'
+        : autoKey.rate_min === autoKey.rate_max
+          ? `动态倍率 ×${autoKey.rate_min}`
+          : `动态倍率 ×${autoKey.rate_min}~${autoKey.rate_max}`;
+      check('分组为 auto 的 Key 显示动态倍率区间，而不是它那个占位的固定倍率',
+        autoKey.rate_dynamic === true && autoChip.includes(wantRange) &&
+        !autoChip.includes(`×${autoKey.rate_multiplier} `),
+        `chip=${JSON.stringify(autoChip)} 期望含 ${JSON.stringify(wantRange)}` +
+        `（后端给的占位 rate_multiplier=${autoKey.rate_multiplier}，` +
+        `候选区间 ${autoKey.rate_min}~${autoKey.rate_max}）`);
     }
 
     // 刚建的那把 Key **自己没有分组**，但账号有默认分组（上游 /api/user/self
@@ -1899,6 +1920,9 @@ try {
       check('自己没分组的 Key 回落到账号的默认分组，并标「跟账号」',
         inherited.group_ref === accountGroup && inherited.group_inherited === true &&
         inherited.channel_group_id === undefined &&
+        // ⚠️ 没写分组 **不等于** 动态倍率：它走账号的默认分组，那通常是个
+        // 有固定倍率的普通组。把两者混成一档会让一个确定的倍率被说成"动态"。
+        inherited.rate_dynamic === false && inherited.rate_multiplier !== undefined &&
         chipOf(inherited.id)?.disabled === false &&
         chipOf(inherited.id)?.text.includes('跟账号'),
         `Key #${inherited.id}：自己的分组=${JSON.stringify(inherited.channel_group_id)} ` +

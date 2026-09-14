@@ -346,19 +346,25 @@ UPDATE upstream_accounts
 
 // ChannelGroup 是一个分组（含可用模型数）。
 type ChannelGroup struct {
-	ID             int64     `json:"id"`
-	ChannelID      int64     `json:"channel_id"`
-	GroupRef       string    `json:"group_ref"`
-	RateMultiplier *float64  `json:"rate_multiplier,omitempty"`
-	ModelCount     int       `json:"model_count"`
-	DataSource     string    `json:"data_source"`
-	FetchedAt      time.Time `json:"fetched_at"`
+	ID             int64    `json:"id"`
+	ChannelID      int64    `json:"channel_id"`
+	GroupRef       string   `json:"group_ref"`
+	RateMultiplier *float64 `json:"rate_multiplier,omitempty"`
+	// RateDynamic 为真时上面那个倍率**不是计费倍率**：这一组的倍率由运行时
+	// 命中的候选组决定（NewAPI 的 auto）。消费方必须先看这一位。
+	RateDynamic bool `json:"rate_dynamic"`
+	// DynamicCandidates 是候选分组名。候选里可能有我方尚未采到的分组。
+	DynamicCandidates []string  `json:"dynamic_candidates,omitempty"`
+	ModelCount        int       `json:"model_count"`
+	DataSource        string    `json:"data_source"`
+	FetchedAt         time.Time `json:"fetched_at"`
 }
 
 // ListChannelGroups 列出分组。
 func ListChannelGroups(ctx context.Context, conn *pgx.Conn, channelID int64) ([]ChannelGroup, error) {
 	rows, err := conn.Query(ctx, `
 SELECT g.id, g.channel_id, g.group_ref, g.rate_multiplier,
+       g.rate_dynamic, g.dynamic_candidates,
        (SELECT count(*) FROM group_models m WHERE m.channel_group_id = g.id),
        g.data_source, g.fetched_at
   FROM channel_groups g
@@ -372,6 +378,7 @@ SELECT g.id, g.channel_id, g.group_ref, g.rate_multiplier,
 	for rows.Next() {
 		var g ChannelGroup
 		if err := rows.Scan(&g.ID, &g.ChannelID, &g.GroupRef, &g.RateMultiplier,
+			&g.RateDynamic, &g.DynamicCandidates,
 			&g.ModelCount, &g.DataSource, &g.FetchedAt); err != nil {
 			return nil, err
 		}

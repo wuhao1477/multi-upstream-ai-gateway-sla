@@ -160,6 +160,22 @@ export function isAutoGroup(ref: string | undefined | null): boolean {
   return ref === AUTO_GROUP
 }
 
+/**
+ * 动态倍率的展示文案。
+ *
+ * 有范围就给范围（"动态 ×0.26~2.6"），没范围只说"动态"——候选一个都没采到
+ * 倍率时说不出范围，而说不出好过编一个。
+ *
+ * ⚠️ 与「跟账号」不是一回事：没写分组的 Key 走账号的默认分组，那通常是个
+ * 有固定倍率的普通组。只有账号分组恰好是 auto 时才落到动态这一档。
+ */
+export function dynamicRateText(min?: number | null, max?: number | null): string {
+  if (min === undefined || min === null || max === undefined || max === null) {
+    return '动态倍率'
+  }
+  return min === max ? `动态倍率 ×${min}` : `动态倍率 ×${min}~${max}`
+}
+
 /** 某个分组下这个模型的**实际**价格（已乘分组倍率）。 */
 export interface EffectivePrice {
   groupRef: string
@@ -228,14 +244,17 @@ export function effectivePrices(c: {
   output_price?: number
   billing_unit?: string | null
   quota_per_unit?: number
-  groups?: { group_ref: string; rate_multiplier?: number }[]
+  groups?: { group_ref: string; rate_multiplier?: number; rate_dynamic?: boolean }[]
 }): EffectivePrice[] {
   if (c.input_price === undefined || c.input_price === null) return []
   const out: EffectivePrice[] = []
   for (const g of c.groups ?? []) {
     if (g.rate_multiplier === undefined || g.rate_multiplier === null) continue
-    // auto 不是可计费分组：它的倍率由运行时命中的那个候选组决定（见 AUTO_GROUP）
-    if (isAutoGroup(g.group_ref)) continue
+    // 动态倍率的组不参与定价计算：它的倍率由运行时命中的候选组决定。
+    // 判据用**后端给的 rate_dynamic**，不是名字 —— 名字判定只在 NewAPI 成立，
+    // 而这一位是采集侧按各家族的规则标出来的。isAutoGroup 只留给
+    // 还没有这一位的旧响应兜底。
+    if (g.rate_dynamic === true || isAutoGroup(g.group_ref)) continue
     out.push({
       groupRef: g.group_ref,
       groupRate: g.rate_multiplier,

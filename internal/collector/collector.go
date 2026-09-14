@@ -282,6 +282,12 @@ type Group struct {
 	RateMultiplier float64
 	// AvailableModels 该分组可获取的模型（FR-124）→ group_models.model_name
 	AvailableModels []string
+	// RateDynamic 为真时 RateMultiplier **不是计费倍率**：这一组的倍率由运行时
+	// 命中的候选组决定（NewAPI 的 auto）。上游照样给它一个数，那是展示占位。
+	RateDynamic bool
+	// DynamicCandidates 是候选分组名（NewAPI 的 auto_groups）。
+	// 存名字：候选里可能有我方尚未采到的分组，存外键会把这个事实丢掉。
+	DynamicCandidates []string
 
 	Meta SourceMeta
 }

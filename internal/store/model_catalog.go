@@ -63,6 +63,13 @@ type ModelGroup struct {
 	GroupRef string `json:"group_ref"`
 	// RateMultiplier 缺席 = 上游没给这个分组的倍率，同样不可当 1。
 	RateMultiplier *float64 `json:"rate_multiplier,omitempty"`
+	// RateDynamic 为真时上面那个倍率**不是计费倍率**：这一组是「自动选组」
+	// （NewAPI 的 auto），实际倍率由运行时命中的候选组决定。消费方必须先看它。
+	RateDynamic bool `json:"rate_dynamic"`
+	// RateMin/RateMax 是候选分组倍率的区间（只有 RateDynamic 时有意义）。
+	// 都缺席 = 候选一个都没采到倍率：只能说"动态"，说不出范围。
+	RateMin *float64 `json:"rate_min,omitempty"`
+	RateMax *float64 `json:"rate_max,omitempty"`
 }
 
 // ModelEntry 是全局模型目录的一行：一个模型名 + 有它的全部渠道。
@@ -472,7 +479,14 @@ SELECT DISTINCT ON (channel_id) channel_id, (payload->>'quota_per_unit')::float8
 	// "最低 · 分组 X（共 4 个分组，最高 17.5）"里的 X 会是一个他根本用不上的
 	// 分组 —— 一个精确且无关的数字。
 	rows, err = conn.Query(ctx, `
-SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier
+SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier,
+       g.rate_dynamic,
+       (SELECT min(c2.rate_multiplier) FROM channel_groups c2
+         WHERE c2.channel_id = g.channel_id
+           AND c2.group_ref = ANY(g.dynamic_candidates)),
+       (SELECT max(c2.rate_multiplier) FROM channel_groups c2
+         WHERE c2.channel_id = g.channel_id
+           AND c2.group_ref = ANY(g.dynamic_candidates))
   FROM group_models gm JOIN channel_groups g ON g.id = gm.channel_group_id
  WHERE gm.model_name = ANY($1)
    AND (cardinality($2::bigint[]) = 0
@@ -494,7 +508,8 @@ SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier
 		var name string
 		var channelID int64
 		var g ModelGroup
-		if err := rows.Scan(&name, &channelID, &g.GroupRef, &g.RateMultiplier); err != nil {
+		if err := rows.Scan(&name, &channelID, &g.GroupRef, &g.RateMultiplier,
+			&g.RateDynamic, &g.RateMin, &g.RateMax); err != nil {
 			return page, err
 		}
 		if mc, ok := slot[groupKey(name, channelID)]; ok {

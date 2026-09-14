@@ -124,6 +124,17 @@ export interface Key {
    * 这一把跟着变，自己定的那把不变 —— 界面上要分开说，否则会改错地方。
    */
   group_inherited?: boolean
+  /**
+   * 为真时 `rate_multiplier` **不是计费倍率**：这把 Key 落在一个「自动选组」的
+   * 分组里，实际倍率由运行时命中的候选组决定。
+   *
+   * ⚠️ 它与 `group_inherited` 是**两回事**：没写分组的 Key 走账号的默认分组，
+   * 那通常是个有固定倍率的普通组 —— 只有账号分组恰好是 auto 时才落到动态这一档。
+   */
+  rate_dynamic?: boolean
+  /** 候选分组倍率的区间（只有 rate_dynamic 时有意义）。 */
+  rate_min?: number
+  rate_max?: number
   remain_quota_usd?: number
   used_quota_usd?: number
   /**
@@ -149,6 +160,10 @@ export interface ChannelGroup {
   channel_id: number
   group_ref: string
   rate_multiplier?: number
+  /** 为真时上面那个倍率不是计费倍率（自动选组）。 */
+  rate_dynamic?: boolean
+  /** 候选分组名。候选里可能有我方尚未采到的分组。 */
+  dynamic_candidates?: string[]
   model_count: number
   data_source: string
   fetched_at: string
@@ -337,6 +352,14 @@ export interface ModelGroup {
   group_ref: string
   /** 缺席 = 上游没给这个分组的倍率，同样不可当 1。 */
   rate_multiplier?: number
+  /**
+   * 为真时上面那个倍率**不是计费倍率**：这一组是「自动选组」（NewAPI 的 auto），
+   * 实际倍率由运行时命中的候选组决定。消费方必须先看它再决定要不要拿来算钱。
+   */
+  rate_dynamic?: boolean
+  /** 候选分组倍率的区间（只有 rate_dynamic 时有意义）。都缺席 = 候选一个都没采到倍率。 */
+  rate_min?: number
+  rate_max?: number
 }
 
 /**

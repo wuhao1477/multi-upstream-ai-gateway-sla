@@ -7,7 +7,13 @@
  *    所以错得没有任何视觉提示，而读者据此选型必然选错。
  *  · 把没采到价格的渠道当 0 → "最低 0" = 免费，而真相是"不知道"。
  */
-import { effectivePrices, isAutoGroup, priceRanges, ratioToUSDPer1M } from './format'
+import {
+  dynamicRateText,
+  effectivePrices,
+  isAutoGroup,
+  priceRanges,
+  ratioToUSDPer1M,
+} from './format'
 
 function assert(cond: boolean, message: string): void {
   if (!cond) throw new Error(message)
@@ -161,6 +167,43 @@ testNoFloatTail()
  * 照样给它一个倍率（实测某站是 1）—— 那是展示占位。照它算钱会报出一个
  * 与账单无关、却看起来完全正常的数字。
  */
+/**
+ * 动态倍率：判据是后端的 `rate_dynamic`，不是分组名。
+ *
+ * 名字判定（ref === 'auto'）只在 NewAPI 成立；`rate_dynamic` 是采集侧按各家族
+ * 的规则标出来的，别的站型可能把这种模式叫别的名字。只认名字的话，换个站型
+ * 就会把一个动态倍率当成固定倍率拿去算钱 —— 而算出来的数看起来完全正常。
+ *
+ * 另一半同样要钉：**没写分组的 Key 不等于动态倍率**。它走账号的默认分组，
+ * 那通常是个有固定倍率的普通组，照常参与计价。
+ */
+function testDynamicRateComesFromFlagNotName(): void {
+  // 名字不是 auto，但后端标了动态 → 必须排除
+  const r = effectivePrices({
+    input_price: 5,
+    groups: [
+      { group_ref: '智能调度', rate_multiplier: 1, rate_dynamic: true },
+      { group_ref: 'default', rate_multiplier: 2 },
+    ],
+  })
+  assert(r.length === 1 && r[0]?.groupRef === 'default',
+    `动态组必须按 rate_dynamic 排除，实际 ${JSON.stringify(r.map((x) => x.groupRef))}`)
+
+  // 反面：普通分组（含账号继承来的那种）照常参与计价
+  const fixed = effectivePrices({
+    input_price: 5,
+    groups: [{ group_ref: 'default', rate_multiplier: 0.8 }],
+  })
+  assert(fixed.length === 1 && fixed[0]?.input === 4,
+    `没写分组走的账号默认组是普通组，该照常算，实际 ${JSON.stringify(fixed)}`)
+
+  // 文案：有范围给范围，没范围只说动态 —— 说不出好过编一个
+  assert(dynamicRateText(0.26, 2.6) === '动态倍率 ×0.26~2.6', dynamicRateText(0.26, 2.6))
+  assert(dynamicRateText(1, 1) === '动态倍率 ×1', dynamicRateText(1, 1))
+  assert(dynamicRateText(undefined, undefined) === '动态倍率', '候选都没采到倍率时不该编一个范围')
+  assert(dynamicRateText(0.5, undefined) === '动态倍率', '只有一半也算说不出范围')
+}
+
 function testAutoGroupIsNotPriceable(): void {
   assert(isAutoGroup('auto'), '字面量 auto 必须识别出来')
   assert(!isAutoGroup('auto-daily'), '只认精确的 auto —— 它是保留字不是一类命名')
@@ -190,3 +233,4 @@ function testAutoGroupIsNotPriceable(): void {
 testRatioToUSD()
 testEffectivePricesCarryUSD()
 testAutoGroupIsNotPriceable()
+testDynamicRateComesFromFlagNotName()

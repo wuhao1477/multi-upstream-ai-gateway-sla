@@ -33,8 +33,8 @@ import { useChannelsStore } from '@/stores/channels'
 import { useGlobalCatalogStore } from '@/stores/globalCatalog'
 import { useResourcesStore } from '@/stores/resources'
 import {
+  dynamicRateText,
   endpointLabel,
-  isAutoGroup,
   priceRanges,
   pricingTypeLabel,
   unitChip,
@@ -77,6 +77,10 @@ const keyFacet = computed(() =>
     channel: channels.list.find((c) => c.id === k.channel_id)?.name ?? `#${k.channel_id}`,
     group: k.group_ref,
     rate: k.rate_multiplier,
+    dynamic: k.rate_dynamic === true,
+    rateText: k.rate_dynamic === true
+      ? dynamicRateText(k.rate_min, k.rate_max)
+      : `×${k.rate_multiplier ?? '?'}`,
     // 「跟账号走」也算可用：那把 Key 自己没定分组，但调用实际走账号的默认分组，
     // 倍率与可调模型都是确定的。标出来只是因为**改法不同**（该改账号那一头）。
     inherited: k.group_inherited === true,
@@ -345,8 +349,12 @@ function endpointsOf(m: ModelEntry): string[] {
             @click="cat.toggleKey(k.id)"
           >
             <code>{{ k.label }}</code>
-            <span class="badge" v-if="k.usable && isAutoGroup(k.group)" title="自动选组：实际倍率由运行时命中的那个分组决定">{{ k.group }} · 自动选组</span>
-            <span class="badge" v-else-if="k.usable">{{ k.group }} ×{{ k.rate ?? '?' }}</span>
+            <span
+              class="badge"
+              v-if="k.usable"
+              :title="k.dynamic ? '自动选组：实际倍率由运行时命中的候选分组决定' : ''"
+              >{{ k.group }} {{ k.rateText }}</span
+            >
             <span class="badge" v-if="k.usable && k.inherited" title="这把 Key 自己没定分组，走的是账号的默认分组">跟账号</span>
             <span class="badge" v-if="!k.usable">未归组</span>
           </button>

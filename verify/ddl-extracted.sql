@@ -170,6 +170,14 @@ CREATE TABLE channel_groups (
   channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
   rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  -- 028 补：有一类分组没有自己的固定倍率（NewAPI 的 auto —— 运行时在候选里
+  -- 选一个组计费，源码显式排除 auto 自己）。上游照样给它一个倍率，那是展示
+  -- 占位不是计费倍率，只存它会报出一个与账单无关却看起来正常的数字。
+  -- ⚠️ 三种状态要分得开：固定倍率 / 动态倍率 / 未采到（dynamic=false 且 rate IS NULL）。
+  -- ⚠️ 空分组的 Key **不等于**动态：它走账号的默认分组（account_group），
+  --    那通常是个有固定倍率的普通组，只有账号分组恰好是 auto 时才落到动态。
+  rate_dynamic  BOOLEAN NOT NULL DEFAULT false,
+  dynamic_candidates TEXT[],                 -- 候选分组名（auto_groups）；存名字不存外键，候选里可能有我方没采到的组
   data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
   fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
   UNIQUE (channel_id, group_ref)

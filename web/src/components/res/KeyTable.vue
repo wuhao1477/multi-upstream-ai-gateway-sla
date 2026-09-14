@@ -26,7 +26,7 @@ import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { RATE_LIMIT_HINT, rateLimitText } from '@/utils/money'
 import { KEY_OPTIONAL_COLS } from '@/utils/keyfilter'
-import { fmtAgo, fmtTime, isAutoGroup, keyStatusLabel } from '@/utils/format'
+import { dynamicRateText, fmtAgo, fmtTime, keyStatusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -277,8 +277,17 @@ async function runPending(): Promise<void> {
                      那个候选组决定（NewAPI 源码里显式排除了 auto 自己）。
                      /api/pricing 照样给它一个倍率，照着显示就是报一个与账单
                      无关、却看起来完全正常的数字 -->
-                <template v-if="isAutoGroup(k.group_ref)">
-                  <span class="dim" :data-key-rate-auto="k.id" title="这把 Key 用「自动选组」：实际倍率由运行时命中的那个分组决定，不是一个固定值。">自动选组</span>
+                <!-- 动态倍率：这把 Key 落在一个「自动选组」的分组里，实际倍率
+                     由运行时命中的候选组决定。有范围就给范围 —— 一个 ×1 看起来
+                     完全正常却与账单无关，而 "×0.26~2.6" 至少说出了不确定性。
+                     判据用后端的 rate_dynamic，不是分组名（名字判定只在 NewAPI 成立）。 -->
+                <template v-if="k.rate_dynamic === true">
+                  <span
+                    class="dim"
+                    :data-key-rate-dynamic="k.id"
+                    title="这把 Key 用「自动选组」：上游在候选分组里挑第一个有可用渠道的来计费，所以倍率不是固定值。括号里是候选分组倍率的范围。"
+                    >{{ dynamicRateText(k.rate_min, k.rate_max) }}</span
+                  >
                 </template>
                 <template v-else-if="k.rate_multiplier !== undefined">
                   ×{{ k.rate_multiplier }}

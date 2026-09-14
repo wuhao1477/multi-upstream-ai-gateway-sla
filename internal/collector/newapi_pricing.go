@@ -19,6 +19,13 @@ type newapiPricing struct {
 	GroupRatios map[string]float64
 	// GroupModels 是分组 → 可用模型，由每个模型的 enable_groups 反转得出。
 	GroupModels map[string][]string
+	// AutoGroups 是「自动选组」的候选分组（顶层 auto_groups）。
+	//
+	// token.Group == "auto" 时，上游在这几个候选里取**第一个有可用渠道**的组
+	// 来计费（service/group.go；"auto" 自己被显式排除）。所以 auto 这一组
+	// 没有自己的固定倍率，倍率要去候选各自的行里取。
+	// 空 = 上游没给（老版本或该用户没有自动组）。
+	AutoGroups []string
 	// Version 是站点侧的定价版本指纹（pricing_version），可用于判断价格是否变过。
 	Version string
 }
@@ -86,6 +93,13 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 		GroupRatios: map[string]float64{},
 		GroupModels: map[string][]string{},
 		Version:     asString(raw["pricing_version"]),
+	}
+
+	// auto_groups：顶层字符串数组，**按请求者过滤**（controller/pricing.go）。
+	for _, g := range asSlice(raw["auto_groups"]) {
+		if ref := asString(g); ref != "" {
+			out.AutoGroups = append(out.AutoGroups, ref)
+		}
 	}
 
 	// group_ratio 在顶层（新形态）；旧形态在 data 里，两处都看一下。

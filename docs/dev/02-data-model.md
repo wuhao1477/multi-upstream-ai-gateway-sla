@@ -291,6 +291,14 @@ CREATE TABLE channel_groups (
   channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
   rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  -- 028 补：有一类分组没有自己的固定倍率（NewAPI 的 auto —— 运行时在候选里
+  -- 选一个组计费，源码显式排除 auto 自己）。上游照样给它一个倍率，那是展示
+  -- 占位不是计费倍率，只存它会报出一个与账单无关却看起来正常的数字。
+  -- ⚠️ 三种状态要分得开：固定倍率 / 动态倍率 / 未采到（dynamic=false 且 rate IS NULL）。
+  -- ⚠️ 空分组的 Key **不等于**动态：它走账号的默认分组（account_group），
+  --    那通常是个有固定倍率的普通组，只有账号分组恰好是 auto 时才落到动态。
+  rate_dynamic  BOOLEAN NOT NULL DEFAULT false,
+  dynamic_candidates TEXT[],                 -- 候选分组名（auto_groups）；存名字不存外键，候选里可能有我方没采到的组
   data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
   fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
   UNIQUE (channel_id, group_ref)
@@ -355,6 +363,31 @@ CREATE UNIQUE INDEX idx_keys_external_ref
 #### 1.3bis 三张表的写入语义（**P1 必需**，第 45 轮补）
 
 > ⚠️ **此前"采不到即删行"只是砍掉 `available` 列的理由，不是实现规则** —— 先删后插还是 diff？什么事务包住？两次 sync 并发会不会互相删？`first_seen_at`/`last_seen_at` 的 upsert 也只有一句括号说明。开发无从下笔（开发视角审查第 45 轮）。
+
+**`channel_groups`：upsert，倍率与「动态倍率」一起覆盖**
+
+```sql
+INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier,
+                            rate_dynamic, dynamic_candidates, data_source, fetched_at)
+VALUES (:cid, :ref, :rate, :dynamic, :candidates, 'auto_collect', :now)
+ON CONFLICT (channel_id, group_ref) DO UPDATE
+   SET rate_multiplier    = EXCLUDED.rate_multiplier,
+       rate_dynamic       = EXCLUDED.rate_dynamic,
+       dynamic_candidates = EXCLUDED.dynamic_candidates,
+       data_source        = EXCLUDED.data_source,
+       fetched_at         = EXCLUDED.fetched_at;
+```
+
+`rate_dynamic` 为真的组（NewAPI 的 `auto`）**其 `rate_multiplier` 不是计费倍率** ——
+上游照样给一个数（实测某站是 1），那是展示占位；实际倍率由运行时命中的
+`dynamic_candidates` 里某个组决定（实测某站三个候选是 0.26 / 1 / 2.6）。
+消费方**必须先看 `rate_dynamic` 再决定要不要拿倍率算钱**，否则会报出一个与账单
+无关、却看起来完全正常的数字。候选存名字不存外键：上游按请求者过滤后给的清单
+里可能有我方尚未采到的分组，存外键会把"上游说有、我方没采到"这个事实丢掉。
+
+⚠️ **「没写分组的 Key」与「动态倍率」是两回事**：前者走账号的默认分组
+（`upstream_accounts.account_group`），那通常是个有固定倍率的普通组；
+只有账号分组恰好是 `auto` 时才落到动态这一档。
 
 **`group_models`：按分组全量替换，单事务**
 

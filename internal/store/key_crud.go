@@ -24,7 +24,14 @@ type Key struct {
 	//
 	// 必须与"自己定的"分开：两者的倍率同样真实，但改法不同 —— 账号分组变了，
 	// 这一把跟着变；自己定的那把不变。界面上混成一样会让人改错地方。
-	GroupInherited bool     `json:"group_inherited"`
+	GroupInherited bool `json:"group_inherited"`
+	// RateDynamic 为真时 RateMultiplier **不是计费倍率**：这把 Key 落在一个
+	// 「自动选组」的分组里，实际倍率由运行时命中的候选组决定。
+	RateDynamic bool `json:"rate_dynamic"`
+	// RateMin/RateMax 是候选分组倍率的区间（只有 RateDynamic 时有意义）。
+	// nil = 候选一个都没采到倍率 —— 只能说"动态"，说不出范围，而这好过编一个。
+	RateMin        *float64 `json:"rate_min,omitempty"`
+	RateMax        *float64 `json:"rate_max,omitempty"`
 	RemainQuotaUSD *float64 `json:"remain_quota_usd,omitempty"`
 	UsedQuotaUSD   *float64 `json:"used_quota_usd,omitempty"`
 	// UnlimitedQuota 为真时 remain_quota_usd 无意义（上游对无限额 Key 回 0）。
@@ -77,6 +84,22 @@ const secretPrefixExpr = `left(secret, 8) || '…'`
 const accountGroupJoin = `LEFT JOIN channel_groups ga
          ON ga.channel_id = a.channel_id AND ga.group_ref = a.account_group`
 
+// dynamicRateRange 算「自动选组」那一档的倍率区间。
+//
+// 候选名在 dynamic_candidates 里，倍率要去候选各自的 channel_groups 行取 ——
+// 候选里可能有我方尚未采到的分组（上游按请求者过滤后给的清单未必都采得到），
+// 那些不计入区间。全都采不到时两个值都是 NULL：界面只能说"动态"，说不出范围，
+// 而说不出范围好过编一个。
+//
+// 写成常量在 ListKeys/GetKey 两处共用：两处的列必须逐字一致，
+// 抄两遍迟早岔开一处，而那一处只在特定 Key 上出错。
+const dynamicRateRange = `(SELECT min(c2.rate_multiplier) FROM channel_groups c2
+          WHERE c2.channel_id = a.channel_id
+            AND c2.group_ref = ANY(COALESCE(g.dynamic_candidates, ga.dynamic_candidates))),
+       (SELECT max(c2.rate_multiplier) FROM channel_groups c2
+          WHERE c2.channel_id = a.channel_id
+            AND c2.group_ref = ANY(COALESCE(g.dynamic_candidates, ga.dynamic_candidates)))`
+
 // ListKeys 列出 Key（脱敏）。
 func ListKeys(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Key, error) {
 	rows, err := conn.Query(ctx, `
@@ -85,6 +108,8 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(g.group_ref, ga.group_ref, ''),
        COALESCE(g.rate_multiplier, ga.rate_multiplier),
        (k.channel_group_id IS NULL AND ga.id IS NOT NULL) AS group_inherited,
+       COALESCE(g.rate_dynamic, ga.rate_dynamic, false) AS rate_dynamic,
+       `+dynamicRateRange+`,
        k.remain_quota_usd, k.used_quota_usd, COALESCE(k.unlimited_quota,false),
        k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
@@ -103,7 +128,7 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
 		var k Key
 		if err := rows.Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
 			&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
-			&k.GroupInherited,
+			&k.GroupInherited, &k.RateDynamic, &k.RateMin, &k.RateMax,
 			&k.RemainQuotaUSD, &k.UsedQuotaUSD, &k.UnlimitedQuota,
 			&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 			&k.QuotaSyncedAt, &k.CreatedAt); err != nil {
@@ -123,6 +148,8 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
        COALESCE(g.group_ref, ga.group_ref, ''),
        COALESCE(g.rate_multiplier, ga.rate_multiplier),
        (k.channel_group_id IS NULL AND ga.id IS NOT NULL) AS group_inherited,
+       COALESCE(g.rate_dynamic, ga.rate_dynamic, false) AS rate_dynamic,
+       `+dynamicRateRange+`,
        k.remain_quota_usd, k.used_quota_usd, COALESCE(k.unlimited_quota,false),
        k.rpm_limit, k.concurrency_limit,
        k.status, k.expired_time, k.quota_synced_at, k.created_at
@@ -132,7 +159,7 @@ SELECT k.id, k.account_id, a.channel_id, `+secretPrefixExpr+`,
   `+accountGroupJoin+`
  WHERE k.id = $1`, id).Scan(&k.ID, &k.AccountID, &k.ChannelID, &k.SecretPrefix,
 		&k.ExternalRef, &k.ChannelGroupID, &k.GroupRef, &k.RateMultiplier,
-		&k.GroupInherited,
+		&k.GroupInherited, &k.RateDynamic, &k.RateMin, &k.RateMax,
 		&k.RemainQuotaUSD, &k.UsedQuotaUSD, &k.UnlimitedQuota,
 		&k.RPMLimit, &k.ConcurrencyLimit, &k.Status, &k.ExpiredTime,
 		&k.QuotaSyncedAt, &k.CreatedAt)

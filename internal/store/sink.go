@@ -119,11 +119,15 @@ func (s *CollectorSink) SaveGroups(
 	for _, g := range gs {
 		r := GroupRow{
 			ChannelID: channelID, GroupRef: g.GroupRef,
-			AvailableModels: g.AvailableModels,
-			PreserveModels:  g.Meta.Partial || slices.Contains(g.Meta.MissingFields, "available_models"),
-			DataSource:      "auto_collect", FetchedAt: g.Meta.FetchedAt,
+			AvailableModels:   g.AvailableModels,
+			RateDynamic:       g.RateDynamic,
+			DynamicCandidates: g.DynamicCandidates,
+			PreserveModels:    g.Meta.Partial || slices.Contains(g.Meta.MissingFields, "available_models"),
+			DataSource:        "auto_collect", FetchedAt: g.Meta.FetchedAt,
 		}
-		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"
+		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"。
+		// 动态倍率的组照样写它上游给的那个数（那是事实），但 RateDynamic 已
+		// 标出来，消费方必须先看那一位再决定要不要拿它算钱。
 		if g.RateMultiplier > 0 {
 			v := g.RateMultiplier
 			r.RateMultiplier = &v

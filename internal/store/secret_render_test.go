@@ -87,6 +87,8 @@ func sqlLiterals(src string) []string {
 		{"secretPrefixExpr", secretPrefixExpr},
 		// 账号默认分组的 LEFT JOIN，只碰 channel_groups，不选任何 upstream_keys 列。
 		{"accountGroupJoin", accountGroupJoin},
+		// 动态倍率区间的两个子查询，只读 channel_groups，不选任何 upstream_keys 列。
+		{"dynamicRateRange", dynamicRateRange},
 	} {
 		src = strings.ReplaceAll(src, "`+"+kv.ident+"+`", kv.value)
 		src = strings.ReplaceAll(src, "` + "+kv.ident+" + `", kv.value)
