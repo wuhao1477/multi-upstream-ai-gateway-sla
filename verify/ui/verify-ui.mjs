@@ -786,7 +786,13 @@ try {
       fetch(`/admin/channel-groups?channel_id=${cid}`, { headers: h }).then(r => r.json()),
     ]);
     const byID = new Map((gs.items ?? []).map(g => [g.id, g.rate_multiplier]));
+    const refByID = new Map((gs.items ?? []).map(g => [g.id, g.group_ref]));
     return (ks.items ?? []).map(k => {
+      // auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
+      // （NewAPI 源码显式排除 auto 自己）。group_ratio 照样给它一个倍率，
+      // 期望里若照抄那个数，就是把"报一个与账单无关的数字"当成正确行为钉死。
+      if (k.channel_group_id !== undefined &&
+          refByID.get(k.channel_group_id) === 'auto') return '自动选组';
       const r = k.channel_group_id === undefined ? undefined : byID.get(k.channel_group_id);
       return r === undefined || r === null ? '未知' : `×${r}`;
     });
@@ -1858,6 +1864,23 @@ try {
         chipOf(k.id)?.text.includes('未归组')),
       `解析得出 ${groupedKeys.length} 把 / 解析不出 ${ungroupedKeys.length} 把；` +
       `chip=${JSON.stringify(keyChips.map(c => `${c.text}${c.disabled ? '(禁用)' : ''}`))}`);
+
+    // auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
+    // （NewAPI 源码显式排除 auto 自己）。而 /api/pricing 的 group_ratio 照样
+    // 给它一个倍率 —— 照着显示就是报一个与账单无关、却看起来完全正常的数字。
+    //
+    // 验收环境里恰好有一把 Key 被指派到 auto（那是该站真实存在的分组）。
+    const autoKey = allKeys.find(k => k.group_ref === 'auto');
+    if (autoKey === undefined) {
+      check('分组为 auto 的 Key 显示「自动选组」而不是一个倍率数字', false,
+        '这一轮没有落在 auto 分组的 Key —— 这条无从验');
+    } else {
+      const autoChip = chipOf(autoKey.id)?.text ?? '';
+      check('分组为 auto 的 Key 显示「自动选组」而不是一个倍率数字',
+        autoChip.includes('自动选组') && !/×\d/.test(autoChip),
+        `chip=${JSON.stringify(autoChip)}（后端给的 rate_multiplier=` +
+        `${autoKey.rate_multiplier}，照它显示就是报一个与账单无关的数）`);
+    }
 
     // 刚建的那把 Key **自己没有分组**，但账号有默认分组（上游 /api/user/self
     // 的 group，实测两个真站点都是 "default"）—— 所以它不是"未归组"，

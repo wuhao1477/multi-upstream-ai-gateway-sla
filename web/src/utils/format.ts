@@ -138,6 +138,28 @@ export function pricingTypeLabel(u: string): string {
   }
 }
 
+/**
+ * 「auto」是**选组模式**，不是一个可计费的分组。
+ *
+ * 2026-09-14 复核 NewAPI 源码（QuantumNous/new-api，middleware/auth.go +
+ * middleware/distributor.go + service/group.go）：token.Group == "auto" 时
+ * 进入自动模式，实际计费用的是 `auto_groups` 候选里**第一个有可用渠道**的那个
+ * 分组的倍率；源码里显式排除了 "auto" 自己（`if groupName == "" ||
+ * groupName == "auto" { return false }`）。
+ *
+ * 而 /api/pricing 的 group_ratio 里 "auto" 照样带着一个倍率（实测某站是 1）——
+ * 那个 1 是**展示用的占位**，不是它的计费倍率。照着显示 ×1 就是在报一个
+ * 与账单无关的数字，而且它看起来完全正常。所以凡是拿分组倍率算钱的地方，
+ * 遇到 auto 一律不算，如实说"按实际命中的分组计"。
+ *
+ * 只认这一个字面量、不做前缀匹配：它是 NewAPI 的保留字，不是一类命名。
+ */
+export const AUTO_GROUP = 'auto'
+
+export function isAutoGroup(ref: string | undefined | null): boolean {
+  return ref === AUTO_GROUP
+}
+
 /** 某个分组下这个模型的**实际**价格（已乘分组倍率）。 */
 export interface EffectivePrice {
   groupRef: string
@@ -212,6 +234,8 @@ export function effectivePrices(c: {
   const out: EffectivePrice[] = []
   for (const g of c.groups ?? []) {
     if (g.rate_multiplier === undefined || g.rate_multiplier === null) continue
+    // auto 不是可计费分组：它的倍率由运行时命中的那个候选组决定（见 AUTO_GROUP）
+    if (isAutoGroup(g.group_ref)) continue
     out.push({
       groupRef: g.group_ref,
       groupRate: g.rate_multiplier,

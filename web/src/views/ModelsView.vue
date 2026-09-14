@@ -34,6 +34,7 @@ import { useGlobalCatalogStore } from '@/stores/globalCatalog'
 import { useResourcesStore } from '@/stores/resources'
 import {
   endpointLabel,
+  isAutoGroup,
   priceRanges,
   pricingTypeLabel,
   unitChip,
@@ -344,7 +345,8 @@ function endpointsOf(m: ModelEntry): string[] {
             @click="cat.toggleKey(k.id)"
           >
             <code>{{ k.label }}</code>
-            <span class="badge" v-if="k.usable">{{ k.group }} ×{{ k.rate ?? '?' }}</span>
+            <span class="badge" v-if="k.usable && isAutoGroup(k.group)" title="自动选组：实际倍率由运行时命中的那个分组决定">{{ k.group }} · 自动选组</span>
+            <span class="badge" v-else-if="k.usable">{{ k.group }} ×{{ k.rate ?? '?' }}</span>
             <span class="badge" v-if="k.usable && k.inherited" title="这把 Key 自己没定分组，走的是账号的默认分组">跟账号</span>
             <span class="badge" v-if="!k.usable">未归组</span>
           </button>

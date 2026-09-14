@@ -7,7 +7,7 @@
  *    所以错得没有任何视觉提示，而读者据此选型必然选错。
  *  · 把没采到价格的渠道当 0 → "最低 0" = 免费，而真相是"不知道"。
  */
-import { effectivePrices, priceRanges, ratioToUSDPer1M } from './format'
+import { effectivePrices, isAutoGroup, priceRanges, ratioToUSDPer1M } from './format'
 
 function assert(cond: boolean, message: string): void {
   if (!cond) throw new Error(message)
@@ -153,5 +153,40 @@ testMissingUnitIsItsOwnGroup()
 testMultipliesByGroupRate()
 testMissingRateIsSkippedNotTreatedAsOne()
 testNoFloatTail()
+/**
+ * auto 分组不参与计价。
+ *
+ * NewAPI 源码里 auto 是**选组模式**：实际计费用 auto_groups 里第一个有可用
+ * 渠道的组的倍率，而 "auto" 自己被显式排除。但 /api/pricing 的 group_ratio
+ * 照样给它一个倍率（实测某站是 1）—— 那是展示占位。照它算钱会报出一个
+ * 与账单无关、却看起来完全正常的数字。
+ */
+function testAutoGroupIsNotPriceable(): void {
+  assert(isAutoGroup('auto'), '字面量 auto 必须识别出来')
+  assert(!isAutoGroup('auto-daily'), '只认精确的 auto —— 它是保留字不是一类命名')
+  assert(!isAutoGroup(undefined), '缺席不是 auto')
+  const r = effectivePrices({
+    input_price: 5,
+    billing_unit: 'per_1m_token',
+    quota_per_unit: 500000,
+    groups: [
+      { group_ref: 'auto', rate_multiplier: 1 },
+      { group_ref: 'default', rate_multiplier: 2 },
+    ],
+  })
+  assert(r.length === 1, `auto 不该参与计价，实际给了 ${r.length} 条`)
+  assert(r[0]?.groupRef === 'default', `留下的应是 default，实际 ${r[0]?.groupRef}`)
+  // 反向哨兵：不排除 auto 的话，它的 ×1 会排在最前，界面就会说"最低 5"
+  assert(r[0]?.input === 10, `应是 5×2=10，实际 ${r[0]?.input} —— 5 说明 auto 混进来了`)
+  assert(
+    effectivePrices({
+      input_price: 5,
+      groups: [{ group_ref: 'auto', rate_multiplier: 1 }],
+    }).length === 0,
+    '只有 auto 一个分组时应为空，界面据此说"按实际命中的分组计"',
+  )
+}
+
 testRatioToUSD()
 testEffectivePricesCarryUSD()
+testAutoGroupIsNotPriceable()

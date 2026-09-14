@@ -26,7 +26,7 @@ import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { RATE_LIMIT_HINT, rateLimitText } from '@/utils/money'
 import { KEY_OPTIONAL_COLS } from '@/utils/keyfilter'
-import { fmtAgo, fmtTime, keyStatusLabel } from '@/utils/format'
+import { fmtAgo, fmtTime, isAutoGroup, keyStatusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -273,7 +273,14 @@ async function runPending(): Promise<void> {
               <td v-if="has('ref')" data-col="ref" class="dim">{{ k.external_ref ?? '—' }}</td>
               <td data-col="group">{{ k.group_ref ?? '—' }}</td>
               <td data-col="rate" class="n" :data-key-rate="k.id" :title="RATE_HINT">
-                <template v-if="k.rate_multiplier !== undefined">
+                <!-- auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的
+                     那个候选组决定（NewAPI 源码里显式排除了 auto 自己）。
+                     /api/pricing 照样给它一个倍率，照着显示就是报一个与账单
+                     无关、却看起来完全正常的数字 -->
+                <template v-if="isAutoGroup(k.group_ref)">
+                  <span class="dim" :data-key-rate-auto="k.id" title="这把 Key 用「自动选组」：实际倍率由运行时命中的那个分组决定，不是一个固定值。">自动选组</span>
+                </template>
+                <template v-else-if="k.rate_multiplier !== undefined">
                   ×{{ k.rate_multiplier }}
                   <!-- 「跟账号」：这把 Key 自己没定分组，走的是账号的默认分组。
                        倍率一样真实，但改法不同 —— 账号分组变了它跟着变。
