@@ -1320,3 +1320,33 @@ summary {
 .chipf[disabled]:hover {
   border-color: var(--border);
 }
+
+/* 供应商字母块。
+   ⚠️ **不是上游那套图标**：NewAPI 用 @lobehub/icons（React 包），而本界面是 Vue
+   且由 go:embed 打进二进制、要在内网/离线环境可用（internal/admin/web.go）——
+   走 CDN 会破坏那条保证。这里用名字取色的字母块：不引依赖、不发外链，
+   仍然让一排 chip 靠颜色区分得开。 */
+.vmark {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border-radius: 4px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: oklch(0.62 0.16 calc(var(--vh) * 1deg));
+}
+.chipf.on .vmark {
+  background: color-mix(in oklab, var(--primary-foreground) 85%, transparent);
+  color: var(--primary);
+}
+
+/* 分面行里的选择器按钮不吃满行：它旁边还有「清除」与计数小字，
+   而全局 input 规则是 width:100%（那条给表单里的输入框用，不该管这里）。 */
+.facet [data-picker] {
+  width: auto;
+  min-width: 190px;
+  max-width: 340px;
+}
