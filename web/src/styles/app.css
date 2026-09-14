@@ -603,6 +603,55 @@ code {
   font-size: 11px;
   color: var(--muted-foreground);
 }
+/* 模型目录的卡片模式。auto-fill 而不是 auto-fit：筛到只剩一个模型时，
+   auto-fit 会把那一张卡拉满整行宽，看起来像出了什么事。 */
+.mcards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 10px;
+}
+.mcard {
+  display: grid;
+  gap: 7px;
+  justify-items: start;
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.mcard:hover,
+.mcard:focus-visible {
+  border-color: var(--primary);
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+}
+/* 模型名可以很长（qwen/qwen3-max-2025-09-23-thinking），断在任意字符处，
+   否则一张卡会被撑出网格 */
+.mcard-n {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.mcard-p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.mcard-p .dim {
+  font-weight: 400;
+  font-size: 11px;
+}
+.mcard-b {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .anoms {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

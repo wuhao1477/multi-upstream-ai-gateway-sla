@@ -53,6 +53,47 @@ export function unitChip(u: string): string {
   return unitLabel(u) ?? '口径未知'
 }
 
+/** 一个模型在某个计价口径下的输入价区间（跨渠道）。 */
+export interface PriceRange {
+  /** 'unknown' = billing_unit 缺失。 */
+  unit: string
+  min: number
+  max: number
+  /** 参与这段区间的渠道数（采到价格的那些）。 */
+  count: number
+}
+
+/**
+ * 把一个模型的逐渠道价格压成**按口径分组**的区间，给卡片用。
+ *
+ * ⚠️ **必须先按口径分组再取 min/max**：per_call 是每次调用的绝对美元价，
+ * per_1m_token 是倍率，两者数值区间重叠（实测按次 0.004~7 vs 倍率 0.01~175）。
+ * 混在一起求最小值，会让一个 $0.08/次 的模型显示成"最低 0.08"，
+ * 而同一行还有倍率 0.5 的渠道 —— 读者据此选型必然选错。
+ *
+ * 没采到价格的渠道**不计入**（不是当 0）：0 是"免费"，缺席是"不知道"。
+ * 某个口径下一个价格都没采到时，该口径不出现在返回值里。
+ */
+export function priceRanges(
+  channels: { input_price?: number; billing_unit?: string | null }[],
+): PriceRange[] {
+  const by = new Map<string, PriceRange>()
+  for (const c of channels) {
+    if (c.input_price === undefined || c.input_price === null) continue
+    const unit = c.billing_unit ?? 'unknown'
+    const cur = by.get(unit)
+    if (cur === undefined) {
+      by.set(unit, { unit, min: c.input_price, max: c.input_price, count: 1 })
+      continue
+    }
+    cur.min = Math.min(cur.min, c.input_price)
+    cur.max = Math.max(cur.max, c.input_price)
+    cur.count += 1
+  }
+  // 渠道数多的口径排前面：它更可能是这个模型的"常态"计价方式
+  return [...by.values()].sort((a, b) => b.count - a.count)
+}
+
 const FAMILY_LABEL: Record<string, string> = {
   newapi: 'NewAPI 系',
   'new-api': 'NewAPI 系',

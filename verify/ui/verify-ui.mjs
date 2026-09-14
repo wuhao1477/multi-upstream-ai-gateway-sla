@@ -1588,6 +1588,64 @@ try {
       /q=claude/.test(urlNow),
       `${filtered.length} 行，URL=${urlNow}`);
     await page.screenshot({ path: `${SHOT}/13-models.png`, fullPage: true });
+
+    // ── 卡片模式 + 二级抽屉 ──
+    //
+    // 两种视图渲染的是**同一份 items**，所以卡片数必须等于列表行数 ——
+    // 不等就说明某一边自己又筛了一道（或者少渲染了），而两边分开看都正常。
+    const listRows = filtered.length;
+    await page.click('[data-seg="card"]');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-model-card]').length > 0, { timeout: 5000 });
+    const cards = await page.$$eval('[data-model-card]',
+      cs => cs.map(c => c.getAttribute('data-model-card')));
+    const viewURL = await page.evaluate(() => location.search);
+    const viewSaved = await page.evaluate(() => localStorage.getItem('sla.models.view'));
+    check('模型目录可切卡片模式，卡片与列表同一份数据且视图写进 URL 与本地偏好',
+      cards.length === listRows &&
+      JSON.stringify(cards) === JSON.stringify(filtered) &&
+      /view=card/.test(viewURL) && viewSaved === 'card',
+      `卡片 ${cards.length} 张 / 列表 ${listRows} 行，URL=${viewURL} 本地=${viewSaved}`);
+
+    // 抽屉里的渠道表与列表模式展开出来的是同一个组件、同一份数据，
+    // 所以逐字比对 API 就够 —— 这里验的是"点卡片能打开、开的是那个模型"。
+    const cardName = cards[0];
+    await page.evaluate(n => {
+      [...document.querySelectorAll('[data-model-card]')]
+        .find(c => c.getAttribute('data-model-card') === n)?.click();
+    }, cardName);
+    await page.waitForSelector('.drawer', { visible: true, timeout: 5000 });
+    const drawer = await page.evaluate(n => {
+      const d = document.querySelector('.drawer');
+      const tbl = d.querySelector('[data-model-channels]');
+      return {
+        title: d.querySelector('.drawer-t')?.textContent.trim(),
+        forModel: tbl?.getAttribute('data-model-channels'),
+        chNames: [...(tbl?.querySelectorAll('tbody tr td:first-child') ?? [])]
+          .map(t => t.textContent.trim()),
+        want: n,
+      };
+    }, cardName);
+    const wantDrawer = firstPage.items.find(m => m.model_name === cardName)
+      ?? (await api(`/admin/catalog?q=${encodeURIComponent(cardName)}&limit=1`)).items[0];
+    check('点卡片打开二级抽屉，抽屉里是该模型的逐渠道明细',
+      drawer.title === cardName && drawer.forModel === cardName &&
+      JSON.stringify(drawer.chNames) ===
+        JSON.stringify((wantDrawer?.channels ?? []).map(c => c.channel_name)),
+      `抽屉标题=${drawer.title} 表=${drawer.forModel} 渠道=${JSON.stringify(drawer.chNames)}`);
+
+    // Esc 关得掉。抽屉盖着半屏，只能靠那个 ✕ 的话，键盘用户走不出去。
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelector('.drawer') === null, { timeout: 5000 }).catch(() => {});
+    check('抽屉可用 Esc 关闭',
+      await page.evaluate(() => document.querySelector('.drawer') === null));
+
+    await page.screenshot({ path: `${SHOT}/13b-models-card.png`, fullPage: true });
+    // 收尾恢复列表模式：本地偏好会被下一次跑读到，留着 card 会让上面那条
+    // "默认列表"的前提在第二次运行时不成立。
+    await page.click('[data-seg="list"]');
+    await sleep(300);
   }
 
   // ── 13. 页面无 JS 错误 ──

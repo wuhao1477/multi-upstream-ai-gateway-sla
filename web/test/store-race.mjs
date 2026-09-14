@@ -75,6 +75,7 @@ try {
   // money 是纯函数、不碰 api/admin，所以不需要上面那套 mock 转写；
   // 挂在这儿只是因为 `pnpm test` 就指向本文件，不值得为它再起第二个 runner。
   await server.ssrLoadModule('/src/utils/money.test.ts')
+  await server.ssrLoadModule('/src/utils/format.test.ts')
 } finally {
   await server.close()
 }

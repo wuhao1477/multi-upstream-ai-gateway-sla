@@ -11,15 +11,26 @@
  * 页面上那句 note 不是客套，是防止有人拿这张表当"网关支持哪些模型"的清单。
  *
  * 筛选写进 URL：把"谁家有 claude-opus"这条链接发给别人，对方看到同一屏。
+ *
+ * 两种视图，**同一份数据、同一套筛选**：
+ *  · 列表 —— 一屏看得下几十行，扫"哪些模型到处都有"用它。默认。
+ *  · 卡片 —— 一眼看到名字、口径、价格区间，点开抽屉看逐渠道明细（NewAPI 那种形态）。
+ * 切视图不重拉数据也不重置筛选：两边渲染的是 store 里同一个 items。
  */
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import ModelChannelTable from '@/components/res/ModelChannelTable.vue'
 import UiCard from '@/components/ui/UiCard.vue'
+import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
-import UiPrice from '@/components/ui/UiPrice.vue'
+import UiSegmented from '@/components/ui/UiSegmented.vue'
 import UiStat from '@/components/ui/UiStat.vue'
 import { useGlobalCatalogStore } from '@/stores/globalCatalog'
-import { fmtAgo, fmtTime, statusLabel, unitChip } from '@/utils/format'
+import { priceRanges, unitChip, unitLabel } from '@/utils/format'
+import type { ModelEntry } from '@/api/types'
+
+type ViewMode = 'list' | 'card'
+const VIEW_KEY = 'sla.models.view'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,8 +38,11 @@ const cat = useGlobalCatalogStore()
 
 /** 输入框自己的值。理由同 CatalogView：直接绑 store.q 会在防抖窗口内被回写。 */
 const qInput = ref('')
-/** 展开的模型名。允许多个 —— 比较两个模型的渠道分布是常见动作。 */
+/** 展开的模型名（列表模式）。允许多个 —— 比较两个模型的渠道分布是常见动作。 */
 const expanded = ref<Set<string>>(new Set())
+const view = ref<ViewMode>('list')
+/** 抽屉里的模型（卡片模式）。null = 抽屉关着。 */
+const picked = ref<ModelEntry | null>(null)
 
 function toggle(name: string): void {
   const next = new Set(expanded.value)
@@ -37,11 +51,23 @@ function toggle(name: string): void {
   expanded.value = next
 }
 
-/** 把当前筛选写回 URL。replace 而非 push：每敲一个字符都进历史栈会废掉返回键。 */
+/**
+ * 抽屉盯的是**模型名**而不是那个对象：翻页或改筛选后 store 里的 items 是新对象，
+ * 拿着旧对象的抽屉会一直显示上一页的数据，而它看起来完全正常。
+ * 列表里没有这个模型了就自动关掉。
+ */
+const drawerModel = computed(() =>
+  picked.value === null
+    ? null
+    : (cat.items.find((m) => m.model_name === picked.value?.model_name) ?? null),
+)
+
+/** 把当前筛选与视图写回 URL。replace 而非 push：每敲一个字符都进历史栈会废掉返回键。 */
 function syncURL(): void {
   const q: Record<string, string> = {}
   if (cat.q !== '') q.q = cat.q
   if (cat.unit !== '') q.unit = cat.unit
+  if (view.value !== 'list') q.view = view.value
   void router.replace({ query: q })
 }
 
@@ -52,6 +78,12 @@ onMounted(async () => {
   const s = (k: string): string => (typeof route.query[k] === 'string' ? String(route.query[k]) : '')
   const urlQ = s('q')
   const urlUnit = s('unit')
+  const urlView = s('view')
+  // URL 里的视图优先于本地偏好，同 KeysView：别人发来的链接必须能覆盖本地记忆
+  const saved = localStorage.getItem(VIEW_KEY)
+  const v = urlView !== '' ? urlView : (saved ?? 'list')
+  view.value = v === 'card' ? 'card' : 'list'
+  localStorage.setItem(VIEW_KEY, view.value)
   if (urlUnit !== '') cat.setUnit(urlUnit)
   if (urlQ !== '') {
     qInput.value = urlQ
@@ -60,6 +92,12 @@ onMounted(async () => {
 })
 
 watch([() => cat.q, () => cat.unit], syncURL)
+watch(view, (v) => {
+  localStorage.setItem(VIEW_KEY, v)
+  // 换视图先关抽屉：列表模式下它没有入口，留着就成了一个关不掉的浮层
+  if (v === 'list') picked.value = null
+  syncURL()
+})
 </script>
 
 <template>
@@ -103,6 +141,14 @@ watch([() => cat.q, () => cat.unit], syncURL)
           cat.loaded ? `${cat.total} / ${cat.whole}` : '—'
         }}</span>
         <div class="spacer"></div>
+        <UiSegmented
+          v-model="view"
+          label="模型目录视图模式"
+          :options="[
+            { value: 'list', label: '列表' },
+            { value: 'card', label: '卡片' },
+          ]"
+        />
       </template>
 
       <!-- ⚠️ #model-q 必须留在结果区**之外**：它一旦落在随响应整块换掉的子树里，
@@ -137,7 +183,38 @@ watch([() => cat.q, () => cat.unit], syncURL)
         />
       </div>
 
-      <div class="tw" v-if="cat.items.length > 0">
+      <!-- 卡片模式：名字 / 口径 / 价格区间 / 渠道数一眼看全，明细进抽屉。 -->
+      <div class="mcards" v-if="view === 'card' && cat.items.length > 0">
+        <button
+          v-for="m in cat.items"
+          :key="m.model_name"
+          class="mcard"
+          :data-model-card="m.model_name"
+          @click="picked = m"
+        >
+          <code class="mcard-n">{{ m.model_name }}</code>
+          <div class="mcard-p">
+            <!-- 价格**按口径分组**给区间，绝不跨口径取 min：两者数值区间重叠，
+                 混着取会让 $0.08/次 显示成"最低 0.08"而同行还有倍率 0.5 -->
+            <span v-for="r in priceRanges(m.channels)" :key="r.unit" class="mcard-pr">
+              {{ r.min === r.max ? r.min : `${r.min} – ${r.max}` }}
+              <span class="dim">{{ unitLabel(r.unit) ?? '口径未知' }}</span>
+            </span>
+            <span v-if="priceRanges(m.channels).length === 0" class="dim">未采到价格</span>
+          </div>
+          <div class="mcard-b">
+            <span class="badge" :data-model-card-count="m.model_name"
+              >{{ m.channel_count }} 个渠道</span
+            >
+            <span v-if="m.stale_count > 0" class="badge warn">{{ m.stale_count }} 疑似下架</span>
+            <span v-if="m.disabled_count > 0" class="badge bad"
+              >{{ m.disabled_count }} 已停用</span
+            >
+          </div>
+        </button>
+      </div>
+
+      <div class="tw" v-else-if="view === 'list' && cat.items.length > 0">
         <table>
           <thead>
             <tr>
@@ -197,49 +274,7 @@ watch([() => cat.q, () => cat.unit], syncURL)
                       支持该模型的渠道
                       <span class="badge">{{ m.channel_count }} 个</span>
                     </div>
-                    <div class="tw">
-                      <table :data-model-channels="m.model_name">
-                        <thead>
-                          <tr>
-                            <th>渠道</th>
-                            <th>输入价</th>
-                            <th>输出价</th>
-                            <th>渠道状态</th>
-                            <th>目录状态</th>
-                            <th>最近出现</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="c in m.channels" :key="c.channel_id">
-                            <td>
-                              <router-link
-                                class="linkish"
-                                :data-model-ch="c.channel_id"
-                                :to="{ name: 'channel-detail', params: { id: String(c.channel_id) } }"
-                                >{{ c.channel_name }}</router-link
-                              >
-                            </td>
-                            <td><UiPrice :value="c.input_price" :unit="c.billing_unit" /></td>
-                            <td><UiPrice :value="c.output_price" :unit="c.billing_unit" /></td>
-                            <td>
-                              <span
-                                class="badge"
-                                :class="c.channel_status === 'disabled' ? 'bad' : 'ok'"
-                                >{{ statusLabel(c.channel_status) }}</span
-                              >
-                            </td>
-                            <td>
-                              <span class="badge" :class="c.stale ? 'warn' : ''">{{
-                                c.stale ? '疑似下架' : '在架'
-                              }}</span>
-                            </td>
-                            <td class="dim" :title="fmtTime(c.last_seen_at)">
-                              {{ fmtAgo(c.last_seen_at) }}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
+                    <ModelChannelTable :model-name="m.model_name" :channels="m.channels" />
                   </div>
                 </td>
               </tr>
@@ -274,5 +309,31 @@ watch([() => cat.q, () => cat.unit], syncURL)
         找具体某个模型用上面的筛选框，不用翻页。
       </p>
     </UiCard>
+
+    <!-- 卡片模式的二级抽屉。列表模式用行内展开，不用它：那边一行就在眼前，
+         为看六列明细盖住半屏是倒退。 -->
+    <UiDrawer
+      :open="drawerModel !== null"
+      :title="drawerModel?.model_name ?? ''"
+      desc="哪些渠道有这个模型。价格与计价口径同格显示，跨口径不可直接比大小。"
+      @close="picked = null"
+    >
+      <template v-if="drawerModel !== null">
+        <div class="stats">
+          <UiStat label="渠道数" :value="drawerModel.channel_count" />
+          <UiStat label="其中疑似下架" :value="drawerModel.stale_count" />
+          <UiStat label="其中渠道已停用" :value="drawerModel.disabled_count" />
+        </div>
+        <ModelChannelTable
+          :model-name="drawerModel.model_name"
+          :channels="drawerModel.channels"
+        />
+        <p class="note">
+          「渠道数」是<b>有这个模型</b>的渠道数，不是"能用它"的渠道数：已停用的渠道
+          不采集也不承接请求，疑似下架的模型上游可能已经撤了。两者各自计数，
+          要不要算进去由你定。
+        </p>
+      </template>
+    </UiDrawer>
   </div>
 </template>
