@@ -94,6 +94,50 @@ export function priceRanges(
   return [...by.values()].sort((a, b) => b.count - a.count)
 }
 
+/**
+ * 端点类型的中文短名。
+ *
+ * 取值来自上游 /api/pricing 每个模型的 `supported_endpoint_types`
+ * （2026-09-14 实测 api2.aigcbest.top 的七种，括号里是实测模型数）。
+ * 译名对齐上游自己的定价页，运维两边对照时不用换一套词。
+ *
+ * ⚠️ **不认识的值原样返回**，不要归到"其他"：站点会加新端点类型，
+ * 而归进"其他"之后，界面上就再也看不出新增了什么 —— 那是静默丢信息。
+ */
+const ENDPOINT_LABEL: Record<string, string> = {
+  openai: 'Chat', // 1364
+  'openai-response': 'Response', // 8
+  anthropic: 'Anthropic', // 38
+  gemini: 'Gemini', // 123
+  'jina-rerank': 'Rerank', // 10
+  'image-generation': '图片', // 68
+  'openai-video': '视频', // 17
+}
+
+export function endpointLabel(e: string): string {
+  return ENDPOINT_LABEL[e] ?? e
+}
+
+/**
+ * 计价类型的中文短名。
+ *
+ * 与 unitChip 的区别：那个说的是"这个数怎么读"（×倍率 / 每次多少钱），
+ * 这个说的是"这个模型怎么计费"，是分面筛选的标签。同一份 billing_unit，
+ * 两种语境两种说法 —— 混用会让分面上写着「×倍率 1188」，读起来像在筛倍率值。
+ */
+export function pricingTypeLabel(u: string): string {
+  switch (u) {
+    case 'per_call':
+      return '按次计费'
+    case 'per_1m_token':
+    case 'per_1k_token':
+    case 'per_token':
+      return '按量计费'
+    default:
+      return '口径未知'
+  }
+}
+
 /** 某个分组下这个模型的**实际**价格（已乘分组倍率）。 */
 export interface EffectivePrice {
   groupRef: string

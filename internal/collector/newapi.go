@@ -309,11 +309,13 @@ func (a *NewAPIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Cat
 	for _, it := range pr.Models {
 		mp := it.toModelPrice()
 		out = append(out, CatalogModel{
-			ModelName:   it.Name,
-			InputPrice:  mp.InputPrice,
-			OutputPrice: mp.OutputPrice,
-			BillingUnit: mp.BillingUnit,
-			Meta:        NewAPIMeta("/api/pricing", now),
+			ModelName:     it.Name,
+			InputPrice:    mp.InputPrice,
+			OutputPrice:   mp.OutputPrice,
+			BillingUnit:   mp.BillingUnit,
+			VendorName:    it.VendorName,
+			EndpointTypes: it.EndpointTypes,
+			Meta:          NewAPIMeta("/api/pricing", now),
 		})
 	}
 	if len(out) == 0 {

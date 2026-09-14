@@ -33,6 +33,10 @@ type ModelChannel struct {
 	BillingUnit   *string   `json:"billing_unit,omitempty"`
 	Stale         bool      `json:"stale"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
+	// VendorName 是上游声明的发行方。nil = 未声明，不是"无供应商"。
+	VendorName *string `json:"vendor_name,omitempty"`
+	// EndpointTypes 是上游声明支持的端点类型。nil = 未声明，不是"不支持任何端点"。
+	EndpointTypes []string `json:"endpoint_types,omitempty"`
 	// Groups 是这个渠道下**能调到这个模型**的分组，带各自的分组倍率。
 	//
 	// 为什么它必须在这儿：上面那个 InputPrice 是模型自己的倍率，而实际计费是
@@ -66,16 +70,42 @@ type ModelEntry struct {
 	Channels      []ModelChannel `json:"channels"`
 }
 
+// CatalogFilter 是模型目录的筛选条件。空切片/空串一律表示"这一维不筛"。
+type CatalogFilter struct {
+	// Q 是模型名子串（大小写不敏感）。
+	Q string
+	// Unit 是计价口径（'per_1m_token' / 'per_call' / 'unknown'）。
+	Unit string
+	// ChannelIDs 限定渠道。
+	ChannelIDs []int64
+	// Vendors 限定发行方（上游 vendors[].name，逐字匹配，跨站点不归一）。
+	Vendors []string
+	// Endpoints 限定端点类型，语义是**任一命中**（数组重叠），不是全部命中：
+	// 一个模型同时支持 openai 与 gemini 时，两个筛选下都该看得见它。
+	Endpoints []string
+}
+
 // GlobalCatalogPage 是一页聚合结果。
 type GlobalCatalogPage struct {
 	Items []ModelEntry
 	// Total 是**筛选后的模型数**（不是目录行数）：一个模型在 30 个渠道上
 	// 仍然只算一个。翻页的单位是模型，总数也必须是模型，否则页码对不上。
 	Total int
-	// Units 是各计价口径的模型数，**在 unit 分段筛选之前**统计。
-	// 理由同 filterCatalog：筛完再数就只剩当前段，切进去就出不来了。
-	Units map[string]int
-	// Whole 是不分段时的模型数（只受 q 影响）。
+	// 下面四个是分面计数，每一个都**在除自己以外的全部筛选之下**统计。
+	//
+	// 这条规则不是随手定的：分面若把自己那一维也算进去，选中一个供应商之后
+	// 其余供应商全变 0 或消失，于是**换不了**供应商 —— 只能先清空再重选。
+	// 反过来若一维都不施加，选了渠道之后供应商列表仍列着别的渠道才有的公司，
+	// 点下去是空结果。排除自己这一维，两个毛病都没有。
+	Units     map[string]int
+	Vendors   map[string]int
+	Endpoints map[string]int
+	// Channels 的键是渠道 id 的十进制串（JSON 对象的键只能是字符串）。
+	Channels map[string]int
+	// ChannelNames 给上面那些 id 配名字，省得界面为了画一行分面去翻渠道列表
+	// ——它未必已经拉过 /admin/channels。
+	ChannelNames map[string]string
+	// Whole 是**不受 Unit 影响**时的模型数（其余筛选照常施加）。
 	//
 	// ⚠️ **不能拿 Units 的各项相加代替**：同一个模型可能在 A 站按倍率、在 B 站
 	// 按次计价，于是它在两个分段里各算一次。实测两个真站点合起来
@@ -84,10 +114,62 @@ type GlobalCatalogPage struct {
 	Whole int
 }
 
+// catalogWhere 拼筛选条件。excl 指定**不施加**哪一维（分面自己那一维）。
+//
+// 参数位置固定为 $1..$5（q / channels / vendors / endpoints / unit），
+// 排除某一维时把该位置传成空值，让那一行条件自己短路 —— 这样每条查询的
+// 占位符编号都一样，不用为每种组合重排参数。手工拼编号是这类代码最常见的
+// 错法，而错了之后查询照样能跑，只是筛错了维度。
+//
+// vendor_name IS NULL 的模型不出现在任何供应商分面里，也就选不到 ——
+// 与上游自己的定价页一致，那里也没有"未声明供应商"这一项。endpoint_types
+// 同理。它们仍然计入「全部」。
+func catalogWhere(f CatalogFilter, excl string) (string, []any) {
+	args := []any{
+		f.Q,
+		int64Slice(f.ChannelIDs),
+		strSlice(f.Vendors),
+		strSlice(f.Endpoints),
+		f.Unit,
+	}
+	switch excl {
+	case "q":
+		args[0] = ""
+	case "channel":
+		args[1] = []int64{}
+	case "vendor":
+		args[2] = []string{}
+	case "endpoint":
+		args[3] = []string{}
+	case "unit":
+		args[4] = ""
+	}
+	return `($1 = '' OR position(lower($1) in lower(c.model_name)) > 0)
+   AND (cardinality($2::bigint[]) = 0 OR c.channel_id = ANY($2))
+   AND (cardinality($3::text[]) = 0 OR c.vendor_name = ANY($3))
+   AND (cardinality($4::text[]) = 0 OR c.endpoint_types && $4)
+   AND ($5 = '' OR COALESCE(c.billing_unit, 'unknown') = $5)`, args
+}
+
+// nil 切片传进 pgx 会变成 NULL 而不是空数组，而 cardinality(NULL) 是 NULL、
+// 不是 0 —— 于是那一行条件整体成 NULL，WHERE 直接把所有行滤掉。空结果，无报错。
+func int64Slice(v []int64) []int64 {
+	if v == nil {
+		return []int64{}
+	}
+	return v
+}
+
+func strSlice(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
 // ListGlobalCatalog 按模型名聚合全部渠道的目录。
 //
-// q 是模型名子串（大小写不敏感）；unit 是计价口径分段（空 = 不筛，
-// "unknown" 选 billing_unit IS NULL）；missingRounds 同 ListCatalog。
+// 筛选见 CatalogFilter；missingRounds 同 ListCatalog。
 //
 // 用 `position(lower(q) in lower(model_name))` 而不是 ILIKE '%q%'：
 // 后者要对用户输入里的 % 和 _ 做转义，漏一处就是"输入 % 匹配全部"。
@@ -97,44 +179,99 @@ type GlobalCatalogPage struct {
 // 毫秒级，而子串匹配本来也用不上 B-tree。要建也该是 trigram，等它真慢了再说。
 func ListGlobalCatalog(
 	ctx context.Context, conn *pgx.Conn,
-	q, unit string, missingRounds, limit, offset int,
+	f CatalogFilter, missingRounds, limit, offset int,
 ) (GlobalCatalogPage, error) {
 	if missingRounds <= 0 {
 		missingRounds = 3
 	}
-	page := GlobalCatalogPage{Items: []ModelEntry{}, Units: map[string]int{}}
-
-	// ① 分段规模。先算，且**不受 unit 影响** —— 界面的分段按钮读它。
-	rows, err := conn.Query(ctx, `
-SELECT COALESCE(billing_unit, 'unknown'), count(DISTINCT model_name)::int
-  FROM channel_model_catalog
- WHERE ($1 = '' OR position(lower($1) in lower(model_name)) > 0)
- GROUP BY 1`, q)
-	if err != nil {
-		return page, fmt.Errorf("统计目录计价口径: %w", err)
+	page := GlobalCatalogPage{
+		Items: []ModelEntry{}, Units: map[string]int{},
+		Vendors: map[string]int{}, Endpoints: map[string]int{},
+		Channels: map[string]int{}, ChannelNames: map[string]string{},
 	}
-	for rows.Next() {
-		var u string
-		var n int
-		if err := rows.Scan(&u, &n); err != nil {
-			rows.Close()
+
+	// ① 四个分面。每个都排除自己那一维（见 GlobalCatalogPage 的注释）。
+	//
+	// 统一 count(DISTINCT model_name)：分面上的数是**模型数**，与列表的总数
+	// 同口径。数目录行的话，一个在 30 个渠道都有的模型会被算 30 次，于是
+	// 分面上的数字远大于点进去看到的行数。
+	facets := []struct {
+		into map[string]int
+		excl string
+		sql  string
+		what string
+	}{
+		{page.Units, "unit", `
+SELECT COALESCE(c.billing_unit, 'unknown'), count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c WHERE %s GROUP BY 1`, "计价口径"},
+		{page.Vendors, "vendor", `
+SELECT c.vendor_name, count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c WHERE c.vendor_name IS NOT NULL AND %s GROUP BY 1`, "发行方"},
+		{page.Endpoints, "endpoint", `
+SELECT e, count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c, unnest(c.endpoint_types) AS e
+ WHERE %s GROUP BY 1`, "端点类型"},
+	}
+	for _, ft := range facets {
+		where, args := catalogWhere(f, ft.excl)
+		rows, err := conn.Query(ctx, fmt.Sprintf(ft.sql, where), args...)
+		if err != nil {
+			return page, fmt.Errorf("统计目录%s分面: %w", ft.what, err)
+		}
+		for rows.Next() {
+			var k string
+			var n int
+			if err := rows.Scan(&k, &n); err != nil {
+				rows.Close()
+				return page, err
+			}
+			ft.into[k] = n
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
 			return page, err
 		}
-		page.Units[u] = n
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return page, err
 	}
 
-	// ①bis 不分段时的模型数。单独一条，理由见 Whole 的注释（相加会多算）。
-	if err := conn.QueryRow(ctx, `
-SELECT count(DISTINCT model_name)::int
-  FROM channel_model_catalog
- WHERE ($1 = '' OR position(lower($1) in lower(model_name)) > 0)`,
-		q).Scan(&page.Whole); err != nil {
-		return page, fmt.Errorf("统计目录模型总数: %w", err)
+	// ①bis 渠道分面。单独一条：它要连 channels 取名字，别的分面不用。
+	{
+		where, args := catalogWhere(f, "channel")
+		rows, err := conn.Query(ctx, `
+SELECT c.channel_id, ch.name, count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
+ WHERE `+where+`
+ GROUP BY 1, 2`, args...)
+		if err != nil {
+			return page, fmt.Errorf("统计目录渠道分面: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			var name string
+			var n int
+			if err := rows.Scan(&id, &name, &n); err != nil {
+				rows.Close()
+				return page, err
+			}
+			key := strconv.FormatInt(id, 10)
+			page.Channels[key] = n
+			page.ChannelNames[key] = name
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return page, err
+		}
 	}
+
+	// ①ter 不分段时的模型数。单独一条，理由见 Whole 的注释（相加会多算）。
+	{
+		where, args := catalogWhere(f, "unit")
+		if err := conn.QueryRow(ctx, `
+SELECT count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c WHERE `+where, args...).Scan(&page.Whole); err != nil {
+			return page, fmt.Errorf("统计目录模型总数: %w", err)
+		}
+	}
+	where, args := catalogWhere(f, "")
 
 	// ② 本页的模型名与三个计数。
 	//
@@ -145,19 +282,23 @@ SELECT count(DISTINCT model_name)::int
 	// 排序按"支持的渠道数"降序：这一页要回答的是"哪些模型到处都有"。
 	// 同数再按名字，保证翻页稳定 —— 只按计数排的话同计数的行在两次查询间
 	// 顺序可以不同，翻页会漏行也会重复行。
-	rows, err = conn.Query(ctx, `
+	//
+	// ⚠️ 计数是**在筛选之后**数的：筛了渠道以后，"渠道数"显示的是"筛出的这些
+	// 渠道里有几个有它"，而不是全库有几个。这是刻意的 —— 筛了渠道还报全库的数，
+	// 展开区列出的行数会对不上那个数字。
+	rows, err := conn.Query(ctx, fmt.Sprintf(`
 SELECT c.model_name,
        count(*)::int,
        count(*) FILTER (
-         WHERE ch.catalog_sync_seq - c.last_seen_seq >= $3::bigint)::int,
+         WHERE ch.catalog_sync_seq - c.last_seen_seq >= $6::bigint)::int,
        count(*) FILTER (WHERE ch.status = 'disabled')::int,
        count(*) OVER ()::int
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
- WHERE ($1 = '' OR position(lower($1) in lower(c.model_name)) > 0)
-   AND ($2 = '' OR COALESCE(c.billing_unit, 'unknown') = $2)
+ WHERE %s
  GROUP BY c.model_name
  ORDER BY count(*) DESC, c.model_name
- LIMIT $4 OFFSET $5`, q, unit, missingRounds, limit, offset)
+ LIMIT $7 OFFSET $8`, where),
+		append(args, missingRounds, limit, offset)...)
 	if err != nil {
 		return page, fmt.Errorf("列全局模型目录: %w", err)
 	}
@@ -190,17 +331,19 @@ SELECT c.model_name,
 	// 只取本页的模型名（= ANY），不是把全表拉回来在 Go 里分组：真库九万行
 	// 一次请求拉回来是几 MB，而筛选框每敲一次（防抖后）就要发一次。
 	//
-	// unit 筛选**必须在这里也加一遍**：切到"按次"那一段时，若明细不筛，
-	// 展开后会看见一堆按倍率计价的渠道行，与上面那个计数对不上。
-	rows, err = conn.Query(ctx, `
+	// **整套筛选都要在这里再加一遍**，不只是 unit：筛了渠道却不筛明细的话，
+	// 展开区会列出被筛掉的那些渠道，与上面那个"渠道数"对不上；筛了供应商同理。
+	// 这就是 catalogWhere 存在的理由 —— 两处条件必须逐字同源。
+	rows, err = conn.Query(ctx, fmt.Sprintf(`
 SELECT c.model_name, ch.id, ch.name, ch.status,
        c.input_price, c.output_price, c.billing_unit,
-       (ch.catalog_sync_seq - c.last_seen_seq >= $2::bigint) AS stale,
+       c.vendor_name, c.endpoint_types,
+       (ch.catalog_sync_seq - c.last_seen_seq >= $6::bigint) AS stale,
        c.last_seen_at
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
- WHERE c.model_name = ANY($1)
-   AND ($3 = '' OR COALESCE(c.billing_unit, 'unknown') = $3)
- ORDER BY c.model_name, ch.name, ch.id`, names, missingRounds, unit)
+ WHERE c.model_name = ANY($7) AND %s
+ ORDER BY c.model_name, ch.name, ch.id`, where),
+		append(args, missingRounds, names)...)
 	if err != nil {
 		return page, fmt.Errorf("列模型的渠道明细: %w", err)
 	}
@@ -211,6 +354,7 @@ SELECT c.model_name, ch.id, ch.name, ch.status,
 		var mc ModelChannel
 		if err := rows.Scan(&name, &mc.ChannelID, &mc.ChannelName, &mc.ChannelStatus,
 			&mc.InputPrice, &mc.OutputPrice, &mc.BillingUnit,
+			&mc.VendorName, &mc.EndpointTypes,
 			&mc.Stale, &mc.LastSeenAt); err != nil {
 			rows.Close()
 			return page, err

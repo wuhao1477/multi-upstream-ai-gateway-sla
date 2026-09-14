@@ -188,6 +188,11 @@ CREATE TABLE channel_model_catalog (
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
   last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
+  -- 下面两列由 026 迁移补（2026-09-14 实测 /api/pricing 的 vendors 数组与
+  -- 每模型的 supported_endpoint_types）。两者都可空：缺席 = 上游未声明，
+  -- **不是**"无供应商"或"不支持任何端点"（同 billing_unit 的口径）。
+  vendor_name    TEXT,                       -- 发行方，按 vendor_id 在顶层 vendors[] 里解析出的 name；跨站点不归一
+  endpoint_types TEXT[],                     -- 支持的端点类型（openai / anthropic / gemini / image-generation / …）
   PRIMARY KEY (channel_id, model_name)
 );
 

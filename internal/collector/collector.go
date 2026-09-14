@@ -297,7 +297,12 @@ type CatalogModel struct {
 	// 于是"看数值猜口径"不成立 —— 没有这个字段，目录里的价格就是个
 	// 无单位的数字，把 $0.15/次 当倍率 0.15 排序会让最贵的模型显得最便宜。
 	BillingUnit string
-	Meta        SourceMeta
+	// VendorName 是发行方（上游 vendors[].name）。空 = 上游未声明，
+	// **不是**"无供应商" —— 界面据此渲染"未声明"而不是编一个分类。
+	VendorName string
+	// EndpointTypes 是上游声明支持的端点类型。空 = 未声明，不是"不支持"。
+	EndpointTypes []string
+	Meta          SourceMeta
 }
 
 // Pricing 是价格采集结果（FR-010/012/013）。

@@ -370,16 +370,20 @@ UPDATE channels SET catalog_sync_seq = catalog_sync_seq + 1
 		// 补 'per_1m_token' 会把"未声明"伪装成"已知按 token 计价"（02 §1.3bis）。
 		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_model_catalog (channel_id, model_name, input_price, output_price,
-                                   billing_unit, first_seen_at, last_seen_at, last_seen_seq)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$6,$7)
+                                   billing_unit, vendor_name, endpoint_types,
+                                   first_seen_at, last_seen_at, last_seen_seq)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8,$8,$9)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price  = EXCLUDED.input_price,
        output_price = EXCLUDED.output_price,
        billing_unit = EXCLUDED.billing_unit,
+       vendor_name  = EXCLUDED.vendor_name,
+       endpoint_types = EXCLUDED.endpoint_types,
        last_seen_at = EXCLUDED.last_seen_at,
        last_seen_seq = EXCLUDED.last_seen_seq`,
 			channelID, m.ModelName, nullFloat(m.InputPrice), nullFloat(m.OutputPrice),
-			m.BillingUnit, m.Meta.FetchedAt, syncSeq); err != nil {
+			m.BillingUnit, m.VendorName, nullStrings(m.EndpointTypes),
+			m.Meta.FetchedAt, syncSeq); err != nil {
 			return n, fmt.Errorf("写目录条目 %s: %w", m.ModelName, err)
 		}
 		n++
@@ -414,6 +418,18 @@ func nullFloat(f float64) any {
 		return nil
 	}
 	return f
+}
+
+// nullStrings 把空切片落成 NULL 而不是 '{}'。
+//
+// 两者在库里不是一回事，而这一列的语义恰好卡在这个区别上：NULL = 上游没声明
+// 支持哪些端点（老版本站点就没这个字段），'{}' = 上游明说"一个都不支持"。
+// 把前者写成后者，界面上会出现一批"不支持任何端点"的模型，而它们其实好好的。
+func nullStrings(s []string) any {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }
 
 var _ collector.Sink = (*CollectorSink)(nil)

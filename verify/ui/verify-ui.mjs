@@ -1485,12 +1485,13 @@ try {
 
   await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });
 
-  // ── 12quater. 模型目录分栏（跨渠道：这个模型哪些渠道有）──
+  // ── 12quater. 模型目录分栏（跨渠道 + 分面筛选）──
   //
   // **要两个不同的真站点才验得了**：只有一个渠道时 channel_count 恒为 1，
-  // 聚合的 GROUP BY 写成什么样都绿。库里 base_url 有唯一约束，同一个站建不出
-  // 两个渠道 —— 那个约束是对的，不该为了凑数据去绕它。第二个站由 ui-stack.sh
-  // 用 PICK_COUNT=2 现场探活挑出来（CLAUDE.md §1：不造站点）。
+  // 聚合的 GROUP BY 写成什么样都绿；渠道分面也只有一项，"筛了渠道之后发行方
+  // 收窄"那条同样验不到。库里 base_url 有唯一约束，同一个站建不出两个渠道 ——
+  // 那个约束是对的，不该为了凑数据去绕它。第二个站由 ui-stack.sh 用
+  // PICK_COUNT=2 现场探活挑出来（CLAUDE.md §1：不造站点）。
   const UP2 = {
     name: process.env.UP2_NAME || '',
     url: process.env.UP2_URL || '',
@@ -1503,7 +1504,7 @@ try {
       '不拿单渠道的绿冒充跨渠道通过（CLAUDE.md §1）');
   } else {
     // 建第二个渠道走 API 而不是点界面：建渠道/登记凭证那条路前面已经逐项验过，
-    // 这里只需要**第二个真站点的目录数据**当输入，重点在聚合本身。
+    // 这里只需要**第二个真站点的目录数据**当输入，重点在聚合与分面本身。
     const ch2 = await page.evaluate(async up => {
       const t = document.querySelector('#token').value;
       const h = { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' };
@@ -1548,43 +1549,74 @@ try {
       JSON.stringify(domRows) === JSON.stringify(firstPage.items.map(m => m.model_name)),
       `共 ${firstPage.total} 个模型；界面 ${domRows.length} 行，首行 ${domRows[0]}`);
 
-    // 核心那条：两个站都有的模型，渠道数必须是 2，且展开区列出的正是那两个站。
+    // ── 明细一律走抽屉（列表模式已无行内展开）──
+    //
+    // 两种视图共用同一个抽屉与同一个 ModelChannelTable。断言"点了列表行之后
+    // 抽屉里是那个模型"，顺带守住"行内展开真的删干净了" —— 留着一份就意味着
+    // 那张七列的表有两套容器，而两套宽度约束迟早会岔开。
+    const openDrawerFor = async name => {
+      await page.evaluate(n => {
+        [...document.querySelectorAll('[data-model-open]')]
+          .find(b => b.getAttribute('data-model-open') === n)?.click();
+      }, name);
+      await page.waitForSelector('.drawer [data-model-channels]', { timeout: 5000 });
+    };
+    const readDrawer = () => page.evaluate(() => {
+      const d = document.querySelector('.drawer');
+      const tbl = d.querySelector('[data-model-channels]');
+      return {
+        wide: d.classList.contains('wide'),
+        width: Math.round(d.getBoundingClientRect().width),
+        viewport: window.innerWidth,
+        title: d.querySelector('.drawer-t')?.textContent.trim(),
+        forModel: tbl?.getAttribute('data-model-channels'),
+        chNames: [...tbl.querySelectorAll('tbody tr td:first-child')]
+          .map(t => t.textContent.trim()),
+        // 只取「实际价」那格里的数字本身：后面还跟着"最低 · 分组 X（共 N 个…）"
+        eff: [...tbl.querySelectorAll('tbody tr td[data-model-eff]')]
+          .map(t => (t.textContent.match(/-?[\d.]+/) ?? ['未采到分组倍率'])[0]),
+      };
+    });
+    const closeDrawer = async () => {
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(
+        () => document.querySelector('.drawer') === null, { timeout: 5000 }).catch(() => {});
+    };
+
+    const noInlineExpand = await page.$$eval('[data-model-toggle]', els => els.length);
+    check('列表模式改用抽屉，行内展开已移除',
+      noInlineExpand === 0, `残留的展开按钮 ${noInlineExpand} 个`);
+
+    // 核心那条：两个站都有的模型，渠道数必须是 2，且抽屉里列出的正是那两个站。
     const shared = firstPage.items.filter(m => m.channel_count >= 2);
     if (shared.length === 0) {
       check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名', false,
         `两个真站点（${UP_URL} / ${UP2.url}）的目录没有交集 —— 这条无从验`);
     } else {
       const m = shared[0];
-      // 在页内按属性值查元素再点，不走 page.click(选择器)：模型名里有点、
-      // 冒号、斜杠（gpt-4o-2024-05-13、qwen/qwen3-max），拼进选择器要转义，
-      // 而 getAttribute 比对不需要。
-      await page.evaluate(n => {
-        [...document.querySelectorAll('[data-model-toggle]')]
-          .find(b => b.getAttribute('data-model-toggle') === n)
-          ?.click();
-      }, m.model_name);
-      await page.waitForFunction(n => [...document.querySelectorAll('[data-model-channels]')]
-        .some(t => t.getAttribute('data-model-channels') === n),
-      { timeout: 5000 }, m.model_name);
-      const { chNames, countShown } = await page.evaluate(n => {
-        const tbl = [...document.querySelectorAll('[data-model-channels]')]
-          .find(t => t.getAttribute('data-model-channels') === n);
-        const cnt = [...document.querySelectorAll('[data-model-chcount]')]
-          .find(e => e.getAttribute('data-model-chcount') === n);
-        return {
-          chNames: [...tbl.querySelectorAll('tbody tr td:first-child')]
-            .map(t => t.textContent.trim()),
-          countShown: Number(cnt.textContent.trim()),
-        };
-      }, m.model_name);
+      await openDrawerFor(m.model_name);
+      const d = await readDrawer();
       const wantNames = m.channels.map(c => c.channel_name);
+      const countShown = await page.evaluate(n => {
+        const e = [...document.querySelectorAll('[data-model-chcount]')]
+          .find(x => x.getAttribute('data-model-chcount') === n);
+        return Number(e.textContent.trim());
+      }, m.model_name);
+      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名',
+        countShown === m.channel_count && m.channel_count >= 2 &&
+        d.title === m.model_name && d.forModel === m.model_name &&
+        JSON.stringify(d.chNames) === JSON.stringify(wantNames),
+        `${m.model_name}：渠道数=${countShown} 抽屉=${d.title} ` +
+        `渠道=${JSON.stringify(d.chNames)} 期望=${JSON.stringify(wantNames)}`);
 
-      // 「实际价」= 模型价 × 分组倍率。
-      //
-      // 这是本页最容易错得看不出来的一格：漏乘分组倍率，显示的仍是一个格式
-      // 正确、量级正常的数字，只是与账单差十几倍（实测真站点分组倍率
-      // 0.12~3.5）。所以期望由 API 现算 —— 取该渠道下能调到这个模型的分组里
-      // **倍率最低**的那个，乘出来逐字比对。
+      // 抽屉要够宽：它装的是七列的表，460px 下每列都换行。
+      // 量渲染出来的宽度而不是"有没有 wide 这个 class" —— 后者改个类名就失效。
+      check('模型抽屉是宽抽屉（约占半屏，装得下七列明细）',
+        d.wide && d.width >= Math.min(700, d.viewport * 0.45),
+        `宽 ${d.width}px / 视口 ${d.viewport}px，wide=${d.wide}`);
+
+      // 「实际价」= 模型价 × 分组倍率。漏乘的话显示的仍是一个格式正确、量级
+      // 正常的数字，只是与账单差十几倍（实测真站点分组倍率 0.12~3.5）。
       const effWant = m.channels.map(c => {
         const rates = (c.groups ?? [])
           .map(g => g.rate_multiplier)
@@ -1592,48 +1624,100 @@ try {
         if (c.input_price === undefined || rates.length === 0) return '未采到分组倍率';
         return String(Math.round(c.input_price * Math.min(...rates) * 1e6) / 1e6);
       });
-      const effGot = await page.evaluate(n => {
-        const tbl = [...document.querySelectorAll('[data-model-channels]')]
-          .find(t => t.getAttribute('data-model-channels') === n);
-        return [...tbl.querySelectorAll('tbody tr td[data-model-eff]')]
-          // 只取那格里的数字本身：后面还跟着"最低 · 分组 X（共 N 个…）"的小字
-          .map(t => (t.textContent.match(/-?[\d.]+/) ?? ['未采到分组倍率'])[0]);
-      }, m.model_name);
       check('模型目录的「实际价」= 模型价 × 分组倍率（不是裸模型价）',
-        effGot.length === effWant.length &&
-        effGot.every((v, i) => v === effWant[i]),
-        `实际=${JSON.stringify(effGot)} 期望=${JSON.stringify(effWant)}（` +
+        JSON.stringify(d.eff) === JSON.stringify(effWant),
+        `实际=${JSON.stringify(d.eff)} 期望=${JSON.stringify(effWant)}（` +
         m.channels.map(c => `${c.channel_name} 模型价=${c.input_price} 分组=` +
           JSON.stringify((c.groups ?? []).map(g => `${g.group_ref}×${g.rate_multiplier}`))
         ).join(' / ') + '）');
-
-      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名',
-        countShown === m.channel_count && m.channel_count >= 2 &&
-        JSON.stringify(chNames) === JSON.stringify(wantNames),
-        `${m.model_name}：渠道数=${countShown} 展开=${JSON.stringify(chNames)} ` +
-        `期望=${JSON.stringify(wantNames)}`);
+      await closeDrawer();
     }
 
-    // 分段：切进「按次」后每一行的口径都只能是按次。这条守的是**明细也筛了**
-    // —— 只筛聚合不筛明细的话，展开后会看见一堆按倍率计价的渠道行，
-    // 与上面那个计数对不上，而列表本身看起来完全正常。
-    const perCallBtn = await page.$('[data-munit="per_call"]');
-    if (perCallBtn === null) {
-      check('模型目录按计价口径分段，段内口径一致', false,
-        '两个真站点的目录里没有按次计价的模型 —— 这条无从验');
+    // ── 分面：按渠道 / 发行方 / 端点类型筛 ──
+    //
+    // 分面计数**在除自己以外的全部筛选之下**统计。这条规则要正着反着各验一次：
+    //   正：筛了渠道之后，发行方只剩这些渠道有的（否则点下去是空结果）
+    //   反：渠道那一组**仍然列全**（否则选了一个就换不了，只能清空重选）
+    // 少哪一半都会得到一个"看起来能用"的分面。
+    const facetCounts = () => page.evaluate(() => ({
+      channels: document.querySelectorAll('[data-facet-channel]').length,
+      vendors: document.querySelectorAll('[data-facet-vendor]').length,
+      endpoints: document.querySelectorAll('[data-facet-endpoint]').length,
+    }));
+    const before = await facetCounts();
+    const ch2Vendors = Object.keys(
+      (await api(`/admin/catalog?channel_id=${ch2.id}&limit=1`)).vendors ?? {}).length;
+    const allVendors = Object.keys(firstPage.vendors ?? {}).length;
+    await page.evaluate(id => {
+      [...document.querySelectorAll('[data-facet-channel]')]
+        .find(b => b.getAttribute('data-facet-channel') === String(id))?.click();
+    }, ch2.id);
+    await sleep(900);
+    const after = await facetCounts();
+    const urlAfter = await page.evaluate(() => location.search);
+    check('按渠道筛选：发行方分面收窄到该渠道，而渠道分面仍列全（换得了渠道）',
+      // 分面里各多一个「全部 X」按钮，所以是 +1
+      after.vendors === ch2Vendors + 1 && after.vendors < before.vendors &&
+      after.channels === before.channels && new RegExp(`channel=${ch2.id}`).test(urlAfter),
+      `发行方 ${before.vendors}→${after.vendors}（后端说该渠道有 ${ch2Vendors} 家，` +
+      `全库 ${allVendors} 家）渠道分面 ${before.channels}→${after.channels} URL=${urlAfter}`);
+
+    // 筛出来的每一行都必须真的属于该渠道 —— 期望由 API 现算。
+    const chFiltered = await api(`/admin/catalog?channel_id=${ch2.id}&limit=50`);
+    const chRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    check('按渠道筛选后每一行都属于该渠道',
+      JSON.stringify(chRows) === JSON.stringify(chFiltered.items.map(m => m.model_name)) &&
+      chFiltered.items.every(m => m.channels.every(c => c.channel_id === ch2.id)),
+      `${chRows.length} 行 / 后端 ${chFiltered.total} 个模型`);
+
+    // 叠一个发行方：两维一起生效，且行里那个发行方徽标就是选中的那个。
+    const vendorPick = Object.entries(chFiltered.vendors ?? {})
+      .sort((a, b) => b[1] - a[1])[0];
+    if (vendorPick === undefined) {
+      check('叠加发行方筛选后每一行都是该发行方', false,
+        '该渠道的目录里一个发行方都没采到 —— 这条无从验');
     } else {
-      await perCallBtn.click();
+      await page.evaluate(v => {
+        [...document.querySelectorAll('[data-facet-vendor]')]
+          .find(b => b.getAttribute('data-facet-vendor') === v)?.click();
+      }, vendorPick[0]);
       await sleep(900);
-      const unitCells = await page.$$eval('td[data-col="units"]',
-        ts => ts.map(t => t.textContent.replace(/\s+/g, '')));
-      const seg = await api('/admin/catalog?unit=per_call&limit=50&offset=0');
-      check('模型目录按计价口径分段，段内口径一致',
-        unitCells.length > 0 && unitCells.every(t => t === '/次') &&
-        unitCells.length === Math.min(50, seg.total),
-        `${unitCells.length} 行（后端 total=${seg.total}），口径取值 ` +
-        `${JSON.stringify([...new Set(unitCells)])}`);
-      await page.click('[data-munit=""]');
-      await sleep(700);
+      const vendorCells = await page.$$eval('td[data-col="vendor"]',
+        ts => ts.map(t => t.textContent.trim()));
+      const vendorURL = await page.evaluate(() => location.search);
+      check('叠加发行方筛选后每一行都是该发行方',
+        vendorCells.length === Math.min(50, vendorPick[1]) &&
+        vendorCells.every(t => t === vendorPick[0]) &&
+        /vendor=/.test(vendorURL) && new RegExp(`channel=${ch2.id}`).test(vendorURL),
+        `${vendorCells.length} 行（后端说 ${vendorPick[1]} 个）发行方取值=` +
+        `${JSON.stringify([...new Set(vendorCells)])} URL=${vendorURL}`);
+    }
+
+    // 端点类型：选一个，筛出来的每一行都得带它。
+    await page.click('#model-reset');
+    await sleep(900);
+    const epPick = Object.entries(firstPage.endpoints ?? {})
+      .sort((a, b) => a[1] - b[1])[0];
+    if (epPick === undefined) {
+      check('按端点类型筛选后每一行都支持该端点', false,
+        '两个真站点都没声明端点类型 —— 这条无从验');
+    } else {
+      await page.evaluate(e => {
+        [...document.querySelectorAll('[data-facet-endpoint]')]
+          .find(b => b.getAttribute('data-facet-endpoint') === e)?.click();
+      }, epPick[0]);
+      await sleep(900);
+      const epResp = await api(`/admin/catalog?endpoint=${encodeURIComponent(epPick[0])}&limit=50`);
+      const epRows = await page.$$eval('[data-model-row]',
+        rs => rs.map(r => r.getAttribute('data-model-row')));
+      check('按端点类型筛选后每一行都支持该端点',
+        JSON.stringify(epRows) === JSON.stringify(epResp.items.map(m => m.model_name)) &&
+        epResp.items.every(m =>
+          m.channels.some(c => (c.endpoint_types ?? []).includes(epPick[0]))),
+        `端点 ${epPick[0]}：界面 ${epRows.length} 行 / 后端 ${epResp.total} 个模型`);
+      await page.click('#model-reset');
+      await sleep(900);
     }
 
     // 筛选：收敛到命中行，且写进 URL（把"谁家有 X"的链接发给别人要能复现）。
@@ -1649,7 +1733,7 @@ try {
       `${filtered.length} 行，URL=${urlNow}`);
     await page.screenshot({ path: `${SHOT}/13-models.png`, fullPage: true });
 
-    // ── 卡片模式 + 二级抽屉 ──
+    // ── 卡片模式 + 疏密 + 抽屉 ──
     //
     // 两种视图渲染的是**同一份 items**，所以卡片数必须等于列表行数 ——
     // 不等就说明某一边自己又筛了一道（或者少渲染了），而两边分开看都正常。
@@ -1667,37 +1751,47 @@ try {
       /view=card/.test(viewURL) && viewSaved === 'card',
       `卡片 ${cards.length} 张 / 列表 ${listRows} 行，URL=${viewURL} 本地=${viewSaved}`);
 
-    // 抽屉里的渠道表与列表模式展开出来的是同一个组件、同一份数据，
-    // 所以逐字比对 API 就够 —— 这里验的是"点卡片能打开、开的是那个模型"。
+    // 疏密：量**渲染出来的列宽**，不是"有没有设上那个 class/属性"。
+    // 后者在 CSS 变量名写错、或 grid 用了别的列宽来源时照样绿。
+    const widthAt = async d => {
+      await page.click(`[data-seg="${d}"]`);
+      await sleep(300);
+      return page.evaluate(() => ({
+        card: Math.round(document.querySelector('.mcard').getBoundingClientRect().width),
+        cols: getComputedStyle(document.querySelector('.mcards'))
+          .gridTemplateColumns.split(' ').length,
+        saved: localStorage.getItem('sla.models.density'),
+      }));
+    };
+    const tight = await widthAt('tight');
+    const loose = await widthAt('loose');
+    const normal = await widthAt('normal');
+    check('卡片疏密三档真的改变了列宽与列数（不是只改了个属性）',
+      tight.card < normal.card && normal.card < loose.card &&
+      tight.cols > normal.cols && normal.cols > loose.cols &&
+      normal.saved === 'normal',
+      `紧凑 ${tight.card}px/${tight.cols} 列 · 标准 ${normal.card}px/${normal.cols} 列 · ` +
+      `宽松 ${loose.card}px/${loose.cols} 列`);
+
+    // 卡片点开的也是同一个抽屉。
     const cardName = cards[0];
     await page.evaluate(n => {
       [...document.querySelectorAll('[data-model-card]')]
         .find(c => c.getAttribute('data-model-card') === n)?.click();
     }, cardName);
-    await page.waitForSelector('.drawer', { visible: true, timeout: 5000 });
-    const drawer = await page.evaluate(n => {
-      const d = document.querySelector('.drawer');
-      const tbl = d.querySelector('[data-model-channels]');
-      return {
-        title: d.querySelector('.drawer-t')?.textContent.trim(),
-        forModel: tbl?.getAttribute('data-model-channels'),
-        chNames: [...(tbl?.querySelectorAll('tbody tr td:first-child') ?? [])]
-          .map(t => t.textContent.trim()),
-        want: n,
-      };
-    }, cardName);
+    await page.waitForSelector('.drawer [data-model-channels]', { timeout: 5000 });
+    const cardDrawer = await readDrawer();
     const wantDrawer = firstPage.items.find(m => m.model_name === cardName)
       ?? (await api(`/admin/catalog?q=${encodeURIComponent(cardName)}&limit=1`)).items[0];
-    check('点卡片打开二级抽屉，抽屉里是该模型的逐渠道明细',
-      drawer.title === cardName && drawer.forModel === cardName &&
-      JSON.stringify(drawer.chNames) ===
+    check('点卡片打开的是同一个宽抽屉，内容是该模型的逐渠道明细',
+      cardDrawer.title === cardName && cardDrawer.forModel === cardName && cardDrawer.wide &&
+      JSON.stringify(cardDrawer.chNames) ===
         JSON.stringify((wantDrawer?.channels ?? []).map(c => c.channel_name)),
-      `抽屉标题=${drawer.title} 表=${drawer.forModel} 渠道=${JSON.stringify(drawer.chNames)}`);
+      `抽屉标题=${cardDrawer.title} 表=${cardDrawer.forModel} ` +
+      `渠道=${JSON.stringify(cardDrawer.chNames)}`);
 
     // Esc 关得掉。抽屉盖着半屏，只能靠那个 ✕ 的话，键盘用户走不出去。
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(
-      () => document.querySelector('.drawer') === null, { timeout: 5000 }).catch(() => {});
+    await closeDrawer();
     check('抽屉可用 Esc 关闭',
       await page.evaluate(() => document.querySelector('.drawer') === null));
 

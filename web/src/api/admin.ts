@@ -129,10 +129,28 @@ export function channelCatalog(id: number, q: CatalogQuery = {}): Promise<Catalo
  * 没有 `stale`：全局视角下陈旧是逐渠道的属性，筛成布尔值会丢掉
  * "在 A 站在架、在 B 站疑似下架"这个区别，行里给的是 stale_count。
  */
-export function globalCatalog(q: CatalogQuery = {}): Promise<GlobalCatalogResp> {
+export interface GlobalCatalogQuery extends CatalogQuery {
+  /** 渠道多选。空数组 = 全部（不是"一个都不要"）。 */
+  channelIDs?: number[]
+  /** 发行方多选，逐字匹配上游给的名字。 */
+  vendors?: string[]
+  /** 端点类型多选，语义是**任一命中**：同时支持 openai 与 gemini 的模型，两个筛选下都看得见。 */
+  endpoints?: string[]
+}
+
+export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalogResp> {
   const sp = new URLSearchParams()
   if (q.q !== undefined && q.q !== '') sp.set('q', q.q)
   if (q.unit !== undefined && q.unit !== '') sp.set('unit', q.unit)
+  // 多选一律逗号分隔。空数组要**整个省掉**参数：`channel_id=` 与"没传"在
+  // 服务端是同一回事，但留着会让 URL 里多一串没意义的等号
+  if (q.channelIDs !== undefined && q.channelIDs.length > 0) {
+    sp.set('channel_id', q.channelIDs.join(','))
+  }
+  if (q.vendors !== undefined && q.vendors.length > 0) sp.set('vendor', q.vendors.join(','))
+  if (q.endpoints !== undefined && q.endpoints.length > 0) {
+    sp.set('endpoint', q.endpoints.join(','))
+  }
   if (q.limit !== undefined) sp.set('limit', String(q.limit))
   if (q.offset !== undefined) sp.set('offset', String(q.offset))
   const qs = sp.toString()

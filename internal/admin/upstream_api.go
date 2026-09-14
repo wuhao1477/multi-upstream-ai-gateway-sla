@@ -620,13 +620,19 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 // 分页与聚合都在 SQL 里做（不像 channelCatalog 那样拉回来再在 Go 里切）：
 // 单渠道是一千多行，全局是几万行，把它们拉进进程只为切出 50 行不划算。
 func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
-	limit, offset := parsePaging(r.URL.Query())
+	query := r.URL.Query()
+	f := store.CatalogFilter{
+		Q:          strings.TrimSpace(query.Get("q")),
+		Unit:       strings.TrimSpace(query.Get("unit")),
+		ChannelIDs: csvInt64s(query.Get("channel_id")),
+		Vendors:    csvStrings(query.Get("vendor")),
+		Endpoints:  csvStrings(query.Get("endpoint")),
+	}
+	limit, offset := parsePaging(query)
 
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		page, err := store.ListGlobalCatalog(
-			r.Context(), conn, q, unit, s.catalogMissingRounds(), limit, offset)
+			r.Context(), conn, f, s.catalogMissingRounds(), limit, offset)
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
@@ -634,10 +640,37 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, map[string]any{
 			"total": page.Total, "whole": page.Whole,
 			"limit": limit, "offset": offset,
-			"q": q, "unit": unit, "units": page.Units,
+			"q": f.Q, "unit": f.Unit,
+			"channel_id": f.ChannelIDs, "vendor": f.Vendors, "endpoint": f.Endpoints,
+			"units": page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
+			"channels": page.Channels, "channel_names": page.ChannelNames,
 			"items": page.Items,
 		})
 	})
+}
+
+// csvInt64s / csvStrings 解逗号分隔的多选参数（`?channel_id=3,7`）。
+//
+// 垃圾值**丢掉而不是报错**：这串在地址栏里，是可以被人手改的。改坏了顶多是
+// 筛选没生效，不该让页面白屏 —— 与前端 KeysView 的 restore() 同一条取舍。
+func csvInt64s(v string) []int64 {
+	out := []int64{}
+	for _, p := range strings.Split(v, ",") {
+		if n, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64); err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func csvStrings(v string) []string {
+	out := []string{}
+	for _, p := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ── 辅助 ──

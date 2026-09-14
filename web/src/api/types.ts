@@ -308,6 +308,10 @@ export interface ModelChannel {
    * 空数组 = 还没采到分组。**不可当成"倍率 1"**：那是"不知道"，不是"不打折"。
    */
   groups: ModelGroup[]
+  /** 发行方（上游 vendors[].name）。缺席 = 上游未声明，不是"无供应商"。 */
+  vendor_name?: string
+  /** 支持的端点类型。缺席 = 未声明，不是"不支持任何端点"。 */
+  endpoint_types?: string[]
 }
 
 export interface ModelGroup {
@@ -345,8 +349,25 @@ export interface GlobalCatalogResp {
   offset: number
   q: string
   unit: string
-  /** 各口径的模型数，同 CatalogResp.units：在分段筛选之前统计。 */
+  channel_id: number[]
+  vendor: string[]
+  endpoint: string[]
+  /**
+   * 四个分面，每个都**在除自己以外的全部筛选之下**统计。
+   *
+   * 排除自己那一维是关键：算进去的话，选中一个供应商之后其余供应商全变 0，
+   * 于是换不了供应商，只能先清空再重选。
+   *
+   * 值都是**模型数**（不是目录行数）：一个在 30 个渠道都有的模型只算一个，
+   * 与列表的总数同口径。
+   */
   units: Record<string, number>
+  vendors: Record<string, number>
+  endpoints: Record<string, number>
+  /** 键是渠道 id 的十进制串（JSON 对象的键只能是字符串）。 */
+  channels: Record<string, number>
+  /** 上面那些 id 对应的渠道名，省得界面为了画分面去翻渠道列表。 */
+  channel_names: Record<string, string>
   items: ModelEntry[]
 }
 
