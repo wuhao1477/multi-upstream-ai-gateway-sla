@@ -627,6 +627,7 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 		ChannelIDs: csvInt64s(query.Get("channel_id")),
 		Vendors:    csvStrings(query.Get("vendor")),
 		Endpoints:  csvStrings(query.Get("endpoint")),
+		KeyIDs:     csvInt64s(query.Get("key_id")),
 	}
 	limit, offset := parsePaging(query)
 
@@ -642,7 +643,8 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 			"limit": limit, "offset": offset,
 			"q": f.Q, "unit": f.Unit,
 			"channel_id": f.ChannelIDs, "vendor": f.Vendors, "endpoint": f.Endpoints,
-			"units": page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
+			"key_id": f.KeyIDs,
+			"units":  page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
 			"channels": page.Channels, "channel_names": page.ChannelNames,
 			"items": page.Items,
 		})

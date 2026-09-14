@@ -83,6 +83,17 @@ type CatalogFilter struct {
 	// Endpoints 限定端点类型，语义是**任一命中**（数组重叠），不是全部命中：
 	// 一个模型同时支持 openai 与 gemini 时，两个筛选下都该看得见它。
 	Endpoints []string
+	// KeyIDs 限定"**这几把 Key 调得到**"。语义与上面几维不同，值得单列：
+	//
+	// 它不是按目录行的某个字段筛，而是按"Key 所在分组的可用模型清单"
+	// （group_models，FR-124 采的那份）筛 —— 一把 Key 固定在一个分组里，
+	// 而分组决定了它能调哪些模型、以及每次调用被乘多少倍率。
+	//
+	// 多把 Key 取**并集**（"我这几把加起来能覆盖哪些模型"）。
+	// 未归组的 Key（channel_group_id IS NULL）什么都匹配不到 —— 这是对的：
+	// 我们不知道它在哪个分组，就不能替它断言能调什么。界面要把这种 Key
+	// 标出来而不是让它悄悄筛出空列表。
+	KeyIDs []int64
 }
 
 // GlobalCatalogPage 是一页聚合结果。
@@ -116,7 +127,7 @@ type GlobalCatalogPage struct {
 
 // catalogWhere 拼筛选条件。excl 指定**不施加**哪一维（分面自己那一维）。
 //
-// 参数位置固定为 $1..$5（q / channels / vendors / endpoints / unit），
+// 参数位置固定为 $1..$6（q / channels / vendors / endpoints / unit / keys），
 // 排除某一维时把该位置传成空值，让那一行条件自己短路 —— 这样每条查询的
 // 占位符编号都一样，不用为每种组合重排参数。手工拼编号是这类代码最常见的
 // 错法，而错了之后查询照样能跑，只是筛错了维度。
@@ -131,6 +142,7 @@ func catalogWhere(f CatalogFilter, excl string) (string, []any) {
 		strSlice(f.Vendors),
 		strSlice(f.Endpoints),
 		f.Unit,
+		int64Slice(f.KeyIDs),
 	}
 	switch excl {
 	case "q":
@@ -143,12 +155,24 @@ func catalogWhere(f CatalogFilter, excl string) (string, []any) {
 		args[3] = []string{}
 	case "unit":
 		args[4] = ""
+	case "key":
+		args[5] = []int64{}
 	}
+	// Key 那一维走 EXISTS 而不是 join：一个模型可能被选中的多把 Key 同时覆盖，
+	// join 会让它在结果里出现多次，而上面那些 count(*) 数的是渠道数 ——
+	// 一把 Key 就能把某个渠道的计数翻倍，且看起来只是"这个模型渠道多"。
 	return `($1 = '' OR position(lower($1) in lower(c.model_name)) > 0)
    AND (cardinality($2::bigint[]) = 0 OR c.channel_id = ANY($2))
    AND (cardinality($3::text[]) = 0 OR c.vendor_name = ANY($3))
    AND (cardinality($4::text[]) = 0 OR c.endpoint_types && $4)
-   AND ($5 = '' OR COALESCE(c.billing_unit, 'unknown') = $5)`, args
+   AND ($5 = '' OR COALESCE(c.billing_unit, 'unknown') = $5)
+   AND (cardinality($6::bigint[]) = 0 OR EXISTS (
+         SELECT 1 FROM upstream_keys k
+           JOIN channel_groups g ON g.id = k.channel_group_id
+           JOIN group_models gm ON gm.channel_group_id = g.id
+          WHERE k.id = ANY($6)
+            AND g.channel_id = c.channel_id
+            AND gm.model_name = c.model_name))`, args
 }
 
 // nil 切片传进 pgx 会变成 NULL 而不是空数组，而 cardinality(NULL) 是 NULL、
@@ -290,14 +314,14 @@ SELECT count(DISTINCT c.model_name)::int
 SELECT c.model_name,
        count(*)::int,
        count(*) FILTER (
-         WHERE ch.catalog_sync_seq - c.last_seen_seq >= $6::bigint)::int,
+         WHERE ch.catalog_sync_seq - c.last_seen_seq >= $7::bigint)::int,
        count(*) FILTER (WHERE ch.status = 'disabled')::int,
        count(*) OVER ()::int
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
  WHERE %s
  GROUP BY c.model_name
  ORDER BY count(*) DESC, c.model_name
- LIMIT $7 OFFSET $8`, where),
+ LIMIT $8 OFFSET $9`, where),
 		append(args, missingRounds, limit, offset)...)
 	if err != nil {
 		return page, fmt.Errorf("列全局模型目录: %w", err)
@@ -338,10 +362,10 @@ SELECT c.model_name,
 SELECT c.model_name, ch.id, ch.name, ch.status,
        c.input_price, c.output_price, c.billing_unit,
        c.vendor_name, c.endpoint_types,
-       (ch.catalog_sync_seq - c.last_seen_seq >= $6::bigint) AS stale,
+       (ch.catalog_sync_seq - c.last_seen_seq >= $7::bigint) AS stale,
        c.last_seen_at
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
- WHERE c.model_name = ANY($7) AND %s
+ WHERE c.model_name = ANY($8) AND %s
  ORDER BY c.model_name, ch.name, ch.id`, where),
 		append(args, missingRounds, names)...)
 	if err != nil {
@@ -381,12 +405,19 @@ SELECT c.model_name, ch.id, ch.name, ch.status,
 	// 连同它那个漂亮的 0.12 倍率一起显示出来，而那是选不到的价格。
 	//
 	// 按倍率升序：先看见最便宜的那个分组，这是选型时唯一想先知道的事。
+	//
+	// 按 Key 筛选时**只留这几把 Key 自己的分组**：那时人问的不是"这个模型最便宜
+	// 能到多少"，而是"我这把 Key 调它要多少钱"。留着别的分组，界面上那句
+	// "最低 · 分组 X（共 4 个分组，最高 17.5）"里的 X 会是一个他根本用不上的
+	// 分组 —— 一个精确且无关的数字。
 	rows, err = conn.Query(ctx, `
 SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier
   FROM group_models gm JOIN channel_groups g ON g.id = gm.channel_group_id
  WHERE gm.model_name = ANY($1)
+   AND (cardinality($2::bigint[]) = 0
+        OR g.id IN (SELECT k.channel_group_id FROM upstream_keys k WHERE k.id = ANY($2)))
  ORDER BY gm.model_name, g.channel_id, g.rate_multiplier NULLS LAST, g.group_ref`,
-		names)
+		names, int64Slice(f.KeyIDs))
 	if err != nil {
 		return page, fmt.Errorf("列模型的分组倍率: %w", err)
 	}

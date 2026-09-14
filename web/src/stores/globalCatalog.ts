@@ -39,6 +39,12 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
   const channelIDs = ref<number[]>([])
   const vendors = ref<string[]>([])
   const endpoints = ref<string[]>([])
+  /**
+   * 「这几把 Key 调得到」。与上面三维不同：它筛的不是目录行的某个字段，
+   * 而是 Key 所在分组的可用模型清单（group_models）。未归组的 Key 什么都
+   * 匹配不到 —— 界面必须不让它被选中，否则得到的是一个无法解释的空列表。
+   */
+  const keyIDs = ref<number[]>([])
   const offset = ref(0)
   const resp = ref<GlobalCatalogResp | null>(null)
   const loaded = ref(false)
@@ -73,7 +79,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
       q.value !== '' ||
       channelIDs.value.length > 0 ||
       vendors.value.length > 0 ||
-      endpoints.value.length > 0,
+      endpoints.value.length > 0 ||
+      keyIDs.value.length > 0,
   )
 
   /** 分面：id/名字 → 模型数。渠道那个额外带名字，见响应体注释。 */
@@ -96,6 +103,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
       channelIDs: [...channelIDs.value],
       vendors: [...vendors.value],
       endpoints: [...endpoints.value],
+      keyIDs: [...keyIDs.value],
     }
     try {
       const data = await adminApi.globalCatalog({
@@ -104,6 +112,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
         channelIDs: request.channelIDs,
         vendors: request.vendors,
         endpoints: request.endpoints,
+        keyIDs: request.keyIDs,
         limit: MODEL_PAGE,
         offset: request.offset,
       })
@@ -113,7 +122,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
         offset.value === request.offset &&
         same(channelIDs.value, request.channelIDs) &&
         same(vendors.value, request.vendors) &&
-        same(endpoints.value, request.endpoints)
+        same(endpoints.value, request.endpoints) &&
+        same(keyIDs.value, request.keyIDs)
       ) {
         resp.value = data
         loaded.value = true
@@ -140,6 +150,9 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
   function toggleEndpoint(e: string): void {
     toggleIn(endpoints, e)
   }
+  function toggleKey(id: number): void {
+    toggleIn(keyIDs, id)
+  }
 
   /** 清掉全部筛选（含筛选框）。分面上的「全部」按钮与「重置」都走它。 */
   function clearFilters(): void {
@@ -148,6 +161,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     channelIDs.value = []
     vendors.value = []
     endpoints.value = []
+    keyIDs.value = []
     offset.value = 0
     void load()
   }
@@ -159,12 +173,14 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     channelIDs?: number[]
     vendors?: string[]
     endpoints?: string[]
+    keyIDs?: number[]
   }): void {
     if (f.q !== undefined) q.value = f.q
     if (f.unit !== undefined) unit.value = f.unit
     if (f.channelIDs !== undefined) channelIDs.value = f.channelIDs
     if (f.vendors !== undefined) vendors.value = f.vendors
     if (f.endpoints !== undefined) endpoints.value = f.endpoints
+    if (f.keyIDs !== undefined) keyIDs.value = f.keyIDs
     offset.value = 0
     void load()
   }
@@ -176,6 +192,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     channelIDs.value = []
     vendors.value = []
     endpoints.value = []
+    keyIDs.value = []
     offset.value = 0
     resp.value = null
     loaded.value = false
@@ -215,6 +232,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     channelIDs,
     vendors,
     endpoints,
+    keyIDs,
     loaded,
     segments,
     vendorFacet,
@@ -235,6 +253,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     toggleChannel,
     toggleVendor,
     toggleEndpoint,
+    toggleKey,
     clearFilters,
     prev,
     next,

@@ -1310,3 +1310,13 @@ summary {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   }
 }
+
+/* 不可选的分面 chip（未归组的 Key）。保持可见而不是隐藏：
+   "这把 Key 筛不了" 本身是运维要知道的信息，藏起来就成了"这把 Key 不存在"。 */
+.chipf[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chipf[disabled]:hover {
+  border-color: var(--border);
+}

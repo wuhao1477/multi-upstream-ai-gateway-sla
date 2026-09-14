@@ -136,6 +136,11 @@ export interface GlobalCatalogQuery extends CatalogQuery {
   vendors?: string[]
   /** 端点类型多选，语义是**任一命中**：同时支持 openai 与 gemini 的模型，两个筛选下都看得见。 */
   endpoints?: string[]
+  /**
+   * 「这几把 Key 调得到」。按 Key 所在分组的可用模型清单筛，多把取并集。
+   * 未归组的 Key 什么都匹配不到（后端不替它猜分组），调用方不该把这种 Key 传进来。
+   */
+  keyIDs?: number[]
 }
 
 export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalogResp> {
@@ -151,6 +156,7 @@ export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalog
   if (q.endpoints !== undefined && q.endpoints.length > 0) {
     sp.set('endpoint', q.endpoints.join(','))
   }
+  if (q.keyIDs !== undefined && q.keyIDs.length > 0) sp.set('key_id', q.keyIDs.join(','))
   if (q.limit !== undefined) sp.set('limit', String(q.limit))
   if (q.offset !== undefined) sp.set('offset', String(q.offset))
   const qs = sp.toString()

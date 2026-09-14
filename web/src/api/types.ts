@@ -352,6 +352,7 @@ export interface GlobalCatalogResp {
   channel_id: number[]
   vendor: string[]
   endpoint: string[]
+  key_id: number[]
   /**
    * 四个分面，每个都**在除自己以外的全部筛选之下**统计。
    *

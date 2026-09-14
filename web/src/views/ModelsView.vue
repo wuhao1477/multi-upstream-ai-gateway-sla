@@ -29,7 +29,9 @@ import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
 import UiSegmented from '@/components/ui/UiSegmented.vue'
 import UiStat from '@/components/ui/UiStat.vue'
+import { useChannelsStore } from '@/stores/channels'
 import { useGlobalCatalogStore } from '@/stores/globalCatalog'
+import { useResourcesStore } from '@/stores/resources'
 import {
   endpointLabel,
   priceRanges,
@@ -54,6 +56,34 @@ const DENSITY_WIDTH: Record<Density, string> = {
 const route = useRoute()
 const router = useRouter()
 const cat = useGlobalCatalogStore()
+const res = useResourcesStore()
+const channels = useChannelsStore()
+
+/**
+ * 「按 Key」分面的候选。不走后端分面：Key 列表本来就在共享 store 里
+ * （账号页与 Key 页都要用），为它再发一条分面查询是白发。
+ *
+ * `usable=false` 的 Key **不可选**：它没有分组，后端按定义匹配不到任何模型，
+ * 选中只会得到一个无法解释的空列表。实测 2026-09-14 两个真站点导入的 6 把
+ * Key 里有 3 把是这样 —— 上游 /api/token 的 `group` 是空串（站点用
+ * `auto_groups` 在调用时自动选组），或者它声明的分组不在我方采到的分组里。
+ * 这不是缺陷，是"我们确实不知道它在哪个分组"，所以标出来而不是替它猜。
+ */
+const keyFacet = computed(() =>
+  res.keys.map((k) => ({
+    id: k.id,
+    label: k.secret_prefix,
+    channel: channels.list.find((c) => c.id === k.channel_id)?.name ?? `#${k.channel_id}`,
+    group: k.group_ref,
+    rate: k.rate_multiplier,
+    usable: k.group_ref !== undefined && k.group_ref !== '',
+  })),
+)
+
+const UNGROUPED_HINT =
+  '这把 Key 未归组：上游没给它指定分组（有些站点用 auto_groups 在调用时自动选），' +
+  '或它声明的分组不在我方采到的分组里。没有分组就不知道它能调哪些模型、' +
+  '按什么倍率计费 —— 所以筛不了，而不是筛出空。'
 
 /** 输入框自己的值。理由同 CatalogView：直接绑 store.q 会在防抖窗口内被回写。 */
 const qInput = ref('')
@@ -81,13 +111,22 @@ function syncURL(): void {
   if (cat.channelIDs.length > 0) q.channel = cat.channelIDs.join(',')
   if (cat.vendors.length > 0) q.vendor = cat.vendors.join(',')
   if (cat.endpoints.length > 0) q.endpoint = cat.endpoints.join(',')
+  if (cat.keyIDs.length > 0) q.key = cat.keyIDs.join(',')
   if (view.value !== 'list') q.view = view.value
   void router.replace({ query: q })
 }
 
 onMounted(async () => {
+  // ⚠️ **先把 query 抓下来再 open()**。
+  //
+  // store 是跨路由存活的：上次离开时若带着筛选，`open()` 把它清空会触发下面
+  // 那个 watch → syncURL → `router.replace({query:{}})`，于是刚 push 进来的
+  // `?key=3` 在我们读它之前就被自己抹掉了。症状是"从 Key 页点『能调哪些模型』
+  // 跳过来，筛选没生效"，而直接刷新同一个地址却好使 —— 那时 store 是干净的，
+  // watch 不触发。
+  const entry = { ...route.query }
   await cat.open()
-  const s = (k: string): string => (typeof route.query[k] === 'string' ? String(route.query[k]) : '')
+  const s = (k: string): string => (typeof entry[k] === 'string' ? String(entry[k]) : '')
   const csv = (k: string): string[] =>
     s(k)
       .split(',')
@@ -112,6 +151,9 @@ onMounted(async () => {
       .filter((v) => Number.isInteger(v) && v > 0),
     vendors: csv('vendor'),
     endpoints: csv('endpoint'),
+    keyIDs: csv('key')
+      .map(Number)
+      .filter((v) => Number.isInteger(v) && v > 0),
   }
   qInput.value = f.q
   if (
@@ -119,10 +161,14 @@ onMounted(async () => {
     f.unit !== '' ||
     f.channelIDs.length > 0 ||
     f.vendors.length > 0 ||
-    f.endpoints.length > 0
+    f.endpoints.length > 0 ||
+    f.keyIDs.length > 0
   ) {
     cat.setFilters(f)
   }
+  // Key 分面要渠道名与 Key 列表。两个 store 都自带"已拉过就不重拉"。
+  void channels.load()
+  void res.load()
 })
 
 watch(
@@ -132,6 +178,7 @@ watch(
     () => cat.channelIDs,
     () => cat.vendors,
     () => cat.endpoints,
+    () => cat.keyIDs,
   ],
   syncURL,
 )
@@ -155,6 +202,9 @@ function resetVendors(): void {
 }
 function resetEndpoints(): void {
   cat.setFilters({ endpoints: [] })
+}
+function resetKeys(): void {
+  cat.setFilters({ keyIDs: [] })
 }
 
 /**
@@ -258,6 +308,37 @@ function endpointsOf(m: ModelEntry): string[] {
             @click="cat.toggleChannel(id)"
           >
             {{ name }} <span class="badge">{{ n }}</span>
+          </button>
+        </div>
+
+        <!-- 按 Key：回答"我这把 Key 能调什么、按什么倍率计费"。
+             筛的是该 Key 所在分组的可用模型清单（group_models），不是渠道 ——
+             同一个渠道下不同分组能调的模型不一样。
+             未归组的 Key 不可选：后端按定义匹配不到任何模型，选中只会得到一个
+             无法解释的空列表。标出来比筛出空诚实。 -->
+        <div class="facet" v-if="keyFacet.length > 0">
+          <div class="facet-l">按 Key</div>
+          <button
+            class="chipf"
+            :class="{ on: cat.keyIDs.length === 0 }"
+            data-facet-key=""
+            @click="cat.keyIDs.length > 0 && resetKeys()"
+          >
+            不限 Key
+          </button>
+          <button
+            v-for="k in keyFacet"
+            :key="k.id"
+            class="chipf"
+            :class="{ on: cat.keyIDs.includes(k.id), dimf: !k.usable }"
+            :data-facet-key="k.id"
+            :disabled="!k.usable"
+            :title="k.usable ? `${k.channel} · 分组 ${k.group}（×${k.rate ?? '?'}）` : UNGROUPED_HINT"
+            @click="cat.toggleKey(k.id)"
+          >
+            <code>{{ k.label }}</code>
+            <span class="badge" v-if="k.usable">{{ k.group }} ×{{ k.rate ?? '?' }}</span>
+            <span class="badge" v-else>未归组</span>
           </button>
         </div>
 

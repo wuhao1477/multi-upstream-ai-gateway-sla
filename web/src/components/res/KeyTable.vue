@@ -75,6 +75,16 @@ async function openChannel(id: number): Promise<void> {
 }
 
 /**
+ * 跳到模型目录并按这把 Key 筛。
+ *
+ * 带 `?key=<id>` 而不是带分组名：分组名在渠道之间会重名（两个站都可能有
+ * `default`），而 Key id 是唯一的，落地那头再去解它属于哪个渠道的哪个分组。
+ */
+async function openModels(k: Key): Promise<void> {
+  await router.push({ name: 'models', query: { key: String(k.id) } })
+}
+
+/**
  * 「分组倍率」列的悬停解释。
  *
  * 三件事必须一起说，少一件就会被读错：它来自分组不是 Key、它与模型倍率相乘
@@ -312,6 +322,23 @@ async function runPending(): Promise<void> {
                   <!-- 选完就收起：原生 details 不会自己关，留着一个悬在表格上
                        盖住下一行的菜单，下一次点哪一行都要先躲开它 -->
                   <div class="more-menu" @click="closeMenu">
+                    <!-- 反方向的入口：从"这把 Key"走到"它能调哪些模型"。
+                         与模型目录的「按 Key」分面是同一个筛选，只是从哪头进。
+                         未归组的 Key 禁用而不是隐藏：它筛不了这件事本身要看得见，
+                         藏起来会让人以为这个功能坏了（title 里写清为什么）。 -->
+                    <button
+                      class="btn ghost sm"
+                      :data-key-models="k.id"
+                      :disabled="k.group_ref === undefined || k.group_ref === ''"
+                      :title="
+                        k.group_ref === undefined || k.group_ref === ''
+                          ? '这把 Key 未归组 —— 不知道它在哪个分组，就不知道它能调哪些模型、按什么倍率计费。先在上面「编辑」里给它选一个分组。'
+                          : `列出分组 ${k.group_ref} 能调的模型，价格按该分组倍率折算`
+                      "
+                      @click="openModels(k)"
+                    >
+                      能调哪些模型
+                    </button>
                     <button class="btn ghost sm" :data-usage="k.id" @click="showUsage(k)">
                       用量历史
                     </button>

@@ -1800,6 +1800,156 @@ try {
     // "默认列表"的前提在第二次运行时不成立。
     await page.click('[data-seg="list"]');
     await sleep(300);
+
+    // ── 按 Key 筛：「我这把 Key 能调什么、按什么倍率计费」──
+    //
+    // 这一维与别的分面不同：它筛的不是目录行的字段，而是 Key 所在分组的可用
+    // 模型清单（group_models）。所以它有一种别的维度没有的失败态 ——
+    // **未归组的 Key**：上游 /api/token 的 group 是空串（站点用 auto_groups 在
+    // 调用时自动选组），或它声明的分组不在我方采到的分组里。实测 2026-09-14
+    // 两个真站点导入的 6 把 Key 里有 3 把是这样。
+    //
+    // 对这种 Key，界面必须**不让选**而不是筛出一个空列表：后端按定义匹配不到
+    // 任何模型，一个空列表解释不了原因，而"筛坏了"与"确实没有"看起来一样。
+    // 现造一把**未归组**的 Key，否则上面那半条断言在本环境里是空转的：
+    // 前面那段给每把 Key 都指派了分组，于是"未归组的必须禁用"永远没有样本。
+    // 这不是"造假数据" —— 未归组是真站点上的常态（实测两个站导入的 6 把 Key
+    // 里有 3 把如此：上游 group 是空串、或分组不在我方采到的清单里），
+    // 而真站点不肯按需产出一把这样的 Key 给验收用。
+    //
+    // ⚠️ account_id 要 **Number()**：accountIDs 来自 getAttribute，是字符串，
+    // 而后端那个字段是 int64 —— 传字符串会 400，且错误只体现为"建不出来"。
+    const ungroupedKey = await page.evaluate(async acct => {
+      const t = document.querySelector('#token').value;
+      const r = await fetch('/admin/keys', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: acct, secret: 'sk-ungrouped-for-facet-check-0001' }),
+      });
+      return { status: r.status, body: await r.json() };
+    }, Number(accountIDs[0]));
+    const ungroupedKeyID = ungroupedKey.body?.id;
+    check('可以登记一把未归组的 Key（给下面两条的禁用态当样本）',
+      typeof ungroupedKeyID === 'number',
+      `HTTP ${ungroupedKey.status} ${JSON.stringify(ungroupedKey.body).slice(0, 120)}`);
+
+    await page.click('#model-reset');
+    await sleep(900);
+    // 分面读的是共享 store 里的 Key 列表，刚建的那把要先拉回来才看得见
+    await pane('keys');
+    await page.click('#btn-keys-reload').catch(() => {});
+    await sleep(700);
+    await pane('models');
+    await sleep(500);
+    const keyChips = await page.$$eval('[data-facet-key]', cs => cs.map(c => ({
+      id: c.getAttribute('data-facet-key'),
+      disabled: c.disabled,
+      text: c.textContent.replace(/\s+/g, ' ').trim(),
+    })));
+    const allKeys = (await api('/admin/keys')).items ?? [];
+    const groupedKeys = allKeys.filter(k => k.group_ref !== undefined && k.group_ref !== '');
+    const ungroupedKeys = allKeys.filter(k => k.group_ref === undefined || k.group_ref === '');
+    const chipOf = id => keyChips.find(c => c.id === String(id));
+    check('「按 Key」分面：已归组的可选、未归组的禁用并标出来',
+      groupedKeys.length > 0 &&
+      groupedKeys.every(k => chipOf(k.id)?.disabled === false &&
+        chipOf(k.id)?.text.includes(k.group_ref)) &&
+      ungroupedKeys.every(k => chipOf(k.id)?.disabled === true &&
+        chipOf(k.id)?.text.includes('未归组')),
+      `已归组 ${groupedKeys.length} 把 / 未归组 ${ungroupedKeys.length} 把；` +
+      `chip=${JSON.stringify(keyChips.map(c => `${c.text}${c.disabled ? '(禁用)' : ''}`))}`);
+
+    if (groupedKeys.length === 0) {
+      check('按 Key 筛出的模型 == 该 Key 所在分组能调的模型', false,
+        '这一轮没有已归组的 Key —— 这条无从验（上游的 group 为空串时我方不替它猜分组）');
+    } else {
+      const theKey = groupedKeys[0];
+      await page.evaluate(id => {
+        [...document.querySelectorAll('[data-facet-key]')]
+          .find(c => c.getAttribute('data-facet-key') === String(id))?.click();
+      }, theKey.id);
+      await sleep(1000);
+      const keyResp = await api(`/admin/catalog?key_id=${theKey.id}&limit=50`);
+      const keyRows = await page.$$eval('[data-model-row]',
+        rs => rs.map(r => r.getAttribute('data-model-row')));
+      const keyURL = await page.evaluate(() => location.search);
+      check('按 Key 筛出的模型 == 该 Key 所在分组能调的模型',
+        keyResp.total > 0 &&
+        JSON.stringify(keyRows) === JSON.stringify(keyResp.items.map(m => m.model_name)) &&
+        new RegExp(`key=${theKey.id}`).test(keyURL),
+        `Key #${theKey.id}（分组 ${theKey.group_ref} ×${theKey.rate_multiplier}）：` +
+        `界面 ${keyRows.length} 行 / 后端 ${keyResp.total} 个模型，URL=${keyURL}`);
+
+      // 按 Key 筛时，「实际价」只能用**这把 Key 自己那个分组**的倍率 ——
+      // 不是全部分组里最低的那个。留着别的分组，那句"最低 · 分组 X"里的 X
+      // 会是一个他根本用不上的分组：一个精确且无关的数字。
+      const firstModel = keyResp.items[0];
+      await openDrawerFor(firstModel.model_name);
+      const keyDrawer = await readDrawer();
+      const groupsShown = await page.evaluate(n => {
+        const t = [...document.querySelectorAll('[data-model-channels]')]
+          .find(x => x.getAttribute('data-model-channels') === n);
+        return [...t.querySelectorAll('tbody tr td[data-model-eff]')]
+          .map(td => td.textContent.replace(/\s+/g, ' ').trim());
+      }, firstModel.model_name);
+      const price = firstModel.channels[0]?.input_price;
+      const wantEff = price === undefined
+        ? '未采到分组倍率'
+        : String(Math.round(price * theKey.rate_multiplier * 1e6) / 1e6);
+      check('按 Key 筛时「实际价」只按该 Key 的分组折算（不是全部分组的最低价）',
+        keyDrawer.eff.length === 1 && keyDrawer.eff[0] === wantEff &&
+        groupsShown.every(t => t.includes(theKey.group_ref)) &&
+        groupsShown.every(t => !t.includes('共')),
+        `${firstModel.model_name} 模型价=${price} × 分组 ${theKey.group_ref} ` +
+        `${theKey.rate_multiplier} → 期望 ${wantEff}，实际 ${JSON.stringify(keyDrawer.eff)}；` +
+        `整格=${JSON.stringify(groupsShown)}`);
+      await closeDrawer();
+
+      // ── 反方向的入口：Key 管理页 →「能调哪些模型」──
+      //
+      // 这条同时守住一个刚修的缺陷：ModelsView 的 onMounted 里 `cat.open()` 会
+      // 清空 store，而清空触发 watch→syncURL，把刚 push 进来的 ?key= 抹掉 ——
+      // 于是"从 Key 页跳过来筛选没生效，直接刷新同一个地址却好使"。
+      // 所以这条必须**从 Key 页点过去**，不能只验直接访问带参数的地址。
+      await pane('keys');
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-key-models]').length > 0, { timeout: 8000 });
+      const modelBtns = await page.$$eval('[data-key-models]', bs => bs.map(b => ({
+        id: b.getAttribute('data-key-models'), disabled: b.disabled, title: b.title,
+      })));
+      const btnOf = id => modelBtns.find(b => b.id === String(id));
+      check('Key 管理页每行有「能调哪些模型」，未归组的禁用并说明原因',
+        groupedKeys.every(k => btnOf(k.id)?.disabled === false) &&
+        ungroupedKeys.every(k => btnOf(k.id)?.disabled === true &&
+          /未归组/.test(btnOf(k.id)?.title ?? '')),
+        `按钮 ${modelBtns.length} 个，禁用 ${modelBtns.filter(b => b.disabled).length} 个` +
+        `（未归组 ${ungroupedKeys.length} 把）`);
+
+      await openMore(`[data-key-more="${theKey.id}"]`);
+      await page.evaluate(id => {
+        [...document.querySelectorAll('[data-key-models]')]
+          .find(b => b.getAttribute('data-key-models') === String(id))?.click();
+      }, theKey.id);
+      await page.waitForFunction(
+        () => document.querySelector('#pane-models')?.classList.contains('on') === true,
+        { timeout: 8000 });
+      await sleep(1200);
+      const jumped = await page.evaluate(() => ({
+        url: location.pathname + location.search,
+        count: document.querySelector('#model-count')?.textContent.trim(),
+        on: [...document.querySelectorAll('[data-facet-key].on')]
+          .map(c => c.getAttribute('data-facet-key')),
+      }));
+      check('从 Key 管理页跳到模型目录时筛选真的带过去了（不是被自己抹掉）',
+        new RegExp(`key=${theKey.id}`).test(jumped.url) &&
+        JSON.stringify(jumped.on) === JSON.stringify([String(theKey.id)]) &&
+        jumped.count === `${keyResp.total} / ${keyResp.total}`,
+        `URL=${jumped.url} 选中=${JSON.stringify(jumped.on)} 计数=${jumped.count}` +
+        `（后端 ${keyResp.total}）`);
+      await page.screenshot({ path: `${SHOT}/13c-models-by-key.png`, fullPage: true });
+      await page.click('#model-reset');
+      await sleep(900);
+    }
   }
 
   // ── 13. 页面无 JS 错误 ──
