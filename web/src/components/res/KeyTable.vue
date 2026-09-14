@@ -26,7 +26,7 @@ import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { RATE_LIMIT_HINT, rateLimitText } from '@/utils/money'
 import { KEY_OPTIONAL_COLS } from '@/utils/keyfilter'
-import { fmtAgo, fmtTime, keyStatusLabel } from '@/utils/format'
+import { dynamicRateText, fmtAgo, fmtTime, keyStatusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -72,6 +72,16 @@ function channelName(id: number): string {
 /** 跳到该渠道的详情。先切路由再 select —— 反过来会让详情页短暂显示上一个渠道。 */
 async function openChannel(id: number): Promise<void> {
   await router.push({ name: 'channel-detail', params: { id: String(id) } })
+}
+
+/**
+ * 跳到模型目录并按这把 Key 筛。
+ *
+ * 带 `?key=<id>` 而不是带分组名：分组名在渠道之间会重名（两个站都可能有
+ * `default`），而 Key id 是唯一的，落地那头再去解它属于哪个渠道的哪个分组。
+ */
+async function openModels(k: Key): Promise<void> {
+  await router.push({ name: 'models', query: { key: String(k.id) } })
 }
 
 /**
@@ -263,7 +273,35 @@ async function runPending(): Promise<void> {
               <td v-if="has('ref')" data-col="ref" class="dim">{{ k.external_ref ?? '—' }}</td>
               <td data-col="group">{{ k.group_ref ?? '—' }}</td>
               <td data-col="rate" class="n" :data-key-rate="k.id" :title="RATE_HINT">
-                <template v-if="k.rate_multiplier !== undefined">×{{ k.rate_multiplier }}</template>
+                <!-- auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的
+                     那个候选组决定（NewAPI 源码里显式排除了 auto 自己）。
+                     /api/pricing 照样给它一个倍率，照着显示就是报一个与账单
+                     无关、却看起来完全正常的数字 -->
+                <!-- 动态倍率：这把 Key 落在一个「自动选组」的分组里，实际倍率
+                     由运行时命中的候选组决定。有范围就给范围 —— 一个 ×1 看起来
+                     完全正常却与账单无关，而 "×0.26~2.6" 至少说出了不确定性。
+                     判据用后端的 rate_dynamic，不是分组名（名字判定只在 NewAPI 成立）。 -->
+                <template v-if="k.rate_dynamic === true">
+                  <span
+                    class="dim"
+                    :data-key-rate-dynamic="k.id"
+                    title="这把 Key 用「自动选组」：上游在候选分组里挑第一个有可用渠道的来计费，所以倍率不是固定值。括号里是候选分组倍率的范围。"
+                    >{{ dynamicRateText(k.rate_min, k.rate_max) }}</span
+                  >
+                </template>
+                <template v-else-if="k.rate_multiplier !== undefined">
+                  ×{{ k.rate_multiplier }}
+                  <!-- 「跟账号」：这把 Key 自己没定分组，走的是账号的默认分组。
+                       倍率一样真实，但改法不同 —— 账号分组变了它跟着变。
+                       不标出来会让人去改这把 Key，而该改的是账号那一头 -->
+                  <span
+                    v-if="k.group_inherited === true"
+                    class="dim cell-sub"
+                    :data-key-rate-inherited="k.id"
+                    title="这把 Key 自己没有分组，走的是账号的默认分组（上游 /api/user/self 的 group）。账号分组变了，这里跟着变。"
+                    >跟账号</span
+                  >
+                </template>
                 <!-- 「未知」而不是 ×1：没分组或分组没采到倍率时，真实倍率可能是
                      0.12 也可能是 3.5，填 1 是编一个看起来正常的错数 -->
                 <span v-else class="dim">未知</span>
@@ -312,6 +350,23 @@ async function runPending(): Promise<void> {
                   <!-- 选完就收起：原生 details 不会自己关，留着一个悬在表格上
                        盖住下一行的菜单，下一次点哪一行都要先躲开它 -->
                   <div class="more-menu" @click="closeMenu">
+                    <!-- 反方向的入口：从"这把 Key"走到"它能调哪些模型"。
+                         与模型目录的「按 Key」分面是同一个筛选，只是从哪头进。
+                         未归组的 Key 禁用而不是隐藏：它筛不了这件事本身要看得见，
+                         藏起来会让人以为这个功能坏了（title 里写清为什么）。 -->
+                    <button
+                      class="btn ghost sm"
+                      :data-key-models="k.id"
+                      :disabled="k.group_ref === undefined || k.group_ref === ''"
+                      :title="
+                        k.group_ref === undefined || k.group_ref === ''
+                          ? '这把 Key 解析不出分组：自己没定，账号的默认分组也没采到。不知道分组就不知道它能调哪些模型、按什么倍率计费。先在上面「编辑」里给它选一个分组。'
+                          : `列出分组 ${k.group_ref} 能调的模型，价格按该分组倍率折算`
+                      "
+                      @click="openModels(k)"
+                    >
+                      能调哪些模型
+                    </button>
                     <button class="btn ghost sm" :data-usage="k.id" @click="showUsage(k)">
                       用量历史
                     </button>

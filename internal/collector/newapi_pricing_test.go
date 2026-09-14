@@ -12,17 +12,38 @@ import (
 //
 // 特征逐条对应实测：data 是**数组**、group_ratio 在**顶层**、
 // 每项带 enable_groups、混有 quota_type=0（倍率）与 =1（按次固定价）。
+//
+// `vendors` / `vendor_id` / `supported_endpoint_types` 三项的形态取自
+// **2026-09-14 实测一个真实 NewAPI 站点**（1394 个模型；站点地址不入库，
+// 见 verify/test-public-safety.sh 的「真实验收站点地址」那条扫描）：
+//   - vendors 是**数组** `[{id,name,icon}]`，实测 35 项；模型用 vendor_id 指过来
+//   - supported_endpoint_types 是字符串数组，实测取值 openai / anthropic /
+//     gemini / openai-response / openai-video / image-generation / jina-rerank
+//   - 同一批数据里 `owner_by` 1394 个全是空串 —— 所以它不能当供应商的兜底
+//
+// 特意让 midjourney-relax **不带** vendor_id 与 supported_endpoint_types：
+// 老版本站点就没有这两个字段，解析器必须给出空值而不是崩或编一个。
 const realNewAPIPricingResponse = `{
   "success": true,
   "pricing_version": "a42d372ccf0b5dd13ecf71203521f9d2",
   "group_ratio": {"default": 1, "vip": 0.8, "专线": 2.6},
   "usable_group": {"default": "默认", "vip": "会员", "专线": "专线通道"},
+  "vendors": [
+    {"id": 115, "name": "OpenAI", "icon": "OpenAI"},
+    {"id": 114, "name": "Anthropic", "icon": "Claude.Color"}
+  ],
+  "supported_endpoint": {
+    "openai": {"path": "/v1/chat/completions", "method": "POST"},
+    "anthropic": {"path": "/v1/messages", "method": "POST"}
+  },
   "data": [
     {"model_name": "gpt-4o", "quota_type": 0, "model_ratio": 1.25,
      "completion_ratio": 4, "cache_ratio": 0.5, "model_price": 0,
+     "vendor_id": 115, "supported_endpoint_types": ["openai", "openai-response"],
      "enable_groups": ["default", "vip"]},
     {"model_name": "claude-opus", "quota_type": 0, "model_ratio": 15,
      "completion_ratio": 5, "model_price": 0,
+     "vendor_id": 114, "supported_endpoint_types": ["anthropic", "openai"],
      "enable_groups": ["vip", "专线"]},
     {"model_name": "midjourney-relax", "quota_type": 1, "model_ratio": 0,
      "completion_ratio": 0, "model_price": 0.1,
@@ -52,6 +73,44 @@ func TestParseRealNewAPIPricingShape(t *testing.T) {
 	// group_ratio 在顶层，不在 data 里
 	if pr.GroupRatios["vip"] != 0.8 || pr.GroupRatios["专线"] != 2.6 {
 		t.Errorf("顶层 group_ratio 未正确解析: %v", pr.GroupRatios)
+	}
+}
+
+// vendor_id 必须解析成**名字**，端点类型必须原样带出。
+//
+// 存名字不存 id：id 是站点自己的自增主键，跨站点毫无意义，而界面上"哪些渠道
+// 有 Anthropic 的模型"是跨渠道聚合。只存 id 的话，两个站点的 115 会被当成
+// 同一家公司 —— 那种错看起来完全正常。
+func TestVendorAndEndpointTypes(t *testing.T) {
+	var raw map[string]any
+	mustJSON(t, realNewAPIPricingResponse, &raw)
+	pr, err := parseNewAPIPricing(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]newapiModel{}
+	for _, m := range pr.Models {
+		byName[m.Name] = m
+	}
+	if got := byName["gpt-4o"].VendorName; got != "OpenAI" {
+		t.Errorf("gpt-4o 的 vendor_id=115 应解析成 OpenAI，实际 %q", got)
+	}
+	if got := byName["claude-opus"].VendorName; got != "Anthropic" {
+		t.Errorf("claude-opus 的 vendor_id=114 应解析成 Anthropic，实际 %q", got)
+	}
+	// 反向哨兵：把 vendors 当成 id→name 的 map 解（而它实测是数组）会让
+	// 两个都拿不到名字，上面两条会一起红；这条保证"全空"不会被当成通过。
+	if byName["gpt-4o"].VendorName == byName["claude-opus"].VendorName {
+		t.Error("两个模型解析出了同一个供应商 —— vendors 数组的 id→name 映射没生效")
+	}
+	if got := byName["gpt-4o"].EndpointTypes; len(got) != 2 ||
+		got[0] != "openai" || got[1] != "openai-response" {
+		t.Errorf("gpt-4o 的端点类型 = %v，期望 [openai openai-response]（已排序）", got)
+	}
+	// 老版本站点没有这两个字段：必须是空值，不是崩、也不是编一个默认供应商。
+	if got := byName["midjourney-relax"]; got.VendorName != "" || len(got.EndpointTypes) != 0 {
+		t.Errorf("缺字段的模型应给空值，实际 vendor=%q endpoints=%v",
+			got.VendorName, got.EndpointTypes)
 	}
 }
 

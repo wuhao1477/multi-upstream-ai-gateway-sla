@@ -23,7 +23,15 @@ function resp(over: Partial<GlobalCatalogResp>): GlobalCatalogResp {
     offset: 0,
     q: '',
     unit: '',
+    channel_id: [],
+    vendor: [],
+    endpoint: [],
+    key_id: [],
     units: { per_1m_token: 1 },
+    vendors: {},
+    endpoints: {},
+    channels: {},
+    channel_names: {},
     items: [
       {
         model_name: 'm',

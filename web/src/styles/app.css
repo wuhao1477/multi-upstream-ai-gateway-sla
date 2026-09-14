@@ -607,8 +607,57 @@ code {
    auto-fit 会把那一张卡拉满整行宽，看起来像出了什么事。 */
 .mcards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  /* 列宽由 --mcard-w 决定（疏密控件改它），列数交给 auto-fill 自己算 */
+  grid-template-columns: repeat(auto-fill, minmax(var(--mcard-w, 280px), 1fr));
   gap: 10px;
+}
+
+/* 分面筛选。一组一行，标签在左、chip 在右自动换行。 */
+.facets {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.facet {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.facet-l {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  width: 62px;
+  flex: none;
+}
+.chipf {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--background);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chipf:hover {
+  border-color: var(--primary);
+}
+.chipf.on {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+/* 选中态里的计数徽标要跟着反色，否则在主色底上是一块看不清的浅灰 */
+.chipf.on .badge {
+  background: color-mix(in oklab, var(--primary-foreground) 25%, transparent);
+  color: var(--primary-foreground);
+  border-color: transparent;
 }
 .mcard {
   display: grid;
@@ -941,6 +990,13 @@ summary {
   justify-content: center;
   padding: 20px;
 }
+/* 宽抽屉。给的是「一张表」而不是「一个表单」：模型目录的抽屉里是六列的逐渠道
+   明细，460px 下每列都要换行，读起来比表格本身还费劲。
+   max(460px, …) 保底：窄屏上不能比普通抽屉还窄；max-width:100% 收口。 */
+.drawer.wide {
+  width: min(900px, max(460px, 56vw));
+  max-width: 100%;
+}
 .drawer {
   display: flex;
   flex-direction: column;
@@ -1253,4 +1309,14 @@ summary {
   .expand {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   }
+}
+
+/* 不可选的分面 chip（未归组的 Key）。保持可见而不是隐藏：
+   "这把 Key 筛不了" 本身是运维要知道的信息，藏起来就成了"这把 Key 不存在"。 */
+.chipf[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chipf[disabled]:hover {
+  border-color: var(--border);
 }

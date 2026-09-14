@@ -127,6 +127,11 @@ CREATE TABLE upstream_accounts (
   channel_id    BIGINT NOT NULL REFERENCES channels(id),
   external_user_id TEXT,          -- NewAPI 数字用户ID（New-API-User 头必需，ISSUE-002 §3.1）
   balance_group_key TEXT,         -- 共享余额分组键：同 key 的多账号/多Key 只算一次余额（FR-022/AC-04）
+  -- 027 补：账号在上游的默认分组名（/api/user/self 的 group）。
+  -- Key 的 group 为空串时调用走的是它，所以那种 Key 不是"未归组"而是"跟账号走"。
+  -- 存名字不存外键：实测有站点的账号分组（default）不在它自己的 group_ratio 里，
+  -- 存外键只能写 NULL，把"上游说是 default、我们没采到它的倍率"这个事实丢掉。
+  account_group TEXT,             -- NULL = 未采到，**不可当成 'default'**
   -- 人工停用（五层停用开关之一）
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   disabled_reason TEXT,
@@ -286,6 +291,14 @@ CREATE TABLE channel_groups (
   channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
   rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  -- 028 补：有一类分组没有自己的固定倍率（NewAPI 的 auto —— 运行时在候选里
+  -- 选一个组计费，源码显式排除 auto 自己）。上游照样给它一个倍率，那是展示
+  -- 占位不是计费倍率，只存它会报出一个与账单无关却看起来正常的数字。
+  -- ⚠️ 三种状态要分得开：固定倍率 / 动态倍率 / 未采到（dynamic=false 且 rate IS NULL）。
+  -- ⚠️ 空分组的 Key **不等于**动态：它走账号的默认分组（account_group），
+  --    那通常是个有固定倍率的普通组，只有账号分组恰好是 auto 时才落到动态。
+  rate_dynamic  BOOLEAN NOT NULL DEFAULT false,
+  dynamic_candidates TEXT[],                 -- 候选分组名（auto_groups）；存名字不存外键，候选里可能有我方没采到的组
   data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
   fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
   UNIQUE (channel_id, group_ref)
@@ -313,6 +326,11 @@ CREATE TABLE channel_model_catalog (
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
   last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
+  -- 下面两列由 026 迁移补（2026-09-14 实测 /api/pricing 的 vendors 数组与
+  -- 每模型的 supported_endpoint_types）。两者都可空：缺席 = 上游未声明，
+  -- **不是**"无供应商"或"不支持任何端点"（同 billing_unit 的口径）。
+  vendor_name    TEXT,                       -- 发行方，按 vendor_id 在顶层 vendors[] 里解析出的 name；跨站点不归一
+  endpoint_types TEXT[],                     -- 支持的端点类型（openai / anthropic / gemini / image-generation / …）
   PRIMARY KEY (channel_id, model_name)
 );
 
@@ -346,6 +364,31 @@ CREATE UNIQUE INDEX idx_keys_external_ref
 
 > ⚠️ **此前"采不到即删行"只是砍掉 `available` 列的理由，不是实现规则** —— 先删后插还是 diff？什么事务包住？两次 sync 并发会不会互相删？`first_seen_at`/`last_seen_at` 的 upsert 也只有一句括号说明。开发无从下笔（开发视角审查第 45 轮）。
 
+**`channel_groups`：upsert，倍率与「动态倍率」一起覆盖**
+
+```sql
+INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier,
+                            rate_dynamic, dynamic_candidates, data_source, fetched_at)
+VALUES (:cid, :ref, :rate, :dynamic, :candidates, 'auto_collect', :now)
+ON CONFLICT (channel_id, group_ref) DO UPDATE
+   SET rate_multiplier    = EXCLUDED.rate_multiplier,
+       rate_dynamic       = EXCLUDED.rate_dynamic,
+       dynamic_candidates = EXCLUDED.dynamic_candidates,
+       data_source        = EXCLUDED.data_source,
+       fetched_at         = EXCLUDED.fetched_at;
+```
+
+`rate_dynamic` 为真的组（NewAPI 的 `auto`）**其 `rate_multiplier` 不是计费倍率** ——
+上游照样给一个数（实测某站是 1），那是展示占位；实际倍率由运行时命中的
+`dynamic_candidates` 里某个组决定（实测某站三个候选是 0.26 / 1 / 2.6）。
+消费方**必须先看 `rate_dynamic` 再决定要不要拿倍率算钱**，否则会报出一个与账单
+无关、却看起来完全正常的数字。候选存名字不存外键：上游按请求者过滤后给的清单
+里可能有我方尚未采到的分组，存外键会把"上游说有、我方没采到"这个事实丢掉。
+
+⚠️ **「没写分组的 Key」与「动态倍率」是两回事**：前者走账号的默认分组
+（`upstream_accounts.account_group`），那通常是个有固定倍率的普通组；
+只有账号分组恰好是 `auto` 时才落到动态这一档。
+
 **`group_models`：按分组全量替换，单事务**
 
 ```sql
@@ -366,16 +409,25 @@ COMMIT;
 ```sql
 INSERT INTO channel_model_catalog
        (channel_id, model_name, input_price, output_price, billing_unit,
+        vendor_name, endpoint_types,
         first_seen_at, last_seen_at, last_seen_seq)
-VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''), :now, :now, :sync_seq)
+VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''),
+        NULLIF(:vendor,''), :endpoints, :now, :now, :sync_seq)
 ON CONFLICT (channel_id, model_name) DO UPDATE
-   SET input_price   = EXCLUDED.input_price,
-       output_price  = EXCLUDED.output_price,
-       billing_unit  = EXCLUDED.billing_unit,
-       last_seen_at  = EXCLUDED.last_seen_at,
-       last_seen_seq = EXCLUDED.last_seen_seq;
+   SET input_price    = EXCLUDED.input_price,
+       output_price   = EXCLUDED.output_price,
+       billing_unit   = EXCLUDED.billing_unit,
+       vendor_name    = EXCLUDED.vendor_name,
+       endpoint_types = EXCLUDED.endpoint_types,
+       last_seen_at   = EXCLUDED.last_seen_at,
+       last_seen_seq  = EXCLUDED.last_seen_seq;
        -- ⚠️ **不更新 first_seen_at** —— 它记录"首次见到"，被覆盖就永久丢失
 ```
+
+`vendor_name` / `endpoint_types` 随每轮采集**整列覆盖**（上游改了模型归属或加了
+端点类型，下一轮就跟着变），空值一律落 NULL 而不是 `''` / `'{}'`：前者是"上游
+没声明"，后者是"上游明说没有"，而界面对这两种的渲染不同（「未声明」vs 一个
+空的能力列表）。`NULLIF(:vendor,'')` 与 `:endpoints` 为空切片时传 NULL 就是干这个。
 
 **`billing_unit` 为何必需**（第 46 轮实测发现，不是理论洁癖）
 

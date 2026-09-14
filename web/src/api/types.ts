@@ -66,6 +66,12 @@ export interface Account {
   channel_id: number
   external_user_id?: string
   balance_group_key?: string
+  /**
+   * 账号在上游的默认分组（/api/user/self 的 group）。
+   * Key 自己没定分组时调用走的就是它 —— 那种 Key 不是"未归组"。
+   * 缺席 = 未采到，**不可当成 "default"**。
+   */
+  account_group?: string
   status: string
   disabled_reason?: string
   disabled_until?: string
@@ -110,6 +116,25 @@ export interface Key {
   channel_group_id?: number
   group_ref?: string
   rate_multiplier?: number
+  /**
+   * 上面那个分组是**跟账号走**的，不是这把 Key 自己定的。
+   *
+   * 上游 /api/token 的 group 为空串时，调用实际走账号的默认分组
+   * （/api/user/self 的 group）。两者倍率同样真实，但改法不同：账号分组变了
+   * 这一把跟着变，自己定的那把不变 —— 界面上要分开说，否则会改错地方。
+   */
+  group_inherited?: boolean
+  /**
+   * 为真时 `rate_multiplier` **不是计费倍率**：这把 Key 落在一个「自动选组」的
+   * 分组里，实际倍率由运行时命中的候选组决定。
+   *
+   * ⚠️ 它与 `group_inherited` 是**两回事**：没写分组的 Key 走账号的默认分组，
+   * 那通常是个有固定倍率的普通组 —— 只有账号分组恰好是 auto 时才落到动态这一档。
+   */
+  rate_dynamic?: boolean
+  /** 候选分组倍率的区间（只有 rate_dynamic 时有意义）。 */
+  rate_min?: number
+  rate_max?: number
   remain_quota_usd?: number
   used_quota_usd?: number
   /**
@@ -135,6 +160,10 @@ export interface ChannelGroup {
   channel_id: number
   group_ref: string
   rate_multiplier?: number
+  /** 为真时上面那个倍率不是计费倍率（自动选组）。 */
+  rate_dynamic?: boolean
+  /** 候选分组名。候选里可能有我方尚未采到的分组。 */
+  dynamic_candidates?: string[]
   model_count: number
   data_source: string
   fetched_at: string
@@ -308,12 +337,29 @@ export interface ModelChannel {
    * 空数组 = 还没采到分组。**不可当成"倍率 1"**：那是"不知道"，不是"不打折"。
    */
   groups: ModelGroup[]
+  /** 发行方（上游 vendors[].name）。缺席 = 上游未声明，不是"无供应商"。 */
+  vendor_name?: string
+  /** 支持的端点类型。缺席 = 未声明，不是"不支持任何端点"。 */
+  endpoint_types?: string[]
+  /**
+   * 该站点的额度换算基数（/api/status 的 quota_per_unit）。
+   * 缺席 = 没采到，**只能显示倍率、不能折算成美元**（不许拿 500000 兜底）。
+   */
+  quota_per_unit?: number
 }
 
 export interface ModelGroup {
   group_ref: string
   /** 缺席 = 上游没给这个分组的倍率，同样不可当 1。 */
   rate_multiplier?: number
+  /**
+   * 为真时上面那个倍率**不是计费倍率**：这一组是「自动选组」（NewAPI 的 auto），
+   * 实际倍率由运行时命中的候选组决定。消费方必须先看它再决定要不要拿来算钱。
+   */
+  rate_dynamic?: boolean
+  /** 候选分组倍率的区间（只有 rate_dynamic 时有意义）。都缺席 = 候选一个都没采到倍率。 */
+  rate_min?: number
+  rate_max?: number
 }
 
 /**
@@ -345,8 +391,26 @@ export interface GlobalCatalogResp {
   offset: number
   q: string
   unit: string
-  /** 各口径的模型数，同 CatalogResp.units：在分段筛选之前统计。 */
+  channel_id: number[]
+  vendor: string[]
+  endpoint: string[]
+  key_id: number[]
+  /**
+   * 四个分面，每个都**在除自己以外的全部筛选之下**统计。
+   *
+   * 排除自己那一维是关键：算进去的话，选中一个供应商之后其余供应商全变 0，
+   * 于是换不了供应商，只能先清空再重选。
+   *
+   * 值都是**模型数**（不是目录行数）：一个在 30 个渠道都有的模型只算一个，
+   * 与列表的总数同口径。
+   */
   units: Record<string, number>
+  vendors: Record<string, number>
+  endpoints: Record<string, number>
+  /** 键是渠道 id 的十进制串（JSON 对象的键只能是字符串）。 */
+  channels: Record<string, number>
+  /** 上面那些 id 对应的渠道名，省得界面为了画分面去翻渠道列表。 */
+  channel_names: Record<string, string>
   items: ModelEntry[]
 }
 

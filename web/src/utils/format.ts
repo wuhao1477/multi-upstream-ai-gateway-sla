@@ -94,15 +94,133 @@ export function priceRanges(
   return [...by.values()].sort((a, b) => b.count - a.count)
 }
 
+/**
+ * 端点类型的中文短名。
+ *
+ * 取值来自上游 /api/pricing 每个模型的 `supported_endpoint_types`
+ * （2026-09-14 实测一个真实 NewAPI 站点的七种，括号里是实测模型数）。
+ * 译名对齐上游自己的定价页，运维两边对照时不用换一套词。
+ *
+ * ⚠️ **不认识的值原样返回**，不要归到"其他"：站点会加新端点类型，
+ * 而归进"其他"之后，界面上就再也看不出新增了什么 —— 那是静默丢信息。
+ */
+const ENDPOINT_LABEL: Record<string, string> = {
+  openai: 'Chat', // 1364
+  'openai-response': 'Response', // 8
+  anthropic: 'Anthropic', // 38
+  gemini: 'Gemini', // 123
+  'jina-rerank': 'Rerank', // 10
+  'image-generation': '图片', // 68
+  'openai-video': '视频', // 17
+}
+
+export function endpointLabel(e: string): string {
+  return ENDPOINT_LABEL[e] ?? e
+}
+
+/**
+ * 计价类型的中文短名。
+ *
+ * 与 unitChip 的区别：那个说的是"这个数怎么读"（×倍率 / 每次多少钱），
+ * 这个说的是"这个模型怎么计费"，是分面筛选的标签。同一份 billing_unit，
+ * 两种语境两种说法 —— 混用会让分面上写着「×倍率 1188」，读起来像在筛倍率值。
+ */
+export function pricingTypeLabel(u: string): string {
+  switch (u) {
+    case 'per_call':
+      return '按次计费'
+    case 'per_1m_token':
+    case 'per_1k_token':
+    case 'per_token':
+      return '按量计费'
+    default:
+      return '口径未知'
+  }
+}
+
+/**
+ * 「auto」是**选组模式**，不是一个可计费的分组。
+ *
+ * 2026-09-14 复核 NewAPI 源码（QuantumNous/new-api，middleware/auth.go +
+ * middleware/distributor.go + service/group.go）：token.Group == "auto" 时
+ * 进入自动模式，实际计费用的是 `auto_groups` 候选里**第一个有可用渠道**的那个
+ * 分组的倍率；源码里显式排除了 "auto" 自己（`if groupName == "" ||
+ * groupName == "auto" { return false }`）。
+ *
+ * 而 /api/pricing 的 group_ratio 里 "auto" 照样带着一个倍率（实测某站是 1）——
+ * 那个 1 是**展示用的占位**，不是它的计费倍率。照着显示 ×1 就是在报一个
+ * 与账单无关的数字，而且它看起来完全正常。所以凡是拿分组倍率算钱的地方，
+ * 遇到 auto 一律不算，如实说"按实际命中的分组计"。
+ *
+ * 只认这一个字面量、不做前缀匹配：它是 NewAPI 的保留字，不是一类命名。
+ */
+export const AUTO_GROUP = 'auto'
+
+export function isAutoGroup(ref: string | undefined | null): boolean {
+  return ref === AUTO_GROUP
+}
+
+/**
+ * 动态倍率的展示文案。
+ *
+ * 有范围就给范围（"动态 ×0.26~2.6"），没范围只说"动态"——候选一个都没采到
+ * 倍率时说不出范围，而说不出好过编一个。
+ *
+ * ⚠️ 与「跟账号」不是一回事：没写分组的 Key 走账号的默认分组，那通常是个
+ * 有固定倍率的普通组。只有账号分组恰好是 auto 时才落到动态这一档。
+ */
+export function dynamicRateText(min?: number | null, max?: number | null): string {
+  if (min === undefined || min === null || max === undefined || max === null) {
+    return '动态倍率'
+  }
+  return min === max ? `动态倍率 ×${min}` : `动态倍率 ×${min}~${max}`
+}
+
 /** 某个分组下这个模型的**实际**价格（已乘分组倍率）。 */
 export interface EffectivePrice {
   groupRef: string
   /** 分组倍率本身。 */
   groupRate: number
-  /** 模型价 × 分组倍率。 */
+  /** 模型价 × 分组倍率。倍率口径下它仍是**倍率**，不是钱。 */
   input: number
   /** 输出价 × 分组倍率；模型没给输出价时为 null。 */
   output: number | null
+  /**
+   * 折算成绝对价后的输入价：倍率口径是 **$/1M token**，按次口径就是 $/次。
+   *
+   * null = 这个渠道没采到 `quota_per_unit`，折算不了 —— 那时只能显示倍率。
+   * **不许拿 500000 兜底**：站点可以改这个基数，改了之后同一个"×1"就是
+   * 另一个价格，而那正是"有些中转站倍率写 ×1、实际是官方 0.5 或 2 倍"的来源。
+   */
+  inputUSD: number | null
+  outputUSD: number | null
+}
+
+/**
+ * 倍率 → 绝对美元价。
+ *
+ * NewAPI 系的计费基数是 `quota_per_unit`（一美元等于多少 quota，实测两站都是
+ * 500000），而 1 倍率 × 1 token = 1 quota。于是
+ *
+ *   每 1M token 美元价 = 模型倍率 × 分组倍率 × 1e6 / quota_per_unit
+ *
+ * quota_per_unit=500000 时就是 ×2，对应 NewAPI 拿来当"倍率 1"的那个
+ * $0.002/1K 基准价。**站点改了基数，这个系数就变** —— 所以必须逐站取，
+ * 不能写死，也不能在没采到时猜一个。
+ *
+ * 按次计价（per_call）不走这个基数：上游那边是
+ * `quota = model_price × quota_per_unit × group_ratio`，除回去之后
+ * 美元价就是 `model_price × group_ratio`，与基数无关。
+ */
+export function ratioToUSDPer1M(
+  ratio: number,
+  unit: string | null | undefined,
+  quotaPerUnit: number | null | undefined,
+): number | null {
+  if (unit === 'per_call') return round6(ratio)
+  if (unit !== 'per_1m_token') return null
+  if (quotaPerUnit === undefined || quotaPerUnit === null || quotaPerUnit <= 0) return null
+  return round6((ratio * 1e6) / quotaPerUnit)
 }
 
 /**
@@ -110,9 +228,9 @@ export interface EffectivePrice {
  *
  * 上游（NewAPI 系）的计费是 `模型倍率 × 分组倍率`，两个乘数都由上游给：
  * 前者在 /api/pricing 的 model_ratio / model_price，后者在顶层 group_ratio。
- * 只看前者选站，看到的数字与账单可以差一个数量级 —— 实测 2026-09-14：
- * 钱多多 API 的分组倍率 0.26~3.5，VVCode 的 0.12~1.5。同一个模型换个分组，
- * 价格差十几倍，而目录上那个数一动不动。
+ * 只看前者选站，看到的数字与账单可以差一个数量级 —— 2026-09-14 实测两个真站点，
+ * 分组倍率跨度分别是 0.26~3.5 与 0.12~1.5。同一个模型换个分组价格差十几倍，
+ * 而目录上那个数一动不动。
  *
  * 按 input 升序：选型时先想知道的是"最便宜能到多少、要用哪个分组"。
  *
@@ -124,12 +242,19 @@ export interface EffectivePrice {
 export function effectivePrices(c: {
   input_price?: number
   output_price?: number
-  groups?: { group_ref: string; rate_multiplier?: number }[]
+  billing_unit?: string | null
+  quota_per_unit?: number
+  groups?: { group_ref: string; rate_multiplier?: number; rate_dynamic?: boolean }[]
 }): EffectivePrice[] {
   if (c.input_price === undefined || c.input_price === null) return []
   const out: EffectivePrice[] = []
   for (const g of c.groups ?? []) {
     if (g.rate_multiplier === undefined || g.rate_multiplier === null) continue
+    // 动态倍率的组不参与定价计算：它的倍率由运行时命中的候选组决定。
+    // 判据用**后端给的 rate_dynamic**，不是名字 —— 名字判定只在 NewAPI 成立，
+    // 而这一位是采集侧按各家族的规则标出来的。isAutoGroup 只留给
+    // 还没有这一位的旧响应兜底。
+    if (g.rate_dynamic === true || isAutoGroup(g.group_ref)) continue
     out.push({
       groupRef: g.group_ref,
       groupRate: g.rate_multiplier,
@@ -140,6 +265,13 @@ export function effectivePrices(c: {
         c.output_price === undefined || c.output_price === null
           ? null
           : round6(c.output_price * g.rate_multiplier),
+      inputUSD: ratioToUSDPer1M(
+        c.input_price * g.rate_multiplier, c.billing_unit, c.quota_per_unit),
+      outputUSD:
+        c.output_price === undefined || c.output_price === null
+          ? null
+          : ratioToUSDPer1M(
+              c.output_price * g.rate_multiplier, c.billing_unit, c.quota_per_unit),
     })
   }
   return out.sort((a, b) => a.input - b.input || a.groupRef.localeCompare(b.groupRef))

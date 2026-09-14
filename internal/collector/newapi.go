@@ -113,7 +113,9 @@ func (a *NewAPIAdapter) FetchAccount(ctx context.Context, s Session) (Account, e
 		UserID:     asString(d["id"]),
 		BalanceUSD: quota / qpu,
 		UsedUSD:    used / qpu,
-		Meta:       NewAPIMeta("/api/user/self", time.Now()),
+		// 账号的默认分组。group 为空串的 Key 走的就是它（实测两站都是 "default"）。
+		GroupRef: asString(d["group"]),
+		Meta:     NewAPIMeta("/api/user/self", time.Now()),
 	}
 	if acc.UserID == "" {
 		acc.UserID = s.ExternalUserID
@@ -213,6 +215,9 @@ func (a *NewAPIAdapter) CreateRemoteKey(
 	return nil
 }
 
+// autoGroupRef 是 NewAPI 的「自动选组」保留字（04 §3.1bis）。
+const autoGroupRef = "auto"
+
 // FetchGroups 由 /api/pricing 派生分组（04 §3.1 + 第 46 轮实测修正）。
 //
 // NewAPI 没有独立的分组端点，分组倍率藏在定价响应的顶层 group_ratio 里。
@@ -243,6 +248,16 @@ func (a *NewAPIAdapter) FetchGroups(ctx context.Context, s Session) ([]Group, er
 			RateMultiplier:  ratio,
 			AvailableModels: pr.GroupModels[ref],
 			Meta:            NewAPIMeta("/api/pricing", now),
+		}
+		// auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
+		// （service/group.go 显式排除 auto 自己）。上面那个 ratio 是上游给的
+		// 展示占位（实测某站是 1），照它算钱会报出一个与账单无关、却看起来
+		// 完全正常的数字 —— 实测某站三个候选的倍率是 0.26 / 1 / 2.6。
+		//
+		// 只认这一个字面量：它是 NewAPI 的保留字，不是一类命名前缀。
+		if ref == autoGroupRef {
+			g.RateDynamic = true
+			g.DynamicCandidates = pr.AutoGroups
 		}
 		// 该分组一个模型都没有：可能是站点只在 usable_group 里列了它、
 		// 却没有任何模型 enable 它。标 degraded 让运维看得见，
@@ -309,11 +324,13 @@ func (a *NewAPIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Cat
 	for _, it := range pr.Models {
 		mp := it.toModelPrice()
 		out = append(out, CatalogModel{
-			ModelName:   it.Name,
-			InputPrice:  mp.InputPrice,
-			OutputPrice: mp.OutputPrice,
-			BillingUnit: mp.BillingUnit,
-			Meta:        NewAPIMeta("/api/pricing", now),
+			ModelName:     it.Name,
+			InputPrice:    mp.InputPrice,
+			OutputPrice:   mp.OutputPrice,
+			BillingUnit:   mp.BillingUnit,
+			VendorName:    it.VendorName,
+			EndpointTypes: it.EndpointTypes,
+			Meta:          NewAPIMeta("/api/pricing", now),
 		})
 	}
 	if len(out) == 0 {

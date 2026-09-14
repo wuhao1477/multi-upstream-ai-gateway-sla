@@ -40,6 +40,11 @@ CREATE TABLE upstream_accounts (
   channel_id    BIGINT NOT NULL REFERENCES channels(id),
   external_user_id TEXT,          -- NewAPI 数字用户ID（New-API-User 头必需，ISSUE-002 §3.1）
   balance_group_key TEXT,         -- 共享余额分组键：同 key 的多账号/多Key 只算一次余额（FR-022/AC-04）
+  -- 027 补：账号在上游的默认分组名（/api/user/self 的 group）。
+  -- Key 的 group 为空串时调用走的是它，所以那种 Key 不是"未归组"而是"跟账号走"。
+  -- 存名字不存外键：实测有站点的账号分组（default）不在它自己的 group_ratio 里，
+  -- 存外键只能写 NULL，把"上游说是 default、我们没采到它的倍率"这个事实丢掉。
+  account_group TEXT,             -- NULL = 未采到，**不可当成 'default'**
   -- 人工停用（五层停用开关之一）
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   disabled_reason TEXT,
@@ -165,6 +170,14 @@ CREATE TABLE channel_groups (
   channel_id    BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   group_ref     TEXT NOT NULL,               -- 上游分组标识（NewAPI group / Sub2API group_id）
   rate_multiplier NUMERIC(12,6),             -- 分组倍率（采集所得；历史版本仍走 multiplier_versions）
+  -- 028 补：有一类分组没有自己的固定倍率（NewAPI 的 auto —— 运行时在候选里
+  -- 选一个组计费，源码显式排除 auto 自己）。上游照样给它一个倍率，那是展示
+  -- 占位不是计费倍率，只存它会报出一个与账单无关却看起来正常的数字。
+  -- ⚠️ 三种状态要分得开：固定倍率 / 动态倍率 / 未采到（dynamic=false 且 rate IS NULL）。
+  -- ⚠️ 空分组的 Key **不等于**动态：它走账号的默认分组（account_group），
+  --    那通常是个有固定倍率的普通组，只有账号分组恰好是 auto 时才落到动态。
+  rate_dynamic  BOOLEAN NOT NULL DEFAULT false,
+  dynamic_candidates TEXT[],                 -- 候选分组名（auto_groups）；存名字不存外键，候选里可能有我方没采到的组
   data_source   TEXT NOT NULL CHECK (data_source IN ('auto_collect','manual')),
   fetched_at    TIMESTAMPTZ NOT NULL,        -- 陈旧性查询期计算，不存 is_stale（与 §7 同一做法）
   UNIQUE (channel_id, group_ref)
@@ -188,6 +201,11 @@ CREATE TABLE channel_model_catalog (
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,        -- 停止更新 = 上游下架了它（FR-126 告警判据）
   last_seen_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_seen_seq >= 0), -- 最近出现的可靠目录轮次
+  -- 下面两列由 026 迁移补（2026-09-14 实测 /api/pricing 的 vendors 数组与
+  -- 每模型的 supported_endpoint_types）。两者都可空：缺席 = 上游未声明，
+  -- **不是**"无供应商"或"不支持任何端点"（同 billing_unit 的口径）。
+  vendor_name    TEXT,                       -- 发行方，按 vendor_id 在顶层 vendors[] 里解析出的 name；跨站点不归一
+  endpoint_types TEXT[],                     -- 支持的端点类型（openai / anthropic / gemini / image-generation / …）
   PRIMARY KEY (channel_id, model_name)
 );
 

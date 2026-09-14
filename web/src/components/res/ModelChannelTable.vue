@@ -24,8 +24,22 @@ defineProps<{ modelName: string; channels: ModelChannel[] }>()
 function groupsTitle(c: ModelChannel): string {
   const u = unitLabel(c.billing_unit) ?? ''
   return effectivePrices(c)
-    .map((e) => `${e.groupRef}（分组倍率 ×${e.groupRate}）→ ${e.input}${u}`)
+    .map(
+      (e) =>
+        `${e.groupRef}（分组倍率 ×${e.groupRate}）→ ${e.input}${u}` +
+        (e.inputUSD === null ? '' : ` ≈ ${usdPerLabel(c.billing_unit, e.inputUSD)}`),
+    )
     .join('\n')
+}
+
+/**
+ * 绝对价的文案。倍率口径折出来的是 **$/1M token**，按次口径就是 $/次。
+ *
+ * 单位必须写出来：一个光秃秃的 8 既可以读成"8 美元一次"也可以读成
+ * "8 美元一百万 token"，两者差着几个数量级。
+ */
+function usdPerLabel(unit: string | null | undefined, v: number): string {
+  return unit === 'per_call' ? `$${v}/次` : `$${v}/1M token`
 }
 </script>
 
@@ -68,6 +82,12 @@ function groupsTitle(c: ModelChannel): string {
                 :value="effectivePrices(c)[0]!.input"
                 :unit="c.billing_unit"
               />
+              <!-- 折成绝对美元价：倍率跨站点不可比（同一个"×1"在改过
+                   quota_per_unit 的站上是另一个价格），折完才可比。
+                   没采到基数时这一行整个不出现，而不是显示一个猜的数。 -->
+              <span v-if="effectivePrices(c)[0]!.inputUSD !== null" class="dim cell-sub">
+                ≈ {{ usdPerLabel(c.billing_unit, effectivePrices(c)[0]!.inputUSD!) }}
+              </span>
               <span v-if="effectivePrices(c).length > 1" class="dim cell-sub"
                 >最低 · 分组 {{ effectivePrices(c)[0]!.groupRef }}（共
                 {{ effectivePrices(c).length }} 个分组，最高
