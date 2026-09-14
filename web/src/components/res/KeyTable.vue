@@ -203,7 +203,13 @@ async function runPending(): Promise<void> {
             <th v-if="has('rate')" data-col="rate" class="n">倍率</th>
             <!-- 「Key 剩余配额」而不是「剩余额度」：它是使用约束不是资金。
                  多把 Key 的配额相加**不等于**账号余额（FR-022） -->
-            <th data-col="quota" class="n">Key 剩余配额</th>
+            <th
+              data-col="quota"
+              class="n"
+              title="这把 Key 还被允许花多少。不限额的 Key 自己没有这个数，改显所属账号余额并在下方标注「账号余额」——两者不可混算。"
+            >
+              Key 剩余配额
+            </th>
             <th v-if="!compact" data-col="rl" :title="RATE_LIMIT_HINT">上游限流</th>
             <th v-if="has('expiry')" data-col="expiry">有效期</th>
             <th v-if="!compact" data-col="status">状态</th>
@@ -237,7 +243,15 @@ async function runPending(): Promise<void> {
                 <template v-if="k.rate_multiplier !== undefined">×{{ k.rate_multiplier }}</template>
                 <span v-else class="dim">未知</span>
               </td>
-              <td data-col="quota" class="n"><QuotaCell :item="k" :bar="!compact" /></td>
+              <!-- 传账号：不限额 Key 的配额格改显该账号余额（带口径注记）。
+                   账号没拉到时传 undefined，QuotaCell 退回「不限额度」 -->
+              <td data-col="quota" class="n">
+                <QuotaCell
+                  :item="k"
+                  :account="res.accountByID.get(k.account_id)"
+                  :bar="!compact"
+                />
+              </td>
               <!-- data-rl 保留：它是既有验收契约。data-col 是新增的语义名 -->
               <td
                 v-if="!compact"

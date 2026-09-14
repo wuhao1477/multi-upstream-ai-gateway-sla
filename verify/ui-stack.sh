@@ -265,7 +265,11 @@ if [ -z "$SPA_ONLY" ]; then
 fi
 
 step "起 sla-core"
-go build -o bin/sla-core ./cmd/sla-core
+# 注入一个**每次都不同**的版本号：界面那条"侧栏显示正在运行的版本"是拿
+# DOM 与 /admin/version 逐字比对的，而不注入时两边都是 main.version 的零值
+# "dev" —— 那时把版本号写死成 "dev" 也照样绿，断言等于没有。
+CORE_VERSION="ui-verify-$$"
+go build -ldflags "-X main.version=${CORE_VERSION}" -o bin/sla-core ./cmd/sla-core
 DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" \
   >"$CORELOG" 2>&1 &
 CORE_PID=$!
@@ -374,6 +378,7 @@ DAV_PASS="$DAV_PASS" \
 DAV_ENC_PASSWORD="$DAV_ENC_PASSWORD" \
 SHOTS=/tmp/sla-ui-shots \
 HUB_FILE="$HUB_FILE" \
+CORE_VERSION="$CORE_VERSION" \
   node verify-ui.mjs
 
 # ── Key 明文不得进日志（P1 退出标准③）──
