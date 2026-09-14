@@ -33,6 +33,9 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /admin/channels/{id}/inventory", h(s.channelInventory))
 	mux.Handle("POST /admin/channels/{id}/sync", h(s.syncChannel))
 	mux.Handle("GET /admin/channels/{id}/catalog", h(s.channelCatalog))
+	// 跨渠道的模型目录（「这个模型哪些渠道有」）。挂在 /admin/catalog 而不是
+	// /admin/models：后者是「可路由模型」那张表的名字，两者是两层（02 §1.3）。
+	mux.Handle("GET /admin/catalog", h(s.globalCatalog))
 	// 账号
 	mux.Handle("GET /admin/accounts", h(s.listAccounts))
 	mux.Handle("POST /admin/accounts", h(s.createAccount))
@@ -602,6 +605,37 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 			"channel_id": id, "total": total, "limit": limit, "offset": offset,
 			"unit": unit, "units": units,
 			"items": page,
+		})
+	})
+}
+
+// globalCatalog 跨渠道列模型目录：一行一个模型，带上有它的全部渠道。
+//
+// 与 channelCatalog 的筛选参数同名同义（q / unit / limit / offset），
+// 刻意保持一致：两个界面并排放着，参数名岔开只会让人以为语义也岔开了。
+// 没有 stale=true 这一位 —— 全局视角下"陈旧"是**逐渠道**的属性，
+// 一个模型可能在 A 站在架、在 B 站疑似下架，筛成布尔值会丢掉这个区别。
+// 行里给的是 stale_count，让人自己看。
+//
+// 分页与聚合都在 SQL 里做（不像 channelCatalog 那样拉回来再在 Go 里切）：
+// 单渠道是一千多行，全局是几万行，把它们拉进进程只为切出 50 行不划算。
+func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
+	limit, offset := parsePaging(r.URL.Query())
+
+	s.withConn(w, r, func(conn *pgx.Conn) {
+		page, err := store.ListGlobalCatalog(
+			r.Context(), conn, q, unit, s.catalogMissingRounds(), limit, offset)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.ok(w, map[string]any{
+			"total": page.Total, "whole": page.Whole,
+			"limit": limit, "offset": offset,
+			"q": q, "unit": unit, "units": page.Units,
+			"items": page.Items,
 		})
 	})
 }

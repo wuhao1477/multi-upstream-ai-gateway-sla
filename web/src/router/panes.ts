@@ -12,7 +12,7 @@
  * 一条 —— 它是账号的属性，不是第五种对象，摆成分栏等于在界面上多编了一个
  * 实体出来。凭证的登记与状态现在都在账号行上。
  */
-export type PaneName = 'channels' | 'accounts' | 'keys' | 'import'
+export type PaneName = 'channels' | 'accounts' | 'keys' | 'models' | 'import'
 
 export interface PaneMeta {
   /** 侧栏里的短名。 */
@@ -44,6 +44,12 @@ export const PANES: Record<PaneName, PaneMeta> = {
     note: '明文只进不出（FR-094）；配额是约束不是钱',
     section: '上游资源',
   },
+  models: {
+    nav: '模型目录',
+    title: '模型目录',
+    note: '上游声明有什么，不是"已登记可路由"；一行一个模型，展开看哪些渠道有',
+    section: '上游资源',
+  },
   import: {
     nav: '批量导入',
     title: '批量导入',
@@ -57,5 +63,6 @@ export const PANE_ORDER: PaneName[] = [
   'channels',
   'accounts',
   'keys',
+  'models',
   'import',
 ]

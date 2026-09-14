@@ -3,6 +3,7 @@ import ChannelsView from '@/views/ChannelsView.vue'
 import DetailView from '@/views/DetailView.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import KeysView from '@/views/KeysView.vue'
+import ModelsView from '@/views/ModelsView.vue'
 import ImportView from '@/views/ImportView.vue'
 
 /**
@@ -33,6 +34,7 @@ const router = createRouter({
     },
     { path: '/accounts', name: 'accounts', component: AccountsView },
     { path: '/keys', name: 'keys', component: KeysView },
+    { path: '/models', name: 'models', component: ModelsView },
     // 旧入口。「账号与 Key」拆成了两个分栏，收藏夹里的链接不该变成 404 ——
     // 账号是它原来的主要内容，所以落到账号页。
     { path: '/register', redirect: '/accounts' },

@@ -90,8 +90,29 @@ async function get(url, headers, { followSameOrigin = false } = {}) {
 
 const fails = [];
 
+// PICK_EXCLUDE：逗号分隔的 base_url，跳过它们再挑。
+//
+// 为什么需要：全局模型目录要回答"这个模型哪些渠道有"，而**一个渠道验不了
+// 跨渠道** —— 只有一个站时 channel_count 恒为 1，聚合写成什么样都绿。
+// 于是验收要两个**不同的真站点**（库里 base_url 有唯一约束，同一个站也
+// 建不出两个渠道 —— 那个约束是对的，不该为了凑数据去绕它）。
+// PICK_COUNT：要挑几个（默认 1）。挑够就停，不继续探 —— 别给别人的站白发请求。
+//
+// 一趟扫到底比"跑两次各挑一个"省：后者会把前面那些已知挂掉的候选**再探一遍**，
+// 而探一个死站的代价是一次超时。
+const wantCount = Math.max(1, Number(process.env.PICK_COUNT ?? 1));
+const picked = [];
+
+const excluded = new Set(
+  String(process.env.PICK_EXCLUDE ?? '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter((s) => s !== ''),
+);
+
 for (const a of candidates.slice(0, maxTry)) {
   const base = String(a.site_url).replace(/\/+$/, '');
+  if (excluded.has(base)) continue;
   const name = String(a.site_name ?? '').slice(0, 20);
   const { access_token: token, id: uid } = obj(a.account_info);
 
@@ -184,13 +205,29 @@ for (const a of candidates.slice(0, maxTry)) {
       `   uid 头名 ${hit} / quota_per_unit=${qpu} / token id=${keyRef} / ` +
       `目录 ${nModels} 个模型（倍率 ${qt0} + 按次 ${qt1}）`,
   );
-  process.stdout.write(
+  // 一行一个站，JSON Lines。PICK_COUNT=1（默认）时就是原来那一行，
+  // 调用方按行取即可 —— 不换成数组是为了让既有调用方一个字都不用改。
+  picked.push(
     JSON.stringify({
       name, url: base, uid: String(uid), token,
       uidHeader: hit, quotaPerUnit: qpu, keyRef,
       models: nModels, ratioModels: qt0, perCallModels: qt1,
     }),
   );
+  if (picked.length >= wantCount) break;
+}
+
+if (picked.length > 0) {
+  process.stdout.write(picked.join('\n'));
+  // 只挑到一个而要两个：**不失败**。第二个站是"跨渠道"那几条验收的输入，
+  // 缺了该由验收自己红并说清原因，而不是让整个栈起不来 —— 后者连前面
+  // 一百多项都跑不成了。
+  if (picked.length < wantCount) {
+    console.error(
+      `⚠️ 只挑到 ${picked.length} 个可用真站点（要 ${wantCount} 个）：` +
+        '跨渠道的那几条验收会红并说明原因。调大 PICK_MAX_TRY 可试更多候选。',
+    );
+  }
   process.exit(0);
 }
 

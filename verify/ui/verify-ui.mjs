@@ -1059,10 +1059,14 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  // 四项：渠道管理 / 账号管理 / Key 管理 / 批量导入。
+  // 五项：渠道管理 / 账号管理 / Key 管理 / 模型目录 / 批量导入。
   // 渠道详情是渠道管理的二级页面，「采集凭证」是账号的属性（并进了账号页），
   // 两者都不占一级菜单位置。
-  check('侧栏导航项齐全', layout.navs === 4, `${layout.navs} 项`);
+  //
+  // 「模型目录」是**一级分栏**而不是渠道详情里那个 Tab：那个 Tab 只能看一个
+  // 渠道有什么模型，而这一栏要回答"这个模型哪些渠道有"——后者在渠道详情里
+  // 天然做不到（那里只有一个渠道）。
+  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //
@@ -1449,6 +1453,142 @@ try {
     `状态=${backOn}，原因元素${reasonGone ? '已消失' : '仍在'}`);
 
   await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });
+
+  // ── 12quater. 模型目录分栏（跨渠道：这个模型哪些渠道有）──
+  //
+  // **要两个不同的真站点才验得了**：只有一个渠道时 channel_count 恒为 1，
+  // 聚合的 GROUP BY 写成什么样都绿。库里 base_url 有唯一约束，同一个站建不出
+  // 两个渠道 —— 那个约束是对的，不该为了凑数据去绕它。第二个站由 ui-stack.sh
+  // 用 PICK_COUNT=2 现场探活挑出来（CLAUDE.md §1：不造站点）。
+  const UP2 = {
+    name: process.env.UP2_NAME || '',
+    url: process.env.UP2_URL || '',
+    token: process.env.UP2_TOKEN || '',
+    uid: process.env.UP2_UID || '',
+  };
+  if (UP2.url === '') {
+    check('模型目录：跨渠道聚合（要两个真站点）', false,
+      '只挑到一个可用真站点，这几条无从验 —— 调大 PICK_MAX_TRY 或换一份更新的导出。' +
+      '不拿单渠道的绿冒充跨渠道通过（CLAUDE.md §1）');
+  } else {
+    // 建第二个渠道走 API 而不是点界面：建渠道/登记凭证那条路前面已经逐项验过，
+    // 这里只需要**第二个真站点的目录数据**当输入，重点在聚合本身。
+    const ch2 = await page.evaluate(async up => {
+      const t = document.querySelector('#token').value;
+      const h = { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' };
+      const post = async (p, b) =>
+        (await fetch(p, { method: 'POST', headers: h, body: JSON.stringify(b) })).json();
+      const c = await post('/admin/channels',
+        { name: `目录验收-${up.name}`.slice(0, 40), base_url: up.url, auto_detect: true });
+      if (typeof c.id !== 'number') return { error: c.error ?? '建渠道失败' };
+      const a = await post('/admin/accounts',
+        { channel_id: c.id, external_user_id: up.uid });
+      if (typeof a.id !== 'number') return { error: a.error ?? '建账号失败' };
+      const cr = await post('/admin/collector/credentials',
+        { account_id: a.id, access_token: up.token });
+      if (cr.stored !== true) return { error: cr.error ?? '登记凭证失败' };
+      const s = await post(`/admin/channels/${c.id}/sync`, {});
+      return {
+        id: c.id,
+        sync: (s.items ?? []).map(i => `${i.capability}=${i.status}`).join(' '),
+        error: s.error,
+      };
+    }, UP2);
+    check('第二个真上游建渠道并采集成功（跨渠道目录的输入）',
+      ch2.error === undefined && /model_catalog=ok/.test(ch2.sync ?? ''),
+      ch2.error ?? `渠道 ${ch2.id}：${ch2.sync}`);
+
+    await pane('models');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-model-row]').length > 0, { timeout: 10000 });
+
+    // 期望从 API 现构造。**逐字比对**而不是"数字大于零"：后者在把两个渠道
+    // 合成一行、或把渠道名错位时照样绿。
+    const api = async path => page.evaluate(async p => {
+      const t = document.querySelector('#token').value;
+      const r = await fetch(p, { headers: { Authorization: `Bearer ${t}` } });
+      return r.json();
+    }, path);
+
+    const firstPage = await api('/admin/catalog?limit=50&offset=0');
+    const domRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    check('模型目录分栏列出模型，且与 /admin/catalog 逐行同序',
+      JSON.stringify(domRows) === JSON.stringify(firstPage.items.map(m => m.model_name)),
+      `共 ${firstPage.total} 个模型；界面 ${domRows.length} 行，首行 ${domRows[0]}`);
+
+    // 核心那条：两个站都有的模型，渠道数必须是 2，且展开区列出的正是那两个站。
+    const shared = firstPage.items.filter(m => m.channel_count >= 2);
+    if (shared.length === 0) {
+      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名', false,
+        `两个真站点（${UP_URL} / ${UP2.url}）的目录没有交集 —— 这条无从验`);
+    } else {
+      const m = shared[0];
+      // 在页内按属性值查元素再点，不走 page.click(选择器)：模型名里有点、
+      // 冒号、斜杠（gpt-4o-2024-05-13、qwen/qwen3-max），拼进选择器要转义，
+      // 而 getAttribute 比对不需要。
+      await page.evaluate(n => {
+        [...document.querySelectorAll('[data-model-toggle]')]
+          .find(b => b.getAttribute('data-model-toggle') === n)
+          ?.click();
+      }, m.model_name);
+      await page.waitForFunction(n => [...document.querySelectorAll('[data-model-channels]')]
+        .some(t => t.getAttribute('data-model-channels') === n),
+      { timeout: 5000 }, m.model_name);
+      const { chNames, countShown } = await page.evaluate(n => {
+        const tbl = [...document.querySelectorAll('[data-model-channels]')]
+          .find(t => t.getAttribute('data-model-channels') === n);
+        const cnt = [...document.querySelectorAll('[data-model-chcount]')]
+          .find(e => e.getAttribute('data-model-chcount') === n);
+        return {
+          chNames: [...tbl.querySelectorAll('tbody tr td:first-child')]
+            .map(t => t.textContent.trim()),
+          countShown: Number(cnt.textContent.trim()),
+        };
+      }, m.model_name);
+      const wantNames = m.channels.map(c => c.channel_name);
+      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名',
+        countShown === m.channel_count && m.channel_count >= 2 &&
+        JSON.stringify(chNames) === JSON.stringify(wantNames),
+        `${m.model_name}：渠道数=${countShown} 展开=${JSON.stringify(chNames)} ` +
+        `期望=${JSON.stringify(wantNames)}`);
+    }
+
+    // 分段：切进「按次」后每一行的口径都只能是按次。这条守的是**明细也筛了**
+    // —— 只筛聚合不筛明细的话，展开后会看见一堆按倍率计价的渠道行，
+    // 与上面那个计数对不上，而列表本身看起来完全正常。
+    const perCallBtn = await page.$('[data-munit="per_call"]');
+    if (perCallBtn === null) {
+      check('模型目录按计价口径分段，段内口径一致', false,
+        '两个真站点的目录里没有按次计价的模型 —— 这条无从验');
+    } else {
+      await perCallBtn.click();
+      await sleep(900);
+      const unitCells = await page.$$eval('td[data-col="units"]',
+        ts => ts.map(t => t.textContent.replace(/\s+/g, '')));
+      const seg = await api('/admin/catalog?unit=per_call&limit=50&offset=0');
+      check('模型目录按计价口径分段，段内口径一致',
+        unitCells.length > 0 && unitCells.every(t => t === '/次') &&
+        unitCells.length === Math.min(50, seg.total),
+        `${unitCells.length} 行（后端 total=${seg.total}），口径取值 ` +
+        `${JSON.stringify([...new Set(unitCells)])}`);
+      await page.click('[data-munit=""]');
+      await sleep(700);
+    }
+
+    // 筛选：收敛到命中行，且写进 URL（把"谁家有 X"的链接发给别人要能复现）。
+    await page.click('#model-q');
+    await page.type('#model-q', 'claude');
+    await sleep(900);
+    const filtered = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const urlNow = await page.evaluate(() => location.search);
+    check('模型目录筛选收敛到命中行并写进 URL',
+      filtered.length > 0 && filtered.every(n => n.toLowerCase().includes('claude')) &&
+      /q=claude/.test(urlNow),
+      `${filtered.length} 行，URL=${urlNow}`);
+    await page.screenshot({ path: `${SHOT}/13-models.png`, fullPage: true });
+  }
 
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是

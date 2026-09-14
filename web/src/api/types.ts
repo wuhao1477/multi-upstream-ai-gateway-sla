@@ -287,6 +287,53 @@ export interface CatalogResp {
   items: CatalogEntry[]
 }
 
+/** 某个模型在某个渠道上的一行目录（全局模型目录的展开区读它）。 */
+export interface ModelChannel {
+  channel_id: number
+  channel_name: string
+  /** 渠道状态。**停用的渠道不采集也不承接请求**，所以它有这个模型 ≠ 你能用。 */
+  channel_status: string
+  input_price?: number
+  output_price?: number
+  billing_unit?: string | null
+  stale: boolean
+  last_seen_at: string
+}
+
+/**
+ * 全局模型目录的一行：一个模型 + 有它的全部渠道。
+ *
+ * 三个计数**互不相减**：`channel_count` 是总数，另两个是其中的子集且可以
+ * 重叠（一个渠道既可能停用又可能陈旧）。界面不要自己合成"可用渠道数" ——
+ * 那需要先定义"可用"，而 P1 还没有那个定义。
+ */
+export interface ModelEntry {
+  model_name: string
+  channel_count: number
+  stale_count: number
+  disabled_count: number
+  channels: ModelChannel[]
+}
+
+export interface GlobalCatalogResp {
+  /** 筛选后的**模型数**（不是目录行数）：一个模型在 30 个渠道上仍算一个。 */
+  total: number
+  /**
+   * 不分段时的模型数（只受 q 影响）。
+   *
+   * ⚠️ **不要拿 units 各项相加代替它**：同一个模型可能在 A 站按倍率、在 B 站
+   * 按次，于是它在两个分段里各算一次，相加会比实际多。
+   */
+  whole: number
+  limit: number
+  offset: number
+  q: string
+  unit: string
+  /** 各口径的模型数，同 CatalogResp.units：在分段筛选之前统计。 */
+  units: Record<string, number>
+  items: ModelEntry[]
+}
+
 /**
  * all-api-hub 的 WebDAV 定时同步配置。
  *
