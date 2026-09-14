@@ -1,6 +1,7 @@
 -- 026：channel_model_catalog 补 vendor_name 与 endpoint_types
 --
--- 两列都来自 NewAPI 的 /api/pricing，2026-09-14 实测 api2.aigcbest.top：
+-- 两列都来自 NewAPI 的 /api/pricing，2026-09-14 实测一个真实 NewAPI 站点
+-- （站点地址不入库，见 verify/test-public-safety.sh）：
 --   · 顶层 `vendors` 是数组 [{id,name,icon}]（实测 35 个），每个模型带 `vendor_id`
 --     指向它。存**名字**而不是 id：id 是站点自己的自增主键，跨站点毫无意义，
 --     而"哪些渠道有 Anthropic 的模型"这个问题要跨渠道聚合，只能按名字聚。

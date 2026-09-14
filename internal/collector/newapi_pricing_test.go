@@ -14,7 +14,8 @@ import (
 // 每项带 enable_groups、混有 quota_type=0（倍率）与 =1（按次固定价）。
 //
 // `vendors` / `vendor_id` / `supported_endpoint_types` 三项的形态取自
-// **2026-09-14 实测 api2.aigcbest.top**（1394 个模型）：
+// **2026-09-14 实测一个真实 NewAPI 站点**（1394 个模型；站点地址不入库，
+// 见 verify/test-public-safety.sh 的「真实验收站点地址」那条扫描）：
 //   - vendors 是**数组** `[{id,name,icon}]`，实测 35 项；模型用 vendor_id 指过来
 //   - supported_endpoint_types 是字符串数组，实测取值 openai / anthropic /
 //     gemini / openai-response / openai-video / image-generation / jina-rerank
