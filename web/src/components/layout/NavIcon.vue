@@ -3,7 +3,7 @@
  * 侧栏导航图标。内联 SVG 而非图标库：管理面要在内网/离线环境能开，
  * 且四个图标不值得引一个依赖。线条取自 lucide（与参考仓库同源）。
  */
-defineProps<{ name: 'channels' | 'accounts' | 'keys' | 'import' }>()
+defineProps<{ name: 'channels' | 'accounts' | 'keys' | 'models' | 'import' }>()
 </script>
 
 <template>
@@ -23,6 +23,13 @@ defineProps<{ name: 'channels' | 'accounts' | 'keys' | 'import' }>()
       <path d="m15.5 7.5 3 3L22 7l-3-3" />
       <circle cx="7.5" cy="15.5" r="5.5" />
       <path d="m11.5 11.5 8-8" />
+    </template>
+    <!-- 模型目录=层叠的方块（一个模型摞在多个渠道上），与"批量导入"的下载箭头
+         区分得开；两者在侧栏里相邻 -->
+    <template v-else-if="name === 'models'">
+      <path d="m12 2 9 5-9 5-9-5 9-5Z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 17 9 5 9-5" />
     </template>
     <template v-else>
       <path d="M12 3v12" />

@@ -198,18 +198,42 @@ if [ -n "$SPA_ONLY" ]; then
   echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
   echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
 else
-  UPJSON="$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs)" || {
+  # 挑**两个**站（PICK_COUNT=2，输出一行一个 JSON）。
+  #
+  # 第二个是给全局模型目录用的：那一页回答"这个模型哪些渠道有"，而一个渠道
+  # 验不了跨渠道 —— channel_count 恒为 1，聚合写成什么样都绿。库里 base_url
+  # 有唯一约束，同一个站建不出两个渠道（那个约束是对的，不该为凑数据去绕它）。
+  #
+  # PICK_MAX_TRY 抬到 40：实测这份导出里活着的站很稀疏，默认 12 个候选只够挑到
+  # 第一个。一趟扫到底比"跑两次各挑一个"省 —— 后者会把前面那些死站再探一遍。
+  #
+  # 只挑到一个时 pick-upstream **退 0**：缺第二个该由那几条验收自己红，
+  # 而不是让整个栈起不来，否则前面一百多项也跟着跑不成。
+  PICKS="$(HUB_FILE="$HUB_FILE" PICK_COUNT=2 PICK_MAX_TRY="${PICK_MAX_TRY:-40}" \
+    node verify/pick-upstream.mjs)" || {
     echo "❌ 没挑到可用的真上游（上面列了每个候选的失败原因）"; exit 1; }
   # 字段名走 argv 而不是拼进脚本字符串：拼字符串要穿 bash 引号再进 JS，
   # 两层转义的坑本仓库踩过（见 P1-evidence §5）。
-  rd() { printf '%s' "$UPJSON" | node -e '
+  rdn() { printf '%s' "$2" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
   process.stdout.write(String(JSON.parse(s)[process.argv[1]])))' "$1"; }
+  UPJSON="$(printf '%s\n' "$PICKS" | sed -n 1p)"
+  UP2JSON="$(printf '%s\n' "$PICKS" | sed -n 2p)"
+  rd() { rdn "$1" "$UPJSON"; }
   UP_NAME="$(rd name)";     UP_URL="$(rd url)"
   UP_TOKEN="$(rd token)";   UP_UID="$(rd uid)"
   UP_KEYREF="$(rd keyRef)"; UP_QPU="$(rd quotaPerUnit)"
   UP_MODELS="$(rd models)"; UP_PER_CALL="$(rd perCallModels)"
   echo "   ✅ 选中 ${UP_NAME}"
+  UP2_NAME=""; UP2_URL=""; UP2_TOKEN=""; UP2_UID=""
+  if [ -n "$UP2JSON" ]; then
+    rd2() { rdn "$1" "$UP2JSON"; }
+    UP2_NAME="$(rd2 name)";   UP2_URL="$(rd2 url)"
+    UP2_TOKEN="$(rd2 token)"; UP2_UID="$(rd2 uid)"
+    echo "   ✅ 第二个真上游：${UP2_NAME}（跨渠道模型目录要两个站）"
+  else
+    echo "   ⚠️ 只挑到一个可用真站点 —— 跨渠道模型目录那几条会红并说明原因"
+  fi
 fi
 
 # SPA_ONLY（无 HUB_FILE）时整段跳过：没有真备份可传，定时同步也就没什么可验。
@@ -379,6 +403,10 @@ DAV_ENC_PASSWORD="$DAV_ENC_PASSWORD" \
 SHOTS=/tmp/sla-ui-shots \
 HUB_FILE="$HUB_FILE" \
 CORE_VERSION="$CORE_VERSION" \
+UP2_NAME="$UP2_NAME" \
+UP2_URL="$UP2_URL" \
+UP2_TOKEN="$UP2_TOKEN" \
+UP2_UID="$UP2_UID" \
   node verify-ui.mjs
 
 # ── Key 明文不得进日志（P1 退出标准③）──

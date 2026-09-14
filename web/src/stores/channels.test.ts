@@ -41,6 +41,12 @@ async function testStaleInventoryCannotReplaceSelectedChannel(): Promise<void> {
   globalThis.slaAdminMock = {
     listSiteFamilies: async () => ({ count: 0, items: [] }),
     listChannels: async () => ({ count: 0, items: [] }),
+    // 本用例不该碰全局目录。留成抛异常的桩而不是把类型改成可选：
+    // 可选的话，漏 stub 一个真会被调到的函数只会在 store 的 catch 里被吞掉，
+    // 用例照样绿。
+    globalCatalog: async () => {
+      throw new Error('unexpected globalCatalog')
+    },
     createChannel: async (input) => {
       void input
       throw new Error('unexpected createChannel')
@@ -83,6 +89,12 @@ async function testStaleSyncCannotReplaceSelectedChannel(): Promise<void> {
   globalThis.slaAdminMock = {
     listSiteFamilies: async () => ({ count: 0, items: [] }),
     listChannels: async () => ({ count: 0, items: [] }),
+    // 本用例不该碰全局目录。留成抛异常的桩而不是把类型改成可选：
+    // 可选的话，漏 stub 一个真会被调到的函数只会在 store 的 catch 里被吞掉，
+    // 用例照样绿。
+    globalCatalog: async () => {
+      throw new Error('unexpected globalCatalog')
+    },
     createChannel: async (input) => {
       void input
       throw new Error('unexpected createChannel')

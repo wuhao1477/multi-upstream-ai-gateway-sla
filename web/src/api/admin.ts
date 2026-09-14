@@ -11,6 +11,7 @@ import type {
   Channel,
   ChannelGroup,
   CreateChannelResp,
+  GlobalCatalogResp,
   GroupModelsResp,
   HubImportResult,
   HubSyncConfig,
@@ -118,6 +119,24 @@ export function channelCatalog(id: number, q: CatalogQuery = {}): Promise<Catalo
   if (q.offset !== undefined) sp.set('offset', String(q.offset))
   const qs = sp.toString()
   return api<CatalogResp>(`/admin/channels/${id}/catalog${qs === '' ? '' : `?${qs}`}`)
+}
+
+/**
+ * 跨渠道的模型目录：一行一个模型，带上有它的全部渠道。
+ *
+ * 与 `channelCatalog` 是同一张表的两个方向 —— 那个问"这个渠道有什么模型"，
+ * 这个问"这个模型哪些渠道有"。参数名刻意一致（q / unit / limit / offset）。
+ * 没有 `stale`：全局视角下陈旧是逐渠道的属性，筛成布尔值会丢掉
+ * "在 A 站在架、在 B 站疑似下架"这个区别，行里给的是 stale_count。
+ */
+export function globalCatalog(q: CatalogQuery = {}): Promise<GlobalCatalogResp> {
+  const sp = new URLSearchParams()
+  if (q.q !== undefined && q.q !== '') sp.set('q', q.q)
+  if (q.unit !== undefined && q.unit !== '') sp.set('unit', q.unit)
+  if (q.limit !== undefined) sp.set('limit', String(q.limit))
+  if (q.offset !== undefined) sp.set('offset', String(q.offset))
+  const qs = sp.toString()
+  return api<GlobalCatalogResp>(`/admin/catalog${qs === '' ? '' : `?${qs}`}`)
 }
 
 // ── 账号 / Key ───────────────────────────────────────────────────────────────
