@@ -169,7 +169,13 @@ type Account struct {
 	UserID     string
 	BalanceUSD float64 // 已归一为美元（FR-018，一期 1:1）
 	UsedUSD    float64
-	Meta       SourceMeta
+	// GroupRef 是账号在上游的**默认分组**。
+	//
+	// 它决定 `group` 为空串的那些 Key 实际走哪个分组 —— 那种 Key 不是"未归组"，
+	// 是"跟账号走"。空 = 上游没给（老版本或别的站型），**不可默认成 "default"**：
+	// 实测有站点的账号分组叫 default，但它的 group_ratio 里根本没有 default。
+	GroupRef string
+	Meta     SourceMeta
 }
 
 // RateLimit 是限流快照（FR-028）。

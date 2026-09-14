@@ -1850,14 +1850,39 @@ try {
     const groupedKeys = allKeys.filter(k => k.group_ref !== undefined && k.group_ref !== '');
     const ungroupedKeys = allKeys.filter(k => k.group_ref === undefined || k.group_ref === '');
     const chipOf = id => keyChips.find(c => c.id === String(id));
-    check('「按 Key」分面：已归组的可选、未归组的禁用并标出来',
+    check('「按 Key」分面：解析得出分组的可选、解析不出的禁用并标出来',
       groupedKeys.length > 0 &&
       groupedKeys.every(k => chipOf(k.id)?.disabled === false &&
         chipOf(k.id)?.text.includes(k.group_ref)) &&
       ungroupedKeys.every(k => chipOf(k.id)?.disabled === true &&
         chipOf(k.id)?.text.includes('未归组')),
-      `已归组 ${groupedKeys.length} 把 / 未归组 ${ungroupedKeys.length} 把；` +
+      `解析得出 ${groupedKeys.length} 把 / 解析不出 ${ungroupedKeys.length} 把；` +
       `chip=${JSON.stringify(keyChips.map(c => `${c.text}${c.disabled ? '(禁用)' : ''}`))}`);
+
+    // 刚建的那把 Key **自己没有分组**，但账号有默认分组（上游 /api/user/self
+    // 的 group，实测两个真站点都是 "default"）—— 所以它不是"未归组"，
+    // 而是"跟账号走"：调用实际走账号那一档，倍率与可调模型都是确定的。
+    //
+    // 这条守的是 027 那一路：不采账号分组的话，这种 Key 会被永远显示成
+    // 未归组、倍率未知，而它其实有明确的倍率（实测站 A 的 default 是 ×1）。
+    const inherited = allKeys.find(k => k.id === ungroupedKeyID);
+    const accountGroup = (await api('/admin/accounts')).items
+      ?.find(a => a.id === Number(accountIDs[0]))?.account_group;
+    if (inherited === undefined || (accountGroup ?? '') === '') {
+      check('自己没分组的 Key 回落到账号的默认分组，并标「跟账号」', false,
+        `账号默认分组=${JSON.stringify(accountGroup)} —— ` +
+        '上游没给账号分组（或它不在该站 group_ratio 里）时这条无从验');
+    } else {
+      check('自己没分组的 Key 回落到账号的默认分组，并标「跟账号」',
+        inherited.group_ref === accountGroup && inherited.group_inherited === true &&
+        inherited.channel_group_id === undefined &&
+        chipOf(inherited.id)?.disabled === false &&
+        chipOf(inherited.id)?.text.includes('跟账号'),
+        `Key #${inherited.id}：自己的分组=${JSON.stringify(inherited.channel_group_id)} ` +
+        `解析出=${inherited.group_ref}（账号默认 ${accountGroup}）` +
+        `×${inherited.rate_multiplier} inherited=${inherited.group_inherited} ` +
+        `chip=${JSON.stringify(chipOf(inherited.id)?.text)}`);
+    }
 
     if (groupedKeys.length === 0) {
       check('按 Key 筛出的模型 == 该 Key 所在分组能调的模型', false,
@@ -1903,6 +1928,30 @@ try {
         `${firstModel.model_name} 模型价=${price} × 分组 ${theKey.group_ref} ` +
         `${theKey.rate_multiplier} → 期望 ${wantEff}，实际 ${JSON.stringify(keyDrawer.eff)}；` +
         `整格=${JSON.stringify(groupsShown)}`);
+      // 倍率折成**绝对美元价**：`模型倍率 × 分组倍率 × 1e6 / quota_per_unit`。
+      //
+      // 倍率跨站点不可比 —— 同一个"×1"，在 quota_per_unit=500000 的站上是
+      // $2/1M token，在 250000 的站上就是 $4，而界面上两个都写着 ×1。
+      // 这正是"有些中转站把倍率设成 ×1 但实际是官方 0.5 或 2 倍"的来源。
+      // 期望由后端给的 quota_per_unit 现算，**不写死 ×2**。
+      const qpu = firstModel.channels[0]?.quota_per_unit;
+      const unit = firstModel.channels[0]?.billing_unit;
+      if (qpu === undefined || unit !== 'per_1m_token') {
+        check('倍率按站点的 quota_per_unit 折成绝对美元价', false,
+          `该渠道 quota_per_unit=${qpu} 口径=${unit} —— 这条无从验`);
+      } else {
+        const wantUSD = Math.round(price * theKey.rate_multiplier * 1e6 / qpu * 1e6) / 1e6;
+        const usdShown = await page.evaluate(n => {
+          const t = [...document.querySelectorAll('[data-model-channels]')]
+            .find(x => x.getAttribute('data-model-channels') === n);
+          return [...t.querySelectorAll('tbody tr td[data-model-eff]')]
+            .map(td => (td.textContent.match(/≈\s*\$([\d.]+)/) ?? [])[1] ?? null);
+        }, firstModel.model_name);
+        check('倍率按站点的 quota_per_unit 折成绝对美元价',
+          usdShown.length === 1 && Number(usdShown[0]) === wantUSD,
+          `${firstModel.model_name}：倍率 ${price}×${theKey.rate_multiplier} ` +
+          `× 1e6/${qpu} → 期望 $${wantUSD}/1M，界面 ${JSON.stringify(usdShown)}`);
+      }
       await closeDrawer();
 
       // ── 反方向的入口：Key 管理页 →「能调哪些模型」──

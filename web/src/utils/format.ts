@@ -143,10 +143,46 @@ export interface EffectivePrice {
   groupRef: string
   /** 分组倍率本身。 */
   groupRate: number
-  /** 模型价 × 分组倍率。 */
+  /** 模型价 × 分组倍率。倍率口径下它仍是**倍率**，不是钱。 */
   input: number
   /** 输出价 × 分组倍率；模型没给输出价时为 null。 */
   output: number | null
+  /**
+   * 折算成绝对价后的输入价：倍率口径是 **$/1M token**，按次口径就是 $/次。
+   *
+   * null = 这个渠道没采到 `quota_per_unit`，折算不了 —— 那时只能显示倍率。
+   * **不许拿 500000 兜底**：站点可以改这个基数，改了之后同一个"×1"就是
+   * 另一个价格，而那正是"有些中转站倍率写 ×1、实际是官方 0.5 或 2 倍"的来源。
+   */
+  inputUSD: number | null
+  outputUSD: number | null
+}
+
+/**
+ * 倍率 → 绝对美元价。
+ *
+ * NewAPI 系的计费基数是 `quota_per_unit`（一美元等于多少 quota，实测两站都是
+ * 500000），而 1 倍率 × 1 token = 1 quota。于是
+ *
+ *   每 1M token 美元价 = 模型倍率 × 分组倍率 × 1e6 / quota_per_unit
+ *
+ * quota_per_unit=500000 时就是 ×2，对应 NewAPI 拿来当"倍率 1"的那个
+ * $0.002/1K 基准价。**站点改了基数，这个系数就变** —— 所以必须逐站取，
+ * 不能写死，也不能在没采到时猜一个。
+ *
+ * 按次计价（per_call）不走这个基数：上游那边是
+ * `quota = model_price × quota_per_unit × group_ratio`，除回去之后
+ * 美元价就是 `model_price × group_ratio`，与基数无关。
+ */
+export function ratioToUSDPer1M(
+  ratio: number,
+  unit: string | null | undefined,
+  quotaPerUnit: number | null | undefined,
+): number | null {
+  if (unit === 'per_call') return round6(ratio)
+  if (unit !== 'per_1m_token') return null
+  if (quotaPerUnit === undefined || quotaPerUnit === null || quotaPerUnit <= 0) return null
+  return round6((ratio * 1e6) / quotaPerUnit)
 }
 
 /**
@@ -168,6 +204,8 @@ export interface EffectivePrice {
 export function effectivePrices(c: {
   input_price?: number
   output_price?: number
+  billing_unit?: string | null
+  quota_per_unit?: number
   groups?: { group_ref: string; rate_multiplier?: number }[]
 }): EffectivePrice[] {
   if (c.input_price === undefined || c.input_price === null) return []
@@ -184,6 +222,13 @@ export function effectivePrices(c: {
         c.output_price === undefined || c.output_price === null
           ? null
           : round6(c.output_price * g.rate_multiplier),
+      inputUSD: ratioToUSDPer1M(
+        c.input_price * g.rate_multiplier, c.billing_unit, c.quota_per_unit),
+      outputUSD:
+        c.output_price === undefined || c.output_price === null
+          ? null
+          : ratioToUSDPer1M(
+              c.output_price * g.rate_multiplier, c.billing_unit, c.quota_per_unit),
     })
   }
   return out.sort((a, b) => a.input - b.input || a.groupRef.localeCompare(b.groupRef))

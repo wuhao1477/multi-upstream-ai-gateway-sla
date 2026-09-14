@@ -113,7 +113,9 @@ func (a *NewAPIAdapter) FetchAccount(ctx context.Context, s Session) (Account, e
 		UserID:     asString(d["id"]),
 		BalanceUSD: quota / qpu,
 		UsedUSD:    used / qpu,
-		Meta:       NewAPIMeta("/api/user/self", time.Now()),
+		// 账号的默认分组。group 为空串的 Key 走的就是它（实测两站都是 "default"）。
+		GroupRef: asString(d["group"]),
+		Meta:     NewAPIMeta("/api/user/self", time.Now()),
 	}
 	if acc.UserID == "" {
 		acc.UserID = s.ExternalUserID

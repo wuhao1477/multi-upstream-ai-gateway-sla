@@ -65,11 +65,22 @@ VALUES ($1,'normal',$2,$3,now())`,
 		}
 	}
 
+	// 账号的默认分组。空串不写（NULLIF）—— NULL 是"没采到"，
+	// 而 '' 会被下面那些 JOIN 当成一个叫空串的分组去匹配。
+	if _, err := tx.Exec(ctx,
+		`UPDATE upstream_accounts SET account_group = NULLIF($2,'') WHERE id=$1`,
+		accountID, a.GroupRef); err != nil {
+		return fmt.Errorf("写账号默认分组: %w", err)
+	}
+
 	// 快照 payload：**未采到的字段省略该键**（02 §7.1）
 	payload := map[string]any{}
 	if !a.Meta.Degraded {
 		payload["balance_usd"] = a.BalanceUSD
 		payload["used_usd"] = a.UsedUSD
+	}
+	if a.GroupRef != "" {
+		payload["account_group"] = a.GroupRef
 	}
 	if a.UserID != "" {
 		payload["external_user_id"] = a.UserID

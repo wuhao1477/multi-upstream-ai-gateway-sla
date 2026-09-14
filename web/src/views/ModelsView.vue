@@ -76,13 +76,16 @@ const keyFacet = computed(() =>
     channel: channels.list.find((c) => c.id === k.channel_id)?.name ?? `#${k.channel_id}`,
     group: k.group_ref,
     rate: k.rate_multiplier,
+    // 「跟账号走」也算可用：那把 Key 自己没定分组，但调用实际走账号的默认分组，
+    // 倍率与可调模型都是确定的。标出来只是因为**改法不同**（该改账号那一头）。
+    inherited: k.group_inherited === true,
     usable: k.group_ref !== undefined && k.group_ref !== '',
   })),
 )
 
 const UNGROUPED_HINT =
-  '这把 Key 未归组：上游没给它指定分组（有些站点用 auto_groups 在调用时自动选），' +
-  '或它声明的分组不在我方采到的分组里。没有分组就不知道它能调哪些模型、' +
+  '这把 Key 解析不出分组：它自己没定分组，而账号的默认分组也没采到' +
+  '（上游没给，或它不在该站的 group_ratio 里）。不知道分组就不知道它能调哪些模型、' +
   '按什么倍率计费 —— 所以筛不了，而不是筛出空。'
 
 /** 输入框自己的值。理由同 CatalogView：直接绑 store.q 会在防抖窗口内被回写。 */
@@ -333,12 +336,17 @@ function endpointsOf(m: ModelEntry): string[] {
             :class="{ on: cat.keyIDs.includes(k.id), dimf: !k.usable }"
             :data-facet-key="k.id"
             :disabled="!k.usable"
-            :title="k.usable ? `${k.channel} · 分组 ${k.group}（×${k.rate ?? '?'}）` : UNGROUPED_HINT"
+            :title="
+              k.usable
+                ? `${k.channel} · 分组 ${k.group}（×${k.rate ?? '?'}）${k.inherited ? ' —— 跟账号走，账号分组变了它跟着变' : ''}`
+                : UNGROUPED_HINT
+            "
             @click="cat.toggleKey(k.id)"
           >
             <code>{{ k.label }}</code>
             <span class="badge" v-if="k.usable">{{ k.group }} ×{{ k.rate ?? '?' }}</span>
-            <span class="badge" v-else>未归组</span>
+            <span class="badge" v-if="k.usable && k.inherited" title="这把 Key 自己没定分组，走的是账号的默认分组">跟账号</span>
+            <span class="badge" v-if="!k.usable">未归组</span>
           </button>
         </div>
 

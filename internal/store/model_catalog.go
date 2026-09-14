@@ -37,6 +37,15 @@ type ModelChannel struct {
 	VendorName *string `json:"vendor_name,omitempty"`
 	// EndpointTypes 是上游声明支持的端点类型。nil = 未声明，不是"不支持任何端点"。
 	EndpointTypes []string `json:"endpoint_types,omitempty"`
+	// QuotaPerUnit 是这个站点的**额度换算基数**（/api/status 的 quota_per_unit，
+	// 由 Detect 采到）。没有它，倍率就只是个相对数，跨站点不可比。
+	//
+	// 换算：`每 1M token 美元价 = 模型倍率 × 分组倍率 × 1e6 / quota_per_unit`。
+	// 实测两个真站点都是 500000（于是乘 2，对应 NewAPI 的 $0.002/1K 基准价），
+	// 但**不可写死**：站点可以改它，改了之后同一个"×1"就是另一个价格 ——
+	// 这正是"有些中转站把倍率设成 ×1 但实际价是官方的 0.5 或 2 倍"的来源。
+	// nil = 该渠道没采到基数（老库或 Detect 失败），界面只能显示倍率、不能折算。
+	QuotaPerUnit *float64 `json:"quota_per_unit,omitempty"`
 	// Groups 是这个渠道下**能调到这个模型**的分组，带各自的分组倍率。
 	//
 	// 为什么它必须在这儿：上面那个 InputPrice 是模型自己的倍率，而实际计费是
@@ -90,9 +99,12 @@ type CatalogFilter struct {
 	// 而分组决定了它能调哪些模型、以及每次调用被乘多少倍率。
 	//
 	// 多把 Key 取**并集**（"我这几把加起来能覆盖哪些模型"）。
-	// 未归组的 Key（channel_group_id IS NULL）什么都匹配不到 —— 这是对的：
-	// 我们不知道它在哪个分组，就不能替它断言能调什么。界面要把这种 Key
-	// 标出来而不是让它悄悄筛出空列表。
+	//
+	// Key 自己没有分组时**回落到账号的默认分组**（upstream_accounts.account_group，
+	// 来自上游 /api/user/self 的 group）—— 上游 /api/token 的 group 为空串时，
+	// 调用走的就是账号那一档，所以那种 Key 不是"未归组"。两级都解析不出来时
+	// （账号分组也没采到、或它不在 group_ratio 里）才真的什么都匹配不到，
+	// 界面据此把这种 Key 标出来而不是让它悄悄筛出空列表。
 	KeyIDs []int64
 }
 
@@ -168,7 +180,12 @@ func catalogWhere(f CatalogFilter, excl string) (string, []any) {
    AND ($5 = '' OR COALESCE(c.billing_unit, 'unknown') = $5)
    AND (cardinality($6::bigint[]) = 0 OR EXISTS (
          SELECT 1 FROM upstream_keys k
-           JOIN channel_groups g ON g.id = k.channel_group_id
+           JOIN upstream_accounts ua ON ua.id = k.account_id
+           JOIN channel_groups g
+             ON g.id = COALESCE(k.channel_group_id, (
+                  SELECT g2.id FROM channel_groups g2
+                   WHERE g2.channel_id = ua.channel_id
+                     AND g2.group_ref = ua.account_group))
            JOIN group_models gm ON gm.channel_group_id = g.id
           WHERE k.id = ANY($6)
             AND g.channel_id = c.channel_id
@@ -398,6 +415,50 @@ SELECT c.model_name, ch.id, ch.name, ch.status,
 		}
 	}
 
+	// ③bis 每个渠道的额度换算基数（quota_per_unit），用来把倍率折成绝对美元价。
+	//
+	// 它存在 Detect 那条快照里（collector_snapshots 的 __detect__ 行），
+	// 一个渠道一条。DISTINCT ON 取最近一次 —— 站点改了基数，重新 Detect
+	// 之后这里就跟着变。
+	//
+	// 拿不到的渠道**不折算**（QuotaPerUnit 留 nil），界面只显示倍率：
+	// 猜一个 500000 会在改过基数的站上给出一个看起来精确的错价，
+	// 而那正是这一段要防的事。
+	{
+		rows, err := conn.Query(ctx, `
+SELECT DISTINCT ON (channel_id) channel_id, (payload->>'quota_per_unit')::float8
+  FROM collector_snapshots
+ WHERE scope_type='pricing' AND scope_id='__detect__' AND payload ? 'quota_per_unit'
+ ORDER BY channel_id, fetched_at DESC`)
+		if err != nil {
+			return page, fmt.Errorf("读渠道额度换算基数: %w", err)
+		}
+		qpu := map[int64]float64{}
+		for rows.Next() {
+			var id int64
+			var v *float64
+			if err := rows.Scan(&id, &v); err != nil {
+				rows.Close()
+				return page, err
+			}
+			if v != nil && *v > 0 {
+				qpu[id] = *v
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return page, err
+		}
+		for _, e := range byName {
+			for i := range e.Channels {
+				if v, ok := qpu[e.Channels[i].ChannelID]; ok {
+					base := v
+					e.Channels[i].QuotaPerUnit = &base
+				}
+			}
+		}
+	}
+
 	// ④ 每个 (模型, 渠道) 下**能调到这个模型**的分组及其倍率。
 	//
 	// 归属来自 group_models（NewAPI 由每个模型的 enable_groups 反转得来），
@@ -415,7 +476,14 @@ SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier
   FROM group_models gm JOIN channel_groups g ON g.id = gm.channel_group_id
  WHERE gm.model_name = ANY($1)
    AND (cardinality($2::bigint[]) = 0
-        OR g.id IN (SELECT k.channel_group_id FROM upstream_keys k WHERE k.id = ANY($2)))
+        OR g.id IN (
+             SELECT COALESCE(k.channel_group_id, (
+                      SELECT g2.id FROM channel_groups g2
+                       WHERE g2.channel_id = ua.channel_id
+                         AND g2.group_ref = ua.account_group))
+               FROM upstream_keys k
+               JOIN upstream_accounts ua ON ua.id = k.account_id
+              WHERE k.id = ANY($2)))
  ORDER BY gm.model_name, g.channel_id, g.rate_multiplier NULLS LAST, g.group_ref`,
 		names, int64Slice(f.KeyIDs))
 	if err != nil {

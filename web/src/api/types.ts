@@ -66,6 +66,12 @@ export interface Account {
   channel_id: number
   external_user_id?: string
   balance_group_key?: string
+  /**
+   * 账号在上游的默认分组（/api/user/self 的 group）。
+   * Key 自己没定分组时调用走的就是它 —— 那种 Key 不是"未归组"。
+   * 缺席 = 未采到，**不可当成 "default"**。
+   */
+  account_group?: string
   status: string
   disabled_reason?: string
   disabled_until?: string
@@ -110,6 +116,14 @@ export interface Key {
   channel_group_id?: number
   group_ref?: string
   rate_multiplier?: number
+  /**
+   * 上面那个分组是**跟账号走**的，不是这把 Key 自己定的。
+   *
+   * 上游 /api/token 的 group 为空串时，调用实际走账号的默认分组
+   * （/api/user/self 的 group）。两者倍率同样真实，但改法不同：账号分组变了
+   * 这一把跟着变，自己定的那把不变 —— 界面上要分开说，否则会改错地方。
+   */
+  group_inherited?: boolean
   remain_quota_usd?: number
   used_quota_usd?: number
   /**
@@ -312,6 +326,11 @@ export interface ModelChannel {
   vendor_name?: string
   /** 支持的端点类型。缺席 = 未声明，不是"不支持任何端点"。 */
   endpoint_types?: string[]
+  /**
+   * 该站点的额度换算基数（/api/status 的 quota_per_unit）。
+   * 缺席 = 没采到，**只能显示倍率、不能折算成美元**（不许拿 500000 兜底）。
+   */
+  quota_per_unit?: number
 }
 
 export interface ModelGroup {

@@ -127,6 +127,11 @@ CREATE TABLE upstream_accounts (
   channel_id    BIGINT NOT NULL REFERENCES channels(id),
   external_user_id TEXT,          -- NewAPI 数字用户ID（New-API-User 头必需，ISSUE-002 §3.1）
   balance_group_key TEXT,         -- 共享余额分组键：同 key 的多账号/多Key 只算一次余额（FR-022/AC-04）
+  -- 027 补：账号在上游的默认分组名（/api/user/self 的 group）。
+  -- Key 的 group 为空串时调用走的是它，所以那种 Key 不是"未归组"而是"跟账号走"。
+  -- 存名字不存外键：实测有站点的账号分组（default）不在它自己的 group_ratio 里，
+  -- 存外键只能写 NULL，把"上游说是 default、我们没采到它的倍率"这个事实丢掉。
+  account_group TEXT,             -- NULL = 未采到，**不可当成 'default'**
   -- 人工停用（五层停用开关之一）
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   disabled_reason TEXT,

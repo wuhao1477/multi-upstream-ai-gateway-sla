@@ -79,9 +79,18 @@ func stripComments(src string) string {
 // —— 三段字面量各自都不完整：第一段有 SELECT 没 FROM，第三段有 FROM 没 SELECT。
 // 不接回去，这条查询会整个逃过检查。
 func sqlLiterals(src string) []string {
-	// 先把 `…` + ident + `…` 里的 ident 换成它的常量值（只认本包已知的那个）。
-	src = strings.ReplaceAll(src, "`+secretPrefixExpr+`", secretPrefixExpr)
-	src = strings.ReplaceAll(src, "` + secretPrefixExpr + `", secretPrefixExpr)
+	// 先把 `…` + ident + `…` 里的 ident 换成它的常量值（只认本包**显式列出**的这几个）。
+	//
+	// 逐个列而不是反射查全包常量：这份名单就是"我确认过这段 SQL 里没有明文列"
+	// 的记录。加一个新的拼接常量时必须来这里加一行 —— 那一刻正是该确认的时候。
+	for _, kv := range []struct{ ident, value string }{
+		{"secretPrefixExpr", secretPrefixExpr},
+		// 账号默认分组的 LEFT JOIN，只碰 channel_groups，不选任何 upstream_keys 列。
+		{"accountGroupJoin", accountGroupJoin},
+	} {
+		src = strings.ReplaceAll(src, "`+"+kv.ident+"+`", kv.value)
+		src = strings.ReplaceAll(src, "` + "+kv.ident+" + `", kv.value)
+	}
 	// 还剩别的 `+ident+` 拼接就留个显式标记 —— 未知拼接不能当成"没问题"。
 	src = regexp.MustCompile("`\\s*\\+\\s*(\\w+)\\s*\\+\\s*`").
 		ReplaceAllString(src, "UNRESOLVED_$1")

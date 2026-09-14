@@ -273,7 +273,19 @@ async function runPending(): Promise<void> {
               <td v-if="has('ref')" data-col="ref" class="dim">{{ k.external_ref ?? '—' }}</td>
               <td data-col="group">{{ k.group_ref ?? '—' }}</td>
               <td data-col="rate" class="n" :data-key-rate="k.id" :title="RATE_HINT">
-                <template v-if="k.rate_multiplier !== undefined">×{{ k.rate_multiplier }}</template>
+                <template v-if="k.rate_multiplier !== undefined">
+                  ×{{ k.rate_multiplier }}
+                  <!-- 「跟账号」：这把 Key 自己没定分组，走的是账号的默认分组。
+                       倍率一样真实，但改法不同 —— 账号分组变了它跟着变。
+                       不标出来会让人去改这把 Key，而该改的是账号那一头 -->
+                  <span
+                    v-if="k.group_inherited === true"
+                    class="dim cell-sub"
+                    :data-key-rate-inherited="k.id"
+                    title="这把 Key 自己没有分组，走的是账号的默认分组（上游 /api/user/self 的 group）。账号分组变了，这里跟着变。"
+                    >跟账号</span
+                  >
+                </template>
                 <!-- 「未知」而不是 ×1：没分组或分组没采到倍率时，真实倍率可能是
                      0.12 也可能是 3.5，填 1 是编一个看起来正常的错数 -->
                 <span v-else class="dim">未知</span>
@@ -332,7 +344,7 @@ async function runPending(): Promise<void> {
                       :disabled="k.group_ref === undefined || k.group_ref === ''"
                       :title="
                         k.group_ref === undefined || k.group_ref === ''
-                          ? '这把 Key 未归组 —— 不知道它在哪个分组，就不知道它能调哪些模型、按什么倍率计费。先在上面「编辑」里给它选一个分组。'
+                          ? '这把 Key 解析不出分组：自己没定，账号的默认分组也没采到。不知道分组就不知道它能调哪些模型、按什么倍率计费。先在上面「编辑」里给它选一个分组。'
                           : `列出分组 ${k.group_ref} 能调的模型，价格按该分组倍率折算`
                       "
                       @click="openModels(k)"

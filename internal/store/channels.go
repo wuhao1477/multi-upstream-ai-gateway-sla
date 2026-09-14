@@ -191,14 +191,19 @@ UPDATE channels
 // Key 数来自 upstream_keys。它们只由 ListAccounts 填充，
 // CreateAccount/UpdateAccount 不碰。
 type Account struct {
-	ID              int64      `json:"id"`
-	ChannelID       int64      `json:"channel_id"`
-	ExternalUserID  string     `json:"external_user_id,omitempty"`
-	BalanceGroupKey string     `json:"balance_group_key,omitempty"`
-	Status          string     `json:"status"`
-	DisabledReason  string     `json:"disabled_reason,omitempty"`
-	DisabledUntil   *time.Time `json:"disabled_until,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID              int64  `json:"id"`
+	ChannelID       int64  `json:"channel_id"`
+	ExternalUserID  string `json:"external_user_id,omitempty"`
+	BalanceGroupKey string `json:"balance_group_key,omitempty"`
+	// AccountGroup 是账号在上游的默认分组（/api/user/self 的 group）。
+	// Key 自己没定分组时，调用走的就是它 —— 那种 Key 不是"未归组"。
+	// 空 = 未采到，**不可当成 "default"**（实测有站点的账号分组不在它自己的
+	// group_ratio 里，那时名字有、倍率没有）。
+	AccountGroup   string     `json:"account_group,omitempty"`
+	Status         string     `json:"status"`
+	DisabledReason string     `json:"disabled_reason,omitempty"`
+	DisabledUntil  *time.Time `json:"disabled_until,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 
 	// BalanceUSD 是最近一次确认的账号余额（归一美元，FR-018 一期 1:1）。
 	//
@@ -259,7 +264,7 @@ RETURNING id`, a.ChannelID, a.ExternalUserID, a.BalanceGroupKey, a.Status).Scan(
 func ListAccounts(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Account, error) {
 	rows, err := conn.Query(ctx, `
 SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
-       COALESCE(a.balance_group_key,''),
+       COALESCE(a.balance_group_key,''), COALESCE(a.account_group,''),
        a.status, COALESCE(a.disabled_reason,''), a.disabled_until, a.created_at,
        b.last_confirmed_balance, COALESCE(b.balance_state,''), b.confirmed_at,
        k.total, k.active,
@@ -291,7 +296,7 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
 	for rows.Next() {
 		var a Account
 		if err := rows.Scan(&a.ID, &a.ChannelID, &a.ExternalUserID,
-			&a.BalanceGroupKey, &a.Status, &a.DisabledReason,
+			&a.BalanceGroupKey, &a.AccountGroup, &a.Status, &a.DisabledReason,
 			&a.DisabledUntil, &a.CreatedAt,
 			&a.BalanceUSD, &a.BalanceState, &a.BalanceConfirmedAt,
 			&a.KeysTotal, &a.KeysActive,

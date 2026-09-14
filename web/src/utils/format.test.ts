@@ -7,10 +7,60 @@
  *    所以错得没有任何视觉提示，而读者据此选型必然选错。
  *  · 把没采到价格的渠道当 0 → "最低 0" = 免费，而真相是"不知道"。
  */
-import { effectivePrices, priceRanges } from './format'
+import { effectivePrices, priceRanges, ratioToUSDPer1M } from './format'
 
 function assert(cond: boolean, message: string): void {
   if (!cond) throw new Error(message)
+}
+
+/**
+ * 倍率 → 绝对美元价。
+ *
+ * 这一段存在的理由：倍率**跨站点不可比**。同一个"×1"，在 quota_per_unit=500000
+ * 的站上是 $2/1M token，在 250000 的站上就是 $4 —— 而界面上两个都写着 ×1。
+ * 折算是把它们放回同一把尺子上的唯一办法。
+ *
+ * 最容易错的三种写法，三条断言各钉一种：
+ *  · 系数写死成 ×2（等于假定所有站都是 500000）
+ *  · 没采到基数时兜底成 500000（给出一个看起来精确的错价）
+ *  · 对按次计价也乘这个基数（上游那边按次根本不过这条公式）
+ */
+function testRatioToUSD(): void {
+  // 实测两个真站点都是 500000 → ×2，对应 NewAPI 当基准的 $0.002/1K
+  assert(ratioToUSDPer1M(1, 'per_1m_token', 500000) === 2, '倍率 1 @50 万基数应是 $2/1M')
+  assert(ratioToUSDPer1M(4, 'per_1m_token', 500000) === 8, '倍率 4 @50 万基数应是 $8/1M')
+  // 基数不同，同一个倍率就是另一个价 —— 这正是"倍率 ×1 实际却是官方 2 倍"的来源
+  assert(
+    ratioToUSDPer1M(1, 'per_1m_token', 250000) === 4,
+    '基数 25 万时倍率 1 应是 $4/1M —— 系数写死成 ×2 的话这条会红',
+  )
+  // 没采到基数：不折算，**不兜底**
+  assert(ratioToUSDPer1M(1, 'per_1m_token', undefined) === null, '没有基数时不该猜一个价出来')
+  assert(ratioToUSDPer1M(1, 'per_1m_token', 0) === null, '基数为 0（没采到的哨兵）同样不折算')
+  // 按次计价不过这条公式：美元价就是 model_price × group_ratio
+  assert(ratioToUSDPer1M(0.08, 'per_call', 500000) === 0.08, '按次价不该再乘换算基数')
+  assert(ratioToUSDPer1M(1, null, 500000) === null, '口径未知时不折算')
+}
+
+/** effectivePrices 要把折算结果一起带出来，否则上面那条只是个孤立的函数。 */
+function testEffectivePricesCarryUSD(): void {
+  const r = effectivePrices({
+    input_price: 2.5,
+    output_price: 12.5,
+    billing_unit: 'per_1m_token',
+    quota_per_unit: 500000,
+    groups: [{ group_ref: 'daily-codex', rate_multiplier: 0.15 }],
+  })
+  assert(r[0]?.input === 0.375, `倍率应是 2.5×0.15=0.375，实际 ${r[0]?.input}`)
+  assert(r[0]?.inputUSD === 0.75, `绝对价应是 0.375×2=$0.75/1M，实际 ${r[0]?.inputUSD}`)
+  assert(r[0]?.outputUSD === 3.75, `输出绝对价应是 12.5×0.15×2=3.75，实际 ${r[0]?.outputUSD}`)
+  const noBase = effectivePrices({
+    input_price: 2.5,
+    billing_unit: 'per_1m_token',
+    groups: [{ group_ref: 'g', rate_multiplier: 1 }],
+  })
+  assert(noBase[0]?.input === 2.5, '没有基数时倍率照常算')
+  assert(noBase[0]?.inputUSD === null, '没有基数时绝对价必须是 null，不是一个猜的数')
 }
 
 function testGroupsByUnitNeverAcrossIt(): void {
@@ -103,3 +153,5 @@ testMissingUnitIsItsOwnGroup()
 testMultipliesByGroupRate()
 testMissingRateIsSkippedNotTreatedAsOne()
 testNoFloatTail()
+testRatioToUSD()
+testEffectivePricesCarryUSD()
