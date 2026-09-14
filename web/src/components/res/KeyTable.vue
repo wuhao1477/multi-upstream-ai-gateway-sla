@@ -74,9 +74,23 @@ async function openChannel(id: number): Promise<void> {
   await router.push({ name: 'channel-detail', params: { id: String(id) } })
 }
 
+/**
+ * 「分组倍率」列的悬停解释。
+ *
+ * 三件事必须一起说，少一件就会被读错：它来自分组不是 Key、它与模型倍率相乘
+ * 才是账单、它跟着上游改分组倍率而变（我们每轮采集重读，界面上这个数是
+ * 现查现算的 JOIN，不是登记时抄下来的快照）。
+ */
+const RATE_HINT =
+  '这把 Key 所在**分组**的倍率（上游 group_ratio），不是 Key 自己的属性。' +
+  '实际计费 = 模型倍率 × 分组倍率，所以同一个模型换个分组价格能差十几倍' +
+  '（实测真站点 0.12~3.5）。上游改了分组倍率，下一轮采集后这里自动跟着变 —— ' +
+  '它是现查的，不是登记时抄下来的。显示「未知」表示没分组或上游没给这个分组的倍率，' +
+  '**不要当成 ×1**。'
+
 /** 编辑行的 colspan。列数算错只是子行宽度不对，但会露出一格空白，很显眼。 */
 const colCount = computed(() => {
-  let n = 4 // 前缀 / 分组 / 配额 / 操作
+  let n = 5 // 前缀 / 分组 / 分组倍率 / 配额 / 操作
   if (showChannelCol.value) n += 1
   if (showAccountCol.value) n += 1
   if (!props.compact) n += 2 // 上游限流 / 状态
@@ -200,7 +214,16 @@ async function runPending(): Promise<void> {
             <th v-if="showAccountCol" data-col="account">所属账号</th>
             <th v-if="has('ref')" data-col="ref">上游标识</th>
             <th data-col="group">分组</th>
-            <th v-if="has('rate')" data-col="rate" class="n">倍率</th>
+            <!-- 常驻列。叫「分组倍率」而不是「倍率」：这个数来自 Key 所在的
+                 **分组**（channel_groups.rate_multiplier），不是这把 Key 自己的
+                 属性，也不是模型的倍率。实际计费 = 模型倍率 × 这个数。 -->
+            <th
+              data-col="rate"
+              class="n"
+              :title="RATE_HINT"
+            >
+              分组倍率
+            </th>
             <!-- 「Key 剩余配额」而不是「剩余额度」：它是使用约束不是资金。
                  多把 Key 的配额相加**不等于**账号余额（FR-022） -->
             <th
@@ -239,8 +262,10 @@ async function runPending(): Promise<void> {
               </td>
               <td v-if="has('ref')" data-col="ref" class="dim">{{ k.external_ref ?? '—' }}</td>
               <td data-col="group">{{ k.group_ref ?? '—' }}</td>
-              <td v-if="has('rate')" data-col="rate" class="n">
+              <td data-col="rate" class="n" :data-key-rate="k.id" :title="RATE_HINT">
                 <template v-if="k.rate_multiplier !== undefined">×{{ k.rate_multiplier }}</template>
+                <!-- 「未知」而不是 ×1：没分组或分组没采到倍率时，真实倍率可能是
+                     0.12 也可能是 3.5，填 1 是编一个看起来正常的错数 -->
                 <span v-else class="dim">未知</span>
               </td>
               <!-- 传账号：不限额 Key 的配额格改显该账号余额（带口径注记）。

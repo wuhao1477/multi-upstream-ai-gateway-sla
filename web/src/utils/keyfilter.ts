@@ -21,9 +21,11 @@ const EXPIRING_DAYS = 7
  * 判据是"排查时才需要"：external_ref 只在采集写不回用量时才要看，
  * 倍率只在算成本时才要看。默认全塞进表里的结果是每一列都变得不显眼。
  */
+// 「倍率」**不在这里**（2026-09-14 从可选列提为常驻列）：它是分组倍率，
+// 直接决定这把 Key 的每一次调用被计多少钱（实测真站点跨度 0.12~3.5，十倍以上）。
+// 默认关着等于把"这把 Key 贵不贵"藏进一个二级菜单。
 export const KEY_OPTIONAL_COLS = [
   { key: 'ref', label: '上游标识' },
-  { key: 'rate', label: '倍率' },
   { key: 'expiry', label: '有效期' },
   { key: 'created', label: '登记时间' },
 ] as const

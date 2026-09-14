@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,23 @@ type ModelChannel struct {
 	BillingUnit   *string   `json:"billing_unit,omitempty"`
 	Stale         bool      `json:"stale"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
+	// Groups 是这个渠道下**能调到这个模型**的分组，带各自的分组倍率。
+	//
+	// 为什么它必须在这儿：上面那个 InputPrice 是模型自己的倍率，而实际计费是
+	// **模型倍率 × 分组倍率**，分组倍率由这把 Key 所在的分组决定。实测两个真
+	// 站点的分组倍率跨度是 0.12~1.5 与 0.26~3.5 —— 十倍以上。只看模型倍率选站，
+	// 看到的是一个与账单差一个数量级的数字。
+	//
+	// 空数组 = 该渠道还没采到分组（或采到了但没有一个分组 enable 这个模型）。
+	// **不要把空当成"倍率 1"** —— 那是"不知道"，不是"不打折"。
+	Groups []ModelGroup `json:"groups"`
+}
+
+// ModelGroup 是一个分组及其倍率（channel_groups 的一行，按模型过滤后）。
+type ModelGroup struct {
+	GroupRef string `json:"group_ref"`
+	// RateMultiplier 缺席 = 上游没给这个分组的倍率，同样不可当 1。
+	RateMultiplier *float64 `json:"rate_multiplier,omitempty"`
 }
 
 // ModelEntry 是全局模型目录的一行：一个模型名 + 有它的全部渠道。
@@ -186,18 +204,65 @@ SELECT c.model_name, ch.id, ch.name, ch.status,
 	if err != nil {
 		return page, fmt.Errorf("列模型的渠道明细: %w", err)
 	}
-	defer rows.Close()
+	// 指到本页每个 (模型, 渠道) 那一行，供 ④ 把分组挂上去。
+	slot := map[string]*ModelChannel{}
 	for rows.Next() {
 		var name string
 		var mc ModelChannel
 		if err := rows.Scan(&name, &mc.ChannelID, &mc.ChannelName, &mc.ChannelStatus,
 			&mc.InputPrice, &mc.OutputPrice, &mc.BillingUnit,
 			&mc.Stale, &mc.LastSeenAt); err != nil {
+			rows.Close()
 			return page, err
 		}
+		mc.Groups = []ModelGroup{}
 		if e, ok := byName[name]; ok {
 			e.Channels = append(e.Channels, mc)
 		}
 	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return page, err
+	}
+	for _, e := range byName {
+		for i := range e.Channels {
+			slot[groupKey(e.ModelName, e.Channels[i].ChannelID)] = &e.Channels[i]
+		}
+	}
+
+	// ④ 每个 (模型, 渠道) 下**能调到这个模型**的分组及其倍率。
+	//
+	// 归属来自 group_models（NewAPI 由每个模型的 enable_groups 反转得来），
+	// 不是"把渠道下所有分组都挂上" —— 后者会把一个调不到这个模型的分组
+	// 连同它那个漂亮的 0.12 倍率一起显示出来，而那是选不到的价格。
+	//
+	// 按倍率升序：先看见最便宜的那个分组，这是选型时唯一想先知道的事。
+	rows, err = conn.Query(ctx, `
+SELECT gm.model_name, g.channel_id, g.group_ref, g.rate_multiplier
+  FROM group_models gm JOIN channel_groups g ON g.id = gm.channel_group_id
+ WHERE gm.model_name = ANY($1)
+ ORDER BY gm.model_name, g.channel_id, g.rate_multiplier NULLS LAST, g.group_ref`,
+		names)
+	if err != nil {
+		return page, fmt.Errorf("列模型的分组倍率: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var channelID int64
+		var g ModelGroup
+		if err := rows.Scan(&name, &channelID, &g.GroupRef, &g.RateMultiplier); err != nil {
+			return page, err
+		}
+		if mc, ok := slot[groupKey(name, channelID)]; ok {
+			mc.Groups = append(mc.Groups, g)
+		}
+	}
 	return page, rows.Err()
+}
+
+// groupKey 拼 (模型名, 渠道 id) 的复合键。用 \x00 分隔：模型名里什么都可能有
+// （斜杠、冒号、点），但不会有 NUL，所以拼出来的键不会与另一对撞上。
+func groupKey(model string, channelID int64) string {
+	return model + "\x00" + strconv.FormatInt(channelID, 10)
 }

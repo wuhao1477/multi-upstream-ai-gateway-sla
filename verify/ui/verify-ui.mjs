@@ -766,6 +766,37 @@ try {
       { timeout: 8000 }, keyID, group.group_ref);
   }
   const groupedKeys = await readKeyRows();
+  // 分组倍率是**常驻列**，不是「列设置」里默认关着的那种。
+  //
+  // 它直接决定这把 Key 的每次调用被计多少钱（实际计费 = 模型倍率 × 分组倍率，
+  // 实测真站点分组倍率 0.12~3.5，十倍以上）。默认关着等于把"这把 Key 贵不贵"
+  // 藏进二级菜单。断言列头字面量而不是 data-col 存在：叫「倍率」会被读成模型
+  // 倍率，而这个数来自分组。
+  const rateHeaderNow = await page.$$eval('#detail-body thead th',
+    ts => ts.map(t => t.textContent.trim()));
+  const rateCells = await page.$$eval('#detail-body tbody tr[data-key-row] td[data-col="rate"]',
+    ts => ts.map(t => t.textContent.trim()));
+  // 期望由 API 构造：每把 Key 的倍率必须等于**它所属分组**的 rate_multiplier，
+  // 而不是别的分组的、也不是写死的 ×1。
+  const rateWant = await page.evaluate(async cid => {
+    const t = document.querySelector('#token').value;
+    const h = { Authorization: `Bearer ${t}` };
+    const [ks, gs] = await Promise.all([
+      fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+      fetch(`/admin/channel-groups?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+    ]);
+    const byID = new Map((gs.items ?? []).map(g => [g.id, g.rate_multiplier]));
+    return (ks.items ?? []).map(k => {
+      const r = k.channel_group_id === undefined ? undefined : byID.get(k.channel_group_id);
+      return r === undefined || r === null ? '未知' : `×${r}`;
+    });
+  }, newChannelId);
+  check('Key 表把「分组倍率」作为常驻列，且逐行等于该 Key 所属分组的倍率',
+    rateHeaderNow.includes('分组倍率') &&
+    JSON.stringify(rateCells) === JSON.stringify(rateWant),
+    `列头=${rateHeaderNow.join('|')} 实际=${JSON.stringify(rateCells)} ` +
+    `期望=${JSON.stringify(rateWant)}`);
+
   check('四把 Key 均显示分组与倍率（AC-37）',
     groupedKeys.length >= 4
       && groupedKeys.every(c => c.group !== '—' && c.rate !== '未知'),
@@ -1547,6 +1578,35 @@ try {
         };
       }, m.model_name);
       const wantNames = m.channels.map(c => c.channel_name);
+
+      // 「实际价」= 模型价 × 分组倍率。
+      //
+      // 这是本页最容易错得看不出来的一格：漏乘分组倍率，显示的仍是一个格式
+      // 正确、量级正常的数字，只是与账单差十几倍（实测真站点分组倍率
+      // 0.12~3.5）。所以期望由 API 现算 —— 取该渠道下能调到这个模型的分组里
+      // **倍率最低**的那个，乘出来逐字比对。
+      const effWant = m.channels.map(c => {
+        const rates = (c.groups ?? [])
+          .map(g => g.rate_multiplier)
+          .filter(r => typeof r === 'number');
+        if (c.input_price === undefined || rates.length === 0) return '未采到分组倍率';
+        return String(Math.round(c.input_price * Math.min(...rates) * 1e6) / 1e6);
+      });
+      const effGot = await page.evaluate(n => {
+        const tbl = [...document.querySelectorAll('[data-model-channels]')]
+          .find(t => t.getAttribute('data-model-channels') === n);
+        return [...tbl.querySelectorAll('tbody tr td[data-model-eff]')]
+          // 只取那格里的数字本身：后面还跟着"最低 · 分组 X（共 N 个…）"的小字
+          .map(t => (t.textContent.match(/-?[\d.]+/) ?? ['未采到分组倍率'])[0]);
+      }, m.model_name);
+      check('模型目录的「实际价」= 模型价 × 分组倍率（不是裸模型价）',
+        effGot.length === effWant.length &&
+        effGot.every((v, i) => v === effWant[i]),
+        `实际=${JSON.stringify(effGot)} 期望=${JSON.stringify(effWant)}（` +
+        m.channels.map(c => `${c.channel_name} 模型价=${c.input_price} 分组=` +
+          JSON.stringify((c.groups ?? []).map(g => `${g.group_ref}×${g.rate_multiplier}`))
+        ).join(' / ') + '）');
+
       check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名',
         countShown === m.channel_count && m.channel_count >= 2 &&
         JSON.stringify(chNames) === JSON.stringify(wantNames),

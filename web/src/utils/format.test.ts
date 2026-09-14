@@ -7,7 +7,7 @@
  *    所以错得没有任何视觉提示，而读者据此选型必然选错。
  *  · 把没采到价格的渠道当 0 → "最低 0" = 免费，而真相是"不知道"。
  */
-import { priceRanges } from './format'
+import { effectivePrices, priceRanges } from './format'
 
 function assert(cond: boolean, message: string): void {
   if (!cond) throw new Error(message)
@@ -50,6 +50,56 @@ function testMissingUnitIsItsOwnGroup(): void {
   assert(r.some((x) => x.unit === 'unknown'), `缺失口径应归入 unknown，实际 ${JSON.stringify(r)}`)
 }
 
+/**
+ * effectivePrices：模型倍率 × 分组倍率。
+ *
+ * 实测 2026-09-14 的真站点分组倍率：钱多多 0.26~3.5、VVCode 0.12~1.5。
+ * 同一个模型换个分组差十几倍，而目录上那个裸倍率一动不动 —— 这就是这段存在
+ * 的理由，也是它写错时最贵的一种错：数字看起来完全正常，只是与账单无关。
+ */
+function testMultipliesByGroupRate(): void {
+  const r = effectivePrices({
+    input_price: 2.5,
+    output_price: 12.5,
+    groups: [
+      { group_ref: 'default', rate_multiplier: 1 },
+      { group_ref: '通用大模型', rate_multiplier: 0.26 },
+      { group_ref: '测试', rate_multiplier: 3.5 },
+    ],
+  })
+  assert(r.length === 3, `三个分组应给三条，实际 ${r.length}`)
+  // 升序：最便宜的在最前，选型时先看见它
+  assert(r[0]?.groupRef === '通用大模型', `应按实际价升序，首条实际是 ${r[0]?.groupRef}`)
+  assert(r[0]?.input === 0.65, `2.5 × 0.26 = 0.65，实际 ${r[0]?.input}`)
+  assert(r[0]?.output === 3.25, `12.5 × 0.26 = 3.25，实际 ${r[0]?.output}`)
+  assert(r[2]?.input === 8.75, `2.5 × 3.5 = 8.75，实际 ${r[2]?.input}`)
+  // 反向哨兵：漏乘分组倍率的话，每一条都会等于模型自己那个 2.5
+  assert(!r.every((x) => x.input === 2.5), '每条都等于模型裸倍率 —— 分组倍率没乘上去')
+}
+
+function testMissingRateIsSkippedNotTreatedAsOne(): void {
+  const r = effectivePrices({
+    input_price: 2,
+    groups: [{ group_ref: 'a' }, { group_ref: 'b', rate_multiplier: 0.5 }],
+  })
+  assert(r.length === 1 && r[0]?.groupRef === 'b', `没采到倍率的分组要跳过，实际 ${JSON.stringify(r)}`)
+  assert(
+    !r.some((x) => x.input === 2),
+    '没采到倍率的分组被当成了 1 —— 那是把"不知道"显示成"不打折"',
+  )
+  assert(effectivePrices({ groups: [{ group_ref: 'a', rate_multiplier: 1 }] }).length === 0,
+    '模型没采到价时不该乘出一个价来')
+  assert(effectivePrices({ input_price: 1 }).length === 0, '没有分组时应为空，界面据此显示未知')
+}
+
+function testNoFloatTail(): void {
+  const r = effectivePrices({ input_price: 0.3, groups: [{ group_ref: 'g', rate_multiplier: 1.1 }] })
+  assert(r[0]?.input === 0.33, `0.3 × 1.1 应显示成 0.33 而不是浮点尾巴，实际 ${r[0]?.input}`)
+}
+
 testGroupsByUnitNeverAcrossIt()
 testUncollectedPriceIsNotZero()
 testMissingUnitIsItsOwnGroup()
+testMultipliesByGroupRate()
+testMissingRateIsSkippedNotTreatedAsOne()
+testNoFloatTail()
