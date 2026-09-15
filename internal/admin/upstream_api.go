@@ -628,6 +628,13 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 		Vendors:    csvStrings(query.Get("vendor")),
 		Endpoints:  csvStrings(query.Get("endpoint")),
 		KeyIDs:     csvInt64s(query.Get("key_id")),
+		Sort:       strings.TrimSpace(query.Get("sort")),
+	}
+	// 跨口径按价格排会把 $7/次 排在"倍率 175"之前（两种口径的数值区间重叠）。
+	// 所以未选定口径时**退回默认排序**而不是报错：地址栏里的参数是可以被人
+	// 手改的，改出一个不合法组合顶多是排序没生效，不该让页面白屏。
+	if f.Sort == "price" && f.Unit == "" {
+		f.Sort = ""
 	}
 	limit, offset := parsePaging(query)
 
@@ -641,11 +648,12 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, map[string]any{
 			"total": page.Total, "whole": page.Whole,
 			"limit": limit, "offset": offset,
-			"q": f.Q, "unit": f.Unit,
+			"q": f.Q, "unit": f.Unit, "sort": f.Sort,
 			"channel_id": f.ChannelIDs, "vendor": f.Vendors, "endpoint": f.Endpoints,
 			"key_id": f.KeyIDs,
 			"units":  page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
 			"channels": page.Channels, "channel_names": page.ChannelNames,
+			"vendor_icons": page.VendorIcons,
 			"items": page.Items,
 		})
 	})

@@ -1350,3 +1350,166 @@ summary {
   min-width: 190px;
   max-width: 340px;
 }
+
+/* ── 模型目录：左筛选 / 右结果 ──
+   照上游定价页的形状：发行方竖在左边（那是最常用的一维，34 家横铺会占满六七行），
+   搜索居中在页头，结果区只留"看什么、怎么排"。*/
+.mhero {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 10px;
+}
+/* 搜索框限宽：铺满一行的输入框看起来像在等一段话，而这里输入的是一个模型名。
+   全局 input 是 width:100%，所以这里必须显式收窄。 */
+.mhero-q {
+  width: min(520px, 100%);
+  height: 38px;
+}
+/* 统计卡吃满整行：.mhero 是 justify-items:center 的网格，不给宽度的话
+   auto-fit 那几列会缩成一列竖着堆，把搜索框和列表顶下去半屏。 */
+.mhero .stats {
+  width: 100%;
+}
+/* 卡片头部的排序框不吃满行 —— 全局 input/select 是 width:100%，
+   那条给表单里的控件用，不该管工具条。 */
+.card-h select {
+  width: auto;
+}
+.mlayout {
+  display: grid;
+  gap: 18px;
+  /* 窄屏叠放。并排的断点见下面 —— 左栏收到 260px 以下时，发行方名字开始
+     换行，而那时右边的表格已经在横向滚动了。 */
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 1100px) {
+  .mlayout {
+    grid-template-columns: 272px minmax(0, 1fr);
+    align-items: start;
+  }
+  /* 左栏跟随滚动：右边翻到第 30 行时还能直接换发行方，不用滚回顶部。
+     自己带滚动条，否则发行方展开全部之后左栏比视口高，底下几家点不到。 */
+  .mside {
+    position: sticky;
+    top: 14px;
+    max-height: calc(100vh - 28px);
+    overflow: auto;
+  }
+}
+.mfilters {
+  display: grid;
+  gap: 16px;
+}
+.mfilter-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 6px;
+}
+.mfilter-n {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin: 6px 0 0;
+}
+.mfilter .chips {
+  margin-bottom: 0;
+  gap: 5px;
+}
+/* 左栏里的选择器吃满栏宽（与 .facet 那条相反：那里旁边还并排着别的东西）。 */
+.mside [data-picker] {
+  width: 100%;
+}
+.btn.block {
+  width: 100%;
+  margin-top: 8px;
+}
+/* 发行方列表：一行一家，图标 + 名字 + 模型数。
+   竖排而不是 chip 墙：名字长短差很多（"OpenAI" vs "Moonshot AI"），
+   横排换行后每行家数不同，扫起来找不准。 */
+.vlist {
+  display: grid;
+  gap: 1px;
+}
+.vrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+  cursor: pointer;
+  text-align: left;
+}
+.vrow:hover {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+}
+.vrow.on {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.vrow.on .badge {
+  background: color-mix(in oklab, var(--primary-foreground) 25%, transparent);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+/* 名字占满中间并在过长时省略：Moonshot AI / MiniMax 这些还好，
+   但站点自定义的发行方名可以很长，撑开左栏会把右边的表格挤窄。 */
+.vrow-n {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 图标版的 vmark。
+   ⚠️ 垫白底不是装饰：28 个图标里有 11 个是 `fill="currentColor"` 的单色版
+   （grok / xai / open-ai / moonshot / ollama…）。走 <img> 时宿主页面的 CSS 管不到
+   SVG 文档内部，currentColor 只能解析成它自己的初始值——黑色。深色主题下那就是
+   一块看不见的图标。垫一层白底，单色与彩色的都稳定可见。 */
+.vmark.img {
+  background: #fff;
+  padding: 1px;
+  object-fit: contain;
+}
+.vmark.all {
+  background: var(--muted-foreground);
+}
+.vrow.on .vmark.all {
+  background: color-mix(in oklab, var(--primary-foreground) 85%, transparent);
+  color: var(--primary);
+}
+/* 表格/抽屉里的"图标 + 名字"。与 .badge 并排时要对齐，所以同样是 inline-flex。 */
+.vcell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  margin-right: 8px;
+}
+/* 价格格：数值粗、口径小。两个口径同时存在时竖着排，绝不并成一行 ——
+   $3/1M 与 $0.08/次 并排会被读成一个区间。 */
+.pcell {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+.pcell .dim {
+  font-size: 11px;
+  margin-left: 4px;
+}
+/* 卡片头：图标与模型名同一行（照上游定价页的卡片）。 */
+.mcard-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}

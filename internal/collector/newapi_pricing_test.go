@@ -98,6 +98,14 @@ func TestVendorAndEndpointTypes(t *testing.T) {
 	if got := byName["claude-opus"].VendorName; got != "Anthropic" {
 		t.Errorf("claude-opus 的 vendor_id=114 应解析成 Anthropic，实际 %q", got)
 	}
+	// icon 要跟着 name 一起带出来：同一站里多个发行方名共用一个图标
+	// （实测四个 Alibaba 系的名字都是 Qwen.Color），前端按名字猜要手写别名表。
+	if got := byName["claude-opus"].VendorIcon; got != "Claude.Color" {
+		t.Errorf("claude-opus 的图标名应是 Claude.Color，实际 %q", got)
+	}
+	if got := byName["midjourney-relax"].VendorIcon; got != "" {
+		t.Errorf("没有 vendor_id 的模型不该有图标名，实际 %q", got)
+	}
 	// 反向哨兵：把 vendors 当成 id→name 的 map 解（而它实测是数组）会让
 	// 两个都拿不到名字，上面两条会一起红；这条保证"全空"不会被当成通过。
 	if byName["gpt-4o"].VendorName == byName["claude-opus"].VendorName {

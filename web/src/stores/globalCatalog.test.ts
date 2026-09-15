@@ -27,11 +27,13 @@ function resp(over: Partial<GlobalCatalogResp>): GlobalCatalogResp {
     vendor: [],
     endpoint: [],
     key_id: [],
+    sort: '',
     units: { per_1m_token: 1 },
     vendors: {},
     endpoints: {},
     channels: {},
     channel_names: {},
+    vendor_icons: {},
     items: [
       {
         model_name: 'm',

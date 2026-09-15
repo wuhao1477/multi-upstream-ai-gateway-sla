@@ -330,6 +330,10 @@ CREATE TABLE channel_model_catalog (
   -- 每模型的 supported_endpoint_types）。两者都可空：缺席 = 上游未声明，
   -- **不是**"无供应商"或"不支持任何端点"（同 billing_unit 的口径）。
   vendor_name    TEXT,                       -- 发行方，按 vendor_id 在顶层 vendors[] 里解析出的 name；跨站点不归一
+  -- 030 补：发行方图标名（同一处 vendors[] 的 icon，实测是 lobehub 的图标名）。
+  -- 存它而不是前端按名字猜：实测同一站里四个发行方名共用一个图标，
+  -- 按名字猜要手写别名表，漏一行是静默的（退回字母块）。
+  vendor_icon    TEXT,                       -- NULL = 未声明，界面退回字母块
   endpoint_types TEXT[],                     -- 支持的端点类型（openai / anthropic / gemini / image-generation / …）
   PRIMARY KEY (channel_id, model_name)
 );
@@ -414,15 +418,16 @@ COMMIT;
 ```sql
 INSERT INTO channel_model_catalog
        (channel_id, model_name, input_price, output_price, billing_unit,
-        vendor_name, endpoint_types,
+        vendor_name, vendor_icon, endpoint_types,
         first_seen_at, last_seen_at, last_seen_seq)
 VALUES (:cid, :name, :in_price, :out_price, NULLIF(:unit,''),
-        NULLIF(:vendor,''), :endpoints, :now, :now, :sync_seq)
+        NULLIF(:vendor,''), NULLIF(:vendor_icon,''), :endpoints, :now, :now, :sync_seq)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price    = EXCLUDED.input_price,
        output_price   = EXCLUDED.output_price,
        billing_unit   = EXCLUDED.billing_unit,
        vendor_name    = EXCLUDED.vendor_name,
+       vendor_icon    = EXCLUDED.vendor_icon,
        endpoint_types = EXCLUDED.endpoint_types,
        last_seen_at   = EXCLUDED.last_seen_at,
        last_seen_seq  = EXCLUDED.last_seen_seq;

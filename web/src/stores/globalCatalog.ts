@@ -14,8 +14,9 @@ import { useToastStore } from './toast'
  * 去重写一段已经被验收覆盖的逻辑，不划算。真要抽，等出现第三个。
  */
 
-/** 每页行数。与渠道目录同值：两个界面并排放着，一页多少行不该不一样。 */
+/** 每页行数的默认值与可选档位。 */
 export const MODEL_PAGE = 50
+export const PAGE_SIZES = [20, 50, 100] as const
 
 const DEBOUNCE_MS = 250
 
@@ -45,6 +46,10 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
    * 匹配不到 —— 界面必须不让它被选中，否则得到的是一个无法解释的空列表。
    */
   const keyIDs = ref<number[]>([])
+  /** 排序与每页行数。两者都进请求 —— 排序必须在服务端做，客户端只排当前页
+   *  的话，翻到第二页看到的是"另一段里各自排好的"，整体并不有序。 */
+  const sort = ref('')
+  const pageSize = ref<number>(MODEL_PAGE)
   const offset = ref(0)
   const resp = ref<GlobalCatalogResp | null>(null)
   const loaded = ref(false)
@@ -85,6 +90,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
 
   /** 分面：id/名字 → 模型数。渠道那个额外带名字，见响应体注释。 */
   const vendorFacet = computed(() => sortedFacet(resp.value?.vendors))
+  /** 发行方 → 图标名。分面 chip 与列表都读它，见响应体注释（不从 items 里凑）。 */
+  const vendorIcons = computed<Record<string, string>>(() => resp.value?.vendor_icons ?? {})
   const endpointFacet = computed(() => sortedFacet(resp.value?.endpoints))
   const channelFacet = computed(() =>
     sortedFacet(resp.value?.channels).map(
@@ -104,6 +111,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
       vendors: [...vendors.value],
       endpoints: [...endpoints.value],
       keyIDs: [...keyIDs.value],
+      sort: sort.value,
+      pageSize: pageSize.value,
     }
     try {
       const data = await adminApi.globalCatalog({
@@ -113,7 +122,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
         vendors: request.vendors,
         endpoints: request.endpoints,
         keyIDs: request.keyIDs,
-        limit: MODEL_PAGE,
+        sort: request.sort,
+        limit: request.pageSize,
         offset: request.offset,
       })
       if (
@@ -123,7 +133,9 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
         same(channelIDs.value, request.channelIDs) &&
         same(vendors.value, request.vendors) &&
         same(endpoints.value, request.endpoints) &&
-        same(keyIDs.value, request.keyIDs)
+        same(keyIDs.value, request.keyIDs) &&
+        sort.value === request.sort &&
+        pageSize.value === request.pageSize
       ) {
         resp.value = data
         loaded.value = true
@@ -193,6 +205,7 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     vendors.value = []
     endpoints.value = []
     keyIDs.value = []
+    sort.value = ''
     offset.value = 0
     resp.value = null
     loaded.value = false
@@ -217,12 +230,25 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
   }
 
   function prev(): void {
-    offset.value = Math.max(0, offset.value - MODEL_PAGE)
+    offset.value = Math.max(0, offset.value - pageSize.value)
     void load()
   }
 
   function next(): void {
-    offset.value += MODEL_PAGE
+    offset.value += pageSize.value
+    void load()
+  }
+
+  /** 改排序/每页行数都回第一页 —— 不回的话多半落到空页上。 */
+  function setSort(v: string): void {
+    sort.value = v
+    offset.value = 0
+    void load()
+  }
+
+  function setPageSize(n: number): void {
+    pageSize.value = n
+    offset.value = 0
     void load()
   }
 
@@ -233,9 +259,12 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     vendors,
     endpoints,
     keyIDs,
+    sort,
+    pageSize,
     loaded,
     segments,
     vendorFacet,
+    vendorIcons,
     endpointFacet,
     channelFacet,
     whole,
@@ -254,6 +283,8 @@ export const useGlobalCatalogStore = defineStore('globalCatalog', () => {
     toggleVendor,
     toggleEndpoint,
     toggleKey,
+    setSort,
+    setPageSize,
     clearFilters,
     prev,
     next,

@@ -1661,7 +1661,15 @@ try {
       // 渠道/Key 在弹窗里，不再有 chip；这里数的是**弹窗里的行**，
       // 同样能回答"换得了渠道吗"这个问题。
       channels: document.querySelectorAll('#model-f-channel').length,
-      vendors: document.querySelectorAll('[data-facet-vendor]').length,
+      // ⚠️ 发行方**不能数行**：超过 12 家就折叠，数出来的永远是 12
+      // （实测真站点 34 家）。折叠时「展开全部 N 家」那个 N 才是真实分面大小；
+      // 展开了就按行数减去「全部发行方」那一行。
+      vendors: (() => {
+        const m = document.querySelector('#model-vendor-more')?.textContent.match(/(\d+)\s*家/);
+        return m === null || m === undefined
+          ? document.querySelectorAll('[data-facet-vendor]').length - 1
+          : Number(m[1]);
+      })(),
       endpoints: document.querySelectorAll('[data-facet-endpoint]').length,
     }));
     const before = await facetCounts();
@@ -1674,14 +1682,13 @@ try {
     await sleep(900);
     const after = await facetCounts();
     const urlAfter = await page.evaluate(() => location.search);
-    // 发行方 chip 数 = 该渠道的发行方数 + 一个「全部发行方」+（超过阈值时）
-    // 一个「展开全部」。所以判据是**收窄了**且不超过那两个附加项，
-    // 而不是一个写死的加法 —— 写死的话改一次折叠阈值这条就假红。
+    // 逐字比对后端说的家数，不是"变小了就行"：收窄到**另一个**错误的集合
+    // （比如少算了一家）同样会变小，而那看起来完全正常。
     check('按渠道筛选：发行方分面收窄到该渠道，而渠道选择器仍能换渠道',
-      after.vendors >= ch2Vendors + 1 && after.vendors <= ch2Vendors + 2 &&
-      after.vendors < before.vendors &&
+      after.vendors === ch2Vendors && after.vendors < before.vendors &&
+      before.vendors === allVendors &&
       after.channels === 1 && new RegExp(`channel=${ch2.id}`).test(urlAfter),
-      `发行方 chip ${before.vendors}→${after.vendors}（后端说该渠道有 ${ch2Vendors} 家，` +
+      `发行方 ${before.vendors}→${after.vendors} 家（后端说该渠道有 ${ch2Vendors} 家，` +
       `全库 ${allVendors} 家）URL=${urlAfter}`);
 
     // 筛出来的每一行都必须真的属于该渠道 —— 期望由 API 现算。
@@ -1705,8 +1712,11 @@ try {
           .find(b => b.getAttribute('data-facet-vendor') === v)?.click();
       }, vendorPick[0]);
       await sleep(900);
+      // 读 .vname 而不是整格 textContent：图标取不到时 VendorIcon 退回的是一个
+      // **带字母的**方块，整格会读成 "OOpenAI"。
       const vendorCells = await page.$$eval('td[data-col="vendor"]',
-        ts => ts.map(t => t.textContent.trim()));
+        ts => ts.map(t => [...t.querySelectorAll('.vname')]
+          .map(v => v.textContent.trim()).join(',')));
       const vendorURL = await page.evaluate(() => location.search);
       check('叠加发行方筛选后每一行都是该发行方',
         vendorCells.length === Math.min(50, vendorPick[1]) &&
@@ -1741,6 +1751,167 @@ try {
       await page.click('#model-reset');
       await sleep(900);
     }
+
+    // ── 布局：左筛选 / 右结果，搜索居中在页头 ──
+    //
+    // 量**渲染出来的位置**，不是"有没有那个 class"：类名换个写法这条就假绿，
+    // 而它要守的恰恰是"发行方在左边、结果在右边"这个视觉事实本身。
+    await page.click('#model-reset');
+    await sleep(900);
+    const layout = await page.evaluate(() => {
+      const r = s => document.querySelector(s)?.getBoundingClientRect() ?? null;
+      const side = r('.mside'), main = r('.mmain'), q = r('#model-q'), hero = r('.mhero');
+      return {
+        sideRight: Math.round(side?.right ?? -1),
+        mainLeft: Math.round(main?.left ?? -1),
+        qCenter: Math.round((q?.left ?? 0) + (q?.width ?? 0) / 2),
+        heroCenter: Math.round((hero?.left ?? 0) + (hero?.width ?? 0) / 2),
+        // 搜索框必须在页头、不在结果区里：结果区随响应整块重渲染会换掉输入框
+        // 节点，焦点与光标随之丢失 —— 症状是"筛选框只认一个字符"。
+        qInMain: document.querySelector('.mmain #model-q') !== null,
+      };
+    });
+    check('模型目录是左筛选 / 右结果两栏，搜索框居中在页头（不在结果区里）',
+      layout.sideRight > 0 && layout.sideRight <= layout.mainLeft && !layout.qInMain &&
+      Math.abs(layout.qCenter - layout.heroCenter) <= 24,
+      `左栏右边界 ${layout.sideRight} / 右栏左边界 ${layout.mainLeft}，` +
+      `搜索框中心 ${layout.qCenter} / 页头中心 ${layout.heroCenter}，` +
+      `搜索框在结果区里=${layout.qInMain}`);
+
+    // ── 发行方图标 ──
+    //
+    // 判据是 **naturalWidth > 0**：有 <img> 只能证明"写了个 img 标签"，
+    // src 指错、文件没打进产物时标签照样在，而页面上是一排裂图。
+    // 同时守住离线保证（internal/admin/web.go）：src 必须是本站资源，
+    // 一旦有人图省事换成 CDN，这条就红。
+    await page.evaluate(() => document.querySelector('#model-vendor-more')?.click());
+    await sleep(300);
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.mside img.vmark')].every(i => i.complete),
+      { timeout: 5000 }).catch(() => {});
+    const icons = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('[data-facet-vendor]')]
+        .filter(b => b.getAttribute('data-facet-vendor') !== '');
+      return rows.map(b => {
+        const img = b.querySelector('img.vmark');
+        return {
+          vendor: b.getAttribute('data-facet-vendor'),
+          loaded: img !== null && img.complete && img.naturalWidth > 0,
+          broken: img !== null && img.complete && img.naturalWidth === 0,
+          src: img?.getAttribute('src') ?? '',
+          letter: b.querySelector('span.vmark') !== null,
+        };
+      });
+    });
+    // 后端声明了图标名的那些**必须**渲染成真图标。少哪家就把那个 SVG 补进
+    // web/src/assets/vendor/（见那里的 README）—— 失败信息直接给出名字。
+    const declared = (await api('/admin/catalog?limit=1')).vendor_icons ?? {};
+    const shouldHave = icons.filter(i => (declared[i.vendor] ?? '') !== '');
+    const missing = shouldHave.filter(i => !i.loaded).map(i => `${i.vendor}(${declared[i.vendor]})`);
+    check('发行方图标：上游声明了图标的都渲染成真 SVG，没声明的退回字母块，且无外链',
+      shouldHave.length > 0 && missing.length === 0 &&
+      icons.every(i => !i.broken) &&
+      icons.every(i => i.loaded || i.letter) &&
+      icons.every(i => i.src === '' || i.src.startsWith('/admin/ui/')),
+      `${icons.length} 家发行方，上游声明图标 ${shouldHave.length} 家，` +
+      `渲染出真图标 ${icons.filter(i => i.loaded).length} 家；` +
+      `缺图标=${JSON.stringify(missing)}；` +
+      `外链=${JSON.stringify(icons.map(i => i.src).filter(u => u !== '' && !u.startsWith('/admin/ui/')))}`);
+    await page.evaluate(() => document.querySelector('#model-vendor-more')?.click());
+    await sleep(300);
+
+    // ── 排序 ──
+    //
+    // 排序必须在**服务端**做。客户端只排当前页的话，翻到第二页看到的是
+    // "另一段里各自排好的" —— 每一页内部有序，整体并不有序，而那看起来完全正常。
+    // 所以判据是与后端同参数的响应**逐行同序**，不是"界面自己排好了"。
+    await page.select('#model-sort', 'name');
+    await sleep(900);
+    const nameRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const nameResp = await api('/admin/catalog?sort=name&limit=50');
+    check('按模型名排序在服务端做，界面与后端逐行同序',
+      nameRows.length > 1 &&
+      JSON.stringify(nameRows) === JSON.stringify(nameResp.items.map(m => m.model_name)) &&
+      nameResp.sort === 'name',
+      `界面首行 ${nameRows[0]} 末行 ${nameRows[nameRows.length - 1]}，` +
+      `后端首行 ${nameResp.items[0]?.model_name}`);
+
+    // 按价格排序**要先选定价类型**：两种口径的数值区间重叠（实测按次 0.004~7
+    // vs 倍率 0.01~175），跨口径排会把 $7/次 的视频模型排在"倍率 175"之前。
+    // 所以未选口径时那一项必须是禁用的 —— 藏起来不行，藏了就没人知道有这功能。
+    const priceOff = await page.$eval('#model-sort option[value="price"]', o => o.disabled);
+    const segUnit = Object.keys(firstPage.units ?? {}).find(u => u !== 'unknown');
+    await page.evaluate(u => {
+      [...document.querySelectorAll('[data-munit]')]
+        .find(b => b.getAttribute('data-munit') === u)?.click();
+    }, segUnit);
+    await sleep(900);
+    const priceOn = await page.$eval('#model-sort option[value="price"]', o => o.disabled);
+    await page.select('#model-sort', 'price');
+    await sleep(900);
+    const priceRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const priceResp = await api(
+      `/admin/catalog?sort=price&unit=${encodeURIComponent(segUnit)}&limit=50`);
+    check('按价格排序：选定价类型后才可用，且与后端逐行同序',
+      priceOff === true && priceOn === false && priceRows.length > 1 &&
+      JSON.stringify(priceRows) === JSON.stringify(priceResp.items.map(m => m.model_name)),
+      `未选口径时禁用=${priceOff} 选了 ${segUnit} 之后禁用=${priceOn}；` +
+      `界面首行 ${priceRows[0]} / 后端首行 ${priceResp.items[0]?.model_name}`);
+
+    // 切走定价类型时排序要退回默认：后端在没有 unit 时也会把 price 降级，
+    // 两边不一致的话界面显示"按价格"、拿到的却是按渠道数排的结果。
+    await page.evaluate(() => {
+      [...document.querySelectorAll('[data-munit]')]
+        .find(b => b.getAttribute('data-munit') === '')?.click();
+    });
+    await sleep(900);
+    const sortAfterUnitCleared = await page.$eval('#model-sort', s => s.value);
+    check('清掉定价类型时「按价格」排序退回默认（与后端的降级一致）',
+      sortAfterUnitCleared === '',
+      `排序框现在是 ${JSON.stringify(sortAfterUnitCleared)}`);
+
+    // ── 每页行数 ──
+    await page.select('#model-pagesize', '20');
+    await sleep(900);
+    const paged = await page.evaluate(() => ({
+      rows: document.querySelectorAll('[data-model-row]').length,
+      foot: document.querySelector('#model-next')?.parentElement?.innerText
+        .replace(/\s+/g, ' ').trim() ?? '',
+    }));
+    check('每页行数可调，翻页区的计数跟着改',
+      paged.rows === 20 && /第 1–20 /.test(paged.foot),
+      `${paged.rows} 行；页脚=${JSON.stringify(paged.foot)}`);
+    await page.select('#model-pagesize', '50');
+    await sleep(900);
+
+    // ── 价格口径 /1M ↔ /1K ──
+    //
+    // 只改**显示**：同一个数除以 1000。所以判据是两次读到的数正好差一千倍，
+    // 不是"点了之后文案变了" —— 后者在把 /1K 实现成"另取一列价格"时照样绿。
+    const priceCell = () => page.evaluate(() => {
+      const cells = [...document.querySelectorAll('td[data-col="price"]')];
+      for (const c of cells) {
+        const m = c.textContent.replace(/\s+/g, ' ').match(/\$([\d.]+)[^$]*?(\/1[MK] token|\/次)/);
+        if (m !== null) return { n: Number(m[1]), suffix: m[2], row: c.closest('tr')
+          ?.getAttribute('data-model-row') };
+      }
+      return null;
+    });
+    const per1M = await priceCell();
+    await page.click('[data-seg="1K"]');
+    await sleep(400);
+    const per1K = await priceCell();
+    const savedUnit = await page.evaluate(() => localStorage.getItem('sla.models.priceUnit'));
+    check('价格可切 /1M ↔ /1K，且两者正好差一千倍（同一个数，不是另一套价）',
+      per1M !== null && per1K !== null && per1M.row === per1K.row &&
+      per1M.suffix === '/1M token' && per1K.suffix === '/1K token' &&
+      Math.abs(per1K.n - per1M.n / 1000) <= 1e-6 && savedUnit === '1K',
+      `${per1M?.row}：${per1M?.n}${per1M?.suffix} → ${per1K?.n}${per1K?.suffix}，` +
+      `本地偏好=${savedUnit}`);
+    await page.click('[data-seg="1M"]');
+    await sleep(300);
 
     // 筛选：收敛到命中行，且写进 URL（把"谁家有 X"的链接发给别人要能复现）。
     await page.click('#model-q');

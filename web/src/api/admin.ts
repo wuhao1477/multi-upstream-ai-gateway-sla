@@ -141,6 +141,8 @@ export interface GlobalCatalogQuery extends CatalogQuery {
    * 未归组的 Key 什么都匹配不到（后端不替它猜分组），调用方不该把这种 Key 传进来。
    */
   keyIDs?: number[]
+  /** 排序：'' / 'channels'（默认）/ 'name' / 'price'。price 只在选定口径时生效。 */
+  sort?: string
 }
 
 export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalogResp> {
@@ -157,6 +159,7 @@ export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalog
     sp.set('endpoint', q.endpoints.join(','))
   }
   if (q.keyIDs !== undefined && q.keyIDs.length > 0) sp.set('key_id', q.keyIDs.join(','))
+  if (q.sort !== undefined && q.sort !== '') sp.set('sort', q.sort)
   if (q.limit !== undefined) sp.set('limit', String(q.limit))
   if (q.offset !== undefined) sp.set('offset', String(q.offset))
   const qs = sp.toString()

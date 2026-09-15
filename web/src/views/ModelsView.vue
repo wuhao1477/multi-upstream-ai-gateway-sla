@@ -25,13 +25,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ModelChannelTable from '@/components/res/ModelChannelTable.vue'
 import ScopePicker from '@/components/res/ScopePicker.vue'
+import VendorIcon from '@/components/res/VendorIcon.vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
 import UiSegmented from '@/components/ui/UiSegmented.vue'
 import UiStat from '@/components/ui/UiStat.vue'
 import { useChannelsStore } from '@/stores/channels'
-import { useGlobalCatalogStore } from '@/stores/globalCatalog'
+import { PAGE_SIZES, useGlobalCatalogStore } from '@/stores/globalCatalog'
 import { useResourcesStore } from '@/stores/resources'
 import {
   dynamicRateText,
@@ -47,6 +48,15 @@ type ViewMode = 'list' | 'card'
 type Density = 'tight' | 'normal' | 'loose'
 const VIEW_KEY = 'sla.models.view'
 const DENSITY_KEY = 'sla.models.density'
+const PRICE_UNIT_KEY = 'sla.models.priceUnit'
+
+/**
+ * 价格显示口径：每 1M token 还是每 1K token。
+ *
+ * 只影响**显示**，不影响筛选与排序 —— 它是同一个数除以 1000。上游的定价页
+ * 也是这么切的，运维两边对照时不用换算。
+ */
+type PriceUnit = '1M' | '1K'
 
 /** 卡片网格的最小列宽。密度就是这一个数 —— 列数由 auto-fill 自己算。 */
 const DENSITY_WIDTH: Record<Density, string> = {
@@ -110,6 +120,56 @@ const view = ref<ViewMode>('list')
 const density = ref<Density>('normal')
 /** 抽屉里的模型名。空串 = 抽屉关着。 */
 const pickedName = ref('')
+const priceUnit = ref<PriceUnit>('1M')
+
+/** 把 $/1M 换成当前口径。/1K 就是除以 1000（同一个数，不是另一套价）。 */
+function inUnit(usdPer1M: number): number {
+  return priceUnit.value === '1K' ? Math.round((usdPer1M / 1000) * 1e6) / 1e6 : usdPer1M
+}
+
+/**
+ * 主列表那一格价格：**按口径分段**给绝对美元区间。
+ *
+ * 绝对价而不是裸倍率：倍率跨站点不可比（同一个 ×1 在不同 quota_per_unit 的站上
+ * 是不同的钱），折算后才在同一把尺子上。折算不出来（该段没有一个渠道采到基数）
+ * 时退回倍率并标出来 —— 不猜一个基数。
+ */
+function priceText(m: ModelEntry): { unit: string; text: string; usd: boolean }[] {
+  return priceRanges(m.channels).map((r) => {
+    if (r.usdMin === null || r.usdMax === null) {
+      return {
+        unit: r.unit,
+        text: r.min === r.max ? `${r.min}` : `${r.min} – ${r.max}`,
+        usd: false,
+      }
+    }
+    const lo = inUnit(r.usdMin)
+    const hi = inUnit(r.usdMax)
+    return { unit: r.unit, text: lo === hi ? `$${lo}` : `$${lo} – $${hi}`, usd: true }
+  })
+}
+
+/**
+ * 折算后那个数的后缀。**口径不同后缀不同** —— per_call 折出来的是"每次调用
+ * 多少钱"，与 token 数无关，写成 /1M token 是错的。
+ */
+function usdSuffix(unit: string): string {
+  return unit === 'per_call' ? '/次' : `/${priceUnit.value} token`
+}
+
+/**
+ * 排序选项。**按价格排只在选定了计价口径时可用** —— 两种口径的数值区间重叠
+ * （实测按次 0.004~7 vs 倍率 0.01~175），跨口径按价格排会把 $7/次 的视频模型
+ * 排在"倍率 175"之前。禁用而不是隐藏：让人看见它存在、以及为什么现在不能用。
+ */
+const SORTS = [
+  { value: '', label: '渠道数' },
+  { value: 'name', label: '模型名' },
+  { value: 'price', label: '价格' },
+] as const
+const priceSortHint =
+  '按价格排序要先选一种计价类型：按量与按次的数值区间重叠，混在一起排会把 ' +
+  '$7/次 的模型排在"倍率 175"之前。'
 
 /**
  * 抽屉盯的是**模型名**而不是那个对象：翻页或改筛选后 store 里的 items 是新对象，
@@ -156,6 +216,8 @@ onMounted(async () => {
   const savedView = localStorage.getItem(VIEW_KEY)
   view.value = (urlView !== '' ? urlView : (savedView ?? 'list')) === 'card' ? 'card' : 'list'
   localStorage.setItem(VIEW_KEY, view.value)
+  const savedPriceUnit = localStorage.getItem(PRICE_UNIT_KEY)
+  priceUnit.value = savedPriceUnit === '1K' ? '1K' : '1M'
   const savedDensity = localStorage.getItem(DENSITY_KEY)
   density.value =
     savedDensity === 'tight' || savedDensity === 'loose' ? savedDensity : 'normal'
@@ -206,6 +268,15 @@ watch(view, (v) => {
   syncURL()
 })
 watch(density, (d) => localStorage.setItem(DENSITY_KEY, d))
+watch(priceUnit, (u) => localStorage.setItem(PRICE_UNIT_KEY, u))
+
+/** 切走计价口径时，若排序是「价格」就退回默认 —— 后端也会这么退，两处一致。 */
+watch(
+  () => cat.unit,
+  (u) => {
+    if (u === '' && cat.sort === 'price') cat.setSort('')
+  },
+)
 
 function resetFilters(): void {
   qInput.value = ''
@@ -253,22 +324,6 @@ const vendorShown = computed(() => {
 })
 
 /**
- * 供应商图标位。
- *
- * ⚠️ **不是上游那套图标**：NewAPI 用 @lobehub/icons（React 包），而这个界面是
- * Vue 且由 go:embed 打进二进制、要在内网/离线环境可用（见 internal/admin/web.go）
- * —— 走 CDN 会破坏那条保证，引一个 React 图标库到 Vue 工程里也不成立。
- * 这里用**名字首字确定性取色**的字母块：不引依赖、不发外链，仍然让一排 chip
- * 能靠颜色区分开。真图标要么把 lobehub 的静态 SVG 挑需要的几十个 vendor 进
- * 仓库，要么放弃离线保证 —— 那是个取舍，不该由我替你定。
- */
-function vendorHue(name: string): number {
-  let h = 0
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360
-  return h
-}
-
-/**
  * 一个模型在各渠道上的发行方/端点类型的并集。
  *
  * 为什么取并集而不是随便拿第一个渠道的：同一个模型在 A 站可能标了发行方、
@@ -286,362 +341,439 @@ function endpointsOf(m: ModelEntry): string[] {
 
 <template>
   <div class="pane on" id="pane-models">
-    <UiCard>
-      <template #header>
-        <div>
-          <h2 class="card-t">模型目录</h2>
-          <p class="card-d">
-            上游声明有哪些模型，以及每个模型<b>哪些渠道有</b>。选型看这里，建站看渠道详情。
-          </p>
-        </div>
-      </template>
+    <!-- 页头。标题 + 一句话 + 居中搜索，照上游定价页的形状：进来第一件事多半是
+         "找某个模型"，搜索框该在视线正中，而不是埋在筛选区末尾。
 
-      <!-- 叫「匹配模型数」而不是「模型数」：它跟着筛选框走（分段不影响它）。
-           搜 gpt-4o 时这一格是 28，写成「模型数」会被读成"目录里一共 28 个"。 -->
-      <div class="stats">
-        <UiStat label="匹配模型数" :value="cat.loaded ? cat.whole : '—'" />
-        <UiStat
-          v-for="[u, n] in cat.segments"
-          :key="u"
-          :label="unitChip(u)"
-          :value="n"
+         ⚠️ #model-q 必须留在结果区**之外**：它一旦落在随响应整块换掉的子树里，
+         重渲染会替换输入框节点，焦点与光标随之丢失 —— 症状是"筛选框只认一个
+         字符"。这坑渠道目录踩过一次，见 CatalogView 同处注释。放在页头里天然
+         满足这条，左栏与右栏怎么重渲染都碰不到它。 -->
+    <UiCard>
+      <div class="mhero">
+        <h2 class="card-t">模型目录</h2>
+        <p class="card-d">
+          上游声明有哪些模型，以及每个模型<b>哪些渠道有</b>。选型看这里，建站看渠道详情。
+        </p>
+        <label class="sr" for="model-q">按模型名筛选</label>
+        <input
+          id="model-q"
+          v-model="qInput"
+          class="mhero-q"
+          placeholder="搜索模型，如 claude / gpt-4o / qwen"
+          @input="cat.setQuery(qInput)"
         />
+        <!-- 叫「匹配模型数」而不是「模型数」：它跟着筛选框走（分段不影响它）。
+             搜 gpt-4o 时这一格是 28，写成「模型数」会被读成"目录里一共 28 个"。 -->
+        <div class="stats">
+          <UiStat label="匹配模型数" :value="cat.loaded ? cat.whole : '—'" />
+          <UiStat v-for="[u, n] in cat.segments" :key="u" :label="unitChip(u)" :value="n" />
+        </div>
       </div>
       <p class="note">
         这是<b>目录</b>（上游声明它有），不是「已登记为可路由的模型」—— 两者是两层（02
         §1.3）。「疑似下架」按连续缺席采集轮次判定，不按经过时间推测。
         <br />⚠️ 计价口径不同的模型<b>不可直接比大小</b>：<code>/次</code>是每次调用的绝对
-        美元价，<code>×倍率</code>是相对基准价的倍数。分段按钮就是为此存在的。
+        美元价，<code>×倍率</code>是相对基准价的倍数。左栏「定价类型」就是为此存在的。
         <br />「渠道数」是<b>有这个模型</b>的渠道数，不是"能用它"的渠道数 ——
         已停用的渠道不采集也不承接请求，疑似下架的模型上游可能已经撤了，
         两者都单独计数，要不要算进去由你定。
       </p>
     </UiCard>
 
-    <UiCard>
-      <template #header>
-        <h2 class="card-t">模型列表</h2>
-        <span class="badge" id="model-count">{{
-          cat.loaded ? `${cat.total} / ${cat.whole}` : '—'
-        }}</span>
-        <div class="spacer"></div>
-        <UiSegmented
-          v-if="view === 'card'"
-          v-model="density"
-          label="卡片疏密"
-          :options="[
-            { value: 'tight', label: '紧凑' },
-            { value: 'normal', label: '标准' },
-            { value: 'loose', label: '宽松' },
-          ]"
-        />
-        <UiSegmented
-          v-model="view"
-          label="模型目录视图模式"
-          :options="[
-            { value: 'list', label: '列表' },
-            { value: 'card', label: '卡片' },
-          ]"
-        />
-      </template>
+    <!-- 左筛选 / 右结果。窄屏叠放（见 app.css 的断点）：左栏六组筛选挤到 300px
+         以下就开始换行，而那时右边的表格已经在横向滚动了。 -->
+    <div class="mlayout">
+      <UiCard class="mside">
+        <template #header>
+          <h2 class="card-t">筛选</h2>
+          <div class="spacer"></div>
+          <button
+            class="btn outline sm"
+            id="model-reset"
+            :disabled="!cat.filtering"
+            @click="resetFilters"
+          >
+            重置
+          </button>
+        </template>
 
-      <!-- 分面筛选。四组都是多选，点第二下取消。
-           每组的计数**在除自己以外的全部筛选之下**统计（后端算的）——
-           所以筛了渠道之后供应商只剩这些渠道有的（正是要的），而渠道那一组
-           仍然列全，换得了渠道。 -->
-      <div class="facets" v-if="cat.loaded">
-        <div class="facet" v-if="cat.channelFacet.length > 0">
-          <div class="facet-l">上游渠道</div>
-          <ScopePicker
-            id="model-f-channel"
-            kind="channel"
-            multi
-            v-model="channelPick"
-            placeholder="全部渠道"
+        <!-- 每组的计数**在除自己以外的全部筛选之下**统计（后端算的）——
+             所以筛了渠道之后发行方只剩这些渠道有的（正是要的），而渠道那一组
+             仍然列全，换得了渠道。 -->
+        <div class="mfilters" v-if="cat.loaded">
+          <!-- 渠道与 Key 走**弹窗**而不是一排 chip：真库 64 个渠道、Key 更多，
+               平铺出来把列表挤出首屏；而弹窗里能搜索、能看域名与分组倍率
+               （选错渠道的后果是把筛选打到别人家站点上，域名才是身份）。 -->
+          <section class="mfilter" v-if="cat.channelFacet.length > 0">
+            <div class="mfilter-h">
+              <span>上游渠道</span>
+              <button
+                v-if="cat.channelIDs.length > 0"
+                class="linkish sm"
+                data-facet-channel=""
+                @click="resetChannels"
+              >
+                清除
+              </button>
+            </div>
+            <ScopePicker
+              id="model-f-channel"
+              kind="channel"
+              multi
+              v-model="channelPick"
+              placeholder="全部渠道"
+            />
+            <p class="mfilter-n">{{ cat.channelFacet.length }} 个渠道有目录数据</p>
+          </section>
+
+          <section class="mfilter" v-if="keyFacet.length > 0">
+            <div class="mfilter-h">
+              <span>按 Key</span>
+              <button
+                v-if="cat.keyIDs.length > 0"
+                class="linkish sm"
+                data-facet-key=""
+                @click="resetKeys"
+              >
+                清除
+              </button>
+            </div>
+            <ScopePicker id="model-f-key" kind="key" multi v-model="keyPick" placeholder="不限 Key" />
+            <p class="mfilter-n" :title="UNGROUPED_HINT">
+              {{ keyFacet.filter((k) => k.usable).length }} 把可筛 ·
+              {{ keyFacet.filter((k) => !k.usable).length }} 把未归组
+            </p>
+          </section>
+
+          <!-- 发行方是左栏的主角（照上游定价页）：竖着一列、带图标、带计数，
+               扫一眼就知道这批渠道里谁家模型多。跟着渠道筛选走：没选渠道时
+               列全部，选了就只剩这些渠道有的。 -->
+          <section class="mfilter" v-if="cat.vendorFacet.length > 0">
+            <div class="mfilter-h">
+              <span
+                >模型发行方
+                <span class="dim" v-if="cat.channelIDs.length > 0">（已按所选渠道收窄）</span></span
+              >
+            </div>
+            <div class="vlist">
+              <button
+                class="vrow"
+                :class="{ on: cat.vendors.length === 0 }"
+                data-facet-vendor=""
+                @click="cat.vendors.length > 0 && resetVendors()"
+              >
+                <span class="vmark all">全</span>
+                <span class="vrow-n">全部发行方</span>
+                <span class="badge">{{ cat.vendorFacet.length }}</span>
+              </button>
+              <button
+                v-for="[v, n] in vendorShown"
+                :key="v"
+                class="vrow"
+                :class="{ on: cat.vendors.includes(v) }"
+                :data-facet-vendor="v"
+                @click="cat.toggleVendor(v)"
+              >
+                <VendorIcon :name="v" :icon="cat.vendorIcons[v]" />
+                <span class="vrow-n">{{ v }}</span>
+                <span class="badge">{{ n }}</span>
+              </button>
+            </div>
+            <!-- 折叠：实测一个真站点 34 家发行方，全列出来左栏要滚好几屏，
+                 而其中多数只有一两个模型。已选中的永远显示（见 vendorShown），
+                 否则收起之后看不见自己选了什么 -->
+            <button
+              v-if="cat.vendorFacet.length > VENDOR_HEAD"
+              class="btn outline sm block"
+              id="model-vendor-more"
+              @click="vendorsExpanded = !vendorsExpanded"
+            >
+              {{ vendorsExpanded ? '收起' : `展开全部 ${cat.vendorFacet.length} 家` }}
+            </button>
+          </section>
+
+          <section class="mfilter">
+            <div class="mfilter-h"><span>定价类型</span></div>
+            <div class="chips">
+              <button
+                class="chipf"
+                :class="{ on: cat.unit === '' }"
+                :data-munit="''"
+                @click="cat.setUnit('')"
+              >
+                全部 <span class="badge">{{ cat.whole }}</span>
+              </button>
+              <!-- 这里用「按量计费 / 按次计费」而不是「×倍率 / 每次」：后者说的是
+                   "这个数怎么读"，是价格单元格的口径；分面上问的是"怎么计费" -->
+              <button
+                v-for="[u, n] in cat.segments"
+                :key="u"
+                class="chipf"
+                :class="{ on: cat.unit === u }"
+                :data-munit="u"
+                @click="cat.setUnit(u)"
+              >
+                {{ pricingTypeLabel(u) }} <span class="badge">{{ n }}</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="mfilter" v-if="cat.endpointFacet.length > 0">
+            <div class="mfilter-h"><span>端点类型</span></div>
+            <div class="chips">
+              <button
+                class="chipf"
+                :class="{ on: cat.endpoints.length === 0 }"
+                data-facet-endpoint=""
+                @click="cat.endpoints.length > 0 && resetEndpoints()"
+              >
+                全部 <span class="badge">{{ cat.endpointFacet.length }}</span>
+              </button>
+              <button
+                v-for="[e, n] in cat.endpointFacet"
+                :key="e"
+                class="chipf"
+                :class="{ on: cat.endpoints.includes(e) }"
+                :data-facet-endpoint="e"
+                @click="cat.toggleEndpoint(e)"
+              >
+                {{ endpointLabel(e) }} <span class="badge">{{ n }}</span>
+              </button>
+            </div>
+          </section>
+        </div>
+      </UiCard>
+
+      <UiCard class="mmain">
+        <template #header>
+          <h2 class="card-t">模型列表</h2>
+          <span class="badge" id="model-count">{{
+            cat.loaded ? `${cat.total} / ${cat.whole}` : '—'
+          }}</span>
+          <div class="spacer"></div>
+          <!-- 计价口径只改**显示**：/1K 就是 /1M 除以 1000，同一个数。
+               上游定价页也是这么切的，运维两边对照时不用换算。 -->
+          <UiSegmented
+            v-model="priceUnit"
+            label="价格显示口径"
+            :options="[
+              { value: '1M', label: '/1M' },
+              { value: '1K', label: '/1K' },
+            ]"
           />
-          <button
-            v-if="cat.channelIDs.length > 0"
-            class="chipf"
-            data-facet-channel=""
-            @click="resetChannels"
+          <label class="sr" for="model-sort">排序方式</label>
+          <select
+            id="model-sort"
+            :value="cat.sort"
+            @change="cat.setSort(($event.target as HTMLSelectElement).value)"
           >
-            清除
-          </button>
-          <span class="dim" style="font-size: 11px"
-            >{{ cat.channelFacet.length }} 个渠道有目录数据</span
-          >
-        </div>
-
-        <!-- 渠道与 Key 走**弹窗**而不是一排 chip：真库 64 个渠道、Key 更多，
-             平铺出来把列表挤出首屏；而弹窗里能搜索、能看域名与分组倍率
-             （选错渠道的后果是把筛选打到别人家站点上，域名才是身份）。 -->
-        <div class="facet" v-if="keyFacet.length > 0">
-          <div class="facet-l">按 Key</div>
-          <ScopePicker
-            id="model-f-key"
-            kind="key"
-            multi
-            v-model="keyPick"
-            placeholder="不限 Key"
+            <option
+              v-for="o in SORTS"
+              :key="o.value"
+              :value="o.value"
+              :disabled="o.value === 'price' && cat.unit === ''"
+            >
+              {{ o.label }}
+            </option>
+          </select>
+          <UiSegmented
+            v-if="view === 'card'"
+            v-model="density"
+            label="卡片疏密"
+            :options="[
+              { value: 'tight', label: '紧凑' },
+              { value: 'normal', label: '标准' },
+              { value: 'loose', label: '宽松' },
+            ]"
           />
-          <button
-            v-if="cat.keyIDs.length > 0"
-            class="chipf"
-            data-facet-key=""
-            @click="resetKeys"
-          >
-            清除
-          </button>
-          <span class="dim" style="font-size: 11px" :title="UNGROUPED_HINT"
-            >{{ keyFacet.filter((k) => k.usable).length }} 把可筛 ·
-            {{ keyFacet.filter((k) => !k.usable).length }} 把未归组</span
-          >
-        </div>
+          <UiSegmented
+            v-model="view"
+            label="模型目录视图模式"
+            :options="[
+              { value: 'list', label: '列表' },
+              { value: 'card', label: '卡片' },
+            ]"
+          />
+        </template>
 
-        <div class="facet" v-if="cat.vendorFacet.length > 0">
-          <!-- 供应商跟着渠道筛选走：没选渠道时列全部，选了就只剩这些渠道有的 -->
-          <div class="facet-l">
-            发行方
-            <span class="dim" v-if="cat.channelIDs.length > 0">（已按所选渠道收窄）</span>
-          </div>
-          <button
-            class="chipf"
-            :class="{ on: cat.vendors.length === 0 }"
-            data-facet-vendor=""
-            @click="cat.vendors.length > 0 && resetVendors()"
-          >
-            全部发行方 <span class="badge">{{ cat.vendorFacet.length }}</span>
-          </button>
-          <button
-            v-for="[v, n] in vendorShown"
-            :key="v"
-            class="chipf"
-            :class="{ on: cat.vendors.includes(v) }"
-            :data-facet-vendor="v"
-            @click="cat.toggleVendor(v)"
-          >
-            <span class="vmark" :style="{ '--vh': vendorHue(v) }">{{ [...v][0] }}</span>
-            {{ v }} <span class="badge">{{ n }}</span>
-          </button>
-          <!-- 折叠：实测一个真站点 34 家发行方，全铺是六七行 chip，把列表挤出
-               首屏，而其中多数只有一两个模型。已选中的永远显示（见 vendorShown），
-               否则收起之后看不见自己选了什么 -->
-          <button
-            v-if="cat.vendorFacet.length > VENDOR_HEAD"
-            class="chipf"
-            id="model-vendor-more"
-            @click="vendorsExpanded = !vendorsExpanded"
-          >
-            {{ vendorsExpanded ? '收起' : `展开全部 ${cat.vendorFacet.length} 家` }}
-          </button>
-        </div>
+        <p class="note" v-if="cat.unit === ''" :title="priceSortHint">
+          「按价格排序」要先在左栏选一种<b>定价类型</b>：按量与按次的数值区间重叠，
+          混在一起排会把 $7/次 的模型排在"倍率 175"之前。
+        </p>
 
-        <div class="facet">
-          <div class="facet-l">定价类型</div>
-          <button
-            class="chipf"
-            :class="{ on: cat.unit === '' }"
-            :data-munit="''"
-            @click="cat.setUnit('')"
-          >
-            全部模型 <span class="badge">{{ cat.whole }}</span>
-          </button>
-          <!-- 这里用「按量计费 / 按次计费」而不是「×倍率 / 每次」：后者说的是
-               "这个数怎么读"，是价格单元格的口径；分面上问的是"怎么计费" -->
-          <button
-            v-for="[u, n] in cat.segments"
-            :key="u"
-            class="chipf"
-            :class="{ on: cat.unit === u }"
-            :data-munit="u"
-            @click="cat.setUnit(u)"
-          >
-            {{ pricingTypeLabel(u) }} <span class="badge">{{ n }}</span>
-          </button>
-        </div>
-
-        <div class="facet" v-if="cat.endpointFacet.length > 0">
-          <div class="facet-l">端点类型</div>
-          <button
-            class="chipf"
-            :class="{ on: cat.endpoints.length === 0 }"
-            data-facet-endpoint=""
-            @click="cat.endpoints.length > 0 && resetEndpoints()"
-          >
-            全部类型 <span class="badge">{{ cat.endpointFacet.length }}</span>
-          </button>
-          <button
-            v-for="[e, n] in cat.endpointFacet"
-            :key="e"
-            class="chipf"
-            :class="{ on: cat.endpoints.includes(e) }"
-            :data-facet-endpoint="e"
-            @click="cat.toggleEndpoint(e)"
-          >
-            {{ endpointLabel(e) }} <span class="badge">{{ n }}</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- ⚠️ #model-q 必须留在结果区**之外**：它一旦落在随响应整块换掉的子树里，
-           重渲染会替换输入框节点，焦点与光标随之丢失 —— 症状是"筛选框只认一个
-           字符"。这坑渠道目录踩过一次，见 CatalogView 同处注释。 -->
-      <div class="flex" style="gap: 7px; align-items: center; margin-bottom: 11px">
-        <button
-          class="btn outline sm"
-          id="model-reset"
-          :disabled="!cat.filtering"
-          @click="resetFilters"
+        <!-- 卡片模式：名字 / 发行方 / 价格 / 渠道数一眼看全，明细进抽屉。
+             疏密由 --mcard-w 一个变量决定，列数交给 auto-fill 自己算。 -->
+        <div
+          class="mcards"
+          v-if="view === 'card' && cat.items.length > 0"
+          :style="{ '--mcard-w': DENSITY_WIDTH[density] }"
+          :data-density="density"
         >
-          重置筛选
-        </button>
-        <label class="sr" for="model-q">按模型名筛选</label>
-        <input
-          id="model-q"
-          v-model="qInput"
-          placeholder="按模型名筛选，如 claude / gpt-4o"
-          style="width: 240px; margin-left: auto"
-          @input="cat.setQuery(qInput)"
-        />
-      </div>
+          <button
+            v-for="m in cat.items"
+            :key="m.model_name"
+            class="mcard"
+            :data-model-card="m.model_name"
+            @click="pickedName = m.model_name"
+          >
+            <div class="mcard-h">
+              <VendorIcon
+                v-for="v in vendorsOf(m)"
+                :key="v"
+                :name="v"
+                :icon="cat.vendorIcons[v]"
+              />
+              <code class="mcard-n">{{ m.model_name }}</code>
+            </div>
+            <div class="mcard-p">
+              <!-- 价格**按口径分组**给区间，绝不跨口径取 min：两者数值区间重叠，
+                   混着取会让 $0.08/次 显示成"最低 0.08"而同行还有倍率 0.5 -->
+              <span v-for="r in priceText(m)" :key="r.unit" class="mcard-pr">
+                {{ r.text }}
+                <span class="dim">{{ r.usd ? usdSuffix(r.unit) : unitLabel(r.unit) ?? '口径未知' }}</span>
+              </span>
+              <span v-if="priceText(m).length === 0" class="dim">未采到价格</span>
+            </div>
+            <div class="mcard-b">
+              <span class="badge" :data-model-card-count="m.model_name"
+                >{{ m.channel_count }} 个渠道</span
+              >
+              <span v-for="e in endpointsOf(m)" :key="e" class="badge">{{ endpointLabel(e) }}</span>
+              <span v-if="m.stale_count > 0" class="badge warn">{{ m.stale_count }} 疑似下架</span>
+              <span v-if="m.disabled_count > 0" class="badge bad"
+                >{{ m.disabled_count }} 已停用</span
+              >
+            </div>
+          </button>
+        </div>
 
-      <!-- 卡片模式：名字 / 发行方 / 口径 / 价格区间 / 渠道数一眼看全，明细进抽屉。
-           疏密由 --mcard-w 一个变量决定，列数交给 auto-fill 自己算。 -->
-      <div
-        class="mcards"
-        v-if="view === 'card' && cat.items.length > 0"
-        :style="{ '--mcard-w': DENSITY_WIDTH[density] }"
-        :data-density="density"
-      >
-        <button
-          v-for="m in cat.items"
-          :key="m.model_name"
-          class="mcard"
-          :data-model-card="m.model_name"
-          @click="pickedName = m.model_name"
+        <div class="tw" v-else-if="view === 'list' && cat.items.length > 0">
+          <table>
+            <thead>
+              <tr>
+                <th data-col="model">模型</th>
+                <th data-col="vendor">发行方</th>
+                <th data-col="units">定价类型</th>
+                <th data-col="price">价格</th>
+                <th data-col="channels" class="n">渠道数</th>
+                <th data-col="risk">其中</th>
+                <th data-col="endpoints">端点类型</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- 整行点开抽屉，**没有行内展开**：明细那张表有七列，塞进表格行里
+                   必须挤掉几列，而挤掉哪几列又与抽屉里不一致（见文件头注释） -->
+              <tr
+                v-for="m in cat.items"
+                :key="m.model_name"
+                :data-model-row="m.model_name"
+                :class="{ open: pickedName === m.model_name }"
+              >
+                <td data-col="model">
+                  <button
+                    class="linkish strong"
+                    :data-model-open="m.model_name"
+                    @click="pickedName = m.model_name"
+                  >
+                    <code>{{ m.model_name }}</code>
+                  </button>
+                </td>
+                <td data-col="vendor">
+                  <!-- 名字单独包一层：图标取不到时 VendorIcon 退回的是一个**带字母的**
+                       方块，textContent 会读成 "OOpenAI"。验收断言的是 .vname。 -->
+                  <span class="vcell" v-for="v in vendorsOf(m)" :key="v">
+                    <VendorIcon :name="v" :icon="cat.vendorIcons[v]" />
+                    <span class="vname">{{ v }}</span>
+                  </span>
+                  <span v-if="vendorsOf(m).length === 0" class="dim">未声明</span>
+                </td>
+                <td data-col="units">
+                  <span
+                    v-for="u in [...new Set(m.channels.map((c) => c.billing_unit ?? 'unknown'))]"
+                    :key="u"
+                    class="badge"
+                    >{{ unitChip(u) }}</span
+                  >
+                </td>
+                <td data-col="price">
+                  <span v-for="r in priceText(m)" :key="r.unit" class="pcell">
+                    <b>{{ r.text }}</b>
+                    <span class="dim">{{
+                      r.usd ? usdSuffix(r.unit) : unitLabel(r.unit) ?? '口径未知'
+                    }}</span>
+                  </span>
+                  <span v-if="priceText(m).length === 0" class="dim">未采到</span>
+                </td>
+                <td data-col="channels" class="n">
+                  <b :data-model-chcount="m.model_name">{{ m.channel_count }}</b>
+                </td>
+                <td data-col="risk">
+                  <!-- 两个计数**各自显示、互不相减**：一个渠道既可能停用又可能
+                       陈旧，合成一个"可用数"需要先定义可用，而 P1 没有那个定义 -->
+                  <span v-if="m.stale_count > 0" class="badge warn"
+                    >{{ m.stale_count }} 个疑似下架</span
+                  >
+                  <span v-if="m.disabled_count > 0" class="badge bad"
+                    >{{ m.disabled_count }} 个渠道已停用</span
+                  >
+                  <span v-if="m.stale_count === 0 && m.disabled_count === 0" class="dim">—</span>
+                </td>
+                <td data-col="endpoints">
+                  <span v-for="e in endpointsOf(m)" :key="e" class="badge">{{
+                    endpointLabel(e)
+                  }}</span>
+                  <span v-if="endpointsOf(m).length === 0" class="dim">未声明</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <UiEmpty v-else-if="cat.loaded && cat.filtering">当前筛选没有匹配的模型</UiEmpty>
+        <UiEmpty v-else-if="cat.loaded"
+          >目录为空。先在「渠道管理」里建渠道、登记采集凭证，再点「立即采集」</UiEmpty
         >
-          <code class="mcard-n">{{ m.model_name }}</code>
-          <div class="mcard-b" v-if="vendorsOf(m).length > 0">
-            <span v-for="v in vendorsOf(m)" :key="v" class="badge acc">{{ v }}</span>
-          </div>
-          <div class="mcard-p">
-            <!-- 价格**按口径分组**给区间，绝不跨口径取 min：两者数值区间重叠，
-                 混着取会让 $0.08/次 显示成"最低 0.08"而同行还有倍率 0.5 -->
-            <span v-for="r in priceRanges(m.channels)" :key="r.unit" class="mcard-pr">
-              {{ r.min === r.max ? r.min : `${r.min} – ${r.max}` }}
-              <span class="dim">{{ unitLabel(r.unit) ?? '口径未知' }}</span>
-            </span>
-            <span v-if="priceRanges(m.channels).length === 0" class="dim">未采到价格</span>
-          </div>
-          <div class="mcard-b">
-            <span class="badge" :data-model-card-count="m.model_name"
-              >{{ m.channel_count }} 个渠道</span
-            >
-            <span v-for="e in endpointsOf(m)" :key="e" class="badge">{{ endpointLabel(e) }}</span>
-            <span v-if="m.stale_count > 0" class="badge warn">{{ m.stale_count }} 疑似下架</span>
-            <span v-if="m.disabled_count > 0" class="badge bad"
-              >{{ m.disabled_count }} 已停用</span
-            >
-          </div>
-        </button>
-      </div>
 
-      <div class="tw" v-else-if="view === 'list' && cat.items.length > 0">
-        <table>
-          <thead>
-            <tr>
-              <th data-col="model">模型</th>
-              <th data-col="vendor">发行方</th>
-              <th data-col="channels" class="n">渠道数</th>
-              <th data-col="risk">其中</th>
-              <th data-col="units">定价类型</th>
-              <th data-col="endpoints">端点类型</th>
-            </tr>
-          </thead>
-          <tbody>
-            <!-- 整行点开抽屉，**没有行内展开**：明细那张表有七列，塞进表格行里
-                 必须挤掉几列，而挤掉哪几列又与抽屉里不一致（见文件头注释） -->
-            <tr
-              v-for="m in cat.items"
-              :key="m.model_name"
-              :data-model-row="m.model_name"
-              :class="{ open: pickedName === m.model_name }"
-            >
-              <td data-col="model">
-                <button
-                  class="linkish strong"
-                  :data-model-open="m.model_name"
-                  @click="pickedName = m.model_name"
-                >
-                  <code>{{ m.model_name }}</code>
-                </button>
-              </td>
-              <td data-col="vendor">
-                <span v-for="v in vendorsOf(m)" :key="v" class="badge acc">{{ v }}</span>
-                <span v-if="vendorsOf(m).length === 0" class="dim">未声明</span>
-              </td>
-              <td data-col="channels" class="n">
-                <b :data-model-chcount="m.model_name">{{ m.channel_count }}</b>
-              </td>
-              <td data-col="risk">
-                <!-- 两个计数**各自显示、互不相减**：一个渠道既可能停用又可能
-                     陈旧，合成一个"可用数"需要先定义可用，而 P1 没有那个定义 -->
-                <span v-if="m.stale_count > 0" class="badge warn"
-                  >{{ m.stale_count }} 个疑似下架</span
-                >
-                <span v-if="m.disabled_count > 0" class="badge bad"
-                  >{{ m.disabled_count }} 个渠道已停用</span
-                >
-                <span v-if="m.stale_count === 0 && m.disabled_count === 0" class="dim">—</span>
-              </td>
-              <td data-col="units">
-                <span
-                  v-for="u in [...new Set(m.channels.map((c) => c.billing_unit ?? 'unknown'))]"
-                  :key="u"
-                  class="badge"
-                  >{{ unitChip(u) }}</span
-                >
-              </td>
-              <td data-col="endpoints">
-                <span v-for="e in endpointsOf(m)" :key="e" class="badge">{{
-                  endpointLabel(e)
-                }}</span>
-                <span v-if="endpointsOf(m).length === 0" class="dim">未声明</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <UiEmpty v-else-if="cat.loaded && cat.filtering">当前筛选没有匹配的模型</UiEmpty>
-      <UiEmpty v-else-if="cat.loaded"
-        >目录为空。先在「渠道管理」里建渠道、登记采集凭证，再点「立即采集」</UiEmpty
-      >
-
-      <div
-        class="flex"
-        v-if="cat.items.length > 0"
-        style="gap: 9px; align-items: center; margin-top: 11px"
-      >
-        <button class="btn outline sm" id="model-prev" :disabled="!cat.hasPrev" @click="cat.prev()">
-          ← 上一页
-        </button>
-        <button class="btn outline sm" id="model-next" :disabled="!cat.hasNext" @click="cat.next()">
-          下一页 →
-        </button>
-        <span class="dim" style="font-size: 12px"
-          >第 {{ cat.from }}–{{ cat.to }} / 共 {{ cat.total }}{{
-            cat.filtering ? '（当前筛选）' : ''
-          }}</span
+        <div
+          class="flex"
+          v-if="cat.items.length > 0"
+          style="gap: 9px; align-items: center; margin-top: 11px; flex-wrap: wrap"
         >
-      </div>
-      <p class="note">
-        默认按「支持它的渠道数」降序 —— 这一屏先回答"哪些模型到处都有"。
-        找具体某个模型用上面的筛选框，不用翻页。
-      </p>
-    </UiCard>
+          <button
+            class="btn outline sm"
+            id="model-prev"
+            :disabled="!cat.hasPrev"
+            @click="cat.prev()"
+          >
+            ← 上一页
+          </button>
+          <button
+            class="btn outline sm"
+            id="model-next"
+            :disabled="!cat.hasNext"
+            @click="cat.next()"
+          >
+            下一页 →
+          </button>
+          <span class="dim" style="font-size: 12px"
+            >第 {{ cat.from }}–{{ cat.to }} / 共 {{ cat.total }}{{
+              cat.filtering ? '（当前筛选）' : ''
+            }}</span
+          >
+          <label class="sr" for="model-pagesize">每页行数</label>
+          <select
+            id="model-pagesize"
+            style="margin-left: auto; width: auto"
+            :value="String(cat.pageSize)"
+            @change="cat.setPageSize(Number(($event.target as HTMLSelectElement).value))"
+          >
+            <option v-for="n in PAGE_SIZES" :key="n" :value="String(n)">每页 {{ n }}</option>
+          </select>
+        </div>
+      </UiCard>
+    </div>
 
-    <!-- 卡片模式的二级抽屉。列表模式用行内展开，不用它：那边一行就在眼前，
-         为看六列明细盖住半屏是倒退。 -->
+    <!-- 两种视图**同一个抽屉**：明细那张表有七列，塞进列表行里必须挤掉几列，
+         而挤掉哪几列又与卡片那边不一致。一套就够（见文件头注释）。 -->
     <UiDrawer
       wide
       :open="drawerModel !== null"
@@ -655,16 +787,16 @@ function endpointsOf(m: ModelEntry): string[] {
           <UiStat label="其中疑似下架" :value="drawerModel.stale_count" />
           <UiStat label="其中渠道已停用" :value="drawerModel.disabled_count" />
         </div>
-        <div class="flex" style="gap: 4px; flex-wrap: wrap; margin: 10px 0">
-          <span v-for="v in vendorsOf(drawerModel)" :key="v" class="badge acc">{{ v }}</span>
+        <div class="flex" style="gap: 6px; flex-wrap: wrap; margin: 10px 0">
+          <span class="vcell" v-for="v in vendorsOf(drawerModel)" :key="v">
+            <VendorIcon :name="v" :icon="cat.vendorIcons[v]" />
+            <span class="vname">{{ v }}</span>
+          </span>
           <span v-for="e in endpointsOf(drawerModel)" :key="e" class="badge">{{
             endpointLabel(e)
           }}</span>
         </div>
-        <ModelChannelTable
-          :model-name="drawerModel.model_name"
-          :channels="drawerModel.channels"
-        />
+        <ModelChannelTable :model-name="drawerModel.model_name" :channels="drawerModel.channels" />
         <p class="note">
           「渠道数」是<b>有这个模型</b>的渠道数，不是"能用它"的渠道数：已停用的渠道
           不采集也不承接请求，疑似下架的模型上游可能已经撤了。两者各自计数，
