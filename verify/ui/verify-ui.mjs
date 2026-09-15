@@ -1788,6 +1788,40 @@ try {
           .map(t => (t.textContent.match(/-?[\d.]+/) ?? ['未采到分组倍率'])[0]),
       };
     });
+    /**
+     * 遮罩（.drawer-scrim）的形态。全站四处浮层共用这一个类。
+     *
+     * 判据不是"有没有设那个属性"那么松，也不是去量模糊半径那么假：
+     *   · backdrop-filter 里确实有 blur（纯压暗的话这里是 none）
+     *   · 遮罩铺满整个视口（只盖住一半的毛玻璃是另一种坏法）
+     *   · **浮层自己不糊、且背景不透明** —— 毛玻璃放错地方（放到面板上）的
+     *     症状正是"要读的那块反而看不清"，而那时上面两条照样绿。
+     */
+    const scrimStyle = () => page.evaluate(() => {
+      const el = document.querySelector('.drawer-scrim');
+      if (el === null) return null;
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const panel = el.firstElementChild;
+      const pc = panel === null ? null : getComputedStyle(panel);
+      const alpha = c => {
+        const m = /^rgba?\(([^)]+)\)/.exec(c ?? '');
+        if (m === null) return 1;
+        const parts = m[1].split(',').map(x => parseFloat(x));
+        return parts.length === 4 ? parts[3] : 1;
+      };
+      return {
+        blur: cs.backdropFilter || cs.webkitBackdropFilter || 'none',
+        w: Math.round(r.width), h: Math.round(r.height),
+        vw: window.innerWidth, vh: window.innerHeight,
+        panelBlur: pc?.backdropFilter || 'none',
+        panelAlpha: alpha(pc?.backgroundColor),
+      };
+    });
+    const scrimOK = g =>
+      g !== null && /blur\(/.test(g.blur) && g.w >= g.vw && g.h >= g.vh &&
+      g.panelBlur === 'none' && g.panelAlpha === 1;
+
     const closeDrawer = async () => {
       await page.keyboard.press('Escape');
       await page.waitForFunction(
@@ -1819,6 +1853,10 @@ try {
         JSON.stringify(d.chNames) === JSON.stringify(wantNames),
         `${m.model_name}：渠道数=${countShown} 抽屉=${d.title} ` +
         `渠道=${JSON.stringify(d.chNames)} 期望=${JSON.stringify(wantNames)}`);
+
+      const drawerScrim = await scrimStyle();
+      check('抽屉的遮罩是毛玻璃（不是纯压暗），且抽屉自己不跟着糊',
+        scrimOK(drawerScrim), JSON.stringify(drawerScrim));
 
       // 抽屉要够宽：它装的是七列的表，460px 下每列都换行。
       // 量渲染出来的宽度而不是"有没有 wide 这个 class" —— 后者改个类名就失效。
@@ -2231,6 +2269,11 @@ try {
     // 解析不出分组的那些标成「筛不了」。
     await page.click('#model-f-key');
     await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+    // 四处浮层共用同一个 .drawer-scrim，所以这里再验一次不是重复 ——
+    // 它证明的是"共用"这件事本身：哪天谁给弹窗单写一套遮罩，这条会红。
+    const pickerScrim = await scrimStyle();
+    check('选择器弹窗的遮罩同样是毛玻璃（四处浮层共用一套遮罩）',
+      scrimOK(pickerScrim), JSON.stringify(pickerScrim));
     const keyChips = await page.$$eval('.picker [data-pick-row]', rs => rs.map(r => ({
       id: r.getAttribute('data-pick-row'),
       disabled: /筛不了/.test(r.innerText),
@@ -2372,6 +2415,107 @@ try {
           `× 1e6/${qpu} → 期望 $${wantUSD}/1M，界面 ${JSON.stringify(usdShown)}`);
       }
       await closeDrawer();
+
+      // ── 「按 Key」跟着上游渠道走 ──
+      //
+      // 选了渠道之后，别的渠道的 Key 留在候选里是**必然筛出空**的：那把 Key 的
+      // 分组属于另一个渠道，与"这几个渠道有什么模型"求交集恒为零。而空结果
+      // 看不出原因，人会以为是目录漏了。所以两件事都要 ——
+      // 候选收窄，**已选的越界 Key 一并丢掉**。后者不做的话，界面上是
+      // "已选 1 把"配一个空列表，而那一把在候选里已经看不见了，取消都取消不掉。
+      //
+      // ⚠️ 先给**第二个渠道**登记一把 Key，否则这条是空转的：这一轮真库里
+      // 4 把 Key 全在渠道 1 上，于是"收窄到渠道 2"的期望是空集，而候选也是空集
+      // —— `[] === []` 恒真，那半条断言什么都没验到。造一把假明文的 Key 属于
+      // 已认定的例外（同下面那把未归组的 Key：要验的是界面行为，拿真 Key 试
+      // 等于把真凭证写进 DOM 快照与 CI 日志）。
+      const ch2Account = ((await api('/admin/accounts')).items ?? [])
+        .find(a => a.channel_id === ch2.id);
+      const ch2Key = await page.evaluate(async acct => {
+        const t = localStorage.getItem('adminToken');
+        const r = await fetch('/admin/keys', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ account_id: acct, secret: 'sk-second-channel-scope-check-1' }),
+        });
+        return { status: r.status, body: await r.json() };
+      }, Number(ch2Account?.id ?? 0));
+      check('可以在第二个渠道上登记一把 Key（给下面那条收窄断言当样本）',
+        typeof ch2Key.body?.id === 'number',
+        `账号 #${ch2Account?.id} → HTTP ${ch2Key.status} ` +
+        `${JSON.stringify(ch2Key.body).slice(0, 120)}`);
+      // 分面读的是共享 store 里的 Key 列表，刚建的那把要先拉回来才看得见
+      await pane('keys');
+      await page.click('#btn-keys-reload').catch(() => {});
+      await sleep(700);
+      await pane('models');
+      await sleep(500);
+      const keysNow = (await api('/admin/keys')).items ?? [];
+      const keysOfCh2 = keysNow.filter(k => k.channel_id === ch2.id).map(k => k.id);
+      await pick('model-f-channel', [ch2.id], true);
+      await sleep(900);
+      const scoped = await page.evaluate(() => {
+        const btn = document.querySelector('#model-f-key');
+        return {
+          url: location.search,
+          picked: (btn?.dataset.picked ?? '').split(',').filter(x => x !== ''),
+          disabled: btn?.disabled === true,
+          note: btn?.closest('.mfilter')?.querySelector('.mfilter-n')?.textContent.trim() ?? '',
+        };
+      });
+      // 候选里到底剩哪几把：开一次弹窗读行（范围内一把都没有时它是禁用的，开不了）
+      let scopedRows = [];
+      if (!scoped.disabled) {
+        await page.click('#model-f-key');
+        await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+        scopedRows = await page.$$eval('.picker [data-pick-row]',
+          rs => rs.map(r => Number(r.getAttribute('data-pick-row'))));
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(
+          () => document.querySelector('.picker') === null, { timeout: 5000 }).catch(() => {});
+      }
+      const sortNum = a => [...a].sort((x, y) => x - y);
+      check('限定上游渠道后，可选的 Key 收窄到该渠道，已选的越界 Key 一并丢掉',
+        // 收窄必须是**真子集**，否则这条是空转的（见上面那把现造的 Key）
+        keysOfCh2.length > 0 && keysOfCh2.length < keysNow.length &&
+        JSON.stringify(sortNum(scopedRows)) === JSON.stringify(sortNum(keysOfCh2)) &&
+        scoped.picked.length === 0 && !/key=/.test(scoped.url) &&
+        scoped.disabled === (keysOfCh2.length === 0),
+        `渠道 ${ch2.id} 下后端有 ${keysOfCh2.length} 把 Key ${JSON.stringify(sortNum(keysOfCh2))}，` +
+        `候选列出 ${JSON.stringify(sortNum(scopedRows))}；` +
+        `原先选中 Key #${theKey.id}，收窄后选中=${JSON.stringify(scoped.picked)} ` +
+        `URL=${scoped.url} 选择器禁用=${scoped.disabled} 提示=${JSON.stringify(scoped.note)}`);
+      // 反过来：清掉渠道筛选，候选必须**回到全部**（否则选一次渠道就再也换不回来）
+      await page.click('#model-reset');
+      await sleep(900);
+      await page.click('#model-f-key');
+      await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+      const allRows = await page.$$eval('.picker [data-pick-row]',
+        rs => rs.map(r => Number(r.getAttribute('data-pick-row'))));
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(
+        () => document.querySelector('.picker') === null, { timeout: 5000 }).catch(() => {});
+      check('清掉渠道筛选后，可选的 Key 回到全部（不是留在上次那个范围里）',
+        JSON.stringify(sortNum(allRows)) === JSON.stringify(sortNum(keysNow.map(k => k.id))),
+        `候选 ${JSON.stringify(sortNum(allRows))} / 全部 ${JSON.stringify(sortNum(keysNow.map(k => k.id)))}`);
+      // 后面那条要从 Key 页跳过来，这里先把筛选恢复成"只筛这把 Key"
+      await pick('model-f-key', [theKey.id], true);
+      await sleep(900);
+
+      // 选中之后按钮上是一串长摘要（前缀 +（渠道名）），正是最容易把左栏顶宽的
+      // 那一下。量 scrollWidth 而不是看着像不像：左栏有 overflow:auto，溢出时
+      // 它不是换行而是**被裁掉** —— 右边的 chip 只剩半个，看起来像少渲染了一块。
+      const sideFit = await page.evaluate(() => {
+        const el = document.querySelector('.mside');
+        return {
+          scrollW: el.scrollWidth, clientW: el.clientWidth,
+          summary: document.querySelector('#model-f-key .picker-sum')?.textContent.trim() ?? '',
+        };
+      });
+      check('左栏筛选不横向溢出（长 Key 摘要不把整段顶宽）',
+        sideFit.scrollW <= sideFit.clientW + 1 && sideFit.summary !== '',
+        `scrollWidth=${sideFit.scrollW} clientWidth=${sideFit.clientW}，` +
+        `按钮摘要=${JSON.stringify(sideFit.summary)}`);
 
       // ── 反方向的入口：Key 管理页 →「能调哪些模型」──
       //
