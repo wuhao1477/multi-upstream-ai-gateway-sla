@@ -1,7 +1,13 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
-/** 存的是"选择"（含 system）而不是最终色，否则跟随系统就退化成一次性快照。 */
+/**
+ * 存的是"选择"（含 system）而不是最终色，否则跟随系统就退化成一次性快照。
+ *
+ * ⚠️ `system` **没有按钮**，但它留着：没点过按钮的浏览器按系统偏好开，
+ * 这是对的默认值。按钮只在 light / dark 之间切（一按一个明确的值）——
+ * 三态按钮要求人先想清楚"跟随系统"和"浅色"此刻是不是一回事才敢点。
+ */
 export type ThemeChoice = 'light' | 'dark' | 'system'
 
 const KEY = 'theme'
@@ -18,10 +24,12 @@ function read(): ThemeChoice {
 
 export const useThemeStore = defineStore('theme', () => {
   const choice = ref<ThemeChoice>(read())
+  /** 此刻**实际**是深色吗。按钮显示的是它，不是 choice（system 时两者不同）。 */
+  const dark = ref(false)
 
   function apply(): void {
-    const dark = choice.value === 'dark' || (choice.value === 'system' && mq.matches)
-    document.documentElement.classList.toggle('dark', dark)
+    dark.value = choice.value === 'dark' || (choice.value === 'system' && mq.matches)
+    document.documentElement.classList.toggle('dark', dark.value)
   }
 
   function set(t: ThemeChoice): void {
@@ -41,5 +49,10 @@ export const useThemeStore = defineStore('theme', () => {
     if (choice.value === 'system') apply()
   })
 
-  return { choice, set }
+  /** 切到"当前不是的那个"。system 状态下按一次就落到一个明确值上。 */
+  function toggle(): void {
+    set(dark.value ? 'light' : 'dark')
+  }
+
+  return { choice, dark: computed(() => dark.value), set, toggle }
 })

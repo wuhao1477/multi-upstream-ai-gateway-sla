@@ -7,6 +7,9 @@
  *     用户看到的是"接口报错"而不是"你还没填令牌"。
  *  3. 失败时抛 ApiError 且带上 status 与已解析的响应体：同步接口用
  *     429/409/422/502 区分限流、前置条件不满足、认证失败，界面要按状态码分别措辞。
+ *  4. 令牌失效（401/403）与没填令牌走**同一个出口** onUnauthorized —— 由
+ *     main.ts 接到"清掉令牌 + 跳登录页"。放在这里而不是每个调用方各判一次：
+ *     漏掉一处的症状是那一栏静静地空着，而别处都跳走了。
  */
 import type { ErrorResp } from './types'
 
@@ -28,6 +31,17 @@ export function setToken(v: string): void {
   } catch {
     /* 同上，存不进去也不该让界面崩 */
   }
+}
+
+/**
+ * 令牌失效时的回调，由 main.ts 注入。
+ *
+ * 不在这里 import router：一个 fetch 薄封装不该依赖路由，而且两边会互相 import。
+ */
+let onUnauthorized: (() => void) | undefined
+
+export function setUnauthorizedHandler(f: () => void): void {
+  onUnauthorized = f
 }
 
 /** 请求失败。status 为 HTTP 状态码，body 是已解析的响应体（可能为 undefined）。 */
@@ -83,7 +97,10 @@ function errMessage(body: unknown, fallback: string): string {
  */
 export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const token = getToken()
-  if (token === '') throw new MissingTokenError()
+  if (token === '') {
+    onUnauthorized?.()
+    throw new MissingTokenError()
+  }
 
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
   let payload: string | undefined
@@ -97,6 +114,12 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
   if (opts.signal !== undefined) init.signal = opts.signal
 
   const resp = await fetch(path, init)
+  // 401/403 在**解析响应体之前**判：反向代理插进来的 HTML 错误页会走下面那条
+  // "非 JSON 就原文当消息"的早退分支，放在后面判就漏掉了这一路。
+  //
+  // 403 一并算：后端目前只回 401，但"这把令牌不让你干这件事"与"这把令牌不对"
+  // 对界面是同一件事 —— 都得重新拿一把。
+  if (resp.status === 401 || resp.status === 403) onUnauthorized?.()
 
   const text = await resp.text()
   let body: unknown

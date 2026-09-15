@@ -42,7 +42,7 @@ a {
    两个导航 + 主题开关，硬按 50% 会横向溢出（SPA 验收有一条专门盯这个）。
    于是宽屏严格 1/4、窄屏退到"两边各留 14px"，中间由 560px 这个下限接住。 */
 .hdr-in {
-  width: max(50%, min(100% - 28px, 560px));
+  width: max(50%, min(100% - 28px, 520px));
   margin: 0 auto;
   min-height: var(--hdr-h);
   display: flex;
@@ -87,10 +87,6 @@ a {
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
   min-height: calc(100vh - var(--hdr-h));
-}
-/* 模型目录那一侧没有侧栏（它自己就有一整列筛选）。 */
-.shell.solo {
-  grid-template-columns: minmax(0, 1fr);
 }
 .sidebar {
   background: var(--sidebar);
@@ -198,32 +194,76 @@ a {
   font-size: 11px;
   color: var(--muted-foreground);
 }
-.theme-sw {
-  display: flex;
-  gap: 3px;
-  background: var(--background);
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.theme-sw button {
-  flex: 1;
+/* 主题开关：一个按钮（浅色 ↔ 深色）。三段换一个的理由见 ThemeSwitch.vue。 */
+.theme-btn {
+  flex: none;
   display: grid;
   place-items: center;
-  padding: 5px 0;
-  border: 0;
-  background: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
   color: var(--muted-foreground);
-  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.theme-sw button svg {
-  width: 15px;
-  height: 15px;
-}
-.theme-sw button[aria-pressed='true'] {
-  background: var(--accent);
+.theme-btn:hover {
   color: var(--foreground);
+  background: var(--accent);
+}
+.theme-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.theme-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 登录页 ──
+   只有一个 ADMIN_TOKEN：P1 没有平台用户实体，所以没有用户名，也不该有。 */
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-top {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+}
+.login-box {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 10px;
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 26px 24px;
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.25);
+}
+.login-box .brand {
+  margin-bottom: 4px;
+}
+.login-d {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0 0 6px;
+  line-height: 1.6;
+}
+.login-box label {
+  margin-bottom: 0;
+}
+/* 错误文案用 destructive 而不是普通灰：这一条是"你得改点什么才能继续"，
+   与上面那句说明不是一类信息。 */
+.login-e {
+  font-size: 12px;
+  color: var(--destructive);
+  margin: 0;
+  line-height: 1.6;
 }
 
 /* ── 顶栏 + 主区 ── */
@@ -239,7 +279,7 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 22px;
+  padding: 10px 22px;
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
   background: color-mix(in oklab, var(--background) 80%, transparent);
@@ -1395,22 +1435,39 @@ summary {
 /* ── 模型目录：左筛选 / 右结果 ──
    照上游定价页的形状：发行方竖在左边（那是最常用的一维，34 家横铺会占满六七行），
    搜索居中在页头，结果区只留"看什么、怎么排"。*/
+/* 模型目录整页自己铺，不走控制台那层 .content（定宽 1440 + 侧栏）。
+   两边的布局不是一回事：那边是"侧栏 + 一列卡片"，这边是"筛选列 + 结果列"。 */
+.mpage {
+  padding: 20px 26px 40px;
+  gap: 14px;
+}
 .mhero {
   display: grid;
   justify-items: center;
   text-align: center;
-  gap: 10px;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+.mhero-t {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+}
+.mhero-d {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  margin: 0;
 }
 /* 搜索框限宽：铺满一行的输入框看起来像在等一段话，而这里输入的是一个模型名。
    全局 input 是 width:100%，所以这里必须显式收窄。 */
 .mhero-q {
   width: min(520px, 100%);
   height: 38px;
+  margin-top: 4px;
 }
-/* 统计卡吃满整行：.mhero 是 justify-items:center 的网格，不给宽度的话
-   auto-fit 那几列会缩成一列竖着堆，把搜索框和列表顶下去半屏。 */
-.mhero .stats {
-  width: 100%;
+/* 页尾小字：与上面两栏之间留一道，别贴着分页条。 */
+.mfoot {
+  margin-top: 4px;
 }
 /* 卡片头部的排序框不吃满行 —— 全局 input/select 是 width:100%，
    那条给表单里的控件用，不该管工具条。 */

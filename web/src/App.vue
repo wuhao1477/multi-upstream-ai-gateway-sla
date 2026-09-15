@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
@@ -17,10 +17,17 @@ const channels = useChannelsStore()
 const res = useResourcesStore()
 
 /**
- * 模型目录那一侧**不渲染侧栏**：那一页自己就有一整列筛选（发行方 / 渠道 /
- * 定价类型…），再套一层侧栏会把屏幕切成三段，而左边那两列干的是同一件事。
+ * 模型目录那一侧**整个不套控制台的壳**（侧栏 + 分栏顶栏 + 定宽内容区）。
+ *
+ * 不是嫌侧栏多余那么简单：两边的布局本来就不是一回事 —— 控制台是"定宽侧栏 +
+ * 一列卡片"，模型目录是"筛选列 + 结果列"，它自己就有一整列筛选、自己的抬头、
+ * 自己的分页条。硬套同一层壳的结果是页面顶上多出一条几乎全空的横条（那上面
+ * 只剩一个令牌框），标题还印了两遍。复用在这里不省事，只是把两套布局别在一起。
  */
-const withSidebar = computed(() => {
+/** 登录页自己铺一页：它没有导航可用（还没登录），顶栏与侧栏都不该出现。 */
+const isLogin = computed(() => route.name === 'login')
+
+const isConsole = computed(() => {
   const name = typeof route.name === 'string' ? route.name : ''
   const parent = typeof route.meta.parent === 'string' ? route.meta.parent : ''
   const key = (name in PANES ? name : parent) as PaneName
@@ -36,6 +43,24 @@ const withSidebar = computed(() => {
 //
 // 采集凭证不再单独拉一轮：它跟着账号行走（UNIQUE(account_id)），
 // res.load() 已经把它带回来了。
+/**
+ * 刚登录完那一次补拉。
+ *
+ * ⚠️ 历史上**不敢**盯 auth：令牌曾经绑在顶栏那个输入框上，一个字符一个字符地敲，
+ * 每敲一下就是一串半截令牌换回一个 401。现在令牌只在登录页提交时整个写一次
+ * （以及 401 时被清空），盯它是安全的 —— 而不盯的话，登录后进控制台是空的，
+ * 因为下面那个 onMounted 在应用启动时就跑完了，那时还没有令牌。
+ */
+watch(
+  () => auth.hasToken,
+  (ok) => {
+    if (ok) {
+      void channels.load()
+      void res.load()
+    }
+  },
+)
+
 onMounted(() => {
   if (auth.hasToken) {
     void channels.load()
@@ -132,15 +157,21 @@ function placeMenus(): void {
 </script>
 
 <template>
-  <AppHeader />
-  <div class="shell" :class="{ solo: !withSidebar }">
-    <AppSidebar v-if="withSidebar" />
-    <div class="main">
-      <AppTopbar />
-      <div class="content">
-        <RouterView />
+  <!-- 登录页：没有顶栏也没有侧栏（还没登录，导航点了也走不到） -->
+  <RouterView v-if="isLogin" />
+  <template v-else>
+    <AppHeader />
+    <!-- 控制台那一侧才有壳；模型目录自己铺一页（见 isConsole 的注释） -->
+    <div class="shell" v-if="isConsole">
+      <AppSidebar />
+      <div class="main">
+        <AppTopbar />
+        <div class="content">
+          <RouterView />
+        </div>
       </div>
     </div>
-  </div>
+    <RouterView v-else />
+  </template>
   <ToastHost />
 </template>
