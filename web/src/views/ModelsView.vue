@@ -340,45 +340,35 @@ function endpointsOf(m: ModelEntry): string[] {
 </script>
 
 <template>
-  <div class="pane on" id="pane-models">
+  <div class="pane on mpage" id="pane-models">
     <!-- 页头。标题 + 一句话 + 居中搜索，照上游定价页的形状：进来第一件事多半是
-         "找某个模型"，搜索框该在视线正中，而不是埋在筛选区末尾。
+         "找某个模型"，搜索框该在视线正中。
+
+         **不套 UiCard**：这是页面抬头，不是页面里的一块内容。套了卡片之后它
+         与下面两栏长得一样重，而它只是一个标题和一个搜索框。
+
+         那几个统计大方块也去掉了：它们数的就是左栏「定价类型」那几个 chip
+         上已经印着的数（全部 38 / 按量计费 38），同一个数在一屏里出现两次，
+         代价是四百像素的纵向空白。
 
          ⚠️ #model-q 必须留在结果区**之外**：它一旦落在随响应整块换掉的子树里，
          重渲染会替换输入框节点，焦点与光标随之丢失 —— 症状是"筛选框只认一个
          字符"。这坑渠道目录踩过一次，见 CatalogView 同处注释。放在页头里天然
          满足这条，左栏与右栏怎么重渲染都碰不到它。 -->
-    <UiCard>
-      <div class="mhero">
-        <h2 class="card-t">模型目录</h2>
-        <p class="card-d">
-          上游声明有哪些模型，以及每个模型<b>哪些渠道有</b>。选型看这里，建站看渠道详情。
-        </p>
-        <label class="sr" for="model-q">按模型名筛选</label>
-        <input
-          id="model-q"
-          v-model="qInput"
-          class="mhero-q"
-          placeholder="搜索模型，如 claude / gpt-4o / qwen"
-          @input="cat.setQuery(qInput)"
-        />
-        <!-- 叫「匹配模型数」而不是「模型数」：它跟着筛选框走（分段不影响它）。
-             搜 gpt-4o 时这一格是 28，写成「模型数」会被读成"目录里一共 28 个"。 -->
-        <div class="stats">
-          <UiStat label="匹配模型数" :value="cat.loaded ? cat.whole : '—'" />
-          <UiStat v-for="[u, n] in cat.segments" :key="u" :label="unitChip(u)" :value="n" />
-        </div>
-      </div>
-      <p class="note">
-        这是<b>目录</b>（上游声明它有），不是「已登记为可路由的模型」—— 两者是两层（02
-        §1.3）。「疑似下架」按连续缺席采集轮次判定，不按经过时间推测。
-        <br />⚠️ 计价口径不同的模型<b>不可直接比大小</b>：<code>/次</code>是每次调用的绝对
-        美元价，<code>×倍率</code>是相对基准价的倍数。左栏「定价类型」就是为此存在的。
-        <br />「渠道数」是<b>有这个模型</b>的渠道数，不是"能用它"的渠道数 ——
-        已停用的渠道不采集也不承接请求，疑似下架的模型上游可能已经撤了，
-        两者都单独计数，要不要算进去由你定。
+    <div class="mhero">
+      <h1 class="mhero-t">模型目录</h1>
+      <p class="mhero-d">
+        上游声明有哪些模型，以及每个模型<b>哪些渠道有</b>。选型看这里，建站看渠道详情。
       </p>
-    </UiCard>
+      <label class="sr" for="model-q">按模型名筛选</label>
+      <input
+        id="model-q"
+        v-model="qInput"
+        class="mhero-q"
+        placeholder="搜索模型，如 claude / gpt-4o / qwen"
+        @input="cat.setQuery(qInput)"
+      />
+    </div>
 
     <!-- 左筛选 / 右结果。窄屏叠放（见 app.css 的断点）：左栏六组筛选挤到 300px
          以下就开始换行，而那时右边的表格已经在横向滚动了。 -->
@@ -771,6 +761,18 @@ function endpointsOf(m: ModelEntry): string[] {
         </div>
       </UiCard>
     </div>
+
+    <!-- 这段小字放在页尾而不是页头：它讲的是"读这张表要注意什么"，
+         而进页面第一件事是搜模型。顶在上面只会把列表推出首屏。 -->
+    <p class="note mfoot">
+      这是<b>目录</b>（上游声明它有），不是「已登记为可路由的模型」—— 两者是两层（02
+      §1.3）。「疑似下架」按连续缺席采集轮次判定，不按经过时间推测。
+      <br />⚠️ 计价口径不同的模型<b>不可直接比大小</b>：<code>/次</code>是每次调用的绝对
+      美元价，<code>×倍率</code>是相对基准价的倍数。左栏「定价类型」就是为此存在的。
+      <br />「渠道数」是<b>有这个模型</b>的渠道数，不是"能用它"的渠道数 ——
+      已停用的渠道不采集也不承接请求，疑似下架的模型上游可能已经撤了，
+      两者都单独计数，要不要算进去由你定。
+    </p>
 
     <!-- 两种视图**同一个抽屉**：明细那张表有七列，塞进列表行里必须挤掉几列，
          而挤掉哪几列又与卡片那边不一致。一套就够（见文件头注释）。 -->

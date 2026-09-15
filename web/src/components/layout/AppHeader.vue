@@ -108,6 +108,22 @@ function go(route_: PaneName): void {
       </nav>
 
       <ThemeSwitch />
+
+      <!-- 令牌在顶栏而不是分栏顶栏：它是**全站**凭证，每一页都要用。
+           原先摆在分栏顶栏里，于是模型目录那一页为了它单独挂一条几乎全空的
+           横条 —— 那条横条上除了这个框什么都没有。 -->
+      <label class="sr" for="token">管理令牌 ADMIN_TOKEN</label>
+      <!-- type=password + v-model：明文只在 DOM 属性里（property，不是序列化 attribute），
+           page.content() 抓不到，符合 FR-094 的"不回显"。 -->
+      <input
+        id="token"
+        class="hdr-token"
+        v-model="auth.token"
+        type="password"
+        placeholder="ADMIN_TOKEN"
+        autocomplete="off"
+        title="管理令牌 ADMIN_TOKEN，粘贴后自动记住"
+      />
     </div>
   </header>
 </template>

@@ -17,10 +17,14 @@ const channels = useChannelsStore()
 const res = useResourcesStore()
 
 /**
- * 模型目录那一侧**不渲染侧栏**：那一页自己就有一整列筛选（发行方 / 渠道 /
- * 定价类型…），再套一层侧栏会把屏幕切成三段，而左边那两列干的是同一件事。
+ * 模型目录那一侧**整个不套控制台的壳**（侧栏 + 分栏顶栏 + 定宽内容区）。
+ *
+ * 不是嫌侧栏多余那么简单：两边的布局本来就不是一回事 —— 控制台是"定宽侧栏 +
+ * 一列卡片"，模型目录是"筛选列 + 结果列"，它自己就有一整列筛选、自己的抬头、
+ * 自己的分页条。硬套同一层壳的结果是页面顶上多出一条几乎全空的横条（那上面
+ * 只剩一个令牌框），标题还印了两遍。复用在这里不省事，只是把两套布局别在一起。
  */
-const withSidebar = computed(() => {
+const isConsole = computed(() => {
   const name = typeof route.name === 'string' ? route.name : ''
   const parent = typeof route.meta.parent === 'string' ? route.meta.parent : ''
   const key = (name in PANES ? name : parent) as PaneName
@@ -133,8 +137,8 @@ function placeMenus(): void {
 
 <template>
   <AppHeader />
-  <div class="shell" :class="{ solo: !withSidebar }">
-    <AppSidebar v-if="withSidebar" />
+  <div class="shell" v-if="isConsole">
+    <AppSidebar />
     <div class="main">
       <AppTopbar />
       <div class="content">
@@ -142,5 +146,6 @@ function placeMenus(): void {
       </div>
     </div>
   </div>
+  <RouterView v-else />
   <ToastHost />
 </template>

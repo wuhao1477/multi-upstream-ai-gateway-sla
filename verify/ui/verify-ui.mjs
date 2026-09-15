@@ -1166,26 +1166,43 @@ try {
     Math.abs(gapL - top.win / 4) <= 4,
     `左留白 ${gapL} 右留白 ${gapR}，视口 ${top.win}（1/4 = ${Math.round(top.win / 4)}）`);
 
-  // 切到模型目录：侧栏整个不渲染（它自己就有一整列筛选），顶层高亮跟着换。
+  // 切到模型目录：控制台那层壳（侧栏 + 分栏顶栏 + 定宽内容区）**整个不渲染**，
+  // 它自己铺一页。断言"不在 DOM 上"而不是"看不见"：两套布局别在一起的症状
+  // 正是那条几乎全空的横条还在，只是上面没东西了。
+  //
+  // 令牌框反过来：它是全站凭证，两边**都必须有**（在顶栏里，只此一份）。
   await pane('models');
   const onModels = await page.evaluate(() => ({
+    shell: document.querySelector('.shell') !== null,
     sidebar: document.querySelector('.sidebar') !== null,
-    solo: document.querySelector('.shell')?.classList.contains('solo') === true,
+    topbar: document.querySelector('.topbar') !== null,
+    content: document.querySelector('.content') !== null,
+    ownPage: document.querySelector('#pane-models.mpage') !== null,
+    tokens: document.querySelectorAll('#token').length,
+    tokenInHeader: document.querySelector('.hdr #token') !== null,
     active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
     mside: document.querySelector('.mside') !== null,
   }));
   await pane('channels');
   const backToConsole = await page.evaluate(() => ({
     sidebar: document.querySelector('.sidebar') !== null,
+    topbar: document.querySelector('.topbar') !== null,
+    tokens: document.querySelectorAll('#token').length,
     active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
   }));
-  check('模型目录与控制台同级：进模型目录时侧栏不渲染，回控制台又回来',
-    onModels.sidebar === false && onModels.solo && onModels.active === 'models' &&
-    onModels.mside === true &&
-    backToConsole.sidebar === true && backToConsole.active === 'console',
-    `模型目录页：侧栏=${onModels.sidebar} solo=${onModels.solo} ` +
-    `高亮=${onModels.active} 自带筛选栏=${onModels.mside}；` +
-    `回控制台：侧栏=${backToConsole.sidebar} 高亮=${backToConsole.active}`);
+  check('模型目录自己铺一页：控制台那层壳整个不渲染，令牌仍在顶栏（只此一份）',
+    onModels.shell === false && onModels.sidebar === false &&
+    onModels.topbar === false && onModels.content === false &&
+    onModels.ownPage && onModels.mside === true && onModels.active === 'models' &&
+    onModels.tokens === 1 && onModels.tokenInHeader &&
+    backToConsole.sidebar === true && backToConsole.topbar === true &&
+    backToConsole.tokens === 1 && backToConsole.active === 'console',
+    `模型目录页：shell=${onModels.shell} 侧栏=${onModels.sidebar} ` +
+    `分栏顶栏=${onModels.topbar} 定宽内容区=${onModels.content} ` +
+    `自己的页容器=${onModels.ownPage} 自带筛选栏=${onModels.mside} ` +
+    `令牌框 ${onModels.tokens} 个（在顶栏=${onModels.tokenInHeader}）；` +
+    `回控制台：侧栏=${backToConsole.sidebar} 分栏顶栏=${backToConsole.topbar} ` +
+    `令牌框 ${backToConsole.tokens} 个`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //

@@ -103,12 +103,15 @@ try {
   const modelsShell = await page.evaluate(() => ({
     on: document.querySelector('#pane-models')?.classList.contains('on') === true,
     sidebar: document.querySelector('.sidebar') !== null,
+    shell: document.querySelector('.shell') !== null,
+    topbar: document.querySelector('.topbar') !== null,
     topNav: [...document.querySelectorAll('[data-top-nav]')]
       .map(b => b.getAttribute('data-top-nav')),
     active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
   }));
-  check('直接访问模型目录：顶层导航高亮它，且整个不渲染侧栏',
-    modelsResp.status() === 200 && modelsShell.on && !modelsShell.sidebar &&
+  check('直接访问模型目录：顶层导航高亮它，且控制台那层壳整个不渲染',
+    modelsResp.status() === 200 && modelsShell.on &&
+    !modelsShell.sidebar && !modelsShell.shell && !modelsShell.topbar &&
     JSON.stringify(modelsShell.topNav) === JSON.stringify(['console', 'models']) &&
     modelsShell.active === 'models',
     `HTTP ${modelsResp.status()} ${JSON.stringify(modelsShell)}`);
