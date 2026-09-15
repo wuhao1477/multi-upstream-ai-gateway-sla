@@ -115,7 +115,7 @@ command -v pnpm >/dev/null || {
 # 真上游来源（CLAUDE.md §1）。
 #
 # ⚠️ 两种模式对缺 HUB_FILE 的处理**故意不同**：
-#    默认模式降级成"只跑免密的 SPA 那 22 项"——这是 CI 唯一能跑的形态，
+#    默认模式降级成"只跑免密的 SPA 那 24 项"——这是 CI 唯一能跑的形态，
 #    真上游令牌不进 GitHub secrets（CLAUDE.md §1 的 CI 表），云上拿不到凭证。
 #    降级必须**吵**，否则"CI 绿了"会被读成"功能验过了"，那正是本规则要防的假绿。
 #    --keep 则直接拒绝：手点的全部意义就是对真站点点，没上游起来也没得点。
@@ -193,23 +193,47 @@ step "探活选真上游（CLAUDE.md §1：不用假上游）"
 # 会换证书，写死等于把"它一定可用"这个假设又搬回来。
 if [ -n "$SPA_ONLY" ]; then
   echo "   ⚠️ 未给 HUB_FILE —— 降级为**只跑 SPA 免密验收**"
-  echo "      跳过的是功能与数据那 106 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
+  echo "      跳过的是功能与数据那 122 项（建渠道 / 探测站型 / 登记凭证 / 采集 /"
   echo "      分组 / 目录 / Key / 限流 / 批量导入试运行 / 改名停用启用）——它们要真上游凭证。"
   echo "      本地跑全量：HUB_FILE=~/Downloads/all-api-hub-backup-*.json $0"
   echo "      （CLAUDE.md §1：验不了就如实说验不了，不拿 mock 填绿）"
 else
-  UPJSON="$(HUB_FILE="$HUB_FILE" node verify/pick-upstream.mjs)" || {
+  # 挑**两个**站（PICK_COUNT=2，输出一行一个 JSON）。
+  #
+  # 第二个是给全局模型目录用的：那一页回答"这个模型哪些渠道有"，而一个渠道
+  # 验不了跨渠道 —— channel_count 恒为 1，聚合写成什么样都绿。库里 base_url
+  # 有唯一约束，同一个站建不出两个渠道（那个约束是对的，不该为凑数据去绕它）。
+  #
+  # PICK_MAX_TRY 抬到 40：实测这份导出里活着的站很稀疏，默认 12 个候选只够挑到
+  # 第一个。一趟扫到底比"跑两次各挑一个"省 —— 后者会把前面那些死站再探一遍。
+  #
+  # 只挑到一个时 pick-upstream **退 0**：缺第二个该由那几条验收自己红，
+  # 而不是让整个栈起不来，否则前面一百多项也跟着跑不成。
+  PICKS="$(HUB_FILE="$HUB_FILE" PICK_COUNT=2 PICK_MAX_TRY="${PICK_MAX_TRY:-40}" \
+    node verify/pick-upstream.mjs)" || {
     echo "❌ 没挑到可用的真上游（上面列了每个候选的失败原因）"; exit 1; }
   # 字段名走 argv 而不是拼进脚本字符串：拼字符串要穿 bash 引号再进 JS，
   # 两层转义的坑本仓库踩过（见 P1-evidence §5）。
-  rd() { printf '%s' "$UPJSON" | node -e '
+  rdn() { printf '%s' "$2" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
   process.stdout.write(String(JSON.parse(s)[process.argv[1]])))' "$1"; }
+  UPJSON="$(printf '%s\n' "$PICKS" | sed -n 1p)"
+  UP2JSON="$(printf '%s\n' "$PICKS" | sed -n 2p)"
+  rd() { rdn "$1" "$UPJSON"; }
   UP_NAME="$(rd name)";     UP_URL="$(rd url)"
   UP_TOKEN="$(rd token)";   UP_UID="$(rd uid)"
   UP_KEYREF="$(rd keyRef)"; UP_QPU="$(rd quotaPerUnit)"
   UP_MODELS="$(rd models)"; UP_PER_CALL="$(rd perCallModels)"
   echo "   ✅ 选中 ${UP_NAME}"
+  UP2_NAME=""; UP2_URL=""; UP2_TOKEN=""; UP2_UID=""
+  if [ -n "$UP2JSON" ]; then
+    rd2() { rdn "$1" "$UP2JSON"; }
+    UP2_NAME="$(rd2 name)";   UP2_URL="$(rd2 url)"
+    UP2_TOKEN="$(rd2 token)"; UP2_UID="$(rd2 uid)"
+    echo "   ✅ 第二个真上游：${UP2_NAME}（跨渠道模型目录要两个站）"
+  else
+    echo "   ⚠️ 只挑到一个可用真站点 —— 跨渠道模型目录那几条会红并说明原因"
+  fi
 fi
 
 # SPA_ONLY（无 HUB_FILE）时整段跳过：没有真备份可传，定时同步也就没什么可验。
@@ -265,7 +289,11 @@ if [ -z "$SPA_ONLY" ]; then
 fi
 
 step "起 sla-core"
-go build -o bin/sla-core ./cmd/sla-core
+# 注入一个**每次都不同**的版本号：界面那条"侧栏显示正在运行的版本"是拿
+# DOM 与 /admin/version 逐字比对的，而不注入时两边都是 main.version 的零值
+# "dev" —— 那时把版本号写死成 "dev" 也照样绿，断言等于没有。
+CORE_VERSION="ui-verify-$$"
+go build -ldflags "-X main.version=${CORE_VERSION}" -o bin/sla-core ./cmd/sla-core
 DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" \
   >"$CORELOG" 2>&1 &
 CORE_PID=$!
@@ -341,12 +369,14 @@ if [ -z "$SPA_ONLY" ]; then
 fi
 cd verify/ui
 
-BASE="http://127.0.0.1:${PORT}" node verify-spa.mjs
+# 令牌要传给它：登录页是现在唯一的入口，SPA 那一份也得先登进去。
+# 这是**本地这个 core 自己的**令牌（上面生成的），不是第三方凭证。
+BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" node verify-spa.mjs
 
 if [ -n "$SPA_ONLY" ]; then
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（22 项）。功能与数据那 106 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密验收（24 项）。功能与数据那 122 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="
@@ -374,6 +404,11 @@ DAV_PASS="$DAV_PASS" \
 DAV_ENC_PASSWORD="$DAV_ENC_PASSWORD" \
 SHOTS=/tmp/sla-ui-shots \
 HUB_FILE="$HUB_FILE" \
+CORE_VERSION="$CORE_VERSION" \
+UP2_NAME="$UP2_NAME" \
+UP2_URL="$UP2_URL" \
+UP2_TOKEN="$UP2_TOKEN" \
+UP2_UID="$UP2_UID" \
   node verify-ui.mjs
 
 # ── Key 明文不得进日志（P1 退出标准③）──

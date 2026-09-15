@@ -24,6 +24,61 @@ a {
   color: var(--primary);
 }
 
+/* ── 顶层导航栏 ──
+   品牌在左、「控制台 / 模型目录」在右，整条居中两边各留约 1/4（形态取自
+   NewAPI 的站点顶栏）。顶层只有两项，它们是两类任务而不是两个分栏。 */
+.hdr {
+  position: sticky;
+  top: 0;
+  /* 高于 .topbar(5) 与表格里的 fixed 菜单之下：菜单要盖住顶栏，
+     否则最上面那一行的「更多」会被顶栏切掉一半。 */
+  z-index: 30;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 88%, transparent);
+  backdrop-filter: blur(8px);
+}
+/* 两边各 1/4 = 内容占中间一半。
+   `max(50%, …)` 那一半是**下限**而不是审美：窄屏上中间一半装不下品牌 +
+   两个导航 + 主题开关，硬按 50% 会横向溢出（SPA 验收有一条专门盯这个）。
+   于是宽屏严格 1/4、窄屏退到"两边各留 14px"，中间由 560px 这个下限接住。 */
+.hdr-in {
+  width: max(50%, min(100% - 28px, 520px));
+  margin: 0 auto;
+  min-height: var(--hdr-h);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 0;
+}
+/* 导航靠右：品牌与它之间的空白由这一条撑开，不用 .spacer 占位元素。 */
+.topnav {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.tnav {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tnav:hover {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+.tnav.on {
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 20%, transparent);
+}
+
 /* ── 左右布局 ──
    grid 而非 flex：侧栏定宽、主区 minmax(0,1fr)。少了 minmax(0,…) 的话，
    主区里的宽表格会把网格列顶宽（min-width:auto 默认按内容算），
@@ -31,7 +86,7 @@ a {
 .shell {
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: calc(100vh - var(--hdr-h));
 }
 .sidebar {
   background: var(--sidebar);
@@ -41,15 +96,17 @@ a {
   flex-direction: column;
   gap: 6px;
   position: sticky;
-  top: 0;
-  height: 100vh;
+  /* 让开顶层导航栏 —— 两条 sticky 叠在一起时，后一条必须从前一条的下沿开始，
+     否则滚起来侧栏顶部那几项被压在顶栏底下。 */
+  top: var(--hdr-h);
+  height: calc(100vh - var(--hdr-h));
   overflow-y: auto;
 }
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 6px 14px;
+  padding: 0;
 }
 .brand-mark {
   width: 34px;
@@ -137,44 +194,76 @@ a {
   font-size: 11px;
   color: var(--muted-foreground);
 }
-.side-foot {
-  margin-top: auto;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--muted) 40%, transparent);
-  padding: 10px;
-}
-.side-foot-l {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  margin-bottom: 7px;
-}
-.theme-sw {
-  display: flex;
-  gap: 3px;
-  background: var(--background);
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.theme-sw button {
-  flex: 1;
+/* 主题开关：一个按钮（浅色 ↔ 深色）。三段换一个的理由见 ThemeSwitch.vue。 */
+.theme-btn {
+  flex: none;
   display: grid;
   place-items: center;
-  padding: 5px 0;
-  border: 0;
-  background: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
   color: var(--muted-foreground);
-  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.theme-sw button svg {
-  width: 15px;
-  height: 15px;
-}
-.theme-sw button[aria-pressed='true'] {
-  background: var(--accent);
+.theme-btn:hover {
   color: var(--foreground);
+  background: var(--accent);
+}
+.theme-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.theme-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 登录页 ──
+   只有一个 ADMIN_TOKEN：P1 没有平台用户实体，所以没有用户名，也不该有。 */
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-top {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+}
+.login-box {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 10px;
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 26px 24px;
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.25);
+}
+.login-box .brand {
+  margin-bottom: 4px;
+}
+.login-d {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0 0 6px;
+  line-height: 1.6;
+}
+.login-box label {
+  margin-bottom: 0;
+}
+/* 错误文案用 destructive 而不是普通灰：这一条是"你得改点什么才能继续"，
+   与上面那句说明不是一类信息。 */
+.login-e {
+  font-size: 12px;
+  color: var(--destructive);
+  margin: 0;
+  line-height: 1.6;
 }
 
 /* ── 顶栏 + 主区 ── */
@@ -185,12 +274,12 @@ a {
 }
 .topbar {
   position: sticky;
-  top: 0;
+  top: var(--hdr-h);
   z-index: 5;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 22px;
+  padding: 10px 22px;
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
   background: color-mix(in oklab, var(--background) 80%, transparent);
@@ -603,6 +692,104 @@ code {
   font-size: 11px;
   color: var(--muted-foreground);
 }
+/* 模型目录的卡片模式。auto-fill 而不是 auto-fit：筛到只剩一个模型时，
+   auto-fit 会把那一张卡拉满整行宽，看起来像出了什么事。 */
+.mcards {
+  display: grid;
+  /* 列宽由 --mcard-w 决定（疏密控件改它），列数交给 auto-fill 自己算 */
+  grid-template-columns: repeat(auto-fill, minmax(var(--mcard-w, 280px), 1fr));
+  gap: 10px;
+}
+
+/* 分面筛选。一组一行，标签在左、chip 在右自动换行。 */
+.facets {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.facet {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.facet-l {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  width: 62px;
+  flex: none;
+}
+.chipf {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--background);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chipf:hover {
+  border-color: var(--primary);
+}
+.chipf.on {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+/* 选中态里的计数徽标要跟着反色，否则在主色底上是一块看不清的浅灰 */
+.chipf.on .badge {
+  background: color-mix(in oklab, var(--primary-foreground) 25%, transparent);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+.mcard {
+  display: grid;
+  gap: 7px;
+  justify-items: start;
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.mcard:hover,
+.mcard:focus-visible {
+  border-color: var(--primary);
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+}
+/* 模型名可以很长（qwen/qwen3-max-2025-09-23-thinking），断在任意字符处，
+   否则一张卡会被撑出网格 */
+.mcard-n {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.mcard-p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.mcard-p .dim {
+  font-weight: 400;
+  font-size: 11px;
+}
+.mcard-b {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .anoms {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -892,6 +1079,13 @@ summary {
   justify-content: center;
   padding: 20px;
 }
+/* 宽抽屉。给的是「一张表」而不是「一个表单」：模型目录的抽屉里是六列的逐渠道
+   明细，460px 下每列都要换行，读起来比表格本身还费劲。
+   max(460px, …) 保底：窄屏上不能比普通抽屉还窄；max-width:100% 收口。 */
+.drawer.wide {
+  width: min(900px, max(460px, 56vw));
+  max-width: 100%;
+}
 .drawer {
   display: flex;
   flex-direction: column;
@@ -1141,6 +1335,8 @@ summary {
   .shell {
     grid-template-columns: 1fr;
   }
+  /* 侧栏折成顶部横排。position 必须改回 static —— sticky + height:100vh
+     会让它吃掉整个视口，主区被挤到首屏之外（SPA 验收有一条专门盯这个）。 */
   .sidebar {
     position: static;
     height: auto;
@@ -1150,9 +1346,6 @@ summary {
     border-right: 0;
     border-bottom: 1px solid var(--sidebar-border);
   }
-  .brand {
-    padding: 0 10px 0 0;
-  }
   .nav-label {
     display: none;
   }
@@ -1160,13 +1353,6 @@ summary {
     width: auto;
   }
   .nav-item.active::after {
-    display: none;
-  }
-  .side-foot {
-    margin: 0 0 0 auto;
-    border-style: solid;
-  }
-  .side-foot-l {
     display: none;
   }
   /* 窄屏保留核心列，次要信息进详情 —— 不把整张 12 列的表硬塞进 375px。
@@ -1204,4 +1390,224 @@ summary {
   .expand {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   }
+}
+
+/* 不可选的分面 chip（未归组的 Key）。保持可见而不是隐藏：
+   "这把 Key 筛不了" 本身是运维要知道的信息，藏起来就成了"这把 Key 不存在"。 */
+.chipf[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chipf[disabled]:hover {
+  border-color: var(--border);
+}
+
+/* 供应商字母块。
+   ⚠️ **不是上游那套图标**：NewAPI 用 @lobehub/icons（React 包），而本界面是 Vue
+   且由 go:embed 打进二进制、要在内网/离线环境可用（internal/admin/web.go）——
+   走 CDN 会破坏那条保证。这里用名字取色的字母块：不引依赖、不发外链，
+   仍然让一排 chip 靠颜色区分得开。 */
+.vmark {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border-radius: 4px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: oklch(0.62 0.16 calc(var(--vh) * 1deg));
+}
+.chipf.on .vmark {
+  background: color-mix(in oklab, var(--primary-foreground) 85%, transparent);
+  color: var(--primary);
+}
+
+/* 分面行里的选择器按钮不吃满行：它旁边还有「清除」与计数小字，
+   而全局 input 规则是 width:100%（那条给表单里的输入框用，不该管这里）。 */
+.facet [data-picker] {
+  width: auto;
+  min-width: 190px;
+  max-width: 340px;
+}
+
+/* ── 模型目录：左筛选 / 右结果 ──
+   照上游定价页的形状：发行方竖在左边（那是最常用的一维，34 家横铺会占满六七行），
+   搜索居中在页头，结果区只留"看什么、怎么排"。*/
+/* 模型目录整页自己铺，不走控制台那层 .content（定宽 1440 + 侧栏）。
+   两边的布局不是一回事：那边是"侧栏 + 一列卡片"，这边是"筛选列 + 结果列"。 */
+.mpage {
+  padding: 20px 26px 40px;
+  gap: 14px;
+}
+.mhero {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+.mhero-t {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+}
+.mhero-d {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+/* 搜索框限宽：铺满一行的输入框看起来像在等一段话，而这里输入的是一个模型名。
+   全局 input 是 width:100%，所以这里必须显式收窄。 */
+.mhero-q {
+  width: min(520px, 100%);
+  height: 38px;
+  margin-top: 4px;
+}
+/* 页尾小字：与上面两栏之间留一道，别贴着分页条。 */
+.mfoot {
+  margin-top: 4px;
+}
+/* 卡片头部的排序框不吃满行 —— 全局 input/select 是 width:100%，
+   那条给表单里的控件用，不该管工具条。 */
+.card-h select {
+  width: auto;
+}
+.mlayout {
+  display: grid;
+  gap: 18px;
+  /* 窄屏叠放。并排的断点见下面 —— 左栏收到 260px 以下时，发行方名字开始
+     换行，而那时右边的表格已经在横向滚动了。 */
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 1100px) {
+  .mlayout {
+    grid-template-columns: 272px minmax(0, 1fr);
+    align-items: start;
+  }
+  /* 左栏跟随滚动：右边翻到第 30 行时还能直接换发行方，不用滚回顶部。
+     自己带滚动条，否则发行方展开全部之后左栏比视口高，底下几家点不到。 */
+  .mside {
+    position: sticky;
+    top: calc(var(--hdr-h) + 14px);
+    max-height: calc(100vh - var(--hdr-h) - 28px);
+    overflow: auto;
+  }
+}
+.mfilters {
+  display: grid;
+  gap: 16px;
+}
+.mfilter-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 6px;
+}
+.mfilter-n {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin: 6px 0 0;
+}
+.mfilter .chips {
+  margin-bottom: 0;
+  gap: 5px;
+}
+/* 左栏里的选择器吃满栏宽（与 .facet 那条相反：那里旁边还并排着别的东西）。 */
+.mside [data-picker] {
+  width: 100%;
+}
+.btn.block {
+  width: 100%;
+  margin-top: 8px;
+}
+/* 发行方列表：一行一家，图标 + 名字 + 模型数。
+   竖排而不是 chip 墙：名字长短差很多（"OpenAI" vs "Moonshot AI"），
+   横排换行后每行家数不同，扫起来找不准。 */
+.vlist {
+  display: grid;
+  gap: 1px;
+}
+.vrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+  cursor: pointer;
+  text-align: left;
+}
+.vrow:hover {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+}
+.vrow.on {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.vrow.on .badge {
+  background: color-mix(in oklab, var(--primary-foreground) 25%, transparent);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+/* 名字占满中间并在过长时省略：Moonshot AI / MiniMax 这些还好，
+   但站点自定义的发行方名可以很长，撑开左栏会把右边的表格挤窄。 */
+.vrow-n {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 图标版的 vmark。
+   ⚠️ 垫白底不是装饰：28 个图标里有 11 个是 `fill="currentColor"` 的单色版
+   （grok / xai / open-ai / moonshot / ollama…）。走 <img> 时宿主页面的 CSS 管不到
+   SVG 文档内部，currentColor 只能解析成它自己的初始值——黑色。深色主题下那就是
+   一块看不见的图标。垫一层白底，单色与彩色的都稳定可见。 */
+.vmark.img {
+  background: #fff;
+  padding: 1px;
+  object-fit: contain;
+}
+.vmark.all {
+  background: var(--muted-foreground);
+}
+.vrow.on .vmark.all {
+  background: color-mix(in oklab, var(--primary-foreground) 85%, transparent);
+  color: var(--primary);
+}
+/* 表格/抽屉里的"图标 + 名字"。与 .badge 并排时要对齐，所以同样是 inline-flex。 */
+.vcell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  margin-right: 8px;
+}
+/* 价格格：数值粗、口径小。两个口径同时存在时竖着排，绝不并成一行 ——
+   $3/1M 与 $0.08/次 并排会被读成一个区间。 */
+.pcell {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+.pcell .dim {
+  font-size: 11px;
+  margin-left: 4px;
+}
+/* 卡片头：图标与模型名同一行（照上游定价页的卡片）。 */
+.mcard-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
 }

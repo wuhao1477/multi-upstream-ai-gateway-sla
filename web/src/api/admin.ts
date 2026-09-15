@@ -11,6 +11,7 @@ import type {
   Channel,
   ChannelGroup,
   CreateChannelResp,
+  GlobalCatalogResp,
   GroupModelsResp,
   HubImportResult,
   HubSyncConfig,
@@ -23,6 +24,19 @@ import type {
   SiteFamilyInfo,
   SyncResult,
 } from './types'
+
+// ── 版本 ─────────────────────────────────────────────────────────────────────
+
+/**
+ * 正在跑的 sla-core 版本（`main.version`，由 -ldflags 注入）。
+ *
+ * 向后端要而不是编进前端：界面是 go:embed 进二进制的，但运维要回答的是
+ * "这台在跑哪一版"，而不是"这份界面是哪一版编的"。旧后端没有这个端点，
+ * 调用方应把 404 当"未知版本"处理，而不是当故障。
+ */
+export function getVersion(): Promise<{ version: string }> {
+  return api<{ version: string }>('/admin/version')
+}
 
 // ── 站型注册表 ───────────────────────────────────────────────────────────────
 
@@ -105,6 +119,51 @@ export function channelCatalog(id: number, q: CatalogQuery = {}): Promise<Catalo
   if (q.offset !== undefined) sp.set('offset', String(q.offset))
   const qs = sp.toString()
   return api<CatalogResp>(`/admin/channels/${id}/catalog${qs === '' ? '' : `?${qs}`}`)
+}
+
+/**
+ * 跨渠道的模型目录：一行一个模型，带上有它的全部渠道。
+ *
+ * 与 `channelCatalog` 是同一张表的两个方向 —— 那个问"这个渠道有什么模型"，
+ * 这个问"这个模型哪些渠道有"。参数名刻意一致（q / unit / limit / offset）。
+ * 没有 `stale`：全局视角下陈旧是逐渠道的属性，筛成布尔值会丢掉
+ * "在 A 站在架、在 B 站疑似下架"这个区别，行里给的是 stale_count。
+ */
+export interface GlobalCatalogQuery extends CatalogQuery {
+  /** 渠道多选。空数组 = 全部（不是"一个都不要"）。 */
+  channelIDs?: number[]
+  /** 发行方多选，逐字匹配上游给的名字。 */
+  vendors?: string[]
+  /** 端点类型多选，语义是**任一命中**：同时支持 openai 与 gemini 的模型，两个筛选下都看得见。 */
+  endpoints?: string[]
+  /**
+   * 「这几把 Key 调得到」。按 Key 所在分组的可用模型清单筛，多把取并集。
+   * 未归组的 Key 什么都匹配不到（后端不替它猜分组），调用方不该把这种 Key 传进来。
+   */
+  keyIDs?: number[]
+  /** 排序：'' / 'channels'（默认）/ 'name' / 'price'。price 只在选定口径时生效。 */
+  sort?: string
+}
+
+export function globalCatalog(q: GlobalCatalogQuery = {}): Promise<GlobalCatalogResp> {
+  const sp = new URLSearchParams()
+  if (q.q !== undefined && q.q !== '') sp.set('q', q.q)
+  if (q.unit !== undefined && q.unit !== '') sp.set('unit', q.unit)
+  // 多选一律逗号分隔。空数组要**整个省掉**参数：`channel_id=` 与"没传"在
+  // 服务端是同一回事，但留着会让 URL 里多一串没意义的等号
+  if (q.channelIDs !== undefined && q.channelIDs.length > 0) {
+    sp.set('channel_id', q.channelIDs.join(','))
+  }
+  if (q.vendors !== undefined && q.vendors.length > 0) sp.set('vendor', q.vendors.join(','))
+  if (q.endpoints !== undefined && q.endpoints.length > 0) {
+    sp.set('endpoint', q.endpoints.join(','))
+  }
+  if (q.keyIDs !== undefined && q.keyIDs.length > 0) sp.set('key_id', q.keyIDs.join(','))
+  if (q.sort !== undefined && q.sort !== '') sp.set('sort', q.sort)
+  if (q.limit !== undefined) sp.set('limit', String(q.limit))
+  if (q.offset !== undefined) sp.set('offset', String(q.offset))
+  const qs = sp.toString()
+  return api<GlobalCatalogResp>(`/admin/catalog${qs === '' ? '' : `?${qs}`}`)
 }
 
 // ── 账号 / Key ───────────────────────────────────────────────────────────────

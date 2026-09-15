@@ -65,11 +65,22 @@ VALUES ($1,'normal',$2,$3,now())`,
 		}
 	}
 
+	// 账号的默认分组。空串不写（NULLIF）—— NULL 是"没采到"，
+	// 而 '' 会被下面那些 JOIN 当成一个叫空串的分组去匹配。
+	if _, err := tx.Exec(ctx,
+		`UPDATE upstream_accounts SET account_group = NULLIF($2,'') WHERE id=$1`,
+		accountID, a.GroupRef); err != nil {
+		return fmt.Errorf("写账号默认分组: %w", err)
+	}
+
 	// 快照 payload：**未采到的字段省略该键**（02 §7.1）
 	payload := map[string]any{}
 	if !a.Meta.Degraded {
 		payload["balance_usd"] = a.BalanceUSD
 		payload["used_usd"] = a.UsedUSD
+	}
+	if a.GroupRef != "" {
+		payload["account_group"] = a.GroupRef
 	}
 	if a.UserID != "" {
 		payload["external_user_id"] = a.UserID
@@ -108,11 +119,15 @@ func (s *CollectorSink) SaveGroups(
 	for _, g := range gs {
 		r := GroupRow{
 			ChannelID: channelID, GroupRef: g.GroupRef,
-			AvailableModels: g.AvailableModels,
-			PreserveModels:  g.Meta.Partial || slices.Contains(g.Meta.MissingFields, "available_models"),
-			DataSource:      "auto_collect", FetchedAt: g.Meta.FetchedAt,
+			AvailableModels:   g.AvailableModels,
+			RateDynamic:       g.RateDynamic,
+			DynamicCandidates: g.DynamicCandidates,
+			PreserveModels:    g.Meta.Partial || slices.Contains(g.Meta.MissingFields, "available_models"),
+			DataSource:        "auto_collect", FetchedAt: g.Meta.FetchedAt,
 		}
-		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"
+		// 倍率为 0 时不写：0 倍率语义上是"免费"，而采不到应是"未知"。
+		// 动态倍率的组照样写它上游给的那个数（那是事实），但 RateDynamic 已
+		// 标出来，消费方必须先看那一位再决定要不要拿它算钱。
 		if g.RateMultiplier > 0 {
 			v := g.RateMultiplier
 			r.RateMultiplier = &v
@@ -370,16 +385,21 @@ UPDATE channels SET catalog_sync_seq = catalog_sync_seq + 1
 		// 补 'per_1m_token' 会把"未声明"伪装成"已知按 token 计价"（02 §1.3bis）。
 		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_model_catalog (channel_id, model_name, input_price, output_price,
-                                   billing_unit, first_seen_at, last_seen_at, last_seen_seq)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$6,$7)
+                                   billing_unit, vendor_name, vendor_icon, endpoint_types,
+                                   first_seen_at, last_seen_at, last_seen_seq)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,$9,$10)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price  = EXCLUDED.input_price,
        output_price = EXCLUDED.output_price,
        billing_unit = EXCLUDED.billing_unit,
+       vendor_name  = EXCLUDED.vendor_name,
+       vendor_icon  = EXCLUDED.vendor_icon,
+       endpoint_types = EXCLUDED.endpoint_types,
        last_seen_at = EXCLUDED.last_seen_at,
        last_seen_seq = EXCLUDED.last_seen_seq`,
 			channelID, m.ModelName, nullFloat(m.InputPrice), nullFloat(m.OutputPrice),
-			m.BillingUnit, m.Meta.FetchedAt, syncSeq); err != nil {
+			m.BillingUnit, m.VendorName, m.VendorIcon, nullStrings(m.EndpointTypes),
+			m.Meta.FetchedAt, syncSeq); err != nil {
 			return n, fmt.Errorf("写目录条目 %s: %w", m.ModelName, err)
 		}
 		n++
@@ -414,6 +434,18 @@ func nullFloat(f float64) any {
 		return nil
 	}
 	return f
+}
+
+// nullStrings 把空切片落成 NULL 而不是 '{}'。
+//
+// 两者在库里不是一回事，而这一列的语义恰好卡在这个区别上：NULL = 上游没声明
+// 支持哪些端点（老版本站点就没这个字段），'{}' = 上游明说"一个都不支持"。
+// 把前者写成后者，界面上会出现一批"不支持任何端点"的模型，而它们其实好好的。
+func nullStrings(s []string) any {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }
 
 var _ collector.Sink = (*CollectorSink)(nil)

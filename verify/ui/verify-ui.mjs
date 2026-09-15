@@ -55,13 +55,39 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 1400 });
 
+  /**
+   * 丢掉**本脚本故意触发的**那几条 401。
+   *
+   * 按「时间窗 + 状态码」双条件，不是全局放行 401：后者会把别处真的鉴权回归
+   * 一起放过去，而那正是最后那条「页面无 JavaScript 错误」要抓的东西。
+   * 用法：`const at = consoleErrors.length;` … 故意打 401 的那几步 … `drop401(at)`。
+   */
+  const drop401 = async at => {
+    await sleep(300); // 控制台消息是异步到的，早清会漏掉最后一两条
+    for (let i = consoleErrors.length - 1; i >= at; i--) {
+      if (/401/.test(consoleErrors[i])) consoleErrors.splice(i, 1);
+    }
+  };
+
   // ── 布局改成左右分栏后新增的两个助手 ──
   //
   // pane()：表单散在不同分栏里，未激活的分栏是 display:none。
   // puppeteer 往隐藏元素 type 不会报错，但 focus() 是空操作 —— 按键会落到
   // 上一个焦点元素上，症状是"填了却没填进去"，且没有任何报错。故先切分栏。
+  //
+  // 顶层导航有两项（控制台 / 模型目录），侧栏只属于控制台那一侧 ——
+  // 所以从模型目录切回任何一个控制台分栏，都得先点一下「控制台」，
+  // 否则那个 .nav-item 根本不在 DOM 上（不是隐藏，是没渲染）。
   const pane = async name => {
-    await page.click(`.nav-item[data-pane="${name}"]`);
+    if (name === 'models') {
+      await page.click('[data-top-nav="models"]');
+    } else {
+      if ((await page.$(`.nav-item[data-pane="${name}"]`)) === null) {
+        await page.click('[data-top-nav="console"]');
+        await page.waitForSelector(`.nav-item[data-pane="${name}"]`, { timeout: 5000 });
+      }
+      await page.click(`.nav-item[data-pane="${name}"]`);
+    }
     await page.waitForFunction(
       n => document.querySelector('#pane-' + n)?.classList.contains('on'),
       { timeout: 5000 }, name);
@@ -177,23 +203,75 @@ try {
   const title = await page.title();
   check('页面标题正确', title.includes('上游渠道采集与管理'), title);
 
-  // ── 2. 未填令牌时不该能拉数据（鉴权在服务端）──
+  // ── 2. 没有令牌时落到登录页，且**带着原本要去的地址** ──
+  //
+  // 这一条替代了旧的「无令牌时拒绝拉取数据」：那时候没令牌也能进控制台，
+  // 于是每一栏各弹一个失败 toast。现在压根进不去。
+  //
+  // 挑一个**深一点的**地址来验 next：用根路径的话，"带没带 next" 与
+  // "没带也正好落在根上" 是同一个结果，这条就等于没验。
   await page.evaluate(() => localStorage.clear());
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.click('#btn-reload');
-  await sleep(600);
-  const toastText = await page.$eval('#toast', el => el.textContent);
-  check('无令牌时拒绝拉取数据', /ADMIN_TOKEN|no token/.test(toastText),
-    toastText.slice(0, 60));
+  await page.goto(`${BASE}/admin/ui/keys`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#pane-login', { timeout: 8000 });
+  const loginLanding = await page.evaluate(() => ({
+    url: location.pathname + location.search,
+    hasToken: document.querySelector('#token') !== null,
+    hasSubmit: document.querySelector('#login-submit') !== null,
+    // 登录页不该有导航：还没登录，点了也走不到
+    hasHeader: document.querySelector('.hdr') !== null,
+    hasSidebar: document.querySelector('.sidebar') !== null,
+    // 登录页只要一个字段（P1 没有平台用户实体，所以没有用户名）
+    inputs: [...document.querySelectorAll('.login-box input')].map(i => i.id),
+  }));
+  check('没有令牌时自动落到登录页，并记住原本要去的地址',
+    loginLanding.url === '/admin/ui/login?next=/keys' &&
+    loginLanding.hasToken && loginLanding.hasSubmit &&
+    !loginLanding.hasHeader && !loginLanding.hasSidebar &&
+    JSON.stringify(loginLanding.inputs) === JSON.stringify(['token']),
+    JSON.stringify(loginLanding));
 
-  // ── 3. 填入令牌并加载渠道列表 ──
+  await page.screenshot({ path: `${SHOT}/00-login.png` });
+
+  // 错令牌当场说清楚，而不是放进去再被弹回来。
+  // 这一步会打一个真的 401（就是它该打的），按窗口清掉，见 drop401。
+  const at401Login = consoleErrors.length;
+  await page.type('#token', 'definitely-not-the-admin-token');
+  await page.click('#login-submit');
+  await page.waitForSelector('#login-error', { timeout: 8000 });
+  const badLogin = await page.evaluate(() => ({
+    msg: document.querySelector('#login-error')?.textContent.trim() ?? '',
+    url: location.pathname,
+    // 错令牌**不能留在本地**：留着的话守卫会认为"有令牌"并放行，
+    // 于是每进一页都是先加载、再 401、再弹回来 —— 一个看不见出口的循环。
+    stored: localStorage.getItem('adminToken') ?? '',
+  }));
+  check('令牌不对时留在登录页、说明原因，且不把错令牌存下来',
+    /令牌不对/.test(badLogin.msg) && badLogin.url === '/admin/ui/login' &&
+    badLogin.stored === '',
+    JSON.stringify(badLogin));
+  await drop401(at401Login);
+
+  // ── 3. 登录并加载渠道列表 ──
   //
   // ⚠️ 必须容忍**空库**：脚本化验收从干净的库起，此时列表是空状态而非表格。
   // 首版只等 `#channels table`，在空库上必然超时 —— 我的手工验证之所以过，
   // 是因为库里残留着先前手点建的渠道。空库才是"运维第一次打开界面"的真实情形。
+  await page.evaluate(() => { document.querySelector('#token').value = ''; });
+  await page.click('#token', { clickCount: 3 });
   await page.type('#token', TOKEN);
-  await page.evaluate(() => document.querySelector('#token')
-    .dispatchEvent(new Event('change')));
+  await page.click('#login-submit');
+  // 登录后回到原本要去的那一页（?next=/keys），不是回根路径
+  await page.waitForFunction(
+    () => document.querySelector('#pane-keys')?.classList.contains('on') === true,
+    { timeout: 10000 });
+  const afterLogin = await page.evaluate(() => ({
+    url: location.pathname,
+    stored: (localStorage.getItem('adminToken') ?? '') !== '',
+  }));
+  check('令牌正确时进入原本要去的那一页，并持久化到浏览器',
+    afterLogin.url === '/admin/ui/keys' && afterLogin.stored,
+    JSON.stringify(afterLogin));
+  await pane('channels');
   await page.click('#btn-reload');
   await page.waitForFunction(
     () => {
@@ -209,13 +287,35 @@ try {
   check('渠道列表可加载（空库显示空状态）', chCount > 0 || emptyState,
     emptyState ? '空库空状态' : `${chCount} 行`);
 
+  // 顶栏（品牌那一块）显示**正在跑的这个二进制**的版本。
+  //
+  // 三端逐字比对：`-ldflags` 注入的值 → `/admin/version` → DOM。
+  // 少任何一端这条都会退化 —— 只比 DOM 与 API 的话，不注入版本时两边都是
+  // main.version 的零值 "dev"，此时把界面上的版本号写死成 "dev" 照样绿；
+  // 而这条要防的正是"写死"与"编进前端构建期"这两种答非所问的实现
+  // （界面要回答的是"这台在跑哪一版"）。CORE_VERSION 由 ui-stack.sh 注入，
+  // 每次跑都不同。
+  const verWant = process.env.CORE_VERSION || '';
+  const verFromAPI = await page.evaluate(async () => {
+    const t = localStorage.getItem('adminToken');
+    const r = await fetch('/admin/version', { headers: { Authorization: `Bearer ${t}` } });
+    return (await r.json()).version ?? '';
+  });
+  const verInDOM = await page.waitForFunction(() => {
+    const el = document.querySelector('[data-app-version]');
+    return el && el.textContent.trim() !== '' ? el.textContent.trim() : null;
+  }, { timeout: 8000 }).then(h => h.jsonValue(), () => '');
+  check('顶栏显示正在运行的 sla-core 版本（取自后端，不是写死）',
+    verWant !== '' && verFromAPI === verWant && verInDOM === verWant,
+    `注入=${verWant} 后端=${verFromAPI} 界面=${verInDOM}`);
+
   // 站型下拉必须来自后端注册表（GET /admin/site-families），不是写死的四项。
   //
   // 逐项等值比对而不是数个数：数个数的话，把 v-for 删掉再写死四个 option
   // 照样绿 —— 而"写死"正是这条要防的东西（加站型时那份列表不报错，
   // 新站型只是在界面上不存在）。
   const famFromAPI = await page.evaluate(async () => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const r = await fetch('/admin/site-families',
       { headers: { Authorization: `Bearer ${t}` } });
     const d = await r.json();
@@ -723,7 +823,7 @@ try {
   check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c.prefix).join(' '));
 
   const groupData = await page.evaluate(async cid => {
-    const token = document.querySelector('#token').value;
+    const token = localStorage.getItem('adminToken');
     const resp = await fetch(`/admin/channel-groups?channel_id=${cid}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -744,6 +844,55 @@ try {
       { timeout: 8000 }, keyID, group.group_ref);
   }
   const groupedKeys = await readKeyRows();
+  // 分组倍率是**常驻列**，不是「列设置」里默认关着的那种。
+  //
+  // 它直接决定这把 Key 的每次调用被计多少钱（实际计费 = 模型倍率 × 分组倍率，
+  // 实测真站点分组倍率 0.12~3.5，十倍以上）。默认关着等于把"这把 Key 贵不贵"
+  // 藏进二级菜单。断言列头字面量而不是 data-col 存在：叫「倍率」会被读成模型
+  // 倍率，而这个数来自分组。
+  const rateHeaderNow = await page.$$eval('#detail-body thead th',
+    ts => ts.map(t => t.textContent.trim()));
+  const rateCells = await page.$$eval('#detail-body tbody tr[data-key-row] td[data-col="rate"]',
+    ts => ts.map(t => t.textContent.trim()));
+  // 期望由 API 构造：每把 Key 的倍率必须等于**它所属分组**的 rate_multiplier，
+  // 而不是别的分组的、也不是写死的 ×1。
+  const rateWant = await page.evaluate(async cid => {
+    const t = localStorage.getItem('adminToken');
+    const h = { Authorization: `Bearer ${t}` };
+    const [ks, gs] = await Promise.all([
+      fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+      fetch(`/admin/channel-groups?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+    ]);
+    const byID = new Map((gs.items ?? []).map(g => [g.id, g.rate_multiplier]));
+    const dynByID = new Map((gs.items ?? []).map(g => [g.id, g.rate_dynamic === true]));
+    const candByID = new Map((gs.items ?? []).map(g => [g.id, g.dynamic_candidates ?? []]));
+    const rateByRef = new Map((gs.items ?? []).map(g => [g.group_ref, g.rate_multiplier]));
+    return (ks.items ?? []).map(k => {
+      // auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
+      // （NewAPI 源码显式排除 auto 自己）。group_ratio 照样给它一个倍率，
+      // 期望里若照抄那个数，就是把"报一个与账单无关的数字"当成正确行为钉死。
+      // 动态倍率的组：显示「动态倍率 ×min~max」而不是那个展示占位的固定数。
+      // 期望里的范围由**候选分组各自的倍率**现算 —— 照抄 auto 自己那个数就是
+      // 把"报一个与账单无关的数字"当成正确行为钉死。
+      const gid = k.channel_group_id;
+      if (gid !== undefined && dynByID.get(gid) === true) {
+        const cands = (candByID.get(gid) ?? [])
+          .map(ref => rateByRef.get(ref))
+          .filter(r => typeof r === 'number');
+        if (cands.length === 0) return '动态倍率';
+        const lo = Math.min(...cands), hi = Math.max(...cands);
+        return lo === hi ? `动态倍率 ×${lo}` : `动态倍率 ×${lo}~${hi}`;
+      }
+      const r = k.channel_group_id === undefined ? undefined : byID.get(k.channel_group_id);
+      return r === undefined || r === null ? '未知' : `×${r}`;
+    });
+  }, newChannelId);
+  check('Key 表把「分组倍率」作为常驻列，且逐行等于该 Key 所属分组的倍率',
+    rateHeaderNow.includes('分组倍率') &&
+    JSON.stringify(rateCells) === JSON.stringify(rateWant),
+    `列头=${rateHeaderNow.join('|')} 实际=${JSON.stringify(rateCells)} ` +
+    `期望=${JSON.stringify(rateWant)}`);
+
   check('四把 Key 均显示分组与倍率（AC-37）',
     groupedKeys.length >= 4
       && groupedKeys.every(c => c.group !== '—' && c.rate !== '未知'),
@@ -762,6 +911,40 @@ try {
   const quotaInformative = quotaCells.some(t => /\$/.test(t) || /不限额度/.test(t));
   check('Key 剩余配额已归一为美元显示，且四态可区分',
     quotaTyped && quotaInformative, quotaCells.join(' | '));
+
+  // 不限额的 Key 在配额列**改显所属账号余额**，并带「账号余额」口径注记。
+  //
+  // 期望由 API 现构造（余额每跑一次都不同，写死必然是错的），逐把比对；
+  // 断言里必须带上那条注记 —— 少了它，配额列里就出现一个没有出处的金额，
+  // 会被读成 Key 自己的配额，而这两个数不可加也不可比（utils/money 开头）。
+  // 空白全剥：注记与金额之间有没有空格取决于 Vue 的 whitespace condense，
+  // 不是我们的意图（同上面限流列的理由）。
+  const unlimitedWant = await page.evaluate(async cid => {
+    const t = localStorage.getItem('adminToken');
+    const h = { Authorization: `Bearer ${t}` };
+    const [ks, as] = await Promise.all([
+      fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+      fetch(`/admin/accounts?channel_id=${cid}`, { headers: h }).then(r => r.json()),
+    ]);
+    const bal = new Map((as.items ?? []).map(a => [a.id, a.balance_usd]));
+    return (ks.items ?? [])
+      .filter(k => k.unlimited_quota === true)
+      .map(k => [String(k.id), bal.get(k.account_id) ?? null]);
+  }, newChannelId);
+  const quotaByID = new Map(
+    (await readKeyRows()).map(r => [r.id, r.quota.replace(/\s+/g, '')]));
+  // 采到余额的那些才有可比的期望；没采到余额的不限额 Key 退回「不限额度」，
+  // 它证明不了借显这件事，所以不计入 —— 一条"集合为空所以全过"的断言
+  // 是绿的，但它什么都没验（CLAUDE.md §1：验不了就说验不了）。
+  const borrowing = unlimitedWant.filter(([, b]) => typeof b === 'number');
+  const borrowGot = borrowing.map(([id]) => quotaByID.get(id) ?? '(缺行)');
+  const borrowWant = borrowing.map(([, b]) => `$${b.toFixed(2)}不限额账号余额`);
+  check('不限额 Key 的配额列显示所属账号余额并标注口径',
+    borrowing.length > 0 &&
+    JSON.stringify(borrowGot) === JSON.stringify(borrowWant),
+    borrowing.length === 0
+      ? `本站 ${unlimitedWant.length} 把不限额 Key 都没采到账号余额，这条无从验`
+      : `期望=${JSON.stringify(borrowWant)} 实际=${JSON.stringify(borrowGot)}`);
 
   // 配额与账号余额必须是**两个列**，不能共用一个"额度"字样。
   const keyHeaders = await page.$$eval('#detail-body thead th',
@@ -784,7 +967,7 @@ try {
     rlCells.length === keyCells.length && rlCells.every(t => t.length > 0),
     `${rlCells.length}/${keyCells.length} 行：${rlCells.join(' | ')}`);
   const rlFromAPI = await page.evaluate(async cid => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const r = await fetch(`/admin/keys?channel_id=${cid}`,
       { headers: { Authorization: `Bearer ${t}` } });
     const d = await r.json();
@@ -995,7 +1178,9 @@ try {
     const s = document.querySelector('.sidebar').getBoundingClientRect();
     const m = document.querySelector('.main').getBoundingClientRect();
     return { sx: s.x, sw: s.width, mx: m.x, sTop: s.y, mTop: m.y,
-             navs: document.querySelectorAll('.nav-item').length };
+             navs: document.querySelectorAll('.nav-item').length,
+             sidebarHasModels:
+               document.querySelector('.sidebar .nav-item[data-pane="models"]') !== null };
   });
   check('侧栏在主区左侧（真左右布局）',
     layout.sx < layout.mx && layout.mx >= layout.sw,
@@ -1006,14 +1191,101 @@ try {
   // 四项：渠道管理 / 账号管理 / Key 管理 / 批量导入。
   // 渠道详情是渠道管理的二级页面，「采集凭证」是账号的属性（并进了账号页），
   // 两者都不占一级菜单位置。
-  check('侧栏导航项齐全', layout.navs === 4, `${layout.navs} 项`);
+  //
+  // 「模型目录」**不在侧栏里**：它与「控制台」同级，在顶层导航上（下一条验）。
+  // 那四项都在**管**某种对象，模型目录是**查**，而且它自己就有一整列筛选。
+  check('侧栏导航项齐全（模型目录已升到顶层，不占侧栏位）',
+    layout.navs === 4 && !layout.sidebarHasModels,
+    `${layout.navs} 项，侧栏里有模型目录=${layout.sidebarHasModels}`);
+
+  // ── 11bis. 顶层导航：品牌在左、控制台/模型目录在右，整条居中两边各约 1/4 ──
+  //
+  // 量**渲染出来的几何**，不是"有没有那个 class"。三件事各自会坏且症状不同：
+  // 项数（多出一项就说明有分栏被误升到顶层）、左右次序（品牌与导航调换）、
+  // 居中与留白（写成满宽或只居中不留白）。
+  const top = await page.evaluate(() => {
+    const items = [...document.querySelectorAll('[data-top-nav]')];
+    const inner = document.querySelector('.hdr-in').getBoundingClientRect();
+    const brand = document.querySelector('.hdr-in .brand').getBoundingClientRect();
+    const nav = document.querySelector('.topnav').getBoundingClientRect();
+    return {
+      keys: items.map(b => b.getAttribute('data-top-nav')),
+      labels: items.map(b => b.textContent.trim()),
+      active: items.filter(b => b.classList.contains('on'))
+        .map(b => b.getAttribute('data-top-nav')),
+      brandRight: Math.round(brand.right), navLeft: Math.round(nav.left),
+      left: Math.round(inner.left), right: Math.round(inner.right),
+      win: window.innerWidth,
+    };
+  });
+  const gapL = top.left;
+  const gapR = top.win - top.right;
+  check('顶层导航只有「控制台 / 模型目录」两项，品牌在左、导航在右',
+    JSON.stringify(top.keys) === JSON.stringify(['console', 'models']) &&
+    JSON.stringify(top.labels) === JSON.stringify(['控制台', '模型目录']) &&
+    top.brandRight <= top.navLeft,
+    `项=${JSON.stringify(top.labels)}，品牌右边界 ${top.brandRight} / 导航左边界 ${top.navLeft}`);
+  // 1/4：两边留白各占视口的四分之一（窄屏会退到下限，见 .hdr-in 的注释；
+  // 这一轮跑在 1280 宽，走的是严格 1/4 那一支）。
+  check('顶层导航居中，两边各留约 1/4',
+    Math.abs(gapL - gapR) <= 2 &&
+    Math.abs(gapL - top.win / 4) <= 4,
+    `左留白 ${gapL} 右留白 ${gapR}，视口 ${top.win}（1/4 = ${Math.round(top.win / 4)}）`);
+
+  // 切到模型目录：控制台那层壳（侧栏 + 分栏顶栏 + 定宽内容区）**整个不渲染**，
+  // 它自己铺一页。断言"不在 DOM 上"而不是"看不见"：两套布局别在一起的症状
+  // 正是那条几乎全空的横条还在，只是上面没东西了。
+  //
+  // 令牌框反过来：登录之后**哪一页都不该再有**（它只在登录页填一次，
+  // 之后存在浏览器里）。摆在界面上的输入框是一把已经生效的凭证，
+  // 却长得像一个还等着你填的表单项。
+  await pane('models');
+  const onModels = await page.evaluate(() => ({
+    shell: document.querySelector('.shell') !== null,
+    sidebar: document.querySelector('.sidebar') !== null,
+    topbar: document.querySelector('.topbar') !== null,
+    content: document.querySelector('.content') !== null,
+    ownPage: document.querySelector('#pane-models.mpage') !== null,
+    tokens: document.querySelectorAll('#token').length,
+    active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
+    mside: document.querySelector('.mside') !== null,
+  }));
+  await pane('channels');
+  const backToConsole = await page.evaluate(() => ({
+    sidebar: document.querySelector('.sidebar') !== null,
+    topbar: document.querySelector('.topbar') !== null,
+    tokens: document.querySelectorAll('#token').length,
+    active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
+  }));
+  check('模型目录自己铺一页：控制台那层壳整个不渲染，登录后两边都没有令牌框',
+    onModels.shell === false && onModels.sidebar === false &&
+    onModels.topbar === false && onModels.content === false &&
+    onModels.ownPage && onModels.mside === true && onModels.active === 'models' &&
+    onModels.tokens === 0 &&
+    backToConsole.sidebar === true && backToConsole.topbar === true &&
+    backToConsole.tokens === 0 && backToConsole.active === 'console',
+    `模型目录页：shell=${onModels.shell} 侧栏=${onModels.sidebar} ` +
+    `分栏顶栏=${onModels.topbar} 定宽内容区=${onModels.content} ` +
+    `自己的页容器=${onModels.ownPage} 自带筛选栏=${onModels.mside} ` +
+    `令牌框 ${onModels.tokens} 个；` +
+    `回控制台：侧栏=${backToConsole.sidebar} 分栏顶栏=${backToConsole.topbar} ` +
+    `令牌框 ${backToConsole.tokens} 个`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //
   // 断言背景亮度而不是 class 名：只看 classList 的话，把 .dark 里的
   // 色值写成白的也照样绿。深/浅两次读数必须真的分处两端。
-  await page.click('#theme-sw button[data-theme="dark"]');
-  await sleep(250);
+  // 一个按钮来回切，所以要先确保它此刻不是深色 —— 直接点会在已经是深色时
+  // 把它切成浅色，而那时这条断言读到的是"切换坏了"，其实只是起点不同。
+  const setTheme = async want => {
+    for (let i = 0; i < 2; i++) {
+      const now = await page.$eval('#theme-sw', b => b.dataset.theme);
+      if (now === want) return;
+      await page.click('#theme-sw');
+      await sleep(250);
+    }
+  };
+  await setTheme('dark');
   const darkLuma = await bgLuma();
   const darkOn = await page.evaluate(() =>
     document.documentElement.classList.contains('dark'));
@@ -1021,8 +1293,7 @@ try {
     `class=dark:${darkOn} 背景亮度=${darkLuma}`);
   await page.screenshot({ path: `${SHOT}/09-theme-dark.png`, fullPage: true });
 
-  await page.click('#theme-sw button[data-theme="light"]');
-  await sleep(250);
+  await setTheme('light');
   const lightLuma = await bgLuma();
   const lightOff = await page.evaluate(() =>
     !document.documentElement.classList.contains('dark'));
@@ -1031,19 +1302,50 @@ try {
   await page.screenshot({ path: `${SHOT}/10-theme-light.png`, fullPage: true });
 
   // 主题必须跨刷新记住：运维每次开界面都被打回默认色，等于没做
-  await page.click('#theme-sw button[data-theme="dark"]');
-  await sleep(150);
+  await setTheme('dark');
   await page.reload({ waitUntil: 'domcontentloaded' });
   await sleep(400);
   const persisted = await page.evaluate(() => ({
     dark: document.documentElement.classList.contains('dark'),
     stored: localStorage.getItem('theme'),
-    pressed: document.querySelector('#theme-sw button[aria-pressed="true"]')
-      ?.dataset.theme,
+    // 按钮显示的是**当前**主题；刷新后它与 html.dark 必须一致，
+    // 否则界面是深色而按钮说浅色（图标读起来就成了假的）
+    shown: document.querySelector('#theme-sw')?.dataset.theme,
+    // 一个按钮，不是三个
+    buttons: document.querySelectorAll('#theme-sw').length,
   }));
-  check('主题选择跨刷新保留且按钮态一致',
-    persisted.dark && persisted.stored === 'dark' && persisted.pressed === 'dark',
+  check('主题是一个按钮、跨刷新保留、按钮显示的与实际一致',
+    persisted.dark && persisted.stored === 'dark' && persisted.shown === 'dark' &&
+    persisted.buttons === 1,
     JSON.stringify(persisted));
+
+  // ── 12bis. 令牌失效（401）自动回登录页 ──
+  //
+  // 现造一把**不灵的令牌**：直接改 localStorage，不改界面上的任何东西 ——
+  // 模拟的是"令牌在后端被换掉了"，而那正是这条要处理的真实情形。
+  // 这不违反禁 mock（CLAUDE.md §1）：假的是**输入**（一把过期凭证），
+  // 不是依赖 —— 真后端确实会对它回 401，而真后端不肯按需把一把令牌作废给验收用。
+  //
+  // 清掉那把不灵的令牌是判据的一半：留着的话守卫会认为"有令牌"并放行，
+  // 于是每进一页都是先加载、再 401、再弹回来 —— 一个看不见出口的循环。
+  const at401Rotated = consoleErrors.length;
+  await page.evaluate(() => localStorage.setItem('adminToken', 'token-was-rotated'));
+  await page.click('#btn-reload');
+  await page.waitForSelector('#pane-login', { timeout: 8000 });
+  const bounced = await page.evaluate(() => ({
+    url: location.pathname + location.search,
+    stored: localStorage.getItem('adminToken') ?? '',
+  }));
+  check('令牌失效（401）时自动回登录页，带上原地址并清掉那把不灵的令牌',
+    /^\/admin\/ui\/login\?next=/.test(bounced.url) && bounced.stored === '',
+    JSON.stringify(bounced));
+  await drop401(at401Rotated);
+  // 登回去，后面的断言还要用
+  await page.type('#token', TOKEN);
+  await page.click('#login-submit');
+  await page.waitForFunction(
+    () => document.querySelector('#pane-channels')?.classList.contains('on') === true,
+    { timeout: 10000 });
 
   // 批量导入分栏可达（端点已实现，界面上要能找到入口）
   await pane('import');
@@ -1393,6 +1695,730 @@ try {
     `状态=${backOn}，原因元素${reasonGone ? '已消失' : '仍在'}`);
 
   await page.screenshot({ path: `${SHOT}/12-channel-edit.png`, fullPage: true });
+
+  // ── 12quater. 模型目录分栏（跨渠道 + 分面筛选）──
+  //
+  // **要两个不同的真站点才验得了**：只有一个渠道时 channel_count 恒为 1，
+  // 聚合的 GROUP BY 写成什么样都绿；渠道分面也只有一项，"筛了渠道之后发行方
+  // 收窄"那条同样验不到。库里 base_url 有唯一约束，同一个站建不出两个渠道 ——
+  // 那个约束是对的，不该为了凑数据去绕它。第二个站由 ui-stack.sh 用
+  // PICK_COUNT=2 现场探活挑出来（CLAUDE.md §1：不造站点）。
+  const UP2 = {
+    name: process.env.UP2_NAME || '',
+    url: process.env.UP2_URL || '',
+    token: process.env.UP2_TOKEN || '',
+    uid: process.env.UP2_UID || '',
+  };
+  if (UP2.url === '') {
+    check('模型目录：跨渠道聚合（要两个真站点）', false,
+      '只挑到一个可用真站点，这几条无从验 —— 调大 PICK_MAX_TRY 或换一份更新的导出。' +
+      '不拿单渠道的绿冒充跨渠道通过（CLAUDE.md §1）');
+  } else {
+    // 建第二个渠道走 API 而不是点界面：建渠道/登记凭证那条路前面已经逐项验过，
+    // 这里只需要**第二个真站点的目录数据**当输入，重点在聚合与分面本身。
+    const ch2 = await page.evaluate(async up => {
+      const t = localStorage.getItem('adminToken');
+      const h = { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' };
+      const post = async (p, b) =>
+        (await fetch(p, { method: 'POST', headers: h, body: JSON.stringify(b) })).json();
+      const c = await post('/admin/channels',
+        { name: `目录验收-${up.name}`.slice(0, 40), base_url: up.url, auto_detect: true });
+      if (typeof c.id !== 'number') return { error: c.error ?? '建渠道失败' };
+      const a = await post('/admin/accounts',
+        { channel_id: c.id, external_user_id: up.uid });
+      if (typeof a.id !== 'number') return { error: a.error ?? '建账号失败' };
+      const cr = await post('/admin/collector/credentials',
+        { account_id: a.id, access_token: up.token });
+      if (cr.stored !== true) return { error: cr.error ?? '登记凭证失败' };
+      const s = await post(`/admin/channels/${c.id}/sync`, {});
+      return {
+        id: c.id,
+        sync: (s.items ?? []).map(i => `${i.capability}=${i.status}`).join(' '),
+        error: s.error,
+      };
+    }, UP2);
+    check('第二个真上游建渠道并采集成功（跨渠道目录的输入）',
+      ch2.error === undefined && /model_catalog=ok/.test(ch2.sync ?? ''),
+      ch2.error ?? `渠道 ${ch2.id}：${ch2.sync}`);
+
+    await pane('models');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-model-row]').length > 0, { timeout: 10000 });
+
+    // 期望从 API 现构造。**逐字比对**而不是"数字大于零"：后者在把两个渠道
+    // 合成一行、或把渠道名错位时照样绿。
+    const api = async path => page.evaluate(async p => {
+      const t = localStorage.getItem('adminToken');
+      const r = await fetch(p, { headers: { Authorization: `Bearer ${t}` } });
+      return r.json();
+    }, path);
+
+    const firstPage = await api('/admin/catalog?limit=50&offset=0');
+    const domRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    check('模型目录分栏列出模型，且与 /admin/catalog 逐行同序',
+      JSON.stringify(domRows) === JSON.stringify(firstPage.items.map(m => m.model_name)),
+      `共 ${firstPage.total} 个模型；界面 ${domRows.length} 行，首行 ${domRows[0]}`);
+
+    // ── 明细一律走抽屉（列表模式已无行内展开）──
+    //
+    // 两种视图共用同一个抽屉与同一个 ModelChannelTable。断言"点了列表行之后
+    // 抽屉里是那个模型"，顺带守住"行内展开真的删干净了" —— 留着一份就意味着
+    // 那张七列的表有两套容器，而两套宽度约束迟早会岔开。
+    const openDrawerFor = async name => {
+      await page.evaluate(n => {
+        [...document.querySelectorAll('[data-model-open]')]
+          .find(b => b.getAttribute('data-model-open') === n)?.click();
+      }, name);
+      await page.waitForSelector('.drawer [data-model-channels]', { timeout: 5000 });
+    };
+    const readDrawer = () => page.evaluate(() => {
+      const d = document.querySelector('.drawer');
+      const tbl = d.querySelector('[data-model-channels]');
+      return {
+        wide: d.classList.contains('wide'),
+        width: Math.round(d.getBoundingClientRect().width),
+        viewport: window.innerWidth,
+        title: d.querySelector('.drawer-t')?.textContent.trim(),
+        forModel: tbl?.getAttribute('data-model-channels'),
+        chNames: [...tbl.querySelectorAll('tbody tr td:first-child')]
+          .map(t => t.textContent.trim()),
+        // 只取「实际价」那格里的数字本身：后面还跟着"最低 · 分组 X（共 N 个…）"
+        eff: [...tbl.querySelectorAll('tbody tr td[data-model-eff]')]
+          .map(t => (t.textContent.match(/-?[\d.]+/) ?? ['未采到分组倍率'])[0]),
+      };
+    });
+    const closeDrawer = async () => {
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(
+        () => document.querySelector('.drawer') === null, { timeout: 5000 }).catch(() => {});
+    };
+
+    const noInlineExpand = await page.$$eval('[data-model-toggle]', els => els.length);
+    check('列表模式改用抽屉，行内展开已移除',
+      noInlineExpand === 0, `残留的展开按钮 ${noInlineExpand} 个`);
+
+    // 核心那条：两个站都有的模型，渠道数必须是 2，且抽屉里列出的正是那两个站。
+    const shared = firstPage.items.filter(m => m.channel_count >= 2);
+    if (shared.length === 0) {
+      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名', false,
+        `两个真站点（${UP_URL} / ${UP2.url}）的目录没有交集 —— 这条无从验`);
+    } else {
+      const m = shared[0];
+      await openDrawerFor(m.model_name);
+      const d = await readDrawer();
+      const wantNames = m.channels.map(c => c.channel_name);
+      const countShown = await page.evaluate(n => {
+        const e = [...document.querySelectorAll('[data-model-chcount]')]
+          .find(x => x.getAttribute('data-model-chcount') === n);
+        return Number(e.textContent.trim());
+      }, m.model_name);
+      check('跨渠道：两站共有的模型渠道数为 2 且列出两个渠道名',
+        countShown === m.channel_count && m.channel_count >= 2 &&
+        d.title === m.model_name && d.forModel === m.model_name &&
+        JSON.stringify(d.chNames) === JSON.stringify(wantNames),
+        `${m.model_name}：渠道数=${countShown} 抽屉=${d.title} ` +
+        `渠道=${JSON.stringify(d.chNames)} 期望=${JSON.stringify(wantNames)}`);
+
+      // 抽屉要够宽：它装的是七列的表，460px 下每列都换行。
+      // 量渲染出来的宽度而不是"有没有 wide 这个 class" —— 后者改个类名就失效。
+      check('模型抽屉是宽抽屉（约占半屏，装得下七列明细）',
+        d.wide && d.width >= Math.min(700, d.viewport * 0.45),
+        `宽 ${d.width}px / 视口 ${d.viewport}px，wide=${d.wide}`);
+
+      // 「实际价」= 模型价 × 分组倍率。漏乘的话显示的仍是一个格式正确、量级
+      // 正常的数字，只是与账单差十几倍（实测真站点分组倍率 0.12~3.5）。
+      const effWant = m.channels.map(c => {
+        const rates = (c.groups ?? [])
+          .map(g => g.rate_multiplier)
+          .filter(r => typeof r === 'number');
+        if (c.input_price === undefined || rates.length === 0) return '未采到分组倍率';
+        return String(Math.round(c.input_price * Math.min(...rates) * 1e6) / 1e6);
+      });
+      check('模型目录的「实际价」= 模型价 × 分组倍率（不是裸模型价）',
+        JSON.stringify(d.eff) === JSON.stringify(effWant),
+        `实际=${JSON.stringify(d.eff)} 期望=${JSON.stringify(effWant)}（` +
+        m.channels.map(c => `${c.channel_name} 模型价=${c.input_price} 分组=` +
+          JSON.stringify((c.groups ?? []).map(g => `${g.group_ref}×${g.rate_multiplier}`))
+        ).join(' / ') + '）');
+      await closeDrawer();
+    }
+
+    // ── 分面：按渠道 / 发行方 / 端点类型筛 ──
+    //
+    // 分面计数**在除自己以外的全部筛选之下**统计。这条规则要正着反着各验一次：
+    //   正：筛了渠道之后，发行方只剩这些渠道有的（否则点下去是空结果）
+    //   反：渠道那一组**仍然列全**（否则选了一个就换不了，只能清空重选）
+    // 少哪一半都会得到一个"看起来能用"的分面。
+    const facetCounts = () => page.evaluate(() => ({
+      // 渠道/Key 在弹窗里，不再有 chip；这里数的是**弹窗里的行**，
+      // 同样能回答"换得了渠道吗"这个问题。
+      channels: document.querySelectorAll('#model-f-channel').length,
+      // ⚠️ 发行方**不能数行**：超过 12 家就折叠，数出来的永远是 12
+      // （实测真站点 34 家）。折叠时「展开全部 N 家」那个 N 才是真实分面大小；
+      // 展开了就按行数减去「全部发行方」那一行。
+      vendors: (() => {
+        const m = document.querySelector('#model-vendor-more')?.textContent.match(/(\d+)\s*家/);
+        return m === null || m === undefined
+          ? document.querySelectorAll('[data-facet-vendor]').length - 1
+          : Number(m[1]);
+      })(),
+      endpoints: document.querySelectorAll('[data-facet-endpoint]').length,
+    }));
+    const before = await facetCounts();
+    const ch2Vendors = Object.keys(
+      (await api(`/admin/catalog?channel_id=${ch2.id}&limit=1`)).vendors ?? {}).length;
+    const allVendors = Object.keys(firstPage.vendors ?? {}).length;
+    // 渠道与 Key 改走 ScopePicker 弹窗（真库 64 个渠道，平铺会把列表挤出首屏）。
+    // 用同一个 pick() 助手 —— 它已经会开弹窗、点行、点确定。
+    await pick('model-f-channel', [ch2.id], true);
+    await sleep(900);
+    const after = await facetCounts();
+    const urlAfter = await page.evaluate(() => location.search);
+    // 逐字比对后端说的家数，不是"变小了就行"：收窄到**另一个**错误的集合
+    // （比如少算了一家）同样会变小，而那看起来完全正常。
+    check('按渠道筛选：发行方分面收窄到该渠道，而渠道选择器仍能换渠道',
+      after.vendors === ch2Vendors && after.vendors < before.vendors &&
+      before.vendors === allVendors &&
+      after.channels === 1 && new RegExp(`channel=${ch2.id}`).test(urlAfter),
+      `发行方 ${before.vendors}→${after.vendors} 家（后端说该渠道有 ${ch2Vendors} 家，` +
+      `全库 ${allVendors} 家）URL=${urlAfter}`);
+
+    // 筛出来的每一行都必须真的属于该渠道 —— 期望由 API 现算。
+    const chFiltered = await api(`/admin/catalog?channel_id=${ch2.id}&limit=50`);
+    const chRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    check('按渠道筛选后每一行都属于该渠道',
+      JSON.stringify(chRows) === JSON.stringify(chFiltered.items.map(m => m.model_name)) &&
+      chFiltered.items.every(m => m.channels.every(c => c.channel_id === ch2.id)),
+      `${chRows.length} 行 / 后端 ${chFiltered.total} 个模型`);
+
+    // 叠一个发行方：两维一起生效，且行里那个发行方徽标就是选中的那个。
+    const vendorPick = Object.entries(chFiltered.vendors ?? {})
+      .sort((a, b) => b[1] - a[1])[0];
+    if (vendorPick === undefined) {
+      check('叠加发行方筛选后每一行都是该发行方', false,
+        '该渠道的目录里一个发行方都没采到 —— 这条无从验');
+    } else {
+      await page.evaluate(v => {
+        [...document.querySelectorAll('[data-facet-vendor]')]
+          .find(b => b.getAttribute('data-facet-vendor') === v)?.click();
+      }, vendorPick[0]);
+      await sleep(900);
+      // 读 .vname 而不是整格 textContent：图标取不到时 VendorIcon 退回的是一个
+      // **带字母的**方块，整格会读成 "OOpenAI"。
+      const vendorCells = await page.$$eval('td[data-col="vendor"]',
+        ts => ts.map(t => [...t.querySelectorAll('.vname')]
+          .map(v => v.textContent.trim()).join(',')));
+      const vendorURL = await page.evaluate(() => location.search);
+      check('叠加发行方筛选后每一行都是该发行方',
+        vendorCells.length === Math.min(50, vendorPick[1]) &&
+        vendorCells.every(t => t === vendorPick[0]) &&
+        /vendor=/.test(vendorURL) && new RegExp(`channel=${ch2.id}`).test(vendorURL),
+        `${vendorCells.length} 行（后端说 ${vendorPick[1]} 个）发行方取值=` +
+        `${JSON.stringify([...new Set(vendorCells)])} URL=${vendorURL}`);
+    }
+
+    // 端点类型：选一个，筛出来的每一行都得带它。
+    await page.click('#model-reset');
+    await sleep(900);
+    const epPick = Object.entries(firstPage.endpoints ?? {})
+      .sort((a, b) => a[1] - b[1])[0];
+    if (epPick === undefined) {
+      check('按端点类型筛选后每一行都支持该端点', false,
+        '两个真站点都没声明端点类型 —— 这条无从验');
+    } else {
+      await page.evaluate(e => {
+        [...document.querySelectorAll('[data-facet-endpoint]')]
+          .find(b => b.getAttribute('data-facet-endpoint') === e)?.click();
+      }, epPick[0]);
+      await sleep(900);
+      const epResp = await api(`/admin/catalog?endpoint=${encodeURIComponent(epPick[0])}&limit=50`);
+      const epRows = await page.$$eval('[data-model-row]',
+        rs => rs.map(r => r.getAttribute('data-model-row')));
+      check('按端点类型筛选后每一行都支持该端点',
+        JSON.stringify(epRows) === JSON.stringify(epResp.items.map(m => m.model_name)) &&
+        epResp.items.every(m =>
+          m.channels.some(c => (c.endpoint_types ?? []).includes(epPick[0]))),
+        `端点 ${epPick[0]}：界面 ${epRows.length} 行 / 后端 ${epResp.total} 个模型`);
+      await page.click('#model-reset');
+      await sleep(900);
+    }
+
+    // ── 布局：左筛选 / 右结果，搜索居中在页头 ──
+    //
+    // 量**渲染出来的位置**，不是"有没有那个 class"：类名换个写法这条就假绿，
+    // 而它要守的恰恰是"发行方在左边、结果在右边"这个视觉事实本身。
+    await page.click('#model-reset');
+    await sleep(900);
+    const layout = await page.evaluate(() => {
+      const r = s => document.querySelector(s)?.getBoundingClientRect() ?? null;
+      const side = r('.mside'), main = r('.mmain'), q = r('#model-q'), hero = r('.mhero');
+      return {
+        sideRight: Math.round(side?.right ?? -1),
+        mainLeft: Math.round(main?.left ?? -1),
+        qCenter: Math.round((q?.left ?? 0) + (q?.width ?? 0) / 2),
+        heroCenter: Math.round((hero?.left ?? 0) + (hero?.width ?? 0) / 2),
+        // 搜索框必须在页头、不在结果区里：结果区随响应整块重渲染会换掉输入框
+        // 节点，焦点与光标随之丢失 —— 症状是"筛选框只认一个字符"。
+        qInMain: document.querySelector('.mmain #model-q') !== null,
+      };
+    });
+    check('模型目录是左筛选 / 右结果两栏，搜索框居中在页头（不在结果区里）',
+      layout.sideRight > 0 && layout.sideRight <= layout.mainLeft && !layout.qInMain &&
+      Math.abs(layout.qCenter - layout.heroCenter) <= 24,
+      `左栏右边界 ${layout.sideRight} / 右栏左边界 ${layout.mainLeft}，` +
+      `搜索框中心 ${layout.qCenter} / 页头中心 ${layout.heroCenter}，` +
+      `搜索框在结果区里=${layout.qInMain}`);
+
+    // ── 发行方图标 ──
+    //
+    // 判据是 **naturalWidth > 0**：有 <img> 只能证明"写了个 img 标签"，
+    // src 指错、文件没打进产物时标签照样在，而页面上是一排裂图。
+    // 同时守住离线保证（internal/admin/web.go）：src 必须是本站资源，
+    // 一旦有人图省事换成 CDN，这条就红。
+    await page.evaluate(() => document.querySelector('#model-vendor-more')?.click());
+    await sleep(300);
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.mside img.vmark')].every(i => i.complete),
+      { timeout: 5000 }).catch(() => {});
+    const icons = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('[data-facet-vendor]')]
+        .filter(b => b.getAttribute('data-facet-vendor') !== '');
+      return rows.map(b => {
+        const img = b.querySelector('img.vmark');
+        return {
+          vendor: b.getAttribute('data-facet-vendor'),
+          loaded: img !== null && img.complete && img.naturalWidth > 0,
+          broken: img !== null && img.complete && img.naturalWidth === 0,
+          src: img?.getAttribute('src') ?? '',
+          letter: b.querySelector('span.vmark') !== null,
+        };
+      });
+    });
+    // 后端声明了图标名的那些**必须**渲染成真图标。少哪家就把那个 SVG 补进
+    // web/src/assets/vendor/（见那里的 README）—— 失败信息直接给出名字。
+    const declared = (await api('/admin/catalog?limit=1')).vendor_icons ?? {};
+    const shouldHave = icons.filter(i => (declared[i.vendor] ?? '') !== '');
+    const missing = shouldHave.filter(i => !i.loaded).map(i => `${i.vendor}(${declared[i.vendor]})`);
+    check('发行方图标：上游声明了图标的都渲染成真 SVG，没声明的退回字母块，且无外链',
+      shouldHave.length > 0 && missing.length === 0 &&
+      icons.every(i => !i.broken) &&
+      icons.every(i => i.loaded || i.letter) &&
+      icons.every(i => i.src === '' || i.src.startsWith('/admin/ui/')),
+      `${icons.length} 家发行方，上游声明图标 ${shouldHave.length} 家，` +
+      `渲染出真图标 ${icons.filter(i => i.loaded).length} 家；` +
+      `缺图标=${JSON.stringify(missing)}；` +
+      `外链=${JSON.stringify(icons.map(i => i.src).filter(u => u !== '' && !u.startsWith('/admin/ui/')))}`);
+    await page.evaluate(() => document.querySelector('#model-vendor-more')?.click());
+    await sleep(300);
+
+    // ── 排序 ──
+    //
+    // 排序必须在**服务端**做。客户端只排当前页的话，翻到第二页看到的是
+    // "另一段里各自排好的" —— 每一页内部有序，整体并不有序，而那看起来完全正常。
+    // 所以判据是与后端同参数的响应**逐行同序**，不是"界面自己排好了"。
+    await page.select('#model-sort', 'name');
+    await sleep(900);
+    const nameRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const nameResp = await api('/admin/catalog?sort=name&limit=50');
+    check('按模型名排序在服务端做，界面与后端逐行同序',
+      nameRows.length > 1 &&
+      JSON.stringify(nameRows) === JSON.stringify(nameResp.items.map(m => m.model_name)) &&
+      nameResp.sort === 'name',
+      `界面首行 ${nameRows[0]} 末行 ${nameRows[nameRows.length - 1]}，` +
+      `后端首行 ${nameResp.items[0]?.model_name}`);
+
+    // 按价格排序**要先选定价类型**：两种口径的数值区间重叠（实测按次 0.004~7
+    // vs 倍率 0.01~175），跨口径排会把 $7/次 的视频模型排在"倍率 175"之前。
+    // 所以未选口径时那一项必须是禁用的 —— 藏起来不行，藏了就没人知道有这功能。
+    const priceOff = await page.$eval('#model-sort option[value="price"]', o => o.disabled);
+    const segUnit = Object.keys(firstPage.units ?? {}).find(u => u !== 'unknown');
+    await page.evaluate(u => {
+      [...document.querySelectorAll('[data-munit]')]
+        .find(b => b.getAttribute('data-munit') === u)?.click();
+    }, segUnit);
+    await sleep(900);
+    const priceOn = await page.$eval('#model-sort option[value="price"]', o => o.disabled);
+    await page.select('#model-sort', 'price');
+    await sleep(900);
+    const priceRows = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const priceResp = await api(
+      `/admin/catalog?sort=price&unit=${encodeURIComponent(segUnit)}&limit=50`);
+    check('按价格排序：选定价类型后才可用，且与后端逐行同序',
+      priceOff === true && priceOn === false && priceRows.length > 1 &&
+      JSON.stringify(priceRows) === JSON.stringify(priceResp.items.map(m => m.model_name)),
+      `未选口径时禁用=${priceOff} 选了 ${segUnit} 之后禁用=${priceOn}；` +
+      `界面首行 ${priceRows[0]} / 后端首行 ${priceResp.items[0]?.model_name}`);
+
+    // 切走定价类型时排序要退回默认：后端在没有 unit 时也会把 price 降级，
+    // 两边不一致的话界面显示"按价格"、拿到的却是按渠道数排的结果。
+    await page.evaluate(() => {
+      [...document.querySelectorAll('[data-munit]')]
+        .find(b => b.getAttribute('data-munit') === '')?.click();
+    });
+    await sleep(900);
+    const sortAfterUnitCleared = await page.$eval('#model-sort', s => s.value);
+    check('清掉定价类型时「按价格」排序退回默认（与后端的降级一致）',
+      sortAfterUnitCleared === '',
+      `排序框现在是 ${JSON.stringify(sortAfterUnitCleared)}`);
+
+    // ── 每页行数 ──
+    await page.select('#model-pagesize', '20');
+    await sleep(900);
+    const paged = await page.evaluate(() => ({
+      rows: document.querySelectorAll('[data-model-row]').length,
+      foot: document.querySelector('#model-next')?.parentElement?.innerText
+        .replace(/\s+/g, ' ').trim() ?? '',
+    }));
+    check('每页行数可调，翻页区的计数跟着改',
+      paged.rows === 20 && /第 1–20 /.test(paged.foot),
+      `${paged.rows} 行；页脚=${JSON.stringify(paged.foot)}`);
+    await page.select('#model-pagesize', '50');
+    await sleep(900);
+
+    // ── 价格口径 /1M ↔ /1K ──
+    //
+    // 只改**显示**：同一个数除以 1000。所以判据是两次读到的数正好差一千倍，
+    // 不是"点了之后文案变了" —— 后者在把 /1K 实现成"另取一列价格"时照样绿。
+    const priceCell = () => page.evaluate(() => {
+      const cells = [...document.querySelectorAll('td[data-col="price"]')];
+      for (const c of cells) {
+        const m = c.textContent.replace(/\s+/g, ' ').match(/\$([\d.]+)[^$]*?(\/1[MK] token|\/次)/);
+        if (m !== null) return { n: Number(m[1]), suffix: m[2], row: c.closest('tr')
+          ?.getAttribute('data-model-row') };
+      }
+      return null;
+    });
+    const per1M = await priceCell();
+    await page.click('[data-seg="1K"]');
+    await sleep(400);
+    const per1K = await priceCell();
+    const savedUnit = await page.evaluate(() => localStorage.getItem('sla.models.priceUnit'));
+    check('价格可切 /1M ↔ /1K，且两者正好差一千倍（同一个数，不是另一套价）',
+      per1M !== null && per1K !== null && per1M.row === per1K.row &&
+      per1M.suffix === '/1M token' && per1K.suffix === '/1K token' &&
+      Math.abs(per1K.n - per1M.n / 1000) <= 1e-6 && savedUnit === '1K',
+      `${per1M?.row}：${per1M?.n}${per1M?.suffix} → ${per1K?.n}${per1K?.suffix}，` +
+      `本地偏好=${savedUnit}`);
+    await page.click('[data-seg="1M"]');
+    await sleep(300);
+
+    // 筛选：收敛到命中行，且写进 URL（把"谁家有 X"的链接发给别人要能复现）。
+    await page.click('#model-q');
+    await page.type('#model-q', 'claude');
+    await sleep(900);
+    const filtered = await page.$$eval('[data-model-row]',
+      rs => rs.map(r => r.getAttribute('data-model-row')));
+    const urlNow = await page.evaluate(() => location.search);
+    check('模型目录筛选收敛到命中行并写进 URL',
+      filtered.length > 0 && filtered.every(n => n.toLowerCase().includes('claude')) &&
+      /q=claude/.test(urlNow),
+      `${filtered.length} 行，URL=${urlNow}`);
+    await page.screenshot({ path: `${SHOT}/13-models.png`, fullPage: true });
+
+    // ── 卡片模式 + 疏密 + 抽屉 ──
+    //
+    // 两种视图渲染的是**同一份 items**，所以卡片数必须等于列表行数 ——
+    // 不等就说明某一边自己又筛了一道（或者少渲染了），而两边分开看都正常。
+    const listRows = filtered.length;
+    await page.click('[data-seg="card"]');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-model-card]').length > 0, { timeout: 5000 });
+    const cards = await page.$$eval('[data-model-card]',
+      cs => cs.map(c => c.getAttribute('data-model-card')));
+    const viewURL = await page.evaluate(() => location.search);
+    const viewSaved = await page.evaluate(() => localStorage.getItem('sla.models.view'));
+    check('模型目录可切卡片模式，卡片与列表同一份数据且视图写进 URL 与本地偏好',
+      cards.length === listRows &&
+      JSON.stringify(cards) === JSON.stringify(filtered) &&
+      /view=card/.test(viewURL) && viewSaved === 'card',
+      `卡片 ${cards.length} 张 / 列表 ${listRows} 行，URL=${viewURL} 本地=${viewSaved}`);
+
+    // 疏密：量**渲染出来的列宽**，不是"有没有设上那个 class/属性"。
+    // 后者在 CSS 变量名写错、或 grid 用了别的列宽来源时照样绿。
+    const widthAt = async d => {
+      await page.click(`[data-seg="${d}"]`);
+      await sleep(300);
+      return page.evaluate(() => ({
+        card: Math.round(document.querySelector('.mcard').getBoundingClientRect().width),
+        cols: getComputedStyle(document.querySelector('.mcards'))
+          .gridTemplateColumns.split(' ').length,
+        saved: localStorage.getItem('sla.models.density'),
+      }));
+    };
+    const tight = await widthAt('tight');
+    const loose = await widthAt('loose');
+    const normal = await widthAt('normal');
+    check('卡片疏密三档真的改变了列宽与列数（不是只改了个属性）',
+      tight.card < normal.card && normal.card < loose.card &&
+      tight.cols > normal.cols && normal.cols > loose.cols &&
+      normal.saved === 'normal',
+      `紧凑 ${tight.card}px/${tight.cols} 列 · 标准 ${normal.card}px/${normal.cols} 列 · ` +
+      `宽松 ${loose.card}px/${loose.cols} 列`);
+
+    // 卡片点开的也是同一个抽屉。
+    const cardName = cards[0];
+    await page.evaluate(n => {
+      [...document.querySelectorAll('[data-model-card]')]
+        .find(c => c.getAttribute('data-model-card') === n)?.click();
+    }, cardName);
+    await page.waitForSelector('.drawer [data-model-channels]', { timeout: 5000 });
+    const cardDrawer = await readDrawer();
+    const wantDrawer = firstPage.items.find(m => m.model_name === cardName)
+      ?? (await api(`/admin/catalog?q=${encodeURIComponent(cardName)}&limit=1`)).items[0];
+    check('点卡片打开的是同一个宽抽屉，内容是该模型的逐渠道明细',
+      cardDrawer.title === cardName && cardDrawer.forModel === cardName && cardDrawer.wide &&
+      JSON.stringify(cardDrawer.chNames) ===
+        JSON.stringify((wantDrawer?.channels ?? []).map(c => c.channel_name)),
+      `抽屉标题=${cardDrawer.title} 表=${cardDrawer.forModel} ` +
+      `渠道=${JSON.stringify(cardDrawer.chNames)}`);
+
+    // Esc 关得掉。抽屉盖着半屏，只能靠那个 ✕ 的话，键盘用户走不出去。
+    await closeDrawer();
+    check('抽屉可用 Esc 关闭',
+      await page.evaluate(() => document.querySelector('.drawer') === null));
+
+    await page.screenshot({ path: `${SHOT}/13b-models-card.png`, fullPage: true });
+    // 收尾恢复列表模式：本地偏好会被下一次跑读到，留着 card 会让上面那条
+    // "默认列表"的前提在第二次运行时不成立。
+    await page.click('[data-seg="list"]');
+    await sleep(300);
+
+    // ── 按 Key 筛：「我这把 Key 能调什么、按什么倍率计费」──
+    //
+    // 这一维与别的分面不同：它筛的不是目录行的字段，而是 Key 所在分组的可用
+    // 模型清单（group_models）。所以它有一种别的维度没有的失败态 ——
+    // **未归组的 Key**：上游 /api/token 的 group 是空串（站点用 auto_groups 在
+    // 调用时自动选组），或它声明的分组不在我方采到的分组里。实测 2026-09-14
+    // 两个真站点导入的 6 把 Key 里有 3 把是这样。
+    //
+    // 对这种 Key，界面必须**不让选**而不是筛出一个空列表：后端按定义匹配不到
+    // 任何模型，一个空列表解释不了原因，而"筛坏了"与"确实没有"看起来一样。
+    // 现造一把**未归组**的 Key，否则上面那半条断言在本环境里是空转的：
+    // 前面那段给每把 Key 都指派了分组，于是"未归组的必须禁用"永远没有样本。
+    // 这不是"造假数据" —— 未归组是真站点上的常态（实测两个站导入的 6 把 Key
+    // 里有 3 把如此：上游 group 是空串、或分组不在我方采到的清单里），
+    // 而真站点不肯按需产出一把这样的 Key 给验收用。
+    //
+    // ⚠️ account_id 要 **Number()**：accountIDs 来自 getAttribute，是字符串，
+    // 而后端那个字段是 int64 —— 传字符串会 400，且错误只体现为"建不出来"。
+    const ungroupedKey = await page.evaluate(async acct => {
+      const t = localStorage.getItem('adminToken');
+      const r = await fetch('/admin/keys', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: acct, secret: 'sk-ungrouped-for-facet-check-0001' }),
+      });
+      return { status: r.status, body: await r.json() };
+    }, Number(accountIDs[0]));
+    const ungroupedKeyID = ungroupedKey.body?.id;
+    check('可以登记一把未归组的 Key（给下面两条的禁用态当样本）',
+      typeof ungroupedKeyID === 'number',
+      `HTTP ${ungroupedKey.status} ${JSON.stringify(ungroupedKey.body).slice(0, 120)}`);
+
+    await page.click('#model-reset');
+    await sleep(900);
+    // 分面读的是共享 store 里的 Key 列表，刚建的那把要先拉回来才看得见
+    await pane('keys');
+    await page.click('#btn-keys-reload').catch(() => {});
+    await sleep(700);
+    await pane('models');
+    await sleep(500);
+    // Key 也进了弹窗：开一次读出每一行，再关掉。行里带分组与倍率，
+    // 解析不出分组的那些标成「筛不了」。
+    await page.click('#model-f-key');
+    await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+    const keyChips = await page.$$eval('.picker [data-pick-row]', rs => rs.map(r => ({
+      id: r.getAttribute('data-pick-row'),
+      disabled: /筛不了/.test(r.innerText),
+      text: r.innerText.replace(/\s+/g, ' ').trim(),
+    })));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelector('.picker') === null, { timeout: 5000 }).catch(() => {});
+    const allKeys = (await api('/admin/keys')).items ?? [];
+    const groupedKeys = allKeys.filter(k => k.group_ref !== undefined && k.group_ref !== '');
+    const ungroupedKeys = allKeys.filter(k => k.group_ref === undefined || k.group_ref === '');
+    const chipOf = id => keyChips.find(c => c.id === String(id));
+    check('「按 Key」分面：解析得出分组的可选、解析不出的禁用并标出来',
+      groupedKeys.length > 0 &&
+      groupedKeys.every(k => chipOf(k.id)?.disabled === false &&
+        chipOf(k.id)?.text.includes(k.group_ref)) &&
+      ungroupedKeys.every(k => chipOf(k.id)?.disabled === true &&
+        chipOf(k.id)?.text.includes('未归组')),
+      `解析得出 ${groupedKeys.length} 把 / 解析不出 ${ungroupedKeys.length} 把；` +
+      `chip=${JSON.stringify(keyChips.map(c => `${c.text}${c.disabled ? '(禁用)' : ''}`))}`);
+
+    // auto 是**选组模式**不是可计费分组：实际倍率由运行时命中的候选组决定
+    // （NewAPI 源码显式排除 auto 自己）。而 /api/pricing 的 group_ratio 照样
+    // 给它一个倍率 —— 照着显示就是报一个与账单无关、却看起来完全正常的数字。
+    //
+    // 验收环境里恰好有一把 Key 被指派到 auto（那是该站真实存在的分组）。
+    const autoKey = allKeys.find(k => k.group_ref === 'auto');
+    if (autoKey === undefined) {
+      check('分组为 auto 的 Key 显示「自动选组」而不是一个倍率数字', false,
+        '这一轮没有落在 auto 分组的 Key —— 这条无从验');
+    } else {
+      const autoChip = chipOf(autoKey.id)?.text ?? '';
+      // 「动态倍率 ×a~b」里也有 × 和数字，所以判据不能是"没有 ×数字"，
+      // 而是**那个数不是 auto 自己那个占位倍率**。区间由后端给的候选区间来对。
+      const wantRange = autoKey.rate_min === undefined || autoKey.rate_max === undefined
+        ? '动态倍率'
+        : autoKey.rate_min === autoKey.rate_max
+          ? `动态倍率 ×${autoKey.rate_min}`
+          : `动态倍率 ×${autoKey.rate_min}~${autoKey.rate_max}`;
+      check('分组为 auto 的 Key 显示动态倍率区间，而不是它那个占位的固定倍率',
+        autoKey.rate_dynamic === true && autoChip.includes(wantRange) &&
+        !autoChip.includes(`×${autoKey.rate_multiplier} `),
+        `chip=${JSON.stringify(autoChip)} 期望含 ${JSON.stringify(wantRange)}` +
+        `（后端给的占位 rate_multiplier=${autoKey.rate_multiplier}，` +
+        `候选区间 ${autoKey.rate_min}~${autoKey.rate_max}）`);
+    }
+
+    // 刚建的那把 Key **自己没有分组**，但账号有默认分组（上游 /api/user/self
+    // 的 group，实测两个真站点都是 "default"）—— 所以它不是"未归组"，
+    // 而是"跟账号走"：调用实际走账号那一档，倍率与可调模型都是确定的。
+    //
+    // 这条守的是 027 那一路：不采账号分组的话，这种 Key 会被永远显示成
+    // 未归组、倍率未知，而它其实有明确的倍率（实测站 A 的 default 是 ×1）。
+    const inherited = allKeys.find(k => k.id === ungroupedKeyID);
+    const accountGroup = (await api('/admin/accounts')).items
+      ?.find(a => a.id === Number(accountIDs[0]))?.account_group;
+    if (inherited === undefined || (accountGroup ?? '') === '') {
+      check('自己没分组的 Key 回落到账号的默认分组，并标「跟账号」', false,
+        `账号默认分组=${JSON.stringify(accountGroup)} —— ` +
+        '上游没给账号分组（或它不在该站 group_ratio 里）时这条无从验');
+    } else {
+      check('自己没分组的 Key 回落到账号的默认分组，并标「跟账号」',
+        inherited.group_ref === accountGroup && inherited.group_inherited === true &&
+        inherited.channel_group_id === undefined &&
+        // ⚠️ 没写分组 **不等于** 动态倍率：它走账号的默认分组，那通常是个
+        // 有固定倍率的普通组。把两者混成一档会让一个确定的倍率被说成"动态"。
+        inherited.rate_dynamic === false && inherited.rate_multiplier !== undefined &&
+        chipOf(inherited.id)?.disabled === false &&
+        chipOf(inherited.id)?.text.includes('跟账号'),
+        `Key #${inherited.id}：自己的分组=${JSON.stringify(inherited.channel_group_id)} ` +
+        `解析出=${inherited.group_ref}（账号默认 ${accountGroup}）` +
+        `×${inherited.rate_multiplier} inherited=${inherited.group_inherited} ` +
+        `chip=${JSON.stringify(chipOf(inherited.id)?.text)}`);
+    }
+
+    if (groupedKeys.length === 0) {
+      check('按 Key 筛出的模型 == 该 Key 所在分组能调的模型', false,
+        '这一轮没有已归组的 Key —— 这条无从验（上游的 group 为空串时我方不替它猜分组）');
+    } else {
+      const theKey = groupedKeys[0];
+      await pick('model-f-key', [theKey.id], true);
+      await sleep(1000);
+      const keyResp = await api(`/admin/catalog?key_id=${theKey.id}&limit=50`);
+      const keyRows = await page.$$eval('[data-model-row]',
+        rs => rs.map(r => r.getAttribute('data-model-row')));
+      const keyURL = await page.evaluate(() => location.search);
+      check('按 Key 筛出的模型 == 该 Key 所在分组能调的模型',
+        keyResp.total > 0 &&
+        JSON.stringify(keyRows) === JSON.stringify(keyResp.items.map(m => m.model_name)) &&
+        new RegExp(`key=${theKey.id}`).test(keyURL),
+        `Key #${theKey.id}（分组 ${theKey.group_ref} ×${theKey.rate_multiplier}）：` +
+        `界面 ${keyRows.length} 行 / 后端 ${keyResp.total} 个模型，URL=${keyURL}`);
+
+      // 按 Key 筛时，「实际价」只能用**这把 Key 自己那个分组**的倍率 ——
+      // 不是全部分组里最低的那个。留着别的分组，那句"最低 · 分组 X"里的 X
+      // 会是一个他根本用不上的分组：一个精确且无关的数字。
+      const firstModel = keyResp.items[0];
+      await openDrawerFor(firstModel.model_name);
+      const keyDrawer = await readDrawer();
+      const groupsShown = await page.evaluate(n => {
+        const t = [...document.querySelectorAll('[data-model-channels]')]
+          .find(x => x.getAttribute('data-model-channels') === n);
+        return [...t.querySelectorAll('tbody tr td[data-model-eff]')]
+          .map(td => td.textContent.replace(/\s+/g, ' ').trim());
+      }, firstModel.model_name);
+      const price = firstModel.channels[0]?.input_price;
+      const wantEff = price === undefined
+        ? '未采到分组倍率'
+        : String(Math.round(price * theKey.rate_multiplier * 1e6) / 1e6);
+      check('按 Key 筛时「实际价」只按该 Key 的分组折算（不是全部分组的最低价）',
+        keyDrawer.eff.length === 1 && keyDrawer.eff[0] === wantEff &&
+        groupsShown.every(t => t.includes(theKey.group_ref)) &&
+        groupsShown.every(t => !t.includes('共')),
+        `${firstModel.model_name} 模型价=${price} × 分组 ${theKey.group_ref} ` +
+        `${theKey.rate_multiplier} → 期望 ${wantEff}，实际 ${JSON.stringify(keyDrawer.eff)}；` +
+        `整格=${JSON.stringify(groupsShown)}`);
+      // 倍率折成**绝对美元价**：`模型倍率 × 分组倍率 × 1e6 / quota_per_unit`。
+      //
+      // 倍率跨站点不可比 —— 同一个"×1"，在 quota_per_unit=500000 的站上是
+      // $2/1M token，在 250000 的站上就是 $4，而界面上两个都写着 ×1。
+      // 这正是"有些中转站把倍率设成 ×1 但实际是官方 0.5 或 2 倍"的来源。
+      // 期望由后端给的 quota_per_unit 现算，**不写死 ×2**。
+      const qpu = firstModel.channels[0]?.quota_per_unit;
+      const unit = firstModel.channels[0]?.billing_unit;
+      if (qpu === undefined || unit !== 'per_1m_token') {
+        check('倍率按站点的 quota_per_unit 折成绝对美元价', false,
+          `该渠道 quota_per_unit=${qpu} 口径=${unit} —— 这条无从验`);
+      } else {
+        const wantUSD = Math.round(price * theKey.rate_multiplier * 1e6 / qpu * 1e6) / 1e6;
+        const usdShown = await page.evaluate(n => {
+          const t = [...document.querySelectorAll('[data-model-channels]')]
+            .find(x => x.getAttribute('data-model-channels') === n);
+          return [...t.querySelectorAll('tbody tr td[data-model-eff]')]
+            .map(td => (td.textContent.match(/≈\s*\$([\d.]+)/) ?? [])[1] ?? null);
+        }, firstModel.model_name);
+        check('倍率按站点的 quota_per_unit 折成绝对美元价',
+          usdShown.length === 1 && Number(usdShown[0]) === wantUSD,
+          `${firstModel.model_name}：倍率 ${price}×${theKey.rate_multiplier} ` +
+          `× 1e6/${qpu} → 期望 $${wantUSD}/1M，界面 ${JSON.stringify(usdShown)}`);
+      }
+      await closeDrawer();
+
+      // ── 反方向的入口：Key 管理页 →「能调哪些模型」──
+      //
+      // 这条同时守住一个刚修的缺陷：ModelsView 的 onMounted 里 `cat.open()` 会
+      // 清空 store，而清空触发 watch→syncURL，把刚 push 进来的 ?key= 抹掉 ——
+      // 于是"从 Key 页跳过来筛选没生效，直接刷新同一个地址却好使"。
+      // 所以这条必须**从 Key 页点过去**，不能只验直接访问带参数的地址。
+      await pane('keys');
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-key-models]').length > 0, { timeout: 8000 });
+      const modelBtns = await page.$$eval('[data-key-models]', bs => bs.map(b => ({
+        id: b.getAttribute('data-key-models'), disabled: b.disabled, title: b.title,
+      })));
+      const btnOf = id => modelBtns.find(b => b.id === String(id));
+      check('Key 管理页每行有「能调哪些模型」，未归组的禁用并说明原因',
+        groupedKeys.every(k => btnOf(k.id)?.disabled === false) &&
+        ungroupedKeys.every(k => btnOf(k.id)?.disabled === true &&
+          /未归组/.test(btnOf(k.id)?.title ?? '')),
+        `按钮 ${modelBtns.length} 个，禁用 ${modelBtns.filter(b => b.disabled).length} 个` +
+        `（未归组 ${ungroupedKeys.length} 把）`);
+
+      await openMore(`[data-key-more="${theKey.id}"]`);
+      await page.evaluate(id => {
+        [...document.querySelectorAll('[data-key-models]')]
+          .find(b => b.getAttribute('data-key-models') === String(id))?.click();
+      }, theKey.id);
+      await page.waitForFunction(
+        () => document.querySelector('#pane-models')?.classList.contains('on') === true,
+        { timeout: 8000 });
+      await sleep(1200);
+      const jumped = await page.evaluate(() => ({
+        url: location.pathname + location.search,
+        count: document.querySelector('#model-count')?.textContent.trim(),
+        on: (document.querySelector('#model-f-key')?.dataset.picked ?? '')
+          .split(',').filter(x => x !== ''),
+      }));
+      check('从 Key 管理页跳到模型目录时筛选真的带过去了（不是被自己抹掉）',
+        new RegExp(`key=${theKey.id}`).test(jumped.url) &&
+        JSON.stringify(jumped.on) === JSON.stringify([String(theKey.id)]) &&
+        jumped.count === `${keyResp.total} / ${keyResp.total}`,
+        `URL=${jumped.url} 选中=${JSON.stringify(jumped.on)} 计数=${jumped.count}` +
+        `（后端 ${keyResp.total}）`);
+      await page.screenshot({ path: `${SHOT}/13c-models-by-key.png`, fullPage: true });
+      await page.click('#model-reset');
+      await sleep(900);
+    }
+  }
 
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是

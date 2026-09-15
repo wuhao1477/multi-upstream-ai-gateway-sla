@@ -169,7 +169,13 @@ type Account struct {
 	UserID     string
 	BalanceUSD float64 // 已归一为美元（FR-018，一期 1:1）
 	UsedUSD    float64
-	Meta       SourceMeta
+	// GroupRef 是账号在上游的**默认分组**。
+	//
+	// 它决定 `group` 为空串的那些 Key 实际走哪个分组 —— 那种 Key 不是"未归组"，
+	// 是"跟账号走"。空 = 上游没给（老版本或别的站型），**不可默认成 "default"**：
+	// 实测有站点的账号分组叫 default，但它的 group_ratio 里根本没有 default。
+	GroupRef string
+	Meta     SourceMeta
 }
 
 // RateLimit 是限流快照（FR-028）。
@@ -276,6 +282,12 @@ type Group struct {
 	RateMultiplier float64
 	// AvailableModels 该分组可获取的模型（FR-124）→ group_models.model_name
 	AvailableModels []string
+	// RateDynamic 为真时 RateMultiplier **不是计费倍率**：这一组的倍率由运行时
+	// 命中的候选组决定（NewAPI 的 auto）。上游照样给它一个数，那是展示占位。
+	RateDynamic bool
+	// DynamicCandidates 是候选分组名（NewAPI 的 auto_groups）。
+	// 存名字：候选里可能有我方尚未采到的分组，存外键会把这个事实丢掉。
+	DynamicCandidates []string
 
 	Meta SourceMeta
 }
@@ -297,7 +309,14 @@ type CatalogModel struct {
 	// 于是"看数值猜口径"不成立 —— 没有这个字段，目录里的价格就是个
 	// 无单位的数字，把 $0.15/次 当倍率 0.15 排序会让最贵的模型显得最便宜。
 	BillingUnit string
-	Meta        SourceMeta
+	// VendorName 是发行方（上游 vendors[].name）。空 = 上游未声明，
+	// **不是**"无供应商" —— 界面据此渲染"未声明"而不是编一个分类。
+	VendorName string
+	// VendorIcon 是发行方图标名（上游 vendors[].icon）。空 = 未声明，界面退回字母块。
+	VendorIcon string
+	// EndpointTypes 是上游声明支持的端点类型。空 = 未声明，不是"不支持"。
+	EndpointTypes []string
+	Meta          SourceMeta
 }
 
 // Pricing 是价格采集结果（FR-010/012/013）。

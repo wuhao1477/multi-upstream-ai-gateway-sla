@@ -33,6 +33,9 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /admin/channels/{id}/inventory", h(s.channelInventory))
 	mux.Handle("POST /admin/channels/{id}/sync", h(s.syncChannel))
 	mux.Handle("GET /admin/channels/{id}/catalog", h(s.channelCatalog))
+	// 跨渠道的模型目录（「这个模型哪些渠道有」）。挂在 /admin/catalog 而不是
+	// /admin/models：后者是「可路由模型」那张表的名字，两者是两层（02 §1.3）。
+	mux.Handle("GET /admin/catalog", h(s.globalCatalog))
 	// 账号
 	mux.Handle("GET /admin/accounts", h(s.listAccounts))
 	mux.Handle("POST /admin/accounts", h(s.createAccount))
@@ -604,6 +607,80 @@ func (s *Server) channelCatalog(w http.ResponseWriter, r *http.Request) {
 			"items": page,
 		})
 	})
+}
+
+// globalCatalog 跨渠道列模型目录：一行一个模型，带上有它的全部渠道。
+//
+// 与 channelCatalog 的筛选参数同名同义（q / unit / limit / offset），
+// 刻意保持一致：两个界面并排放着，参数名岔开只会让人以为语义也岔开了。
+// 没有 stale=true 这一位 —— 全局视角下"陈旧"是**逐渠道**的属性，
+// 一个模型可能在 A 站在架、在 B 站疑似下架，筛成布尔值会丢掉这个区别。
+// 行里给的是 stale_count，让人自己看。
+//
+// 分页与聚合都在 SQL 里做（不像 channelCatalog 那样拉回来再在 Go 里切）：
+// 单渠道是一千多行，全局是几万行，把它们拉进进程只为切出 50 行不划算。
+func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	f := store.CatalogFilter{
+		Q:          strings.TrimSpace(query.Get("q")),
+		Unit:       strings.TrimSpace(query.Get("unit")),
+		ChannelIDs: csvInt64s(query.Get("channel_id")),
+		Vendors:    csvStrings(query.Get("vendor")),
+		Endpoints:  csvStrings(query.Get("endpoint")),
+		KeyIDs:     csvInt64s(query.Get("key_id")),
+		Sort:       strings.TrimSpace(query.Get("sort")),
+	}
+	// 跨口径按价格排会把 $7/次 排在"倍率 175"之前（两种口径的数值区间重叠）。
+	// 所以未选定口径时**退回默认排序**而不是报错：地址栏里的参数是可以被人
+	// 手改的，改出一个不合法组合顶多是排序没生效，不该让页面白屏。
+	if f.Sort == "price" && f.Unit == "" {
+		f.Sort = ""
+	}
+	limit, offset := parsePaging(query)
+
+	s.withConn(w, r, func(conn *pgx.Conn) {
+		page, err := store.ListGlobalCatalog(
+			r.Context(), conn, f, s.catalogMissingRounds(), limit, offset)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.ok(w, map[string]any{
+			"total": page.Total, "whole": page.Whole,
+			"limit": limit, "offset": offset,
+			"q": f.Q, "unit": f.Unit, "sort": f.Sort,
+			"channel_id": f.ChannelIDs, "vendor": f.Vendors, "endpoint": f.Endpoints,
+			"key_id": f.KeyIDs,
+			"units":  page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
+			"channels": page.Channels, "channel_names": page.ChannelNames,
+			"vendor_icons": page.VendorIcons,
+			"items":        page.Items,
+		})
+	})
+}
+
+// csvInt64s / csvStrings 解逗号分隔的多选参数（`?channel_id=3,7`）。
+//
+// 垃圾值**丢掉而不是报错**：这串在地址栏里，是可以被人手改的。改坏了顶多是
+// 筛选没生效，不该让页面白屏 —— 与前端 KeysView 的 restore() 同一条取舍。
+func csvInt64s(v string) []int64 {
+	out := []int64{}
+	for _, p := range strings.Split(v, ",") {
+		if n, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64); err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func csvStrings(v string) []string {
+	out := []string{}
+	for _, p := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ── 辅助 ──

@@ -17,6 +17,11 @@ type GroupRow struct {
 	GroupRef        string
 	RateMultiplier  *float64 // 可空：采不到倍率时不写 0（0 倍率语义上是"免费"）
 	AvailableModels []string
+	// RateDynamic 为真时 RateMultiplier 不是计费倍率（NewAPI 的 auto：运行时
+	// 在候选里选一个组计费）。三种状态要分得开：固定 / 动态 / 未采到。
+	RateDynamic bool
+	// DynamicCandidates 是候选分组名（auto_groups）。存名字不存外键。
+	DynamicCandidates []string
 	// PreserveModels keeps the last complete list when this response omitted the model field.
 	PreserveModels bool
 	DataSource     string // auto_collect | manual
@@ -58,13 +63,18 @@ func upsertGroups(ctx context.Context, db DBTX, rows []GroupRow) (int, error) {
 		}
 		var gid int64
 		err := db.QueryRow(ctx, `
-INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier, data_source, fetched_at)
-VALUES ($1,$2,$3,$4,$5)
+INSERT INTO channel_groups (channel_id, group_ref, rate_multiplier,
+                            rate_dynamic, dynamic_candidates, data_source, fetched_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
 ON CONFLICT (channel_id, group_ref) DO UPDATE
-   SET rate_multiplier = EXCLUDED.rate_multiplier,
-       data_source     = EXCLUDED.data_source,
-       fetched_at      = EXCLUDED.fetched_at
-RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier, g.DataSource, g.FetchedAt).Scan(&gid)
+   SET rate_multiplier    = EXCLUDED.rate_multiplier,
+       rate_dynamic       = EXCLUDED.rate_dynamic,
+       dynamic_candidates = EXCLUDED.dynamic_candidates,
+       data_source        = EXCLUDED.data_source,
+       fetched_at         = EXCLUDED.fetched_at
+RETURNING id`, g.ChannelID, g.GroupRef, g.RateMultiplier,
+			g.RateDynamic, nullStrings(g.DynamicCandidates),
+			g.DataSource, g.FetchedAt).Scan(&gid)
 		if err != nil {
 			return n, fmt.Errorf("写分组 %s: %w", g.GroupRef, err)
 		}
