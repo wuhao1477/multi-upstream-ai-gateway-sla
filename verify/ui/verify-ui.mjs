@@ -1658,7 +1658,9 @@ try {
     //   反：渠道那一组**仍然列全**（否则选了一个就换不了，只能清空重选）
     // 少哪一半都会得到一个"看起来能用"的分面。
     const facetCounts = () => page.evaluate(() => ({
-      channels: document.querySelectorAll('[data-facet-channel]').length,
+      // 渠道/Key 在弹窗里，不再有 chip；这里数的是**弹窗里的行**，
+      // 同样能回答"换得了渠道吗"这个问题。
+      channels: document.querySelectorAll('#model-f-channel').length,
       vendors: document.querySelectorAll('[data-facet-vendor]').length,
       endpoints: document.querySelectorAll('[data-facet-endpoint]').length,
     }));
@@ -1666,19 +1668,21 @@ try {
     const ch2Vendors = Object.keys(
       (await api(`/admin/catalog?channel_id=${ch2.id}&limit=1`)).vendors ?? {}).length;
     const allVendors = Object.keys(firstPage.vendors ?? {}).length;
-    await page.evaluate(id => {
-      [...document.querySelectorAll('[data-facet-channel]')]
-        .find(b => b.getAttribute('data-facet-channel') === String(id))?.click();
-    }, ch2.id);
+    // 渠道与 Key 改走 ScopePicker 弹窗（真库 64 个渠道，平铺会把列表挤出首屏）。
+    // 用同一个 pick() 助手 —— 它已经会开弹窗、点行、点确定。
+    await pick('model-f-channel', [ch2.id], true);
     await sleep(900);
     const after = await facetCounts();
     const urlAfter = await page.evaluate(() => location.search);
-    check('按渠道筛选：发行方分面收窄到该渠道，而渠道分面仍列全（换得了渠道）',
-      // 分面里各多一个「全部 X」按钮，所以是 +1
-      after.vendors === ch2Vendors + 1 && after.vendors < before.vendors &&
-      after.channels === before.channels && new RegExp(`channel=${ch2.id}`).test(urlAfter),
-      `发行方 ${before.vendors}→${after.vendors}（后端说该渠道有 ${ch2Vendors} 家，` +
-      `全库 ${allVendors} 家）渠道分面 ${before.channels}→${after.channels} URL=${urlAfter}`);
+    // 发行方 chip 数 = 该渠道的发行方数 + 一个「全部发行方」+（超过阈值时）
+    // 一个「展开全部」。所以判据是**收窄了**且不超过那两个附加项，
+    // 而不是一个写死的加法 —— 写死的话改一次折叠阈值这条就假红。
+    check('按渠道筛选：发行方分面收窄到该渠道，而渠道选择器仍能换渠道',
+      after.vendors >= ch2Vendors + 1 && after.vendors <= ch2Vendors + 2 &&
+      after.vendors < before.vendors &&
+      after.channels === 1 && new RegExp(`channel=${ch2.id}`).test(urlAfter),
+      `发行方 chip ${before.vendors}→${after.vendors}（后端说该渠道有 ${ch2Vendors} 家，` +
+      `全库 ${allVendors} 家）URL=${urlAfter}`);
 
     // 筛出来的每一行都必须真的属于该渠道 —— 期望由 API 现算。
     const chFiltered = await api(`/admin/catalog?channel_id=${ch2.id}&limit=50`);
@@ -1859,11 +1863,18 @@ try {
     await sleep(700);
     await pane('models');
     await sleep(500);
-    const keyChips = await page.$$eval('[data-facet-key]', cs => cs.map(c => ({
-      id: c.getAttribute('data-facet-key'),
-      disabled: c.disabled,
-      text: c.textContent.replace(/\s+/g, ' ').trim(),
+    // Key 也进了弹窗：开一次读出每一行，再关掉。行里带分组与倍率，
+    // 解析不出分组的那些标成「筛不了」。
+    await page.click('#model-f-key');
+    await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+    const keyChips = await page.$$eval('.picker [data-pick-row]', rs => rs.map(r => ({
+      id: r.getAttribute('data-pick-row'),
+      disabled: /筛不了/.test(r.innerText),
+      text: r.innerText.replace(/\s+/g, ' ').trim(),
     })));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelector('.picker') === null, { timeout: 5000 }).catch(() => {});
     const allKeys = (await api('/admin/keys')).items ?? [];
     const groupedKeys = allKeys.filter(k => k.group_ref !== undefined && k.group_ref !== '');
     const ungroupedKeys = allKeys.filter(k => k.group_ref === undefined || k.group_ref === '');
@@ -1936,10 +1947,7 @@ try {
         '这一轮没有已归组的 Key —— 这条无从验（上游的 group 为空串时我方不替它猜分组）');
     } else {
       const theKey = groupedKeys[0];
-      await page.evaluate(id => {
-        [...document.querySelectorAll('[data-facet-key]')]
-          .find(c => c.getAttribute('data-facet-key') === String(id))?.click();
-      }, theKey.id);
+      await pick('model-f-key', [theKey.id], true);
       await sleep(1000);
       const keyResp = await api(`/admin/catalog?key_id=${theKey.id}&limit=50`);
       const keyRows = await page.$$eval('[data-model-row]',
@@ -2033,8 +2041,8 @@ try {
       const jumped = await page.evaluate(() => ({
         url: location.pathname + location.search,
         count: document.querySelector('#model-count')?.textContent.trim(),
-        on: [...document.querySelectorAll('[data-facet-key].on')]
-          .map(c => c.getAttribute('data-facet-key')),
+        on: (document.querySelector('#model-f-key')?.dataset.picked ?? '')
+          .split(',').filter(x => x !== ''),
       }));
       check('从 Key 管理页跳到模型目录时筛选真的带过去了（不是被自己抹掉）',
         new RegExp(`key=${theKey.id}`).test(jumped.url) &&

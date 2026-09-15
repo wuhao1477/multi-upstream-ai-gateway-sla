@@ -24,6 +24,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ModelChannelTable from '@/components/res/ModelChannelTable.vue'
+import ScopePicker from '@/components/res/ScopePicker.vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiDrawer from '@/components/ui/UiDrawer.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
@@ -87,6 +88,16 @@ const keyFacet = computed(() =>
     usable: k.group_ref !== undefined && k.group_ref !== '',
   })),
 )
+
+/**
+ * 发行方分面先只铺前 VENDOR_HEAD 个，其余收进「展开全部」。
+ *
+ * 实测一个真站点有 34 家发行方，全铺出来是六七行 chip，把下面的列表挤出首屏 ——
+ * 而那几行里绝大多数是只有一两个模型的小厂。按模型数降序取前几个，
+ * 剩下的要找时再展开。**已选中的永远显示**，否则选完一收起就看不见自己选了什么。
+ */
+const VENDOR_HEAD = 12
+const vendorsExpanded = ref(false)
 
 const UNGROUPED_HINT =
   '这把 Key 解析不出分组：它自己没定分组，而账号的默认分组也没采到' +
@@ -216,6 +227,48 @@ function resetKeys(): void {
 }
 
 /**
+ * ScopePicker 的 v-model 桥。
+ *
+ * 它是"弹窗里勾完点确定才写回"的语义（见 ScopePicker 顶部），所以这里一次
+ * 收到完整选择，直接 setFilters 打**一次**请求 —— 换成逐个 toggle 会为每个
+ * 勾选各打一次，而前面几次的结果都会被过期响应那道门丢掉。
+ */
+const channelPick = computed({
+  get: () => cat.channelIDs,
+  set: (v: number[]) => cat.setFilters({ channelIDs: v }),
+})
+const keyPick = computed({
+  get: () => cat.keyIDs,
+  set: (v: number[]) => cat.setFilters({ keyIDs: v }),
+})
+
+/** 折叠后仍要显示的发行方：前 N 个 + 全部已选中的。 */
+const vendorShown = computed(() => {
+  if (vendorsExpanded.value) return cat.vendorFacet
+  const head = cat.vendorFacet.slice(0, VENDOR_HEAD)
+  const picked = cat.vendorFacet.filter(
+    ([v]) => cat.vendors.includes(v) && !head.some(([h]) => h === v),
+  )
+  return [...head, ...picked]
+})
+
+/**
+ * 供应商图标位。
+ *
+ * ⚠️ **不是上游那套图标**：NewAPI 用 @lobehub/icons（React 包），而这个界面是
+ * Vue 且由 go:embed 打进二进制、要在内网/离线环境可用（见 internal/admin/web.go）
+ * —— 走 CDN 会破坏那条保证，引一个 React 图标库到 Vue 工程里也不成立。
+ * 这里用**名字首字确定性取色**的字母块：不引依赖、不发外链，仍然让一排 chip
+ * 能靠颜色区分开。真图标要么把 lobehub 的静态 SVG 挑需要的几十个 vendor 进
+ * 仓库，要么放弃离线保证 —— 那是个取舍，不该由我替你定。
+ */
+function vendorHue(name: string): number {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360
+  return h
+}
+
+/**
  * 一个模型在各渠道上的发行方/端点类型的并集。
  *
  * 为什么取并集而不是随便拿第一个渠道的：同一个模型在 A 站可能标了发行方、
@@ -299,65 +352,50 @@ function endpointsOf(m: ModelEntry): string[] {
       <div class="facets" v-if="cat.loaded">
         <div class="facet" v-if="cat.channelFacet.length > 0">
           <div class="facet-l">上游渠道</div>
+          <ScopePicker
+            id="model-f-channel"
+            kind="channel"
+            multi
+            v-model="channelPick"
+            placeholder="全部渠道"
+          />
           <button
+            v-if="cat.channelIDs.length > 0"
             class="chipf"
-            :class="{ on: cat.channelIDs.length === 0 }"
             data-facet-channel=""
-            @click="cat.channelIDs.length > 0 && resetChannels()"
+            @click="resetChannels"
           >
-            全部渠道 <span class="badge">{{ cat.channelFacet.length }}</span>
+            清除
           </button>
-          <button
-            v-for="[id, name, n] in cat.channelFacet"
-            :key="id"
-            class="chipf"
-            :class="{ on: cat.channelIDs.includes(id) }"
-            :data-facet-channel="id"
-            @click="cat.toggleChannel(id)"
+          <span class="dim" style="font-size: 11px"
+            >{{ cat.channelFacet.length }} 个渠道有目录数据</span
           >
-            {{ name }} <span class="badge">{{ n }}</span>
-          </button>
         </div>
 
-        <!-- 按 Key：回答"我这把 Key 能调什么、按什么倍率计费"。
-             筛的是该 Key 所在分组的可用模型清单（group_models），不是渠道 ——
-             同一个渠道下不同分组能调的模型不一样。
-             未归组的 Key 不可选：后端按定义匹配不到任何模型，选中只会得到一个
-             无法解释的空列表。标出来比筛出空诚实。 -->
+        <!-- 渠道与 Key 走**弹窗**而不是一排 chip：真库 64 个渠道、Key 更多，
+             平铺出来把列表挤出首屏；而弹窗里能搜索、能看域名与分组倍率
+             （选错渠道的后果是把筛选打到别人家站点上，域名才是身份）。 -->
         <div class="facet" v-if="keyFacet.length > 0">
           <div class="facet-l">按 Key</div>
+          <ScopePicker
+            id="model-f-key"
+            kind="key"
+            multi
+            v-model="keyPick"
+            placeholder="不限 Key"
+          />
           <button
+            v-if="cat.keyIDs.length > 0"
             class="chipf"
-            :class="{ on: cat.keyIDs.length === 0 }"
             data-facet-key=""
-            @click="cat.keyIDs.length > 0 && resetKeys()"
+            @click="resetKeys"
           >
-            不限 Key
+            清除
           </button>
-          <button
-            v-for="k in keyFacet"
-            :key="k.id"
-            class="chipf"
-            :class="{ on: cat.keyIDs.includes(k.id), dimf: !k.usable }"
-            :data-facet-key="k.id"
-            :disabled="!k.usable"
-            :title="
-              k.usable
-                ? `${k.channel} · 分组 ${k.group}（×${k.rate ?? '?'}）${k.inherited ? ' —— 跟账号走，账号分组变了它跟着变' : ''}`
-                : UNGROUPED_HINT
-            "
-            @click="cat.toggleKey(k.id)"
+          <span class="dim" style="font-size: 11px" :title="UNGROUPED_HINT"
+            >{{ keyFacet.filter((k) => k.usable).length }} 把可筛 ·
+            {{ keyFacet.filter((k) => !k.usable).length }} 把未归组</span
           >
-            <code>{{ k.label }}</code>
-            <span
-              class="badge"
-              v-if="k.usable"
-              :title="k.dynamic ? '自动选组：实际倍率由运行时命中的候选分组决定' : ''"
-              >{{ k.group }} {{ k.rateText }}</span
-            >
-            <span class="badge" v-if="k.usable && k.inherited" title="这把 Key 自己没定分组，走的是账号的默认分组">跟账号</span>
-            <span class="badge" v-if="!k.usable">未归组</span>
-          </button>
         </div>
 
         <div class="facet" v-if="cat.vendorFacet.length > 0">
@@ -375,14 +413,26 @@ function endpointsOf(m: ModelEntry): string[] {
             全部发行方 <span class="badge">{{ cat.vendorFacet.length }}</span>
           </button>
           <button
-            v-for="[v, n] in cat.vendorFacet"
+            v-for="[v, n] in vendorShown"
             :key="v"
             class="chipf"
             :class="{ on: cat.vendors.includes(v) }"
             :data-facet-vendor="v"
             @click="cat.toggleVendor(v)"
           >
+            <span class="vmark" :style="{ '--vh': vendorHue(v) }">{{ [...v][0] }}</span>
             {{ v }} <span class="badge">{{ n }}</span>
+          </button>
+          <!-- 折叠：实测一个真站点 34 家发行方，全铺是六七行 chip，把列表挤出
+               首屏，而其中多数只有一两个模型。已选中的永远显示（见 vendorShown），
+               否则收起之后看不见自己选了什么 -->
+          <button
+            v-if="cat.vendorFacet.length > VENDOR_HEAD"
+            class="chipf"
+            id="model-vendor-more"
+            @click="vendorsExpanded = !vendorsExpanded"
+          >
+            {{ vendorsExpanded ? '收起' : `展开全部 ${cat.vendorFacet.length} 家` }}
           </button>
         </div>
 

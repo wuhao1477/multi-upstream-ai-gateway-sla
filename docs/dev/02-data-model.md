@@ -337,7 +337,12 @@ CREATE TABLE channel_model_catalog (
 -- upstream_keys 补 7 列（FR-122/125/127）
 ALTER TABLE upstream_keys
   ADD COLUMN channel_group_id BIGINT REFERENCES channel_groups(id),  -- Key 归属分组（FR-123）
-  ADD COLUMN remain_quota_usd nonneg_usd,     -- 剩余额度（归一美元，FR-125）
+  -- 029 改成裸 NUMERIC：**剩余额度可以为负**。不限额 Key 扣穿名义额度后上游
+  -- 就回负数（2026-09-15 实测两个真站点：remain=-3017798 / -22，两把都是
+  -- unlimited_quota=true）。原先是 nonneg_usd，于是 UpdateKeyUsage 在这类 Key
+  -- 上必然违反 CHECK，整个渠道的 keys 能力报 failed、配额从此不再更新。
+  -- ⚠️ 只放开 remain 不放开 used：负的 used 没有任何真实含义，仍该被拦下。
+  ADD COLUMN remain_quota_usd NUMERIC(20,10), -- 剩余额度（归一美元，FR-125）；负数 = 已超支
   ADD COLUMN used_quota_usd   nonneg_usd,     -- 已用额度（FR-125）
   ADD COLUMN rpm_limit        INTEGER,        -- 上游 Key 级 RPM（FR-127；**P1 只存不判**）
   ADD COLUMN concurrency_limit INTEGER,       -- 上游 Key 级并发（FR-127；同上）
