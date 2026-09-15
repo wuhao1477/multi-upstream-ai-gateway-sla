@@ -13,6 +13,9 @@ import puppeteer from 'puppeteer-core';
 const CHROME = process.env.CHROME ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const BASE = process.env.BASE || 'http://127.0.0.1:18390';
+// 本地起的那个 core 自己的 ADMIN_TOKEN（ui-stack.sh 生成并注入）。
+// 这不是第三方凭证 —— 那些永远不进 CI（CLAUDE.md §1 的"后果"一节）。
+const TOKEN = process.env.ADMIN_TOKEN || 'dev-ui-token';
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -38,8 +41,28 @@ try {
   page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
-  // ── 1. 带尾斜杠与不带尾斜杠都能开到同一个分栏 ──
+  // ── 0. 没令牌先去登录页，登录后才有下面这些分栏 ──
+  //
+  // 这一条在 CI 里也跑（免密：用的是本地 core 自己的令牌），所以登录这条路
+  // 每次提交都有人走一遍 —— 它是现在**唯一**的入口，坏了整个界面就进不去。
   await page.setViewport({ width: 1280, height: 1000 });
+  await page.goto(`${BASE}/admin/ui/import`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#pane-login', { timeout: 8000 });
+  const gate = await page.evaluate(() => ({
+    url: location.pathname + location.search,
+    fields: [...document.querySelectorAll('.login-box input')].map(i => i.id),
+  }));
+  check('没令牌时任何分栏都先落到登录页（带上原地址）',
+    gate.url === '/admin/ui/login?next=/import' &&
+    JSON.stringify(gate.fields) === JSON.stringify(['token']),
+    JSON.stringify(gate));
+  await page.type('#token', TOKEN);
+  await page.click('#login-submit');
+  await page.waitForFunction(
+    () => document.querySelector('#pane-import')?.classList.contains('on') === true,
+    { timeout: 10000 });
+
+  // ── 1. 带尾斜杠与不带尾斜杠都能开到同一个分栏 ──
   for (const path of ['/admin/ui', '/admin/ui/']) {
     const r = await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
     const on = await page.evaluate(() =>

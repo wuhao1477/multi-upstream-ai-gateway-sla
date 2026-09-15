@@ -55,6 +55,20 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 1400 });
 
+  /**
+   * 丢掉**本脚本故意触发的**那几条 401。
+   *
+   * 按「时间窗 + 状态码」双条件，不是全局放行 401：后者会把别处真的鉴权回归
+   * 一起放过去，而那正是最后那条「页面无 JavaScript 错误」要抓的东西。
+   * 用法：`const at = consoleErrors.length;` … 故意打 401 的那几步 … `drop401(at)`。
+   */
+  const drop401 = async at => {
+    await sleep(300); // 控制台消息是异步到的，早清会漏掉最后一两条
+    for (let i = consoleErrors.length - 1; i >= at; i--) {
+      if (/401/.test(consoleErrors[i])) consoleErrors.splice(i, 1);
+    }
+  };
+
   // ── 布局改成左右分栏后新增的两个助手 ──
   //
   // pane()：表单散在不同分栏里，未激活的分栏是 display:none。
@@ -189,23 +203,75 @@ try {
   const title = await page.title();
   check('页面标题正确', title.includes('上游渠道采集与管理'), title);
 
-  // ── 2. 未填令牌时不该能拉数据（鉴权在服务端）──
+  // ── 2. 没有令牌时落到登录页，且**带着原本要去的地址** ──
+  //
+  // 这一条替代了旧的「无令牌时拒绝拉取数据」：那时候没令牌也能进控制台，
+  // 于是每一栏各弹一个失败 toast。现在压根进不去。
+  //
+  // 挑一个**深一点的**地址来验 next：用根路径的话，"带没带 next" 与
+  // "没带也正好落在根上" 是同一个结果，这条就等于没验。
   await page.evaluate(() => localStorage.clear());
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.click('#btn-reload');
-  await sleep(600);
-  const toastText = await page.$eval('#toast', el => el.textContent);
-  check('无令牌时拒绝拉取数据', /ADMIN_TOKEN|no token/.test(toastText),
-    toastText.slice(0, 60));
+  await page.goto(`${BASE}/admin/ui/keys`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#pane-login', { timeout: 8000 });
+  const loginLanding = await page.evaluate(() => ({
+    url: location.pathname + location.search,
+    hasToken: document.querySelector('#token') !== null,
+    hasSubmit: document.querySelector('#login-submit') !== null,
+    // 登录页不该有导航：还没登录，点了也走不到
+    hasHeader: document.querySelector('.hdr') !== null,
+    hasSidebar: document.querySelector('.sidebar') !== null,
+    // 登录页只要一个字段（P1 没有平台用户实体，所以没有用户名）
+    inputs: [...document.querySelectorAll('.login-box input')].map(i => i.id),
+  }));
+  check('没有令牌时自动落到登录页，并记住原本要去的地址',
+    loginLanding.url === '/admin/ui/login?next=/keys' &&
+    loginLanding.hasToken && loginLanding.hasSubmit &&
+    !loginLanding.hasHeader && !loginLanding.hasSidebar &&
+    JSON.stringify(loginLanding.inputs) === JSON.stringify(['token']),
+    JSON.stringify(loginLanding));
 
-  // ── 3. 填入令牌并加载渠道列表 ──
+  await page.screenshot({ path: `${SHOT}/00-login.png` });
+
+  // 错令牌当场说清楚，而不是放进去再被弹回来。
+  // 这一步会打一个真的 401（就是它该打的），按窗口清掉，见 drop401。
+  const at401Login = consoleErrors.length;
+  await page.type('#token', 'definitely-not-the-admin-token');
+  await page.click('#login-submit');
+  await page.waitForSelector('#login-error', { timeout: 8000 });
+  const badLogin = await page.evaluate(() => ({
+    msg: document.querySelector('#login-error')?.textContent.trim() ?? '',
+    url: location.pathname,
+    // 错令牌**不能留在本地**：留着的话守卫会认为"有令牌"并放行，
+    // 于是每进一页都是先加载、再 401、再弹回来 —— 一个看不见出口的循环。
+    stored: localStorage.getItem('adminToken') ?? '',
+  }));
+  check('令牌不对时留在登录页、说明原因，且不把错令牌存下来',
+    /令牌不对/.test(badLogin.msg) && badLogin.url === '/admin/ui/login' &&
+    badLogin.stored === '',
+    JSON.stringify(badLogin));
+  await drop401(at401Login);
+
+  // ── 3. 登录并加载渠道列表 ──
   //
   // ⚠️ 必须容忍**空库**：脚本化验收从干净的库起，此时列表是空状态而非表格。
   // 首版只等 `#channels table`，在空库上必然超时 —— 我的手工验证之所以过，
   // 是因为库里残留着先前手点建的渠道。空库才是"运维第一次打开界面"的真实情形。
+  await page.evaluate(() => { document.querySelector('#token').value = ''; });
+  await page.click('#token', { clickCount: 3 });
   await page.type('#token', TOKEN);
-  await page.evaluate(() => document.querySelector('#token')
-    .dispatchEvent(new Event('change')));
+  await page.click('#login-submit');
+  // 登录后回到原本要去的那一页（?next=/keys），不是回根路径
+  await page.waitForFunction(
+    () => document.querySelector('#pane-keys')?.classList.contains('on') === true,
+    { timeout: 10000 });
+  const afterLogin = await page.evaluate(() => ({
+    url: location.pathname,
+    stored: (localStorage.getItem('adminToken') ?? '') !== '',
+  }));
+  check('令牌正确时进入原本要去的那一页，并持久化到浏览器',
+    afterLogin.url === '/admin/ui/keys' && afterLogin.stored,
+    JSON.stringify(afterLogin));
+  await pane('channels');
   await page.click('#btn-reload');
   await page.waitForFunction(
     () => {
@@ -231,7 +297,7 @@ try {
   // 每次跑都不同。
   const verWant = process.env.CORE_VERSION || '';
   const verFromAPI = await page.evaluate(async () => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const r = await fetch('/admin/version', { headers: { Authorization: `Bearer ${t}` } });
     return (await r.json()).version ?? '';
   });
@@ -249,7 +315,7 @@ try {
   // 照样绿 —— 而"写死"正是这条要防的东西（加站型时那份列表不报错，
   // 新站型只是在界面上不存在）。
   const famFromAPI = await page.evaluate(async () => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const r = await fetch('/admin/site-families',
       { headers: { Authorization: `Bearer ${t}` } });
     const d = await r.json();
@@ -757,7 +823,7 @@ try {
   check('Key 列表只显示前缀', prefixOK, keyCells.map(c => c.prefix).join(' '));
 
   const groupData = await page.evaluate(async cid => {
-    const token = document.querySelector('#token').value;
+    const token = localStorage.getItem('adminToken');
     const resp = await fetch(`/admin/channel-groups?channel_id=${cid}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -791,7 +857,7 @@ try {
   // 期望由 API 构造：每把 Key 的倍率必须等于**它所属分组**的 rate_multiplier，
   // 而不是别的分组的、也不是写死的 ×1。
   const rateWant = await page.evaluate(async cid => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const h = { Authorization: `Bearer ${t}` };
     const [ks, gs] = await Promise.all([
       fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
@@ -854,7 +920,7 @@ try {
   // 空白全剥：注记与金额之间有没有空格取决于 Vue 的 whitespace condense，
   // 不是我们的意图（同上面限流列的理由）。
   const unlimitedWant = await page.evaluate(async cid => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const h = { Authorization: `Bearer ${t}` };
     const [ks, as] = await Promise.all([
       fetch(`/admin/keys?channel_id=${cid}`, { headers: h }).then(r => r.json()),
@@ -901,7 +967,7 @@ try {
     rlCells.length === keyCells.length && rlCells.every(t => t.length > 0),
     `${rlCells.length}/${keyCells.length} 行：${rlCells.join(' | ')}`);
   const rlFromAPI = await page.evaluate(async cid => {
-    const t = document.querySelector('#token').value;
+    const t = localStorage.getItem('adminToken');
     const r = await fetch(`/admin/keys?channel_id=${cid}`,
       { headers: { Authorization: `Bearer ${t}` } });
     const d = await r.json();
@@ -1170,7 +1236,9 @@ try {
   // 它自己铺一页。断言"不在 DOM 上"而不是"看不见"：两套布局别在一起的症状
   // 正是那条几乎全空的横条还在，只是上面没东西了。
   //
-  // 令牌框反过来：它是全站凭证，两边**都必须有**（在顶栏里，只此一份）。
+  // 令牌框反过来：登录之后**哪一页都不该再有**（它只在登录页填一次，
+  // 之后存在浏览器里）。摆在界面上的输入框是一把已经生效的凭证，
+  // 却长得像一个还等着你填的表单项。
   await pane('models');
   const onModels = await page.evaluate(() => ({
     shell: document.querySelector('.shell') !== null,
@@ -1179,7 +1247,6 @@ try {
     content: document.querySelector('.content') !== null,
     ownPage: document.querySelector('#pane-models.mpage') !== null,
     tokens: document.querySelectorAll('#token').length,
-    tokenInHeader: document.querySelector('.hdr #token') !== null,
     active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
     mside: document.querySelector('.mside') !== null,
   }));
@@ -1190,17 +1257,17 @@ try {
     tokens: document.querySelectorAll('#token').length,
     active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
   }));
-  check('模型目录自己铺一页：控制台那层壳整个不渲染，令牌仍在顶栏（只此一份）',
+  check('模型目录自己铺一页：控制台那层壳整个不渲染，登录后两边都没有令牌框',
     onModels.shell === false && onModels.sidebar === false &&
     onModels.topbar === false && onModels.content === false &&
     onModels.ownPage && onModels.mside === true && onModels.active === 'models' &&
-    onModels.tokens === 1 && onModels.tokenInHeader &&
+    onModels.tokens === 0 &&
     backToConsole.sidebar === true && backToConsole.topbar === true &&
-    backToConsole.tokens === 1 && backToConsole.active === 'console',
+    backToConsole.tokens === 0 && backToConsole.active === 'console',
     `模型目录页：shell=${onModels.shell} 侧栏=${onModels.sidebar} ` +
     `分栏顶栏=${onModels.topbar} 定宽内容区=${onModels.content} ` +
     `自己的页容器=${onModels.ownPage} 自带筛选栏=${onModels.mside} ` +
-    `令牌框 ${onModels.tokens} 个（在顶栏=${onModels.tokenInHeader}）；` +
+    `令牌框 ${onModels.tokens} 个；` +
     `回控制台：侧栏=${backToConsole.sidebar} 分栏顶栏=${backToConsole.topbar} ` +
     `令牌框 ${backToConsole.tokens} 个`);
 
@@ -1208,8 +1275,17 @@ try {
   //
   // 断言背景亮度而不是 class 名：只看 classList 的话，把 .dark 里的
   // 色值写成白的也照样绿。深/浅两次读数必须真的分处两端。
-  await page.click('#theme-sw button[data-theme="dark"]');
-  await sleep(250);
+  // 一个按钮来回切，所以要先确保它此刻不是深色 —— 直接点会在已经是深色时
+  // 把它切成浅色，而那时这条断言读到的是"切换坏了"，其实只是起点不同。
+  const setTheme = async want => {
+    for (let i = 0; i < 2; i++) {
+      const now = await page.$eval('#theme-sw', b => b.dataset.theme);
+      if (now === want) return;
+      await page.click('#theme-sw');
+      await sleep(250);
+    }
+  };
+  await setTheme('dark');
   const darkLuma = await bgLuma();
   const darkOn = await page.evaluate(() =>
     document.documentElement.classList.contains('dark'));
@@ -1217,8 +1293,7 @@ try {
     `class=dark:${darkOn} 背景亮度=${darkLuma}`);
   await page.screenshot({ path: `${SHOT}/09-theme-dark.png`, fullPage: true });
 
-  await page.click('#theme-sw button[data-theme="light"]');
-  await sleep(250);
+  await setTheme('light');
   const lightLuma = await bgLuma();
   const lightOff = await page.evaluate(() =>
     !document.documentElement.classList.contains('dark'));
@@ -1227,19 +1302,50 @@ try {
   await page.screenshot({ path: `${SHOT}/10-theme-light.png`, fullPage: true });
 
   // 主题必须跨刷新记住：运维每次开界面都被打回默认色，等于没做
-  await page.click('#theme-sw button[data-theme="dark"]');
-  await sleep(150);
+  await setTheme('dark');
   await page.reload({ waitUntil: 'domcontentloaded' });
   await sleep(400);
   const persisted = await page.evaluate(() => ({
     dark: document.documentElement.classList.contains('dark'),
     stored: localStorage.getItem('theme'),
-    pressed: document.querySelector('#theme-sw button[aria-pressed="true"]')
-      ?.dataset.theme,
+    // 按钮显示的是**当前**主题；刷新后它与 html.dark 必须一致，
+    // 否则界面是深色而按钮说浅色（图标读起来就成了假的）
+    shown: document.querySelector('#theme-sw')?.dataset.theme,
+    // 一个按钮，不是三个
+    buttons: document.querySelectorAll('#theme-sw').length,
   }));
-  check('主题选择跨刷新保留且按钮态一致',
-    persisted.dark && persisted.stored === 'dark' && persisted.pressed === 'dark',
+  check('主题是一个按钮、跨刷新保留、按钮显示的与实际一致',
+    persisted.dark && persisted.stored === 'dark' && persisted.shown === 'dark' &&
+    persisted.buttons === 1,
     JSON.stringify(persisted));
+
+  // ── 12bis. 令牌失效（401）自动回登录页 ──
+  //
+  // 现造一把**不灵的令牌**：直接改 localStorage，不改界面上的任何东西 ——
+  // 模拟的是"令牌在后端被换掉了"，而那正是这条要处理的真实情形。
+  // 这不违反禁 mock（CLAUDE.md §1）：假的是**输入**（一把过期凭证），
+  // 不是依赖 —— 真后端确实会对它回 401，而真后端不肯按需把一把令牌作废给验收用。
+  //
+  // 清掉那把不灵的令牌是判据的一半：留着的话守卫会认为"有令牌"并放行，
+  // 于是每进一页都是先加载、再 401、再弹回来 —— 一个看不见出口的循环。
+  const at401Rotated = consoleErrors.length;
+  await page.evaluate(() => localStorage.setItem('adminToken', 'token-was-rotated'));
+  await page.click('#btn-reload');
+  await page.waitForSelector('#pane-login', { timeout: 8000 });
+  const bounced = await page.evaluate(() => ({
+    url: location.pathname + location.search,
+    stored: localStorage.getItem('adminToken') ?? '',
+  }));
+  check('令牌失效（401）时自动回登录页，带上原地址并清掉那把不灵的令牌',
+    /^\/admin\/ui\/login\?next=/.test(bounced.url) && bounced.stored === '',
+    JSON.stringify(bounced));
+  await drop401(at401Rotated);
+  // 登回去，后面的断言还要用
+  await page.type('#token', TOKEN);
+  await page.click('#login-submit');
+  await page.waitForFunction(
+    () => document.querySelector('#pane-channels')?.classList.contains('on') === true,
+    { timeout: 10000 });
 
   // 批量导入分栏可达（端点已实现，界面上要能找到入口）
   await pane('import');
@@ -1611,7 +1717,7 @@ try {
     // 建第二个渠道走 API 而不是点界面：建渠道/登记凭证那条路前面已经逐项验过，
     // 这里只需要**第二个真站点的目录数据**当输入，重点在聚合与分面本身。
     const ch2 = await page.evaluate(async up => {
-      const t = document.querySelector('#token').value;
+      const t = localStorage.getItem('adminToken');
       const h = { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' };
       const post = async (p, b) =>
         (await fetch(p, { method: 'POST', headers: h, body: JSON.stringify(b) })).json();
@@ -1642,7 +1748,7 @@ try {
     // 期望从 API 现构造。**逐字比对**而不是"数字大于零"：后者在把两个渠道
     // 合成一行、或把渠道名错位时照样绿。
     const api = async path => page.evaluate(async p => {
-      const t = document.querySelector('#token').value;
+      const t = localStorage.getItem('adminToken');
       const r = await fetch(p, { headers: { Authorization: `Bearer ${t}` } });
       return r.json();
     }, path);
@@ -2100,7 +2206,7 @@ try {
     // ⚠️ account_id 要 **Number()**：accountIDs 来自 getAttribute，是字符串，
     // 而后端那个字段是 int64 —— 传字符串会 400，且错误只体现为"建不出来"。
     const ungroupedKey = await page.evaluate(async acct => {
-      const t = document.querySelector('#token').value;
+      const t = localStorage.getItem('adminToken');
       const r = await fetch('/admin/keys', {
         method: 'POST',
         headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },

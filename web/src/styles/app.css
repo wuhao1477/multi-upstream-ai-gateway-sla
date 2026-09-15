@@ -42,7 +42,7 @@ a {
    两个导航 + 主题开关，硬按 50% 会横向溢出（SPA 验收有一条专门盯这个）。
    于是宽屏严格 1/4、窄屏退到"两边各留 14px"，中间由 560px 这个下限接住。 */
 .hdr-in {
-  width: max(50%, min(100% - 28px, 620px));
+  width: max(50%, min(100% - 28px, 520px));
   margin: 0 auto;
   min-height: var(--hdr-h);
   display: flex;
@@ -52,12 +52,6 @@ a {
   padding: 8px 0;
 }
 /* 导航靠右：品牌与它之间的空白由这一条撑开，不用 .spacer 占位元素。 */
-.hdr-token {
-  width: 150px;
-  height: 32px;
-  font-size: 12px;
-  flex: none;
-}
 .topnav {
   margin-left: auto;
   display: flex;
@@ -200,32 +194,76 @@ a {
   font-size: 11px;
   color: var(--muted-foreground);
 }
-.theme-sw {
-  display: flex;
-  gap: 3px;
-  background: var(--background);
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.theme-sw button {
-  flex: 1;
+/* 主题开关：一个按钮（浅色 ↔ 深色）。三段换一个的理由见 ThemeSwitch.vue。 */
+.theme-btn {
+  flex: none;
   display: grid;
   place-items: center;
-  padding: 5px 0;
-  border: 0;
-  background: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
   color: var(--muted-foreground);
-  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.theme-sw button svg {
-  width: 15px;
-  height: 15px;
-}
-.theme-sw button[aria-pressed='true'] {
-  background: var(--accent);
+.theme-btn:hover {
   color: var(--foreground);
+  background: var(--accent);
+}
+.theme-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.theme-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 登录页 ──
+   只有一个 ADMIN_TOKEN：P1 没有平台用户实体，所以没有用户名，也不该有。 */
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-top {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+}
+.login-box {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 10px;
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 26px 24px;
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.25);
+}
+.login-box .brand {
+  margin-bottom: 4px;
+}
+.login-d {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0 0 6px;
+  line-height: 1.6;
+}
+.login-box label {
+  margin-bottom: 0;
+}
+/* 错误文案用 destructive 而不是普通灰：这一条是"你得改点什么才能继续"，
+   与上面那句说明不是一类信息。 */
+.login-e {
+  font-size: 12px;
+  color: var(--destructive);
+  margin: 0;
+  line-height: 1.6;
 }
 
 /* ── 顶栏 + 主区 ── */
