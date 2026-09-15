@@ -35,6 +35,8 @@ type ModelChannel struct {
 	LastSeenAt    time.Time `json:"last_seen_at"`
 	// VendorName 是上游声明的发行方。nil = 未声明，不是"无供应商"。
 	VendorName *string `json:"vendor_name,omitempty"`
+	// VendorIcon 是发行方图标名（lobehub 图标名）。nil = 未声明，界面退回字母块。
+	VendorIcon *string `json:"vendor_icon,omitempty"`
 	// EndpointTypes 是上游声明支持的端点类型。nil = 未声明，不是"不支持任何端点"。
 	EndpointTypes []string `json:"endpoint_types,omitempty"`
 	// QuotaPerUnit 是这个站点的**额度换算基数**（/api/status 的 quota_per_unit，
@@ -113,6 +115,14 @@ type CatalogFilter struct {
 	// （账号分组也没采到、或它不在 group_ratio 里）才真的什么都匹配不到，
 	// 界面据此把这种 Key 标出来而不是让它悄悄筛出空列表。
 	KeyIDs []int64
+	// Sort 是排序方式：'' / 'channels'（支持它的渠道数降序，默认）、
+	// 'name'（模型名升序）、'price'（价格升序）。
+	//
+	// ⚠️ **'price' 只在选定了 Unit 时才允许**（调用方负责）：两种口径的数值
+	// 区间重叠（实测按次 0.004~7 vs 倍率 0.01~175），跨口径按价格排会把
+	// $7/次 的视频模型排在"倍率 175"之前，读者据此选型必然选错。
+	// 这条与 ListCatalog 里那句"排序先按 billing_unit 再按价格"是同一条纪律。
+	Sort string
 }
 
 // GlobalCatalogPage 是一页聚合结果。
@@ -135,6 +145,12 @@ type GlobalCatalogPage struct {
 	// ChannelNames 给上面那些 id 配名字，省得界面为了画一行分面去翻渠道列表
 	// ——它未必已经拉过 /admin/channels。
 	ChannelNames map[string]string
+	// VendorIcons 给发行方配图标名（上游 vendors[].icon）。
+	//
+	// 与 ChannelNames 同理：分面上要画图标，而 Vendors 只有名字。
+	// 不让界面从 Items 里凑这张表 —— 那张表只盖得住当前页出现过的发行方，
+	// 于是同一个 chip 翻一页就从图标变字母块。
+	VendorIcons map[string]string
 	// Whole 是**不受 Unit 影响**时的模型数（其余筛选照常施加）。
 	//
 	// ⚠️ **不能拿 Units 的各项相加代替**：同一个模型可能在 A 站按倍率、在 B 站
@@ -199,6 +215,27 @@ func catalogWhere(f CatalogFilter, excl string) (string, []any) {
             AND gm.model_name = c.model_name))`, args
 }
 
+// catalogOrderBy 把 Sort 翻成 ORDER BY 片段。
+//
+// **白名单而不是拼字符串**：这段要塞进 fmt.Sprintf，任何来自请求的内容拼进去
+// 都是注入面。所以只认三个固定值，别的一律回默认。
+//
+// 每一种都以 `c.model_name` 收尾：只按前一个键排的话，同值的行在两次查询之间
+// 顺序可以不同，翻页会漏行也会重复行 —— 而那是看不出来的。
+//
+// 'price' 按 min(input_price) 升序：一个模型在多个渠道上有多个价，选型看的是
+// "最便宜能到多少"。NULLS LAST —— 没采到价的排最后，不是排最前。
+func catalogOrderBy(f CatalogFilter) string {
+	switch f.Sort {
+	case "name":
+		return "c.model_name"
+	case "price":
+		return "min(c.input_price) NULLS LAST, c.model_name"
+	default:
+		return "count(*) DESC, c.model_name"
+	}
+}
+
 // nil 切片传进 pgx 会变成 NULL 而不是空数组，而 cardinality(NULL) 是 NULL、
 // 不是 0 —— 于是那一行条件整体成 NULL，WHERE 直接把所有行滤掉。空结果，无报错。
 func int64Slice(v []int64) []int64 {
@@ -236,6 +273,7 @@ func ListGlobalCatalog(
 		Items: []ModelEntry{}, Units: map[string]int{},
 		Vendors: map[string]int{}, Endpoints: map[string]int{},
 		Channels: map[string]int{}, ChannelNames: map[string]string{},
+		VendorIcons: map[string]string{},
 	}
 
 	// ① 四个分面。每个都排除自己那一维（见 GlobalCatalogPage 的注释）。
@@ -252,9 +290,6 @@ func ListGlobalCatalog(
 		{page.Units, "unit", `
 SELECT COALESCE(c.billing_unit, 'unknown'), count(DISTINCT c.model_name)::int
   FROM channel_model_catalog c WHERE %s GROUP BY 1`, "计价口径"},
-		{page.Vendors, "vendor", `
-SELECT c.vendor_name, count(DISTINCT c.model_name)::int
-  FROM channel_model_catalog c WHERE c.vendor_name IS NOT NULL AND %s GROUP BY 1`, "发行方"},
 		{page.Endpoints, "endpoint", `
 SELECT e, count(DISTINCT c.model_name)::int
   FROM channel_model_catalog c, unnest(c.endpoint_types) AS e
@@ -281,7 +316,43 @@ SELECT e, count(DISTINCT c.model_name)::int
 		}
 	}
 
-	// ①bis 渠道分面。单独一条：它要连 channels 取名字，别的分面不用。
+	// ①bis 发行方分面。单独一条：它要多带一列图标名，上面那个循环只扫两列。
+	//
+	// 图标用 mode()：同一家发行方在不同站点上可能标了不同的图标名（也可能
+	// 有的站点根本没标）。mode() 取出现最多的那个且**跳过 NULL** —— 于是
+	// "一个站标了、另一个没标"时拿到的是标了的那个，而不是看运气。
+	{
+		where, args := catalogWhere(f, "vendor")
+		rows, err := conn.Query(ctx, `
+SELECT c.vendor_name,
+       mode() WITHIN GROUP (ORDER BY c.vendor_icon),
+       count(DISTINCT c.model_name)::int
+  FROM channel_model_catalog c
+ WHERE c.vendor_name IS NOT NULL AND `+where+`
+ GROUP BY 1`, args...)
+		if err != nil {
+			return page, fmt.Errorf("统计目录发行方分面: %w", err)
+		}
+		for rows.Next() {
+			var name string
+			var icon *string
+			var n int
+			if err := rows.Scan(&name, &icon, &n); err != nil {
+				rows.Close()
+				return page, err
+			}
+			page.Vendors[name] = n
+			if icon != nil && *icon != "" {
+				page.VendorIcons[name] = *icon
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return page, err
+		}
+	}
+
+	// ①ter 渠道分面。单独一条：它要连 channels 取名字，别的分面不用。
 	{
 		where, args := catalogWhere(f, "channel")
 		rows, err := conn.Query(ctx, `
@@ -310,7 +381,7 @@ SELECT c.channel_id, ch.name, count(DISTINCT c.model_name)::int
 		}
 	}
 
-	// ①ter 不分段时的模型数。单独一条，理由见 Whole 的注释（相加会多算）。
+	// ①quater 不分段时的模型数。单独一条，理由见 Whole 的注释（相加会多算）。
 	{
 		where, args := catalogWhere(f, "unit")
 		if err := conn.QueryRow(ctx, `
@@ -344,8 +415,8 @@ SELECT c.model_name,
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
  WHERE %s
  GROUP BY c.model_name
- ORDER BY count(*) DESC, c.model_name
- LIMIT $8 OFFSET $9`, where),
+ ORDER BY %s
+ LIMIT $8 OFFSET $9`, where, catalogOrderBy(f)),
 		append(args, missingRounds, limit, offset)...)
 	if err != nil {
 		return page, fmt.Errorf("列全局模型目录: %w", err)
@@ -385,7 +456,7 @@ SELECT c.model_name,
 	rows, err = conn.Query(ctx, fmt.Sprintf(`
 SELECT c.model_name, ch.id, ch.name, ch.status,
        c.input_price, c.output_price, c.billing_unit,
-       c.vendor_name, c.endpoint_types,
+       c.vendor_name, c.vendor_icon, c.endpoint_types,
        (ch.catalog_sync_seq - c.last_seen_seq >= $7::bigint) AS stale,
        c.last_seen_at
   FROM channel_model_catalog c JOIN channels ch ON ch.id = c.channel_id
@@ -402,7 +473,7 @@ SELECT c.model_name, ch.id, ch.name, ch.status,
 		var mc ModelChannel
 		if err := rows.Scan(&name, &mc.ChannelID, &mc.ChannelName, &mc.ChannelStatus,
 			&mc.InputPrice, &mc.OutputPrice, &mc.BillingUnit,
-			&mc.VendorName, &mc.EndpointTypes,
+			&mc.VendorName, &mc.VendorIcon, &mc.EndpointTypes,
 			&mc.Stale, &mc.LastSeenAt); err != nil {
 			rows.Close()
 			return page, err

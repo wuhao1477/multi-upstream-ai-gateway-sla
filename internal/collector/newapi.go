@@ -329,6 +329,7 @@ func (a *NewAPIAdapter) FetchModelCatalog(ctx context.Context, s Session) ([]Cat
 			OutputPrice:   mp.OutputPrice,
 			BillingUnit:   mp.BillingUnit,
 			VendorName:    it.VendorName,
+			VendorIcon:    it.VendorIcon,
 			EndpointTypes: it.EndpointTypes,
 			Meta:          NewAPIMeta("/api/pricing", now),
 		})

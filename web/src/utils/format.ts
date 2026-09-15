@@ -61,6 +61,17 @@ export interface PriceRange {
   max: number
   /** 参与这段区间的渠道数（采到价格的那些）。 */
   count: number
+  /**
+   * 折算成绝对美元后的区间（倍率口径是 $/1M token，按次口径是 $/次）。
+   *
+   * **逐渠道用它自己的 quota_per_unit 折算再取 min/max** —— 不是先取倍率的
+   * min/max 再折算：两个渠道的基数可以不同，那样算出来的区间端点会属于
+   * 不同的站，是一个不存在的价格。
+   *
+   * null = 这一段里没有一个渠道采到了基数，折算不了（只能显示倍率）。
+   */
+  usdMin: number | null
+  usdMax: number | null
 }
 
 /**
@@ -75,20 +86,32 @@ export interface PriceRange {
  * 某个口径下一个价格都没采到时，该口径不出现在返回值里。
  */
 export function priceRanges(
-  channels: { input_price?: number; billing_unit?: string | null }[],
+  channels: { input_price?: number; billing_unit?: string | null; quota_per_unit?: number }[],
 ): PriceRange[] {
   const by = new Map<string, PriceRange>()
   for (const c of channels) {
     if (c.input_price === undefined || c.input_price === null) continue
     const unit = c.billing_unit ?? 'unknown'
+    const usd = ratioToUSDPer1M(c.input_price, unit, c.quota_per_unit)
     const cur = by.get(unit)
     if (cur === undefined) {
-      by.set(unit, { unit, min: c.input_price, max: c.input_price, count: 1 })
+      by.set(unit, {
+        unit,
+        min: c.input_price,
+        max: c.input_price,
+        count: 1,
+        usdMin: usd,
+        usdMax: usd,
+      })
       continue
     }
     cur.min = Math.min(cur.min, c.input_price)
     cur.max = Math.max(cur.max, c.input_price)
     cur.count += 1
+    if (usd !== null) {
+      cur.usdMin = cur.usdMin === null ? usd : Math.min(cur.usdMin, usd)
+      cur.usdMax = cur.usdMax === null ? usd : Math.max(cur.usdMax, usd)
+    }
   }
   // 渠道数多的口径排前面：它更可能是这个模型的"常态"计价方式
   return [...by.values()].sort((a, b) => b.count - a.count)

@@ -312,6 +312,8 @@ type CatalogModel struct {
 	// VendorName 是发行方（上游 vendors[].name）。空 = 上游未声明，
 	// **不是**"无供应商" —— 界面据此渲染"未声明"而不是编一个分类。
 	VendorName string
+	// VendorIcon 是发行方图标名（上游 vendors[].icon）。空 = 未声明，界面退回字母块。
+	VendorIcon string
 	// EndpointTypes 是上游声明支持的端点类型。空 = 未声明，不是"不支持"。
 	EndpointTypes []string
 	Meta          SourceMeta

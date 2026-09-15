@@ -339,6 +339,8 @@ export interface ModelChannel {
   groups: ModelGroup[]
   /** 发行方（上游 vendors[].name）。缺席 = 上游未声明，不是"无供应商"。 */
   vendor_name?: string
+  /** 发行方图标名（上游 vendors[].icon，lobehub 图标名）。缺席 = 未声明，界面退回字母块。 */
+  vendor_icon?: string
   /** 支持的端点类型。缺席 = 未声明，不是"不支持任何端点"。 */
   endpoint_types?: string[]
   /**
@@ -395,6 +397,7 @@ export interface GlobalCatalogResp {
   vendor: string[]
   endpoint: string[]
   key_id: number[]
+  sort: string
   /**
    * 四个分面，每个都**在除自己以外的全部筛选之下**统计。
    *
@@ -411,6 +414,13 @@ export interface GlobalCatalogResp {
   channels: Record<string, number>
   /** 上面那些 id 对应的渠道名，省得界面为了画分面去翻渠道列表。 */
   channel_names: Record<string, string>
+  /**
+   * 发行方 → 图标名。理由同 channel_names。
+   *
+   * 不从 items 里凑：那只盖得住当前页出现过的发行方，于是同一个 chip
+   * 翻一页就从图标变字母块。缺席 = 上游没声明图标，界面退回字母块。
+   */
+  vendor_icons: Record<string, string>
   items: ModelEntry[]
 }
 

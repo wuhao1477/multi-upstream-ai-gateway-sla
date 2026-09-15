@@ -52,6 +52,10 @@ type newapiModel struct {
 	// 存名字不存 id：id 是站点自己的自增主键，跨站点毫无意义，而"哪些渠道有
 	// Anthropic 的模型"要跨渠道聚合。空串 = 上游没给 vendor_id 或没这个字段。
 	VendorName string
+	// VendorIcon 是发行方图标名（上游 vendors[].icon，实测是 lobehub 的图标名）。
+	// 跟着 name 一起带出来：同一站里多个发行方名共用一个图标，前端按名字猜要
+	// 手写别名表，漏一行是静默的。
+	VendorIcon string
 	// EndpointTypes 是上游声明该模型支持的端点类型
 	// （实测取值 openai / anthropic / gemini / openai-response /
 	// openai-video / image-generation / jina-rerank）。
@@ -120,13 +124,14 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 	// 老版本没有这个字段：那时 vendorByID 为空，每个模型的 VendorName 是空串，
 	// 界面按"未声明"渲染。**不要退回 owner_by** —— 实测那一列 1394 个模型
 	// 全是空串，拿它兜底只会把"未声明"换成另一种形式的"未声明"。
-	vendorByID := map[int64]string{}
+	type vendorInfo struct{ name, icon string }
+	vendorByID := map[int64]vendorInfo{}
 	for _, it := range asSlice(raw["vendors"]) {
 		v := asMap(it)
 		id, ok := asFloat(v["id"])
 		name := asString(v["name"])
 		if ok && name != "" {
-			vendorByID[int64(id)] = name
+			vendorByID[int64(id)] = vendorInfo{name: name, icon: asString(v["icon"])}
 		}
 	}
 
@@ -153,7 +158,8 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 				mod.CacheRatio, mod.HasCache = cr, true
 			}
 			if vid, ok := asFloat(m["vendor_id"]); ok {
-				mod.VendorName = vendorByID[int64(vid)]
+				v := vendorByID[int64(vid)]
+				mod.VendorName, mod.VendorIcon = v.name, v.icon
 			}
 			for _, e := range asSlice(m["supported_endpoint_types"]) {
 				if s := asString(e); s != "" {

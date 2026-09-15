@@ -385,19 +385,20 @@ UPDATE channels SET catalog_sync_seq = catalog_sync_seq + 1
 		// 补 'per_1m_token' 会把"未声明"伪装成"已知按 token 计价"（02 §1.3bis）。
 		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_model_catalog (channel_id, model_name, input_price, output_price,
-                                   billing_unit, vendor_name, endpoint_types,
+                                   billing_unit, vendor_name, vendor_icon, endpoint_types,
                                    first_seen_at, last_seen_at, last_seen_seq)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8,$8,$9)
+VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,$9,$10)
 ON CONFLICT (channel_id, model_name) DO UPDATE
    SET input_price  = EXCLUDED.input_price,
        output_price = EXCLUDED.output_price,
        billing_unit = EXCLUDED.billing_unit,
        vendor_name  = EXCLUDED.vendor_name,
+       vendor_icon  = EXCLUDED.vendor_icon,
        endpoint_types = EXCLUDED.endpoint_types,
        last_seen_at = EXCLUDED.last_seen_at,
        last_seen_seq = EXCLUDED.last_seen_seq`,
 			channelID, m.ModelName, nullFloat(m.InputPrice), nullFloat(m.OutputPrice),
-			m.BillingUnit, m.VendorName, nullStrings(m.EndpointTypes),
+			m.BillingUnit, m.VendorName, m.VendorIcon, nullStrings(m.EndpointTypes),
 			m.Meta.FetchedAt, syncSeq); err != nil {
 			return n, fmt.Errorf("写目录条目 %s: %w", m.ModelName, err)
 		}

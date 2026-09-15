@@ -80,6 +80,8 @@ function testGroupsByUnitNeverAcrossIt(): void {
   const call = r.find((x) => x.unit === 'per_call')
   assert(ratio?.min === 0.5 && ratio?.max === 5, `倍率段应是 0.5–5，实际 ${JSON.stringify(ratio)}`)
   assert(call?.min === 0.08 && call?.max === 0.08, `按次段应是 0.08，实际 ${JSON.stringify(call)}`)
+  // 没给基数时折算不出绝对价，那一段的 usd 必须是 null 而不是 0
+  assert(ratio?.usdMin === null, `没有 quota_per_unit 时不该折算出绝对价，实际 ${ratio?.usdMin}`)
   // 反向哨兵：不分口径取全局 min 会得到 0.08，上面两条照样能被写成"通过"
   assert(
     ratio?.min !== 0.08,
