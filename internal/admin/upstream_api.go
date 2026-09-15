@@ -654,7 +654,7 @@ func (s *Server) globalCatalog(w http.ResponseWriter, r *http.Request) {
 			"units":  page.Units, "vendors": page.Vendors, "endpoints": page.Endpoints,
 			"channels": page.Channels, "channel_names": page.ChannelNames,
 			"vendor_icons": page.VendorIcons,
-			"items": page.Items,
+			"items":        page.Items,
 		})
 	})
 }
