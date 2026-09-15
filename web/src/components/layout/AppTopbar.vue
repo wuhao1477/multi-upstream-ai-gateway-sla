@@ -8,6 +8,8 @@ const route = useRoute()
 const auth = useAuthStore()
 
 const meta = computed(() => {
+  // 模型目录：标题与说明都交给页面自己（它有个居中的大标题），这里只留令牌。
+  if (route.name === 'models') return { title: '', note: '' }
   const name = route.name
   const base = typeof name === 'string' && name in PANES ? PANES[name as PaneName] : undefined
   const title = route.meta.title ?? base?.title
@@ -21,8 +23,11 @@ const meta = computed(() => {
 
 <template>
   <header class="topbar">
-    <h1 id="pane-title">{{ meta.title }}</h1>
-    <span class="badge" id="pane-note">{{ meta.note }}</span>
+    <!-- 模型目录那一页自己有大标题与一句话（照上游定价页的形状），
+         这里再印一遍就是同一句话出现两次。令牌输入框照旧全页都在 ——
+         它是全站凭证，哪一页都可能要现填。 -->
+    <h1 id="pane-title" v-if="meta.title !== ''">{{ meta.title }}</h1>
+    <span class="badge" id="pane-note" v-if="meta.note !== ''">{{ meta.note }}</span>
     <div class="spacer"></div>
     <div style="min-width: 250px">
       <label for="token" class="dim" style="font-size: 11px">管理令牌 ADMIN_TOKEN</label>
