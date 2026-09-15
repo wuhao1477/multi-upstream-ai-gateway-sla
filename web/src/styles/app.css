@@ -1065,14 +1065,35 @@ summary {
   background: color-mix(in oklab, var(--destructive) 12%, transparent);
 }
 
-/* ── 抽屉 / 确认框 ── */
+/* ── 抽屉 / 确认框 / 选择器弹窗 的遮罩 ──
+   全站四处浮层（UiDrawer / UiConfirm / ScopePicker / 同步详情）共用这一个类，
+   所以毛玻璃只写一遍。
+
+   纯压暗改成 **iOS 那种毛玻璃**：底下那一层仍然看得出形状（"我是从哪儿点开的"
+   不会丢），但读不清内容，于是注意力落在浮层上。saturate 是这个效果的一半 ——
+   只 blur 不提饱和会发灰，像蒙了层脏布。
+
+   ⚠️ backdrop-filter 会让这个元素成为 fixed 后代的**包含块**。抽屉里的行内
+   「更多」菜单正是 position:fixed 且按视口坐标落位的（见 App.vue 的 placeMenus）——
+   这里没出问题，是因为遮罩自己就是 inset:0 的 fixed，两者的包含块逐像素相同。
+   要是哪天给它加了内边距或改成非全屏，那些菜单会整体偏移，而看起来像"算错了坐标"。 */
 .drawer-scrim {
   position: fixed;
   inset: 0;
   z-index: 60;
   display: flex;
   justify-content: flex-end;
-  background: rgb(0 0 0 / 0.35);
+  /* 不支持 backdrop-filter 时的样子：压得更暗一点，靠纯遮挡拿回对比度。
+     顺序不能反 —— @supports 里那条要覆盖它。 */
+  background: rgb(0 0 0 / 0.45);
+}
+@supports (backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px)) {
+  .drawer-scrim {
+    /* 压暗降到 0.28：再暗就把毛玻璃盖住了，底下只剩一团黑 */
+    background: rgb(0 0 0 / 0.28);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    backdrop-filter: blur(14px) saturate(140%);
+  }
 }
 .drawer-scrim.center {
   align-items: center;
@@ -1212,6 +1233,7 @@ summary {
 }
 .picker-sum {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1498,6 +1520,13 @@ summary {
 .mfilters {
   display: grid;
   gap: 16px;
+}
+/* 每一段都要能被压窄。grid 子项的自动最小尺寸是 **min-content**，不写这一条的话，
+   Key 选择器按钮里那串长摘要（前缀 +（渠道名））会把整段顶宽超出左栏 ——
+   而 .mside 有 overflow:auto，于是它不是换行而是**被裁掉**，右边的 chip 只剩半个，
+   看起来像少渲染了一块。2026-09-16 从验收截图里看出来的。 */
+.mfilter {
+  min-width: 0;
 }
 .mfilter-h {
   display: flex;
