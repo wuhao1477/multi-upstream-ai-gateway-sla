@@ -1,15 +1,31 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
+import AppHeader from '@/components/layout/AppHeader.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AppTopbar from '@/components/layout/AppTopbar.vue'
 import ToastHost from '@/components/layout/ToastHost.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
+import type { PaneName } from '@/router/panes'
+import { PANES } from '@/router/panes'
 
+const route = useRoute()
 const auth = useAuthStore()
 const channels = useChannelsStore()
 const res = useResourcesStore()
+
+/**
+ * 模型目录那一侧**不渲染侧栏**：那一页自己就有一整列筛选（发行方 / 渠道 /
+ * 定价类型…），再套一层侧栏会把屏幕切成三段，而左边那两列干的是同一件事。
+ */
+const withSidebar = computed(() => {
+  const name = typeof route.name === 'string' ? route.name : ''
+  const parent = typeof route.meta.parent === 'string' ? route.meta.parent : ''
+  const key = (name in PANES ? name : parent) as PaneName
+  return !(key in PANES) || PANES[key].top === 'console'
+})
 
 // 已经存过令牌就直接拉一轮：刷新后还要再点一次「刷新」是多余的一步。
 // 没有令牌则什么都不做 —— 空发请求只会换回 401，把真正该看的提示挤掉。
@@ -116,8 +132,9 @@ function placeMenus(): void {
 </script>
 
 <template>
-  <div class="shell">
-    <AppSidebar />
+  <AppHeader />
+  <div class="shell" :class="{ solo: !withSidebar }">
+    <AppSidebar v-if="withSidebar" />
     <div class="main">
       <AppTopbar />
       <div class="content">

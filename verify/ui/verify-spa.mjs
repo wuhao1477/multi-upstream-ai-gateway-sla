@@ -95,6 +95,26 @@ try {
   check('渠道详情页面高亮渠道管理', detailState.channelsActive,
     `channelsActive=${detailState.channelsActive}`);
 
+  // ── 3bis. 模型目录与控制台同级：顶层导航的另一半，不带侧栏 ──
+  //
+  // 走**直接访问地址**而不是点过去：这条要守的是"冷启动就该是这个形态"。
+  // 点过去只能证明切换逻辑对，而收藏夹里的链接、别人发来的链接走的是这条路。
+  const modelsResp = await page.goto(`${BASE}/admin/ui/models`, { waitUntil: 'domcontentloaded' });
+  const modelsShell = await page.evaluate(() => ({
+    on: document.querySelector('#pane-models')?.classList.contains('on') === true,
+    sidebar: document.querySelector('.sidebar') !== null,
+    topNav: [...document.querySelectorAll('[data-top-nav]')]
+      .map(b => b.getAttribute('data-top-nav')),
+    active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
+  }));
+  check('直接访问模型目录：顶层导航高亮它，且整个不渲染侧栏',
+    modelsResp.status() === 200 && modelsShell.on && !modelsShell.sidebar &&
+    JSON.stringify(modelsShell.topNav) === JSON.stringify(['console', 'models']) &&
+    modelsShell.active === 'models',
+    `HTTP ${modelsResp.status()} ${JSON.stringify(modelsShell)}`);
+  // 回控制台那一侧，下面几条要用侧栏
+  await page.goto(`${BASE}/admin/ui/channels/1`, { waitUntil: 'domcontentloaded' });
+
   // ── 4. 点导航会改地址栏（分栏可分享链接）──
   await page.click('.nav-item[data-pane="import"]');
   await page.waitForFunction(() =>

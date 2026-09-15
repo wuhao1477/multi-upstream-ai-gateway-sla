@@ -24,6 +24,61 @@ a {
   color: var(--primary);
 }
 
+/* ── 顶层导航栏 ──
+   品牌在左、「控制台 / 模型目录」在右，整条居中两边各留约 1/4（形态取自
+   NewAPI 的站点顶栏）。顶层只有两项，它们是两类任务而不是两个分栏。 */
+.hdr {
+  position: sticky;
+  top: 0;
+  /* 高于 .topbar(5) 与表格里的 fixed 菜单之下：菜单要盖住顶栏，
+     否则最上面那一行的「更多」会被顶栏切掉一半。 */
+  z-index: 30;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 88%, transparent);
+  backdrop-filter: blur(8px);
+}
+/* 两边各 1/4 = 内容占中间一半。
+   `max(50%, …)` 那一半是**下限**而不是审美：窄屏上中间一半装不下品牌 +
+   两个导航 + 主题开关，硬按 50% 会横向溢出（SPA 验收有一条专门盯这个）。
+   于是宽屏严格 1/4、窄屏退到"两边各留 14px"，中间由 560px 这个下限接住。 */
+.hdr-in {
+  width: max(50%, min(100% - 28px, 560px));
+  margin: 0 auto;
+  min-height: var(--hdr-h);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 0;
+}
+/* 导航靠右：品牌与它之间的空白由这一条撑开，不用 .spacer 占位元素。 */
+.topnav {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.tnav {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tnav:hover {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+.tnav.on {
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 20%, transparent);
+}
+
 /* ── 左右布局 ──
    grid 而非 flex：侧栏定宽、主区 minmax(0,1fr)。少了 minmax(0,…) 的话，
    主区里的宽表格会把网格列顶宽（min-width:auto 默认按内容算），
@@ -31,7 +86,11 @@ a {
 .shell {
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: calc(100vh - var(--hdr-h));
+}
+/* 模型目录那一侧没有侧栏（它自己就有一整列筛选）。 */
+.shell.solo {
+  grid-template-columns: minmax(0, 1fr);
 }
 .sidebar {
   background: var(--sidebar);
@@ -41,15 +100,17 @@ a {
   flex-direction: column;
   gap: 6px;
   position: sticky;
-  top: 0;
-  height: 100vh;
+  /* 让开顶层导航栏 —— 两条 sticky 叠在一起时，后一条必须从前一条的下沿开始，
+     否则滚起来侧栏顶部那几项被压在顶栏底下。 */
+  top: var(--hdr-h);
+  height: calc(100vh - var(--hdr-h));
   overflow-y: auto;
 }
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 6px 14px;
+  padding: 0;
 }
 .brand-mark {
   width: 34px;
@@ -137,18 +198,6 @@ a {
   font-size: 11px;
   color: var(--muted-foreground);
 }
-.side-foot {
-  margin-top: auto;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--muted) 40%, transparent);
-  padding: 10px;
-}
-.side-foot-l {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  margin-bottom: 7px;
-}
 .theme-sw {
   display: flex;
   gap: 3px;
@@ -185,7 +234,7 @@ a {
 }
 .topbar {
   position: sticky;
-  top: 0;
+  top: var(--hdr-h);
   z-index: 5;
   display: flex;
   align-items: center;
@@ -1246,6 +1295,8 @@ summary {
   .shell {
     grid-template-columns: 1fr;
   }
+  /* 侧栏折成顶部横排。position 必须改回 static —— sticky + height:100vh
+     会让它吃掉整个视口，主区被挤到首屏之外（SPA 验收有一条专门盯这个）。 */
   .sidebar {
     position: static;
     height: auto;
@@ -1255,9 +1306,6 @@ summary {
     border-right: 0;
     border-bottom: 1px solid var(--sidebar-border);
   }
-  .brand {
-    padding: 0 10px 0 0;
-  }
   .nav-label {
     display: none;
   }
@@ -1265,13 +1313,6 @@ summary {
     width: auto;
   }
   .nav-item.active::after {
-    display: none;
-  }
-  .side-foot {
-    margin: 0 0 0 auto;
-    border-style: solid;
-  }
-  .side-foot-l {
     display: none;
   }
   /* 窄屏保留核心列，次要信息进详情 —— 不把整张 12 列的表硬塞进 375px。
@@ -1392,8 +1433,8 @@ summary {
      自己带滚动条，否则发行方展开全部之后左栏比视口高，底下几家点不到。 */
   .mside {
     position: sticky;
-    top: 14px;
-    max-height: calc(100vh - 28px);
+    top: calc(var(--hdr-h) + 14px);
+    max-height: calc(100vh - var(--hdr-h) - 28px);
     overflow: auto;
   }
 }

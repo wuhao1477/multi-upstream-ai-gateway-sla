@@ -60,8 +60,20 @@ try {
   // pane()：表单散在不同分栏里，未激活的分栏是 display:none。
   // puppeteer 往隐藏元素 type 不会报错，但 focus() 是空操作 —— 按键会落到
   // 上一个焦点元素上，症状是"填了却没填进去"，且没有任何报错。故先切分栏。
+  //
+  // 顶层导航有两项（控制台 / 模型目录），侧栏只属于控制台那一侧 ——
+  // 所以从模型目录切回任何一个控制台分栏，都得先点一下「控制台」，
+  // 否则那个 .nav-item 根本不在 DOM 上（不是隐藏，是没渲染）。
   const pane = async name => {
-    await page.click(`.nav-item[data-pane="${name}"]`);
+    if (name === 'models') {
+      await page.click('[data-top-nav="models"]');
+    } else {
+      if ((await page.$(`.nav-item[data-pane="${name}"]`)) === null) {
+        await page.click('[data-top-nav="console"]');
+        await page.waitForSelector(`.nav-item[data-pane="${name}"]`, { timeout: 5000 });
+      }
+      await page.click(`.nav-item[data-pane="${name}"]`);
+    }
     await page.waitForFunction(
       n => document.querySelector('#pane-' + n)?.classList.contains('on'),
       { timeout: 5000 }, name);
@@ -209,7 +221,7 @@ try {
   check('渠道列表可加载（空库显示空状态）', chCount > 0 || emptyState,
     emptyState ? '空库空状态' : `${chCount} 行`);
 
-  // 侧栏显示**正在跑的这个二进制**的版本。
+  // 顶栏（品牌那一块）显示**正在跑的这个二进制**的版本。
   //
   // 三端逐字比对：`-ldflags` 注入的值 → `/admin/version` → DOM。
   // 少任何一端这条都会退化 —— 只比 DOM 与 API 的话，不注入版本时两边都是
@@ -227,7 +239,7 @@ try {
     const el = document.querySelector('[data-app-version]');
     return el && el.textContent.trim() !== '' ? el.textContent.trim() : null;
   }, { timeout: 8000 }).then(h => h.jsonValue(), () => '');
-  check('侧栏显示正在运行的 sla-core 版本（取自后端，不是写死）',
+  check('顶栏显示正在运行的 sla-core 版本（取自后端，不是写死）',
     verWant !== '' && verFromAPI === verWant && verInDOM === verWant,
     `注入=${verWant} 后端=${verFromAPI} 界面=${verInDOM}`);
 
@@ -1100,7 +1112,9 @@ try {
     const s = document.querySelector('.sidebar').getBoundingClientRect();
     const m = document.querySelector('.main').getBoundingClientRect();
     return { sx: s.x, sw: s.width, mx: m.x, sTop: s.y, mTop: m.y,
-             navs: document.querySelectorAll('.nav-item').length };
+             navs: document.querySelectorAll('.nav-item').length,
+             sidebarHasModels:
+               document.querySelector('.sidebar .nav-item[data-pane="models"]') !== null };
   });
   check('侧栏在主区左侧（真左右布局）',
     layout.sx < layout.mx && layout.mx >= layout.sw,
@@ -1108,14 +1122,70 @@ try {
   check('侧栏与主区顶部对齐（未折成上下堆叠）',
     Math.abs(layout.sTop - layout.mTop) < 2,
     `侧栏 top=${layout.sTop}，主区 top=${layout.mTop}`);
-  // 五项：渠道管理 / 账号管理 / Key 管理 / 模型目录 / 批量导入。
+  // 四项：渠道管理 / 账号管理 / Key 管理 / 批量导入。
   // 渠道详情是渠道管理的二级页面，「采集凭证」是账号的属性（并进了账号页），
   // 两者都不占一级菜单位置。
   //
-  // 「模型目录」是**一级分栏**而不是渠道详情里那个 Tab：那个 Tab 只能看一个
-  // 渠道有什么模型，而这一栏要回答"这个模型哪些渠道有"——后者在渠道详情里
-  // 天然做不到（那里只有一个渠道）。
-  check('侧栏导航项齐全', layout.navs === 5, `${layout.navs} 项`);
+  // 「模型目录」**不在侧栏里**：它与「控制台」同级，在顶层导航上（下一条验）。
+  // 那四项都在**管**某种对象，模型目录是**查**，而且它自己就有一整列筛选。
+  check('侧栏导航项齐全（模型目录已升到顶层，不占侧栏位）',
+    layout.navs === 4 && !layout.sidebarHasModels,
+    `${layout.navs} 项，侧栏里有模型目录=${layout.sidebarHasModels}`);
+
+  // ── 11bis. 顶层导航：品牌在左、控制台/模型目录在右，整条居中两边各约 1/4 ──
+  //
+  // 量**渲染出来的几何**，不是"有没有那个 class"。三件事各自会坏且症状不同：
+  // 项数（多出一项就说明有分栏被误升到顶层）、左右次序（品牌与导航调换）、
+  // 居中与留白（写成满宽或只居中不留白）。
+  const top = await page.evaluate(() => {
+    const items = [...document.querySelectorAll('[data-top-nav]')];
+    const inner = document.querySelector('.hdr-in').getBoundingClientRect();
+    const brand = document.querySelector('.hdr-in .brand').getBoundingClientRect();
+    const nav = document.querySelector('.topnav').getBoundingClientRect();
+    return {
+      keys: items.map(b => b.getAttribute('data-top-nav')),
+      labels: items.map(b => b.textContent.trim()),
+      active: items.filter(b => b.classList.contains('on'))
+        .map(b => b.getAttribute('data-top-nav')),
+      brandRight: Math.round(brand.right), navLeft: Math.round(nav.left),
+      left: Math.round(inner.left), right: Math.round(inner.right),
+      win: window.innerWidth,
+    };
+  });
+  const gapL = top.left;
+  const gapR = top.win - top.right;
+  check('顶层导航只有「控制台 / 模型目录」两项，品牌在左、导航在右',
+    JSON.stringify(top.keys) === JSON.stringify(['console', 'models']) &&
+    JSON.stringify(top.labels) === JSON.stringify(['控制台', '模型目录']) &&
+    top.brandRight <= top.navLeft,
+    `项=${JSON.stringify(top.labels)}，品牌右边界 ${top.brandRight} / 导航左边界 ${top.navLeft}`);
+  // 1/4：两边留白各占视口的四分之一（窄屏会退到下限，见 .hdr-in 的注释；
+  // 这一轮跑在 1280 宽，走的是严格 1/4 那一支）。
+  check('顶层导航居中，两边各留约 1/4',
+    Math.abs(gapL - gapR) <= 2 &&
+    Math.abs(gapL - top.win / 4) <= 4,
+    `左留白 ${gapL} 右留白 ${gapR}，视口 ${top.win}（1/4 = ${Math.round(top.win / 4)}）`);
+
+  // 切到模型目录：侧栏整个不渲染（它自己就有一整列筛选），顶层高亮跟着换。
+  await pane('models');
+  const onModels = await page.evaluate(() => ({
+    sidebar: document.querySelector('.sidebar') !== null,
+    solo: document.querySelector('.shell')?.classList.contains('solo') === true,
+    active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
+    mside: document.querySelector('.mside') !== null,
+  }));
+  await pane('channels');
+  const backToConsole = await page.evaluate(() => ({
+    sidebar: document.querySelector('.sidebar') !== null,
+    active: document.querySelector('[data-top-nav].on')?.getAttribute('data-top-nav'),
+  }));
+  check('模型目录与控制台同级：进模型目录时侧栏不渲染，回控制台又回来',
+    onModels.sidebar === false && onModels.solo && onModels.active === 'models' &&
+    onModels.mside === true &&
+    backToConsole.sidebar === true && backToConsole.active === 'console',
+    `模型目录页：侧栏=${onModels.sidebar} solo=${onModels.solo} ` +
+    `高亮=${onModels.active} 自带筛选栏=${onModels.mside}；` +
+    `回控制台：侧栏=${backToConsole.sidebar} 高亮=${backToConsole.active}`);
 
   // ── 12. 浅色 / 深色双模式 ──
   //
