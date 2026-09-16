@@ -155,6 +155,13 @@ export interface QuotaView {
   title: string
   /** 已用/总额 的比例，只有在能算出总额时才有值（用于进度条）。 */
   ratio: number | null
+  /**
+   * 口径注记：`text` 里的这个数**不是 Key 配额**时，写清它是什么。
+   *
+   * 目前只有一种情形会非空 —— 不限额 Key 借显账号余额。空串表示
+   * `text` 就是本列的正常口径（Key 剩余配额），不必额外说明。
+   */
+  sub: string
 }
 
 /** 剩余配额低于这个值就标黄。绝对阈值而非比例：多数 Key 采不到总额，比例算不出来。 */
@@ -169,16 +176,41 @@ export const LOW_QUOTA_USD = 1
  *
  * 「未设独立限额」也**不等于无限可用** —— 它只是说这把 Key 自己没有约束，
  * 账号余额仍然管着它。文案里写清楚，别让人读成"随便用"。
+ *
+ * ⚠️ **不限额时借显账号余额**（传了 `account` 且它采到过余额才会）：
+ * 「不限额度」四个字回答不了运维真正要问的"这把 Key 还能打多少" ——
+ * 那个上限就是账号余额。但这两个数**不是一回事**，本文件开头那条
+ * "Key 配额不是钱、不可相加"的纪律仍然成立，所以借显时必须同时给出
+ * `sub='账号余额'` 这个口径注记，让人一眼看出这一格换了口径。
+ * 借显**不改 kind**：筛选、合计仍按"不限额"归类，那些地方要的是分类不是金额。
  */
-export function quotaView(k: Key): QuotaView {
+export function quotaView(k: Key, account?: Account): QuotaView {
   if (k.unlimited_quota === true) {
+    const balance = account?.balance_usd
+    if (balance === undefined) {
+      return {
+        kind: 'unlimited',
+        text: '不限额度',
+        tone: '',
+        ratio: null,
+        sub: '',
+        title:
+          '上游声明该 Key 不限额度。注意：不限额度 ≠ 无限可用 —— 它仍受所属账号余额约束，' +
+          '而该账号的余额尚未采到，所以这里给不出可用上限。',
+      }
+    }
     return {
       kind: 'unlimited',
-      text: '不限额度',
-      tone: '',
+      text: usd(balance),
+      // 余额的色调直接沿用账号那一套：临界/耗尽的账号会把它名下所有
+      // 不限额 Key 一起拖下水，这里不该显示成一个平静的黑色数字。
+      tone: balanceView(account!).tone,
       ratio: null,
+      sub: '账号余额',
       title:
-        '上游声明该 Key 不限额度。注意：不限额度 ≠ 无限可用 —— 它仍受所属账号余额约束。',
+        `该 Key 不限额度，所以这一格显示的是它所属账号（#${account!.id}）的余额 ` +
+        `${usd(balance)}，**不是 Key 自己的配额**。不限额度 ≠ 无限可用：账号余额是它的实际上限，` +
+        `而同一账号下的其它 Key 也在花这笔钱。`,
     }
   }
   if (k.remain_quota_usd === undefined) {
@@ -187,6 +219,7 @@ export function quotaView(k: Key): QuotaView {
       text: '未采集',
       tone: '',
       ratio: null,
+      sub: '',
       title: '尚未采到该 Key 的剩余配额。跑一次采集，或检查该站型是否提供 Key 额度接口。',
     }
   }
@@ -204,6 +237,7 @@ export function quotaView(k: Key): QuotaView {
       text: '配额耗尽',
       tone: 'bad',
       ratio,
+      sub: '',
       title: `${detail}。配额耗尽的 Key 不能承接新请求（FR-025）。`,
     }
   }
@@ -213,10 +247,11 @@ export function quotaView(k: Key): QuotaView {
       text: usdFine(remain),
       tone: 'warn',
       ratio,
+      sub: '',
       title: `${detail}。剩余低于 $${LOW_QUOTA_USD}，接近耗尽。`,
     }
   }
-  return { kind: 'ok', text: usdFine(remain), tone: '', ratio, title: detail }
+  return { kind: 'ok', text: usdFine(remain), tone: '', ratio, sub: '', title: detail }
 }
 
 /**

@@ -325,6 +325,63 @@ type SubscriptionQuota struct {
  model_catalog: supported}
 ```
 
+#### 3.1bis Key 的分组到底怎么定（2026-09-14 源码复核 + 真站点实测）
+
+一把 Key 的分组决定它**能调哪些模型**与**每次调用乘多少倍率**，而"没写分组"
+并不等于"没有分组"。NewAPI 的解析规则（`QuantumNous/new-api`，
+`middleware/auth.go` → `middleware/distributor.go` → `service/group.go`）：
+
+```
+userGroup := user.Group                 // ① 账号自己的分组
+if token.Group != "" {                  // ② Key 写了分组就覆盖它，但要过两道校验：
+    //   不在 GetUserUsableGroups(user.Group) 里 → 403「无权访问 X 分组」
+    //   不在 GroupRatio 里且不是 "auto"        → 403「分组 X 已被弃用」
+    userGroup = token.Group
+}
+usingGroup := userGroup
+if usingGroup == "auto" {               // ③ auto 是**选组模式**，不是一个分组
+    候选 := GetUserAutoGroup(user.Group)         // = /api/pricing 的 auto_groups
+    取候选里第一个有可用渠道的组来计费；源码显式排除 "auto" 自己：
+    `if groupName == "" || groupName == "auto" { return false }`
+}
+```
+
+三条结论，每条都对应我方的一处实现：
+
+1. **`token.Group == ""` → 用账号分组，不是硬编码 `default`。** 源码里对
+   `"default"` 没有任何特殊处理 —— 它只是多数站点给用户的默认组名（实测两个
+   真站点的 `/api/user/self.group` 都是 `default`，所以看起来像默认值，其实是
+   巧合）。故 027 迁移采 `upstream_accounts.account_group`，Key 查询按
+   「自己的分组 → 账号的分组」两级解析，界面标「跟账号」。
+2. **`/api/pricing` 的 `group_ratio` / `usable_group` / `auto_groups` 都按请求者
+   过滤**（`controller/pricing.go` 先 copy 站点全量再 `delete` 掉不可用的）。
+   所以"我方采不到某分组的倍率"与"这个账号用不了那个分组"是同一件事 ——
+   那种 Key 打过去会 403。实测某站有两把 Key 的分组不在自己的 `group_ratio`
+   里，属于这一类。
+3. **`auto` 在 `group_ratio` 里照样带倍率（实测某站是 1），但那不是它的计费
+   倍率。** 实际倍率由运行时命中的候选组决定。故 028 迁移把这类分组存成
+   **动态倍率**：`channel_groups.rate_dynamic=true` + `dynamic_candidates`
+   （= 顶层 `auto_groups`），倍率去候选各自的行里取。界面显示
+   「动态倍率 ×0.26~2.6」而不是 `×1` —— 那个 1 看起来完全正常却与账单无关，
+   而区间至少说出了不确定性。候选一个都没采到倍率时只说「动态倍率」，
+   说不出范围好过编一个。
+
+   判据是**采集侧标出来的 `rate_dynamic`，不是分组名**：`ref === "auto"` 只在
+   NewAPI 成立，别的站型可能把同一模式叫别的名字。只认名字的话，换个站型就会
+   把一个动态倍率当成固定倍率拿去算钱，而算出来的数看起来完全正常。
+
+   ⚠️ **「没写分组的 Key」与「动态倍率」是两回事**：前者走账号的默认分组
+   （结论 1），那通常是个有固定倍率的普通组；只有账号分组恰好是 `auto` 时才
+   落到动态这一档。把两者混成一档，会让一个确定的倍率被说成"动态"。
+
+**Sub2API 的同一问题：未确认。** API Key DTO 的 `group_id` 是 `*int64`（可空，
+`cdb5cfa` 源码复核），我方 `FetchKeys` 读它；但**空 `group_id` 在调用时怎么解析
+没有查到**，也没有真站点样本。所以我方对 Sub2API **不做**任何回落 ——
+`account_group` 只由 NewAPI 的 `FetchAccount` 写入（那条路读 `/api/user/self`
+的 `group`），Sub2API 账号该列恒为 NULL，回落 JOIN 自然匹配不上，这种 Key
+如实显示"解析不出分组"。**不知道就不猜**，这是对的：猜错的分组会给出一个
+精确的错倍率。
+
 ### 3.2 Sub2API 系（molifang + hyhawang 实测 + 源码级 ent schema 解析）
 
 | 项 | 结论 |

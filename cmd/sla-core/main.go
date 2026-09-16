@@ -158,6 +158,7 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 
 	srv := admin.NewServer(pool, adminToken, logger, rebuild)
 	srv.ReadOnly = readOnly
+	srv.Version = version
 	srv.Snapshot = func() *config.Snapshot { return snap.Load() }
 	srv.Detect = func(ctx context.Context, baseURL string) (collector.DetectResult, error) {
 		return collector.Detect(ctx, hc, baseURL)

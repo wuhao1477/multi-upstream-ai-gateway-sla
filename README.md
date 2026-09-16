@@ -2,9 +2,9 @@
 
 一个面向个人和内网环境的多上游 AI 渠道管理系统。它把不同站型的渠道、账号、Key、分组、额度和模型目录统一采集到 PostgreSQL，并提供管理 UI、手动采集和周期采集。
 
-当前发布版本：`v1.0.6` · 当前交付阶段：**P1 上游采集与管理**
+当前发布版本：`v1.0.7` · 当前交付阶段：**P1 上游采集与管理**
 
-[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.6](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.6) · [Apache-2.0](LICENSE)
+[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.7](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.7) · [Apache-2.0](LICENSE)
 
 ## P1 已交付什么
 
@@ -14,10 +14,11 @@
 - 渠道分组、分组倍率与 Key 分组关联
 - Key 额度、用量、限流字段和同步历史
 - 渠道模型目录、价格信息和疑似下架提示
+- **跨渠道模型目录**：一个模型哪些渠道有；按发行方 / 上游渠道 / 定价类型 / 端点类型筛，也能按"我这把 Key 的分组调得到哪些"筛；倍率按各站的 `quota_per_unit` 折成绝对美元价（跨站点才可比）
 - NewAPI / Sub2API 站型探测与采集适配器
 - 手动采集、周期采集、部分成功和 `degraded` 能力标记
 - All API Hub 备份导入，以及从 WebDAV 定时同步（支持其加密备份）
-- 资产总览、异常项、管理 API 和 Vue 管理 UI
+- 资产总览、异常项、管理 API 和 Vue 管理 UI（登录页只要 `ADMIN_TOKEN`，存本地不上传；令牌失效自动回登录页）
 
 ## 明确不在本版本
 
@@ -45,7 +46,7 @@ docker compose ps
 curl http://127.0.0.1:18081/healthz
 ```
 
-管理界面地址：<http://127.0.0.1:18081/admin/ui/>。在界面中输入 `.env` 的 `ADMIN_TOKEN`，然后创建渠道、账号、采集凭证和上游 Key。
+管理界面地址：<http://127.0.0.1:18081/admin/ui/>。首次打开会落到登录页，输入 `.env` 的 `ADMIN_TOKEN`（只需这一项）即可进入，之后存在浏览器里不用再填。然后创建渠道、账号、采集凭证和上游 Key。
 
 ## 架构
 
@@ -66,7 +67,7 @@ collector ───────────────────────�
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6` | 发布镜像版本 |
+| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.7` | 发布镜像版本 |
 | `DATABASE_URL` | 无 | 必填；外部 PostgreSQL 16+ 连接串 |
 | `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌，建议 `openssl rand -hex 32` |
 | `ADMIN_PORT` | `18081` | 本机管理端口，只绑 `127.0.0.1` |
@@ -114,10 +115,10 @@ docker compose -f deploy/docker-compose.yml down -v
 Release 工作流由 Tag 触发，构建 Linux amd64/arm64 二进制并推送多架构 GHCR 镜像：
 
 ```text
-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.6
+ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.7
 ```
 
-当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.6](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.6) 与 [发布工作流](.github/workflows/release.yml)。
+当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.7](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.7) 与 [发布工作流](.github/workflows/release.yml)。
 
 ## 文档地图
 

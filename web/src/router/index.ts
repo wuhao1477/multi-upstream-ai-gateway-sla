@@ -3,7 +3,10 @@ import ChannelsView from '@/views/ChannelsView.vue'
 import DetailView from '@/views/DetailView.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import KeysView from '@/views/KeysView.vue'
+import ModelsView from '@/views/ModelsView.vue'
 import ImportView from '@/views/ImportView.vue'
+import LoginView from '@/views/LoginView.vue'
+import { getToken } from '@/api/client'
 
 /**
  * history 模式而非 hash：分栏可以直接分享链接（"打开 #12 的详情"）。
@@ -33,6 +36,7 @@ const router = createRouter({
     },
     { path: '/accounts', name: 'accounts', component: AccountsView },
     { path: '/keys', name: 'keys', component: KeysView },
+    { path: '/models', name: 'models', component: ModelsView },
     // 旧入口。「账号与 Key」拆成了两个分栏，收藏夹里的链接不该变成 404 ——
     // 账号是它原来的主要内容，所以落到账号页。
     { path: '/register', redirect: '/accounts' },
@@ -43,10 +47,25 @@ const router = createRouter({
     // 地址栏与屏幕上的筛选从此对不上，那种链接比没有更坏。
     { path: '/creds', redirect: '/accounts' },
     { path: '/import', name: 'import', component: ImportView },
+    { path: '/login', name: 'login', component: LoginView },
     // 未知路径回渠道列表，而不是留个空白页
     { path: '/:rest(.*)', redirect: '/' },
   ],
   scrollBehavior: () => ({ top: 0 }),
+})
+
+/**
+ * 没令牌一律先去登录页，并把原本要去的地址带上。
+ *
+ * 读 localStorage 而不是读 auth store：守卫在 store 初始化之前也会跑
+ * （首屏那一次），而 localStorage 是令牌唯一的落点，两处读同一个源。
+ *
+ * ⚠️ 这不是鉴权 —— 鉴权在服务端（每个 /admin/* 都验 Bearer）。这里只是别让人
+ * 落进一屏"每一栏都在报错"的界面。真正的拦截是 401，见 main.ts 那个出口。
+ */
+router.beforeEach((to) => {
+  if (to.name === 'login' || getToken() !== '') return true
+  return { name: 'login', query: { next: to.fullPath } }
 })
 
 export default router

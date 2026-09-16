@@ -19,13 +19,13 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Channel } from '@/api/types'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
-import { familyLabel, statusLabel } from '@/utils/format'
+import { dynamicRateText, familyLabel, statusLabel } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
     /** 触发按钮的 id。与其它表单控件同理，id 是验收契约，由调用方写。 */
     id: string
-    kind: 'channel' | 'account'
+    kind: 'channel' | 'account' | 'key'
     modelValue: number[]
     multi?: boolean
     /** 账号选择器的渠道范围；空数组 = 不限。渠道选择器忽略它。 */
@@ -50,7 +50,12 @@ const state = ref('')
 /** 弹窗内的草稿选择。 */
 const draft = ref<Set<number>>(new Set())
 
-const noun = computed(() => (props.kind === 'channel' ? '渠道' : '账号'))
+const NOUN: Record<'channel' | 'account' | 'key', string> = {
+  channel: '渠道',
+  account: '账号',
+  key: 'Key',
+}
+const noun = computed(() => NOUN[props.kind])
 
 /** 域名才是渠道的身份。协议与端口留在 title 里，列表只显示主机名。 */
 function host(url: string): string {
@@ -134,10 +139,59 @@ const accountRows = computed<Row[]>(() => {
   })
 })
 
-const rows = computed(() => (props.kind === 'channel' ? channelRows.value : accountRows.value))
+/**
+ * Key 行。第二列给**所属渠道**，第三列给分组与倍率 —— 那是选 Key 时真正要
+ * 看的两件事（同一渠道下不同分组能调的模型与计费倍率都不一样）。
+ *
+ * 解析不出分组的 Key 标成 `statusOK=false` 并写明原因：它按定义筛不出任何
+ * 模型，让人选中只会得到一个无法解释的空列表（见 04 §3.1bis）。
+ */
+const keyRows = computed<Row[]>(() => {
+  const scoped =
+    props.scope.length === 0
+      ? res.keys
+      : res.keys.filter((k) => props.scope.includes(k.channel_id))
+  return scoped.map((k) => {
+    const c = channelByID.value.get(k.channel_id)
+    const grouped = k.group_ref !== undefined && k.group_ref !== ''
+    const rate = k.rate_dynamic === true
+      ? dynamicRateText(k.rate_min, k.rate_max)
+      : k.rate_multiplier === undefined
+        ? '倍率未采到'
+        : `×${k.rate_multiplier}`
+    return {
+      id: k.id,
+      title: k.secret_prefix,
+      sub: grouped
+        ? `分组 ${k.group_ref}${k.group_inherited === true ? '（跟账号）' : ''}`
+        : '未归组 —— 筛不出模型',
+      origin: c === undefined ? `渠道 #${k.channel_id}` : c.name,
+      originSub: c === undefined ? '' : host(c.base_url),
+      counts: grouped ? rate : '—',
+      status: grouped ? '可筛' : '筛不了',
+      statusOK: grouped,
+      hay: `${k.secret_prefix} ${k.group_ref ?? ''} ${c?.name ?? ''} ${
+        c?.base_url ?? ''
+      } #${k.id} ${k.id}`.toLowerCase(),
+      facetValue: grouped ? 'grouped' : 'ungrouped',
+    }
+  })
+})
+
+const rows = computed(() => {
+  if (props.kind === 'channel') return channelRows.value
+  if (props.kind === 'key') return keyRows.value
+  return accountRows.value
+})
 
 /** facet 下拉的选项，从当前数据现算 —— 写死的那份在加站型时不会报错，只是选不到。 */
 const facetOptions = computed(() => {
+  if (props.kind === 'key') {
+    return [
+      { value: 'grouped', label: '能解析出分组' },
+      { value: 'ungrouped', label: '未归组（筛不了）' },
+    ]
+  }
   if (props.kind === 'account') {
     return [
       { value: 'known', label: '已采到余额' },

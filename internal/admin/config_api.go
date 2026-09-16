@@ -31,6 +31,11 @@ type Server struct {
 	DB     DB
 	Token  string // ADMIN_TOKEN；空则拒绝一切请求（不是"放行一切"）
 	Logger *slog.Logger
+	// Version 是**正在跑的这个二进制**的版本（main.version，由 -ldflags 注入）。
+	// 界面读它而不是读构建期写死的前端常量：运维要回答的问题是"这台在跑哪一版"，
+	// 而前端常量只能回答"这份界面是哪一版编的"—— 两者在滚动升级或手工替换
+	// 二进制时会不一样，而那正是需要查版本的时候。
+	Version string
 	// ReadOnly 禁止会触达上游或写入资产台账的 Key 自动化操作。
 	ReadOnly bool
 
@@ -94,6 +99,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	h := func(f func(http.ResponseWriter, *http.Request)) http.Handler {
 		return s.requireToken(http.HandlerFunc(f))
 	}
+	mux.Handle("GET /admin/version", h(s.serverVersion))
 	mux.Handle("GET /admin/config", h(s.listConfig))
 	mux.Handle("GET /admin/config/{scopeType}/{scopeID}/{paramKey}", h(s.getConfig))
 	mux.Handle("POST /admin/config/preview", h(s.previewConfig))
@@ -121,6 +127,20 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// serverVersion 回本进程的版本。
+//
+// 要令牌与别的 /admin/* 一致：没有单独放行的理由，而版本号是探测已知漏洞
+// 版本的第一步信息。界面本来就得先填令牌才有内容。
+func (s *Server) serverVersion(w http.ResponseWriter, _ *http.Request) {
+	v := s.Version
+	if v == "" {
+		// 没注入就照 main.version 的零值说法回 "dev"，别回空串 ——
+		// 空串在界面上会被渲染成"什么都没有"，看起来像接口坏了。
+		v = "dev"
+	}
+	s.ok(w, map[string]string{"version": v})
 }
 
 type configItem struct {

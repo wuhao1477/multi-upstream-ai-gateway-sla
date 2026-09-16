@@ -19,6 +19,13 @@ type newapiPricing struct {
 	GroupRatios map[string]float64
 	// GroupModels 是分组 → 可用模型，由每个模型的 enable_groups 反转得出。
 	GroupModels map[string][]string
+	// AutoGroups 是「自动选组」的候选分组（顶层 auto_groups）。
+	//
+	// token.Group == "auto" 时，上游在这几个候选里取**第一个有可用渠道**的组
+	// 来计费（service/group.go；"auto" 自己被显式排除）。所以 auto 这一组
+	// 没有自己的固定倍率，倍率要去候选各自的行里取。
+	// 空 = 上游没给（老版本或该用户没有自动组）。
+	AutoGroups []string
 	// Version 是站点侧的定价版本指纹（pricing_version），可用于判断价格是否变过。
 	Version string
 }
@@ -40,6 +47,20 @@ type newapiModel struct {
 	ModelPrice float64
 	// EnableGroups 是能用该模型的分组列表 —— FR-124 的真正数据源。
 	EnableGroups []string
+	// VendorName 是发行方名字，由本模型的 vendor_id 在顶层 vendors[] 里解析。
+	//
+	// 存名字不存 id：id 是站点自己的自增主键，跨站点毫无意义，而"哪些渠道有
+	// Anthropic 的模型"要跨渠道聚合。空串 = 上游没给 vendor_id 或没这个字段。
+	VendorName string
+	// VendorIcon 是发行方图标名（上游 vendors[].icon，实测是 lobehub 的图标名）。
+	// 跟着 name 一起带出来：同一站里多个发行方名共用一个图标，前端按名字猜要
+	// 手写别名表，漏一行是静默的。
+	VendorIcon string
+	// EndpointTypes 是上游声明该模型支持的端点类型
+	// （实测取值 openai / anthropic / gemini / openai-response /
+	// openai-video / image-generation / jina-rerank）。
+	// 空 = 未声明，**不是**"不支持任何端点"。
+	EndpointTypes []string
 }
 
 // BillingUnit 返回该条目的计费口径。
@@ -78,6 +99,13 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 		Version:     asString(raw["pricing_version"]),
 	}
 
+	// auto_groups：顶层字符串数组，**按请求者过滤**（controller/pricing.go）。
+	for _, g := range asSlice(raw["auto_groups"]) {
+		if ref := asString(g); ref != "" {
+			out.AutoGroups = append(out.AutoGroups, ref)
+		}
+	}
+
 	// group_ratio 在顶层（新形态）；旧形态在 data 里，两处都看一下。
 	// 顶层优先：新形态是当前唯一实际存在的形态。
 	ratios := asMap(raw["group_ratio"])
@@ -87,6 +115,23 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 	for ref, v := range ratios {
 		if r, ok := asFloat(v); ok {
 			out.GroupRatios[ref] = r
+		}
+	}
+
+	// vendors 是**数组** [{id,name,icon}]（2026-09-14 实测 35 项），
+	// 每个模型用 vendor_id 指过来。先反成 id→name，下面逐模型解析。
+	//
+	// 老版本没有这个字段：那时 vendorByID 为空，每个模型的 VendorName 是空串，
+	// 界面按"未声明"渲染。**不要退回 owner_by** —— 实测那一列 1394 个模型
+	// 全是空串，拿它兜底只会把"未声明"换成另一种形式的"未声明"。
+	type vendorInfo struct{ name, icon string }
+	vendorByID := map[int64]vendorInfo{}
+	for _, it := range asSlice(raw["vendors"]) {
+		v := asMap(it)
+		id, ok := asFloat(v["id"])
+		name := asString(v["name"])
+		if ok && name != "" {
+			vendorByID[int64(id)] = vendorInfo{name: name, icon: asString(v["icon"])}
 		}
 	}
 
@@ -112,6 +157,17 @@ func parseNewAPIPricing(raw map[string]any) (*newapiPricing, error) {
 			if cr, ok := asFloat(m["cache_ratio"]); ok {
 				mod.CacheRatio, mod.HasCache = cr, true
 			}
+			if vid, ok := asFloat(m["vendor_id"]); ok {
+				v := vendorByID[int64(vid)]
+				mod.VendorName, mod.VendorIcon = v.name, v.icon
+			}
+			for _, e := range asSlice(m["supported_endpoint_types"]) {
+				if s := asString(e); s != "" {
+					mod.EndpointTypes = append(mod.EndpointTypes, s)
+				}
+			}
+			sort.Strings(mod.EndpointTypes)
+			mod.EndpointTypes = slices.Compact(mod.EndpointTypes)
 			for _, g := range asSlice(m["enable_groups"]) {
 				ref := asString(g)
 				if ref == "all" {

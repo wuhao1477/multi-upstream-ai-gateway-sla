@@ -2,7 +2,6 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NavIcon from './NavIcon.vue'
-import ThemeSwitch from './ThemeSwitch.vue'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import type { PaneName } from '@/router/panes'
@@ -23,8 +22,8 @@ function badge(p: PaneName): string {
 
 /**
  * 把分栏按 section 切段，分区标题只在段首出现一次。
- * 不是为了好看：「上游资源」四项与「运维」两项是两类任务，
- * 连成一排六个会让人以为它们是同一个流程的六步。
+ * 不是为了好看：「上游资源」三项与「运维」一项是两类任务，
+ * 连成一排四个会让人以为它们是同一个流程的四步。
  */
 const sections = computed(() => {
   const out: { title: string; panes: PaneName[] }[] = []
@@ -47,17 +46,9 @@ function isActive(p: PaneName): boolean {
 </script>
 
 <template>
-  <!-- 导航形态取自参考仓库的 settings-nav（图标 chip + 右侧激活竖条 + 底部虚线块），
-       而不是 dashboard 的横向 pill nav：用户明确要求左右布局。 -->
+  <!-- 控制台那一侧的分栏导航。品牌与主题开关在顶栏（AppHeader）——
+       模型目录那一侧没有侧栏，放这儿等于换个页面就看不见版本号和主题开关了。 -->
   <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">SLA</div>
-      <div>
-        <div class="brand-t">上游采集与管理</div>
-        <div class="brand-s">交付阶段 P1</div>
-      </div>
-    </div>
-
     <template v-for="s in sections" :key="s.title">
       <div class="nav-label">{{ s.title }}</div>
       <button
@@ -73,10 +64,5 @@ function isActive(p: PaneName): boolean {
         <span class="nav-count">{{ badge(p) }}</span>
       </button>
     </template>
-
-    <div class="side-foot">
-      <div class="side-foot-l">外观</div>
-      <ThemeSwitch />
-    </div>
   </aside>
 </template>

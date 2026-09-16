@@ -191,14 +191,19 @@ UPDATE channels
 // Key 数来自 upstream_keys。它们只由 ListAccounts 填充，
 // CreateAccount/UpdateAccount 不碰。
 type Account struct {
-	ID              int64      `json:"id"`
-	ChannelID       int64      `json:"channel_id"`
-	ExternalUserID  string     `json:"external_user_id,omitempty"`
-	BalanceGroupKey string     `json:"balance_group_key,omitempty"`
-	Status          string     `json:"status"`
-	DisabledReason  string     `json:"disabled_reason,omitempty"`
-	DisabledUntil   *time.Time `json:"disabled_until,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID              int64  `json:"id"`
+	ChannelID       int64  `json:"channel_id"`
+	ExternalUserID  string `json:"external_user_id,omitempty"`
+	BalanceGroupKey string `json:"balance_group_key,omitempty"`
+	// AccountGroup 是账号在上游的默认分组（/api/user/self 的 group）。
+	// Key 自己没定分组时，调用走的就是它 —— 那种 Key 不是"未归组"。
+	// 空 = 未采到，**不可当成 "default"**（实测有站点的账号分组不在它自己的
+	// group_ratio 里，那时名字有、倍率没有）。
+	AccountGroup   string     `json:"account_group,omitempty"`
+	Status         string     `json:"status"`
+	DisabledReason string     `json:"disabled_reason,omitempty"`
+	DisabledUntil  *time.Time `json:"disabled_until,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 
 	// BalanceUSD 是最近一次确认的账号余额（归一美元，FR-018 一期 1:1）。
 	//
@@ -259,7 +264,7 @@ RETURNING id`, a.ChannelID, a.ExternalUserID, a.BalanceGroupKey, a.Status).Scan(
 func ListAccounts(ctx context.Context, conn *pgx.Conn, channelID int64) ([]Account, error) {
 	rows, err := conn.Query(ctx, `
 SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
-       COALESCE(a.balance_group_key,''),
+       COALESCE(a.balance_group_key,''), COALESCE(a.account_group,''),
        a.status, COALESCE(a.disabled_reason,''), a.disabled_until, a.created_at,
        b.last_confirmed_balance, COALESCE(b.balance_state,''), b.confirmed_at,
        k.total, k.active,
@@ -291,7 +296,7 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
 	for rows.Next() {
 		var a Account
 		if err := rows.Scan(&a.ID, &a.ChannelID, &a.ExternalUserID,
-			&a.BalanceGroupKey, &a.Status, &a.DisabledReason,
+			&a.BalanceGroupKey, &a.AccountGroup, &a.Status, &a.DisabledReason,
 			&a.DisabledUntil, &a.CreatedAt,
 			&a.BalanceUSD, &a.BalanceState, &a.BalanceConfirmedAt,
 			&a.KeysTotal, &a.KeysActive,
@@ -341,19 +346,25 @@ UPDATE upstream_accounts
 
 // ChannelGroup 是一个分组（含可用模型数）。
 type ChannelGroup struct {
-	ID             int64     `json:"id"`
-	ChannelID      int64     `json:"channel_id"`
-	GroupRef       string    `json:"group_ref"`
-	RateMultiplier *float64  `json:"rate_multiplier,omitempty"`
-	ModelCount     int       `json:"model_count"`
-	DataSource     string    `json:"data_source"`
-	FetchedAt      time.Time `json:"fetched_at"`
+	ID             int64    `json:"id"`
+	ChannelID      int64    `json:"channel_id"`
+	GroupRef       string   `json:"group_ref"`
+	RateMultiplier *float64 `json:"rate_multiplier,omitempty"`
+	// RateDynamic 为真时上面那个倍率**不是计费倍率**：这一组的倍率由运行时
+	// 命中的候选组决定（NewAPI 的 auto）。消费方必须先看这一位。
+	RateDynamic bool `json:"rate_dynamic"`
+	// DynamicCandidates 是候选分组名。候选里可能有我方尚未采到的分组。
+	DynamicCandidates []string  `json:"dynamic_candidates,omitempty"`
+	ModelCount        int       `json:"model_count"`
+	DataSource        string    `json:"data_source"`
+	FetchedAt         time.Time `json:"fetched_at"`
 }
 
 // ListChannelGroups 列出分组。
 func ListChannelGroups(ctx context.Context, conn *pgx.Conn, channelID int64) ([]ChannelGroup, error) {
 	rows, err := conn.Query(ctx, `
 SELECT g.id, g.channel_id, g.group_ref, g.rate_multiplier,
+       g.rate_dynamic, g.dynamic_candidates,
        (SELECT count(*) FROM group_models m WHERE m.channel_group_id = g.id),
        g.data_source, g.fetched_at
   FROM channel_groups g
@@ -367,6 +378,7 @@ SELECT g.id, g.channel_id, g.group_ref, g.rate_multiplier,
 	for rows.Next() {
 		var g ChannelGroup
 		if err := rows.Scan(&g.ID, &g.ChannelID, &g.GroupRef, &g.RateMultiplier,
+			&g.RateDynamic, &g.DynamicCandidates,
 			&g.ModelCount, &g.DataSource, &g.FetchedAt); err != nil {
 			return nil, err
 		}

@@ -42,6 +42,12 @@ export default defineConfig({
     outDir: OUT_DIR,
     emptyOutDir: true,
     target: 'es2022',
+    // 供应商图标**不内联**。27 个 SVG 共 116K，base64 塞进 JS 是 ~150K，
+    // 而产物不分包（见下），于是每次打开界面都要先下完这 150K 才开始渲染 ——
+    // 首屏实际画得到的图标只有十来个。留成文件：浏览器只取用到的那几个，
+    // 而且能各自缓存。它们仍然由 go:embed 打进二进制，离线保证不变。
+    assetsInlineLimit: (file: string) =>
+      file.includes('assets/vendor/') ? false : undefined,
     // 不做代码分割：ESM 的 <script type="module"> 是 defer 语义，
     // 而 DOMContentLoaded 要等 defer 脚本抓取+执行完 —— 单块产物才能保证
     // Puppeteer 的 waitUntil:'domcontentloaded' 返回时 SPA 已经挂载完成。

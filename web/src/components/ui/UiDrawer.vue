@@ -13,7 +13,14 @@
  */
 import { onBeforeUnmount, watch } from 'vue'
 
-const props = defineProps<{ open: boolean; title: string; desc?: string }>()
+const props = defineProps<{
+  open: boolean
+  title: string
+  desc?: string
+  /** 宽抽屉。给"一张表"用（模型目录的逐渠道明细），表单不要开 —— 4~6 个字段
+   *  摊在 900px 上会变成一行一个空旷的输入框。 */
+  wide?: boolean
+}>()
 const emit = defineEmits<{ close: [] }>()
 
 /** Esc 关闭。表单里按 Esc 是肌肉记忆，没有它就只能去找那个 × 。 */
@@ -38,7 +45,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   <!-- v-if 而不是 v-show：关闭时表单必须真的从 DOM 上消失。里面有 Key 明文
        输入框，留在 DOM 里等于把它留在页面上（FR-094 的同一条理由）。 -->
   <div v-if="open" class="drawer-scrim" @click.self="emit('close')">
-    <aside class="drawer" role="dialog" aria-modal="true" :aria-label="title">
+    <aside
+      class="drawer"
+      :class="{ wide: wide === true }"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="title"
+    >
       <header class="drawer-h">
         <div>
           <h2 class="drawer-t">{{ title }}</h2>

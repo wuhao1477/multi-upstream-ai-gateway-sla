@@ -223,7 +223,7 @@ function blocked(c: Channel): string {
         <div class="spacer"></div>
         <div class="tb-search">
           <label class="sr" for="ch-filter">筛选渠道</label>
-          <input id="ch-filter" v-model="channels.filter" placeholder="按名称 / 地址 / 站型筛选" />
+          <input id="ch-filter" v-model="channels.filter" placeholder="按渠道名 / 域名 / 站型筛选" />
         </div>
         <!-- 刷新连账号与 Key 一起拉：这张表的三列读的是它们，
              只刷渠道会得到一张"渠道更新了、资产还是旧的"的表 -->

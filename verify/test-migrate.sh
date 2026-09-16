@@ -139,6 +139,43 @@ SEQ_CHECKS=$(q "select count(*) from pg_constraint
                   and pg_get_constraintdef(oid) like '%>= 0%'")
 [ "$SEQ_CHECKS" = "2" ] || {
   echo "❌ 020 的非负 CHECK = $SEQ_CHECKS，期望 2"; exit 1; }
+# 029：剩余额度**可以为负**，已用额度**不可以**。
+#
+# 两句真 SQL 而不是查 information_schema 的类型名：要验的是"库肯不肯收这个值"，
+# 而那正是 2026-09-15 那次采集失败的判据 —— 上游对不限额 Key 扣穿后回负数
+# （实测 remain=-3017798），nonneg_usd 把它挡下，整个渠道的 keys 能力报 failed。
+#
+# 反面那半条同样要有：只验"负 remain 能进"的话，把整个 nonneg_usd 域改宽也能绿，
+# 而那会一并放开网关侧的预留/结算金额与价格表，那些地方负值确实是错误。
+#
+# ⚠️ 两处都要 `|| true`：脚本是 set -euo pipefail，而下半条**故意**让 psql 失败 ——
+# 不吞掉的话脚本在那一行直接退出，连一句诊断都打不出来（这坑本仓库踩过）。
+neg_setup=$(q "
+  INSERT INTO channels (name, base_url, site_family)
+       VALUES ('t029', 'https://t029.invalid', 'newapi');
+  INSERT INTO upstream_accounts (channel_id)
+       SELECT id FROM channels WHERE name='t029';
+  INSERT INTO upstream_keys (account_id, secret, status)
+       SELECT a.id, 'sk-t029', 'active' FROM upstream_accounts a
+         JOIN channels c ON c.id=a.channel_id WHERE c.name='t029';
+  UPDATE upstream_keys SET remain_quota_usd = -3.5 WHERE secret='sk-t029';
+  SELECT remain_quota_usd FROM upstream_keys WHERE secret='sk-t029';" 2>&1 | tail -1) || true
+case "$neg_setup" in
+  -3.5*) ;;
+  *) echo "❌ 029：remain_quota_usd 不收负数（实际：$neg_setup）——"
+     echo "   上游对不限额 Key 扣穿后就回负数，收不下等于整个渠道的 keys 采集报 failed"
+     exit 1 ;;
+esac
+used_neg=$(q "UPDATE upstream_keys SET used_quota_usd = -1 WHERE secret='sk-t029'" 2>&1 | tail -1) || true
+case "$used_neg" in
+  *nonneg_usd*|*violates*) ;;
+  *) echo "❌ 029：used_quota_usd 竟然收下了负数（实际：$used_neg）——"
+     echo "   负的已用额度没有任何真实含义，放开它说明把整个 nonneg_usd 域改宽了"
+     exit 1 ;;
+esac
+q "DELETE FROM channels WHERE name='t029'" >/dev/null 2>&1 || true
+echo "   ✅ 029：剩余额度可为负、已用额度仍不可为负"
+
 echo "   ✅ P1 三表 + upstream_keys 六列 + 020 目录轮次两列就位"
 
 CRED_LOCK=$(q "select count(*) from pg_constraint
