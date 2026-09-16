@@ -561,10 +561,34 @@ func appendImportWarning(it *collector.HubImportItem, warning string) {
 
 // shortErr 截短错误信息。
 // 上游可能返回整页 HTML，全塞进报告会让 JSON 膨胀到不可读。
+// shortErr 把一条错误压到能塞进界面一格的长度。
+//
+// **掐头去尾都不行，要留两头**：Go 的错误链是"外层上下文 : … : 根因"，
+// 而这两端各自不可替代 —— 开头说的是"哪个账号的哪一步"，结尾才是上游递过来的
+// 那句原话（"Unauthorized, invalid access token"）。原先只留前 160 字，
+// 2026-09-16 实测正好把根因整句切掉了：界面上显示到
+// "上游拒绝了这把采集凭证（换用户 ID 头名无济于事…): collector: 上游拒…" 为止，
+// 运维看得见结论、看不见依据。
+//
+// 中间那段是层层包装的路径信息，丢掉它的代价最小。
 func shortErr(err error) string {
 	s := err.Error()
-	if len(s) > 160 {
-		return s[:160] + "…"
+	if len(s) <= shortErrLimit {
+		return s
 	}
-	return s
+	// 按 rune 切，别按 byte —— 这些消息大半是中文，切在半个字上会出现乱码，
+	// 而乱码看起来像"上游返回了坏数据"，又是一次误导。
+	r := []rune(s)
+	if len(r) <= shortErrLimit {
+		return s
+	}
+	head := shortErrLimit / 2
+	tail := shortErrLimit - head
+	return string(r[:head]) + " …… " + string(r[len(r)-tail:])
 }
+
+// shortErrLimit 是单条错误在界面上保留的字符数。
+//
+// 从 160 抬到 240：错误链里一层"账号 N 会话鉴权失败"加一层"上游拒绝了这把
+// 采集凭证（…）"就已经一百多字，160 不够两头都留下。
+const shortErrLimit = 240

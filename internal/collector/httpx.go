@@ -186,11 +186,55 @@ func (c *Client) doJSONBodyAuth(
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, raw, fmt.Errorf("解析 %s %s 响应失败（非 JSON）: %s", method, path, snippet(raw))
 	}
+	// ⚠️ NewAPI 系用 **HTTP 200 + `{"success":false,"message":"…"}`** 表达失败，
+	// 不是用状态码。上面那两个状态码判断一个都拦不住它，于是调用方拿到的是一个
+	// "解析成功但没有 data" 的 map —— 而每个调用方对这种 map 的反应都是**静默给
+	// 出空数据**：
+	//   · fetchAllKeyItems：`data` 不存在 → 直接 return，**空 Key 列表且无错误**，
+	//     表现为"这个账号没有 Key"（2026-09-16 用户报的正是这个症状）；
+	//   · FetchAccount：`d["quota"]` 取不到 → 余额算成 **0 美元**，一个看起来
+	//     精确的错数（FR-020 最忌讳的那种）；
+	//   · Authenticate：`quota`/`id` 都没有 → 报"头名 X 通过但响应无预期字段"，
+	//     把矛头指向用户 ID 头，而上游明明白白写着是令牌的问题。
+	//
+	// 形态实测来源：api.lyjxka.top（午夜Free，new-api 系），2026-09-16 用一把
+	// 已失效的令牌打 /api/user/self，七个候选头名**全部**返回
+	// `HTTP 200 {"message":"Unauthorized, invalid access token","success":false}`。
+	//
+	// 只在 `success` 这一位**存在且为 false** 时才拦：Sub2API 系用的是
+	// `{code,message,data}`，没有这个字段，行为完全不变。
+	if ok, exists := m["success"].(bool); exists && !ok {
+		return nil, raw, fmt.Errorf("%w（%s %s）：%s",
+			ErrUpstreamRejected, method, path, upstreamMessage(m, raw))
+	}
 	return m, raw, nil
+}
+
+// upstreamMessage 取上游自己给的失败说明。
+//
+// 优先用 message —— 那是人家写给人看的一句话，比我们能编的任何措辞都准。
+// 空的时候退回响应片段，**不要退回一句泛泛的"请求失败"**：那等于把上游递到
+// 手里的唯一线索丢掉。
+func upstreamMessage(m map[string]any, raw []byte) string {
+	if msg, _ := m["message"].(string); strings.TrimSpace(msg) != "" {
+		return strings.TrimSpace(msg)
+	}
+	if msg, _ := m["msg"].(string); strings.TrimSpace(msg) != "" {
+		return strings.TrimSpace(msg)
+	}
+	return snippet(raw)
 }
 
 // ErrUnauthorized 是 401，供调用方区分"凭证问题"与"其它错误"。
 var ErrUnauthorized = errors.New("collector: 上游返回 401")
+
+// ErrUpstreamRejected 是"上游收下了请求，但明说不干"—— HTTP 200 配 success:false。
+//
+// 与 ErrUnauthorized 分开：那个是状态码层面的拒绝，这个是**业务层面**的，
+// 而同一个站两种都可能出现。调用方要区分的不是"哪一层拒的"，是"要不要重试"——
+// 两者都不值得重试（换个时间打还是同一个答案），所以都落在重试分类的
+// "确定性错误"那一档。
+var ErrUpstreamRejected = errors.New("collector: 上游拒绝了请求")
 
 // HTTPError preserves response metadata needed by the collection scheduler.
 type HTTPError struct {

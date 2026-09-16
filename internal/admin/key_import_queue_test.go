@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"testing"
@@ -369,6 +370,10 @@ func TestKeyImportRetryDelayClassifiesErrors(t *testing.T) {
 		{name: "网络超时值得等", err: timeoutErr{}, retry: true},
 		{name: "我们自己取消的不重试", err: context.Canceled, retry: false},
 		{name: "说不清的错不重试", err: errors.New("站型不支持自动读取 Key 明文"), retry: false},
+		// 上游明说拒绝（HTTP 200 + success:false，如"令牌失效"）——
+		// 换个时间再打还是同一句话，重试只是拿同一把废令牌再敲一次别人家的门。
+		{name: "上游明说拒绝不重试",
+			err: fmt.Errorf("账号 1 会话鉴权失败: %w", collector.ErrUpstreamRejected), retry: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			delay, retry := keyImportRetryDelay(tc.err, 1)

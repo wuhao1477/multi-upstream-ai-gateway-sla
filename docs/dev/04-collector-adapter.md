@@ -277,6 +277,7 @@ type SubscriptionQuota struct {
 | 额度换算 | `金额(USD) = quota / quota_per_unit`（upstream-d.invalid `quota_per_unit=500000`，已实测与页面一致）。换算在适配器内完成（FR-018、AC-17） |
 | 订阅 | P1 不采集；订阅台账属于后续阶段 |
 | 签到额度 | `/api/status.checkin_enabled=true`（upstream-d.invalid 本月签到 ¥160）。**一期不建模为额度来源**（FR-034 删签到句）；仅可作为 note 记录，接受该类站点额度预测系统性偏低 |
+| **失败怎么表达** | **HTTP 200 + `{"success":false,"message":"…"}`**，不是状态码。见下方 §3.1ter —— 这一位不看就会静默产出空数据 |
 
 **字段映射：**
 
@@ -287,6 +288,37 @@ type SubscriptionQuota struct {
 | `FetchGroups` | 由 `/api/pricing` 派生 | 顶层 `group_ratio` + 各模型 `enable_groups` **反转** | `RateMultiplier`、`AvailableModels`（FR-124） | FR-010/123/124 |
 | `FetchPricing` | `/api/pricing`（**公开**） | `quota_type`、`model_ratio`、`model_price`、`completion_ratio`、`cache_ratio`、顶层 `group_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
 | `FetchModelCatalog` | `/api/pricing` | `model_name` + 上列价格字段 | `channel_model_catalog`（含 `billing_unit`） | FR-126 |
+
+#### 3.1ter 失败不一定是状态码：`success:false`（2026-09-16 实测补）
+
+NewAPI 系**用 HTTP 200 承载业务失败**，靠顶层 `success` 这一位区分：
+
+```
+HTTP 200
+{"message":"Unauthorized, invalid access token","success":false}
+```
+
+形态来源：2026-09-16 用一把已失效的令牌打 `api.lyjxka.top`（午夜Free，new-api 系）
+的 `/api/user/self`，**七个候选用户 ID 头名全部**返回上面这一行。同批实测的
+77 个 new-api 站里有 2 个处于这个状态（另有 6 个走的是老实的 HTTP 401）。
+
+**不看这一位的后果不是报错，是静默的错数据** —— 因为响应体里没有 `data`，
+而每个调用方对"没有 data"的反应都是给出空值：
+
+| 调用方 | 静默后果 |
+| --- | --- |
+| `FetchKeys` | 空 Key 列表**且无错误** → 台账上表现为"这个账号没有 Key" |
+| `FetchAccount` | `quota` 取不到 → 余额算成 **$0**，一个看起来精确的错数（FR-020 最忌讳的那种） |
+| `Authenticate` | `quota`/`id` 都没有 → 报"头名 X 通过但响应无预期字段"，**把矛头指向用户 ID 头**，而上游明明写着是令牌的问题 |
+
+故在**客户端层**统一拦（`internal/collector/httpx.go` 的 `doJSONBodyAuth`）：
+`success` 存在且为 `false` 时返回 `ErrUpstreamRejected`，并带上上游自己那句
+`message` —— 那句话比我方能编的任何措辞都准，是运维唯一可行动的线索。
+只认"存在且为布尔 false"：Sub2API 系用 `{code,message,data}`，没有这个字段，
+行为完全不变。
+
+⚠️ **头名 fan-out 不因此中止**：站点可能只拒某几个头名而认另一个，那时换头名
+是有用的。只有当**全部候选都拿到同一类拒绝**时才断言"这不是头名的问题"。
 
 > **Key 分页依据（2026-09-11 源码复核）**：NewAPI `bdef117` 的
 > `common/page_info.go:GetPageQuery` 将 `p=0` 规范为第 1 页，并优先读取

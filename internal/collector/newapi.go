@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -62,6 +63,11 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 	}
 
 	var lastErr error
+	// 上游**明说拒绝**（HTTP 200 + success:false）的那条消息单独留一份。
+	// 它与"这个头名不对"是两回事，而全部候选都拿到同一句拒绝时，
+	// 问题根本不在头名上 —— 见下面收尾处的判定。
+	var rejected error
+	rejectedAll := true
 	for _, hdr := range candidates {
 		s := Session{
 			ChannelID: cred.ChannelID, Family: FamilyNewAPI,
@@ -71,8 +77,16 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 		m, _, err := a.C.getJSONAuth(ctx, s, "/api/user/self")
 		if err != nil {
 			lastErr = err
+			if errors.Is(err, ErrUpstreamRejected) {
+				if rejected == nil {
+					rejected = err
+				}
+			} else {
+				rejectedAll = false
+			}
 			continue
 		}
+		rejectedAll = false
 		// 命中判据：能取到 data 且里面有 quota 类字段
 		d := unwrapData(m)
 		if _, ok := d["quota"]; !ok {
@@ -83,6 +97,16 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 		}
 		s.QuotaPerUnit = cred.QuotaPerUnit
 		return s, nil
+	}
+	// 每个候选都被上游用同一套话术拒了 ⇒ **不是头名的问题**，别再让运维往那个
+	// 方向查。2026-09-16 实测 api.lyjxka.top：令牌失效时七个头名齐刷刷回
+	// `{"success":false,"message":"Unauthorized, invalid access token"}`，
+	// 而旧文案报的是"七个用户 ID 头名全部试探失败"+"头名 neo-api-user 通过但
+	// 响应无预期字段" —— 两句都把矛头指向头名，而上游那句现成的答案被丢掉了。
+	if rejectedAll && rejected != nil {
+		return Session{}, fmt.Errorf(
+			"上游拒绝了这把采集凭证（换用户 ID 头名无济于事，七个候选拿到的是同一句话）: %w",
+			rejected)
 	}
 	return Session{}, fmt.Errorf(
 		"七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: %w", lastErr)
@@ -201,16 +225,16 @@ func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef 
 func (a *NewAPIAdapter) CreateRemoteKey(
 	ctx context.Context, s Session, request RemoteKeyRequest,
 ) error {
-	m, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/token/", map[string]any{
+	_, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/token/", map[string]any{
 		"name": request.Name, "group": request.GroupRef,
 		"expired_time": -1, "remain_quota": 0, "unlimited_quota": true,
 		"model_limits_enabled": false, "model_limits": "", "allow_ips": "",
 	})
 	if err != nil {
+		// success:false 现在由客户端层统一拦下并带出上游原话（httpx.go 的
+		// ErrUpstreamRejected），所以这里**不再**单独判它 —— 留着会是一段
+		// 永远走不到的代码，而读的人会以为只有这个端点需要判。
 		return err
-	}
-	if success, exists := m["success"]; exists && !asBool(success) {
-		return fmt.Errorf("上游拒绝创建 Key: %s", asString(m["message"]))
 	}
 	return nil
 }
