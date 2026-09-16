@@ -82,21 +82,27 @@ const channels = useChannelsStore()
  * 这不是缺陷，是"我们确实不知道它在哪个分组"，所以标出来而不是替它猜。
  */
 const keyFacet = computed(() =>
-  res.keys.map((k) => ({
-    id: k.id,
-    label: k.secret_prefix,
-    channel: channels.list.find((c) => c.id === k.channel_id)?.name ?? `#${k.channel_id}`,
-    group: k.group_ref,
-    rate: k.rate_multiplier,
-    dynamic: k.rate_dynamic === true,
-    rateText: k.rate_dynamic === true
-      ? dynamicRateText(k.rate_min, k.rate_max)
-      : `×${k.rate_multiplier ?? '?'}`,
-    // 「跟账号走」也算可用：那把 Key 自己没定分组，但调用实际走账号的默认分组，
-    // 倍率与可调模型都是确定的。标出来只是因为**改法不同**（该改账号那一头）。
-    inherited: k.group_inherited === true,
-    usable: k.group_ref !== undefined && k.group_ref !== '',
-  })),
+  res.keys
+    // **跟着上游渠道筛选走**，与发行方那一维同理：选了渠道之后，别的渠道的
+    // Key 留在候选里是**必然筛出空**的 —— 那把 Key 的分组属于另一个渠道，
+    // 与"这几个渠道有什么模型"求交集恒为零。而空结果看不出原因，人会以为
+    // 是目录漏了。空数组 = 不限渠道，列全部。
+    .filter((k) => cat.channelIDs.length === 0 || cat.channelIDs.includes(k.channel_id))
+    .map((k) => ({
+      id: k.id,
+      label: k.secret_prefix,
+      channel: channels.list.find((c) => c.id === k.channel_id)?.name ?? `#${k.channel_id}`,
+      group: k.group_ref,
+      rate: k.rate_multiplier,
+      dynamic: k.rate_dynamic === true,
+      rateText: k.rate_dynamic === true
+        ? dynamicRateText(k.rate_min, k.rate_max)
+        : `×${k.rate_multiplier ?? '?'}`,
+      // 「跟账号走」也算可用：那把 Key 自己没定分组，但调用实际走账号的默认分组，
+      // 倍率与可调模型都是确定的。标出来只是因为**改法不同**（该改账号那一头）。
+      inherited: k.group_inherited === true,
+      usable: k.group_ref !== undefined && k.group_ref !== '',
+    })),
 )
 
 /**
@@ -306,7 +312,18 @@ function resetKeys(): void {
  */
 const channelPick = computed({
   get: () => cat.channelIDs,
-  set: (v: number[]) => cat.setFilters({ channelIDs: v }),
+  set: (v: number[]) => {
+    // 收窄渠道时，把已选的、不在这些渠道里的 Key **一起丢掉**。
+    // 留着的话它们既不在候选列表里（看不见、取消不了），又实实在在参与筛选 ——
+    // 结果是一个空列表加一个解释不了的"已选 2 把"。
+    const kept =
+      v.length === 0
+        ? cat.keyIDs
+        : cat.keyIDs.filter((id) =>
+            v.includes(res.keys.find((k) => k.id === id)?.channel_id ?? -1),
+          )
+    cat.setFilters({ channelIDs: v, keyIDs: kept })
+  },
 })
 const keyPick = computed({
   get: () => cat.keyIDs,
@@ -416,9 +433,15 @@ function endpointsOf(m: ModelEntry): string[] {
             <p class="mfilter-n">{{ cat.channelFacet.length }} 个渠道有目录数据</p>
           </section>
 
-          <section class="mfilter" v-if="keyFacet.length > 0">
+          <!-- 整段的存在与否看**全部** Key（res.keys），列表看**渠道范围内**的
+               （keyFacet）：选了个没有 Key 的渠道就让这一段消失的话，看起来像
+               界面出了问题，而事实是"这些渠道下没有 Key"—— 那句话得说出来。 -->
+          <section class="mfilter" v-if="res.keys.length > 0">
             <div class="mfilter-h">
-              <span>按 Key</span>
+              <span
+                >按 Key
+                <span class="dim" v-if="cat.channelIDs.length > 0">（已按所选渠道收窄）</span></span
+              >
               <button
                 v-if="cat.keyIDs.length > 0"
                 class="linkish sm"
@@ -428,8 +451,17 @@ function endpointsOf(m: ModelEntry): string[] {
                 清除
               </button>
             </div>
-            <ScopePicker id="model-f-key" kind="key" multi v-model="keyPick" placeholder="不限 Key" />
-            <p class="mfilter-n" :title="UNGROUPED_HINT">
+            <ScopePicker
+              id="model-f-key"
+              kind="key"
+              multi
+              v-model="keyPick"
+              :scope="cat.channelIDs"
+              :disabled="keyFacet.length === 0"
+              placeholder="不限 Key"
+            />
+            <p class="mfilter-n" v-if="keyFacet.length === 0">所选渠道下还没有登记 Key</p>
+            <p class="mfilter-n" v-else :title="UNGROUPED_HINT">
               {{ keyFacet.filter((k) => k.usable).length }} 把可筛 ·
               {{ keyFacet.filter((k) => !k.usable).length }} 把未归组
             </p>
