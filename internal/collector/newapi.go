@@ -173,6 +173,10 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 			Unlimited: asBool(t["unlimited_quota"]),
 			GroupRef:  asString(t["group"]),
 			Meta:      NewAPIMeta("/api/token", now),
+			// 有些二开在列表里就给了完整明文（见 Key.Secret 的注释与实测表）。
+			// 判据与 ResolveKeySecret 共用一个函数：两处若各写一份，
+			// "什么算可用明文"迟早会岔开，而岔开的那一侧会把脱敏串当明文存进库。
+			Secret: usableSecret(asString(t["key"])),
 		}
 		if remain, ok := asFloat(t["remain_quota"]); ok {
 			remain /= qpu
@@ -214,11 +218,25 @@ func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef 
 	if err != nil {
 		return "", err
 	}
-	key := strings.TrimSpace(asString(unwrapData(m)["key"]))
-	if key == "" || strings.Contains(key, "*") {
+	key := usableSecret(asString(unwrapData(m)["key"]))
+	if key == "" {
 		return "", fmt.Errorf("上游未返回可用 Key 明文")
 	}
 	return key, nil
+}
+
+// usableSecret 判断上游给的这一串是不是**能直接用的完整明文**，不是就回空串。
+//
+// 判据只有"非空且不含 `*`"，这是实测出来的分界（2026-09-17 打四个真站点）：
+// 脱敏串一律是 18 字符且带 `*`（如 `4lF…****…`），完整明文是 48 字符无 `*`。
+// **不按长度判**：48 是这四个站今天的长度，换个站或换个版本就不是了，
+// 而按长度判错的方向是"把明文当脱敏串丢掉"——那会静默退化成一把都导不进来。
+func usableSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.Contains(v, "*") {
+		return ""
+	}
+	return v
 }
 
 // CreateRemoteKey 在 NewAPI 账号中创建一把不限额度、永不过期的 Key。

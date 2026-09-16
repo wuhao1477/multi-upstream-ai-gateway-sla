@@ -196,7 +196,22 @@ type WindowUsage struct {
 // Key 是 Key 级数据（FR-003/028/031/122/125/127）。
 type Key struct {
 	// KeyRef 是脱敏引用，**不含明文**（FR-094）。
-	KeyRef         string
+	KeyRef string
+	// Secret 是上游在**列表响应里就直接给了**的完整明文；给不了时为空串。
+	//
+	// ⚠️ `json:"-"` 不是可选的。这个结构体本身不会被序列化（快照的 Payload 是
+	// 逐字段拼的 map，见 store/sink.go 的 SaveKey），但"以后没人会 Marshal 它"
+	// 不是一条能指望的保证 —— 而它一旦被 Marshal，明文就进了 collector_snapshots
+	// 的 payload，那是 FR-094 最不该破的地方。
+	//
+	// 为什么需要这个字段（2026-09-17 实测）：NewAPI 系至少有两种变体 ——
+	//   · 钱多多 / VVCode / JustDoWork：列表里的 `key` 是 18 字符带 `*` 的脱敏串，
+	//     完整明文要另外打 `POST /api/token/{id}/key`（而那个接口按 IP 限流）；
+	//   · Agent Router（agentrouter.org）：列表里的 `key` **就是 48 字符的完整
+	//     明文**，且**没有** `/api/token/{id}/key` 这个端点（实测 404）。
+	// 原先无条件走专用端点，于是后一种站上每把 Key 都 404、一把都导不进来。
+	// 顺带的好处：这种站压根不消耗那个"20 次 / 20 分钟"的明文读取预算。
+	Secret         string `json:"-"`
 	RemainQuotaUSD *float64
 	UsedQuotaUSD   *float64
 	Unlimited      bool

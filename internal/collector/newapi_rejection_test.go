@@ -163,3 +163,58 @@ func TestUpstreamRejectionGateOnlyFiresOnExplicitFalse(t *testing.T) {
 		})
 	}
 }
+
+// NewAPI 系至少两种变体：列表里给脱敏串（要另打专用端点取明文）、
+// 以及**列表里直接给完整明文**（且没有那个专用端点）。
+//
+// 形态实测（2026-09-17，四个真站点各打一次 /api/token）：
+//
+//	钱多多 / VVCode / JustDoWork  →  key 是 18 字符含 `*`；POST /api/token/{id}/key 回 200 + 48 字符明文
+//	Agent Router（agentrouter.org）→  key 就是 48 字符完整明文；POST /api/token/{id}/key **404**
+//
+// 判据只能是"含不含 `*`"，不能按长度：48 是这四个站今天的长度。
+func TestUsableSecretAcceptsPlainRejectsMasked(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{name: "完整明文（Agent Router 列表实测形态）",
+			in: "eFYlJ7pCabcdefghijklmnopqrstuvwxyz0123456789ABCD", want: "eFYlJ7pCabcdefghijklmnopqrstuvwxyz0123456789ABCD"},
+		{name: "脱敏串（钱多多列表实测形态）", in: "4lF9lpMc********", want: ""},
+		{name: "空串", in: "", want: ""},
+		{name: "只有空白", in: "   ", want: ""},
+		{name: "首尾空白要去掉", in: "  abcdef  ", want: "abcdef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := usableSecret(tc.in); got != tc.want {
+				t.Fatalf("usableSecret(%q) = %q，期望 %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// 列表里已经给了明文时，FetchKeys 要把它带出来 —— 带不出来的话，
+// 上层只能去打那个专用端点，而 Agent Router 那种站上它是 404。
+func TestNewAPIFetchKeysCarriesInlinePlaintextWhenUpstreamGivesIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"page":1,"page_size":100,"total":2,"items":[
+			{"id":887318,"key":"PLAINTEXT-FROM-LIST-0001","group":"core","unlimited_quota":true},
+			{"id":481908,"key":"masked-0001******","group":"core","unlimited_quota":true}
+		]}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &NewAPIAdapter{C: NewClient(0)}
+	keys, err := a.FetchKeys(context.Background(), rejectedSession(srv.URL))
+	if err != nil {
+		t.Fatalf("取 Key 列表失败: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("应取到 2 把，实际 %d", len(keys))
+	}
+	if keys[0].Secret != "PLAINTEXT-FROM-LIST-0001" {
+		t.Fatalf("列表里给了完整明文就该带出来，实际 %q", keys[0].Secret)
+	}
+	if keys[1].Secret != "" {
+		t.Fatal("脱敏串不能当明文带出去 —— 那会把一串带 * 的东西存进库当 Key 用")
+	}
+}

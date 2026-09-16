@@ -242,23 +242,33 @@ func (r *Runner) importFetchedKeys(
 			result.Skipped++
 			continue
 		}
-		if remainingSecrets != nil && *remainingSecrets <= 0 {
-			result.Deferred += len(keys) - index
-			break
-		}
-		if remainingSecrets != nil {
-			(*remainingSecrets)--
-		}
-		result.SecretResolves++
-		secret, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
-		if err != nil {
-			r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
-			if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+		// 上游在列表里就给了完整明文时，**一个额外请求都不用发**。
+		//
+		// 这不只是省一次往返：那个专用端点正是按 IP 限流的那一个（实测 20 次 /
+		// 20 分钟），也是"同步已有 Key"要排队跑的全部理由。这种站因此完全不消耗
+		// 预算。而且有的二开**根本没有**那个端点（Agent Router 实测 404），
+		// 无条件去调的结果是一把都导不进来。见 collector.Key.Secret 的注释。
+		secret := key.Secret
+		if secret == "" {
+			if remainingSecrets != nil && *remainingSecrets <= 0 {
 				result.Deferred += len(keys) - index
 				break
 			}
-			result.Failed++
-			continue
+			if remainingSecrets != nil {
+				(*remainingSecrets)--
+			}
+			result.SecretResolves++
+			resolved, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
+			if err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
+				if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+					result.Deferred += len(keys) - index
+					break
+				}
+				result.Failed++
+				continue
+			}
+			secret = resolved
 		}
 		groupID, err := importedGroupID(ctx, conn, ch.ID, key.GroupRef)
 		if err != nil {

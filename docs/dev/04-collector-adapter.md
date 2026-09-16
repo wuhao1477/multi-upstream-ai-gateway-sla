@@ -289,6 +289,35 @@ type SubscriptionQuota struct {
 | `FetchPricing` | `/api/pricing`（**公开**） | `quota_type`、`model_ratio`、`model_price`、`completion_ratio`、`cache_ratio`、顶层 `group_ratio` | 价格版本（不可覆盖，FR-012） | FR-010/012/013/017 |
 | `FetchModelCatalog` | `/api/pricing` | `model_name` + 上列价格字段 | `channel_model_catalog`（含 `billing_unit`） | FR-126 |
 
+#### 3.1quater Key 明文在哪：两种变体（2026-09-17 实测补）
+
+NewAPI 系读 Key 明文有**两条互斥的路**，逐站不同，实测打了四个真站点：
+
+| 站点 | `/api/token` 列表里的 `key` | `POST /api/token/{id}/key` |
+| --- | --- | --- |
+| 钱多多 `api2.aigcbest.top` | 18 字符、含 `*`（脱敏） | `200` → 48 字符完整明文 |
+| VVCode `vvcode.top` | 同上 | 同上 |
+| JustDoWork `api.justwoker.icu` | 同上 | 同上 |
+| **Agent Router `agentrouter.org`** | **48 字符、无 `*`、就是完整明文** | **`404`（没有这个端点）** |
+
+原先无条件走专用端点，于是 Agent Router 那种站**每把 Key 都 404、一把都导不进来**
+（实测：发现 2 把、失败 2 把，`stage=resolve_secret`、`http_status=404`）。
+
+现在 `FetchKeys` 把列表里那个 `key` 取出来放进 `collector.Key.Secret`，
+导入时**有就直接用、没有才去打专用端点**。顺带的好处不小：那个专用端点正是
+按 IP 限流的那一个（20 次 / 20 分钟，见记忆「NewAPI 读 Key 明文的限流预算」），
+也是"同步已有 Key"要排队跑的全部理由 —— 这类站因此**完全不消耗**那份预算。
+
+判据只有**含不含 `*`**（`usableSecret`），两处共用一个函数：
+- **不按长度判**：48 是这四个站今天的长度，换个站或换个版本就不是了，
+  而判错的方向是"把明文当脱敏串丢掉"，表现为一把都导不进来。
+- 两处若各写一份，"什么算可用明文"迟早岔开，而岔开的那一侧会把一串带 `*` 的
+  东西当 Key 存进库。
+
+⚠️ `Key.Secret` 带 `json:"-"`。这个结构体目前不会被序列化（快照的 payload 是
+逐字段拼的 map），但"以后没人会 Marshal 它"不是能指望的保证 —— 一旦被 Marshal，
+明文就进了 `collector_snapshots.payload`，那是 FR-094 最不该破的地方。
+
 #### 3.1ter 失败不一定是状态码：`success:false`（2026-09-16 实测补）
 
 NewAPI 系**用 HTTP 200 承载业务失败**，靠顶层 `success` 这一位区分：
