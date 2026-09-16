@@ -43,7 +43,7 @@ onMounted(() => {
 const drawerChannelIDs = computed(() => [filter.value.channelID])
 const drawerAccountIDs = computed(() => [drawerAccount.value])
 
-const shown = computed(() => filterAccounts(res.accounts, filter.value))
+const shown = computed(() => filterAccounts(res.accounts, filter.value, channels.hay))
 const active = computed(() => isAccountFilterActive(filter.value))
 
 /** 概览统计**跟着筛选走**：筛出"未采到余额"的那批之后，合计要是那批的。 */
@@ -120,7 +120,11 @@ function openCred(accountID: number): void {
       <div class="toolbar">
         <div class="tb-grow">
           <label class="sr" for="acc-q">搜索账号</label>
-          <input id="acc-q" v-model="filter.q" placeholder="搜索账号 ID / 上游用户 ID / 余额组…" />
+          <input
+            id="acc-q"
+            v-model="filter.q"
+            placeholder="搜索渠道 / 域名 / 站型 / 账号 ID / 上游用户 ID / 余额组…"
+          />
         </div>
         <UiField label="渠道" for="acc-f-channel">
           <select id="acc-f-channel" v-model.number="filter.channelID">

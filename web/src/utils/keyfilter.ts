@@ -1,5 +1,5 @@
 /**
- * Key 筛选谓词。
+ * Key 与账号的筛选谓词。
  *
  * 抽出来是因为**同一套条件要作用在两种视图上**（平铺 / 按渠道或账号分组）。
  * 视图各自实现筛选的话，两边迟早会分叉，而用户切一下视图就发现"少了几把"
@@ -34,7 +34,11 @@ export type QuotaFilter = 'all' | 'low' | 'exhausted' | 'unlimited' | 'unknown'
 export type ExpiryFilter = 'all' | 'expiring' | 'expired'
 
 export interface KeyFilter {
-  /** 关键字。匹配前缀、上游标识、分组名 —— **不匹配明文**（我们本来也拿不到）。 */
+  /**
+   * 关键字。匹配前缀、上游标识、分组名、所属账号，以及**所属渠道**
+   * （站名 / 域名 / 站型）—— 人记得住的是站名和域名，不是 Key 前缀。
+   * **不匹配明文**（我们本来也拿不到）。
+   */
   q: string
   /**
    * 渠道 ID 集合；**空数组 = 全部**。
@@ -105,7 +109,19 @@ function matchQuota(k: Key, mode: QuotaFilter): boolean {
   return kind === 'low' || kind === 'exhausted'
 }
 
-export function matchKey(k: Key, f: KeyFilter, accountLabel: (id: number) => string): boolean {
+/**
+ * 关键字要搜到**渠道**上。
+ *
+ * channelHay 由 stores/channels 提供（名称 + 地址 + 站型原值与展示名 + #id）。
+ * 传函数而不是把渠道列表塞进来：这个模块是纯谓词，不该知道 store 长什么样；
+ * 而三个页面共用同一个串，才不会出现"渠道页搜得到、Key 页搜不到"。
+ */
+export function matchKey(
+  k: Key,
+  f: KeyFilter,
+  accountLabel: (id: number) => string,
+  channelHay: (id: number) => string,
+): boolean {
   if (f.channelIDs.length > 0 && !f.channelIDs.includes(k.channel_id)) return false
   if (f.accountIDs.length > 0 && !f.accountIDs.includes(k.account_id)) return false
   if (f.status !== '' && k.status !== f.status) return false
@@ -127,7 +143,8 @@ export function matchKey(k: Key, f: KeyFilter, accountLabel: (id: number) => str
     ]
       .join(' ')
       .toLowerCase()
-    if (!hay.includes(q)) return false
+    // 渠道那一串单独拼：它自己已经是小写的（见 stores/channels 的 hays）
+    if (!hay.includes(q) && !channelHay(k.channel_id).includes(q)) return false
   }
   return true
 }
@@ -136,9 +153,10 @@ export function filterKeys(
   keys: Key[],
   f: KeyFilter,
   accountLabel: (id: number) => string,
+  channelHay: (id: number) => string,
 ): Key[] {
   if (!isFilterActive(f)) return keys
-  return keys.filter((k) => matchKey(k, f, accountLabel))
+  return keys.filter((k) => matchKey(k, f, accountLabel, channelHay))
 }
 
 // ── 账号筛选（账号页用，条件比 Key 少得多）────────────────────────────────
@@ -172,7 +190,12 @@ export function isAccountFilterActive(f: AccountFilter): boolean {
   )
 }
 
-export function filterAccounts(accounts: Account[], f: AccountFilter): Account[] {
+/** channelHay 同 matchKey：账号也要能按站名 / 域名搜出来。 */
+export function filterAccounts(
+  accounts: Account[],
+  f: AccountFilter,
+  channelHay: (id: number) => string,
+): Account[] {
   if (!isAccountFilterActive(f)) return accounts
   const q = f.q.trim().toLowerCase()
   return accounts.filter((a) => {
@@ -190,7 +213,7 @@ export function filterAccounts(accounts: Account[], f: AccountFilter): Account[]
       const hay = [String(a.id), a.external_user_id ?? '', a.balance_group_key ?? '']
         .join(' ')
         .toLowerCase()
-      if (!hay.includes(q)) return false
+      if (!hay.includes(q) && !channelHay(a.channel_id).includes(q)) return false
     }
     return true
   })

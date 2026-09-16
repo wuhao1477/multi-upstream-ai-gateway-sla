@@ -117,7 +117,7 @@ watch(view, (v) => {
 })
 watch(cols, (c) => localStorage.setItem(COLS_KEY, JSON.stringify(c)), { deep: true })
 
-const shown = computed(() => filterKeys(res.keys, filter.value, res.accountLabel))
+const shown = computed(() => filterKeys(res.keys, filter.value, res.accountLabel, channels.hay))
 const active = computed(() => isFilterActive(filter.value))
 const quota = computed(() => totalQuota(shown.value))
 
@@ -252,7 +252,11 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
       <div class="toolbar">
         <div class="tb-grow">
           <label class="sr" for="key-q">搜索 Key</label>
-          <input id="key-q" v-model="filter.q" placeholder="搜索前缀 / 上游标识 / 分组 / 账号…" />
+          <input
+            id="key-q"
+            v-model="filter.q"
+            placeholder="搜索渠道 / 域名 / 站型 / 前缀 / 上游标识 / 分组 / 账号…"
+          />
         </div>
         <UiField label="渠道" for="key-f-channel">
           <ScopePicker
