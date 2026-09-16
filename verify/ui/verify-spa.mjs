@@ -190,6 +190,41 @@ try {
   check('批量补齐默认仅无 Key 账号', onlyEmpty);
   await page.click('.drawer-x');
 
+  // ── 4ter. 后台同步批次的三条契约（免密可验的那半）──
+  //
+  // 同步已有 Key 从「同步等结果」改成了「排队 + 轮询」。真正跑一批要真上游凭证，
+  // 那部分在 verify-ui.mjs；这里守的是**与数据无关**的三条：端点在不在、空范围
+  // 怎么拒、批次不在内存里时说不说得清。
+  //
+  // 第三条尤其要守：队列只在内存里，重启就没了。那时轮询拿到的 404 必须带原因 ——
+  // 只回"不存在"会被读成"这个 id 是假的"，而事实是"它曾经在、被重启抹掉了"。
+  const jobsAPI = async (path, init) => {
+    const r = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    });
+    return { status: r.status, body: await r.json().catch(() => ({})) };
+  };
+  const emptyJobs = await jobsAPI('/admin/keys/import/jobs');
+  check('后台同步批次列表端点可用（空库时是空列表，不是 404）',
+    emptyJobs.status === 200 && emptyJobs.body.count === 0,
+    `HTTP ${emptyJobs.status} ${JSON.stringify(emptyJobs.body).slice(0, 60)}`);
+
+  // 空库里 1 号渠道不存在，于是范围展开出 0 个账号。**在排队之前就拒**：
+  // 排一个注定什么都不做的批次，界面上会显示一条 0/0 的进度，读起来像跑完了。
+  const emptyScope = await jobsAPI('/admin/keys/import', {
+    method: 'POST',
+    body: JSON.stringify({ channel_ids: [1], account_ids: [], all: false }),
+  });
+  check('范围内没有账号时当场 400，不排一个空批次',
+    emptyScope.status === 400 && /没有账号/.test(emptyScope.body.error ?? ''),
+    `HTTP ${emptyScope.status} ${emptyScope.body.error ?? ''}`);
+
+  const missingJob = await jobsAPI('/admin/keys/import/jobs/999');
+  check('批次不在内存里时 404 要说清原因（重启过 / 被挤出历史）',
+    missingJob.status === 404 && /重启|历史/.test(missingJob.body.error ?? ''),
+    `HTTP ${missingJob.status} ${missingJob.body.error ?? ''}`);
+
   // ── 5. 未知子路径回渠道列表，而不是白屏 ──
   await page.goto(`${BASE}/admin/ui/no-such-pane`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() =>

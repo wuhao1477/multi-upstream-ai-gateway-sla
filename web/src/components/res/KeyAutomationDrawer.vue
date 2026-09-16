@@ -5,6 +5,7 @@ import UiField from '@/components/ui/UiField.vue'
 import UiStat from '@/components/ui/UiStat.vue'
 import ScopePicker from '@/components/res/ScopePicker.vue'
 import * as adminApi from '@/api/admin'
+import { ApiError } from '@/api/client'
 import type { KeyProvisionBatchResult } from '@/api/types'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
@@ -18,7 +19,8 @@ const props = defineProps<{
   channelIds?: number[]
   accountIds?: number[]
 }>()
-const emit = defineEmits<{ close: []; changed: [] }>()
+/** queued 带上后台批次 id：调用方据此把进度卡切到这一批。 */
+const emit = defineEmits<{ close: []; changed: []; queued: [number] }>()
 
 const resources = useResourcesStore()
 const toast = useToastStore()
@@ -72,6 +74,15 @@ function request(): adminApi.KeyAutomationInput {
   }
 }
 
+/**
+ * 排一批后台同步。
+ *
+ * 这里**不再等结果**：一批的时长由上游的限流窗口决定（每站 20 次 / 20 分钟），
+ * 跨几十个站点天然是小时级的。点完就关抽屉，进度交给 Key 页上那张进度卡。
+ *
+ * 409 不是错误路径：它说明已经有一批在跑，而人多半正想看那一批 ——
+ * 所以照样把进度卡切过去，而不是丢一句"正忙"让人自己去找是哪一批。
+ */
 async function syncExisting(): Promise<void> {
   if (channelIDs.value.length === 0) {
     toast.show('请选择渠道', 'bad')
@@ -79,19 +90,35 @@ async function syncExisting(): Promise<void> {
   }
   busy.value = true
   try {
-    const result = await adminApi.importKeys(request())
-    const issues = result.failed + result.deferred + result.deferred_accounts
-    toast.show(
-      `同步完成：发现 ${result.found}，新增 ${result.imported}，已有 ${result.skipped}，失败 ${result.failed}，待重试 Key ${result.deferred}，待处理账号 ${result.deferred_accounts}`,
-      issues > 0 ? 'bad' : 'ok',
-    )
-    emit('changed')
+    const job = await adminApi.importKeys(request())
+    toast.show(`已在后台开始同步 ${job.total} 个账号，进度见下方`, 'ok')
+    emit('queued', job.id)
     emit('close')
   } catch (error) {
-    toast.fail('同步已有 Key 失败', error)
+    const runningID =
+      error instanceof ApiError && error.status === 409 && isRunningJobBody(error.body)
+        ? error.body.running_job_id
+        : 0
+    if (runningID > 0) {
+      toast.show('已有一批同步在后台执行，下方是它的进度', 'bad')
+      emit('queued', runningID)
+      emit('close')
+      return
+    }
+    toast.fail('排队同步已有 Key 失败', error)
   } finally {
     busy.value = false
   }
+}
+
+/** 409 的响应体形状。不用 as 断言：那会把"字段根本不在"也一起放行。 */
+function isRunningJobBody(body: unknown): body is { running_job_id: number } {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    'running_job_id' in body &&
+    typeof (body as { running_job_id: unknown }).running_job_id === 'number'
+  )
 }
 
 async function loadPreview(): Promise<void> {
@@ -127,7 +154,10 @@ async function applyProvision(): Promise<void> {
   }
 }
 
-/** 范围摘要。一次最多 20 个账号是后端硬上限，选超了要在点下去之前就知道。 */
+/**
+ * 范围摘要。上限是后端硬上限，选超了要在点下去之前就知道 ——
+ * 同步（后台批次）200 个，补齐（真的在别人家站点建 Key）仍然 20 个。
+ */
 const scopeHint = computed(() => {
   if (accountIDs.value.length > 0) return `将处理 ${accountIDs.value.length} 个账号`
   if (channelIDs.value.length === 0) return '未限定范围：按全部渠道的账号处理'
@@ -143,7 +173,11 @@ const scopeHint = computed(() => {
   <UiDrawer
     :open="mode !== null"
     :title="mode === 'import' ? '同步已有 Key' : '批量补齐 Key'"
-    desc="使用已登记的账号采集凭证访问上游；Key 明文不会回显，单次最多处理 20 个账号。"
+    :desc="
+      mode === 'import'
+        ? '使用已登记的账号采集凭证访问上游；Key 明文不会回显。点「开始同步」后在后台排队执行，进度见 Key 页。'
+        : '使用已登记的账号采集凭证访问上游；Key 明文不会回显，单次最多处理 20 个账号。'
+    "
     @close="emit('close')"
   >
     <UiField label="渠道范围" for="key-auto-channel">
@@ -197,7 +231,7 @@ const scopeHint = computed(() => {
 
     <template #footer>
       <button v-if="mode === 'import'" class="btn" :disabled="busy" @click="syncExisting">
-        {{ busy ? '同步中…' : '开始同步' }}
+        {{ busy ? '排队中…' : '开始同步' }}
       </button>
       <template v-else>
         <button class="btn outline" :disabled="busy" @click="loadPreview">

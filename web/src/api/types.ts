@@ -250,8 +250,11 @@ export interface GroupModelsResp {
 export interface KeyImportItem {
   channel_id: number
   account_id: number
+  /** ok / partial / deferred / skipped / failed。 */
   status: string
   error?: string
+  /** 这条结果是第几次尝试得出的（限流退避会重排）。 */
+  attempts?: number
   found: number
   imported: number
   skipped: number
@@ -259,6 +262,14 @@ export interface KeyImportItem {
   deferred: number
 }
 
+/**
+ * 一批同步的汇总。
+ *
+ * ⚠️ 两组计数**单位不同**，不可混着读：`found/imported/skipped/failed/deferred`
+ * 的单位是**把**（Key），`*_accounts` 的单位是**个**（账号）。实测撞到过：
+ * 10 个渠道里 6 个站整个连不上，而 `failed` 是 2（那 2 把来自唯一连得上的站）——
+ * 只显示 `failed` 会把"半数站点没采到"写成"两处小问题"。
+ */
 export interface KeyImportBatchResult {
   count: number
   found: number
@@ -266,9 +277,36 @@ export interface KeyImportBatchResult {
   skipped: number
   failed: number
   deferred: number
-  /** 因明文读取预算耗尽而尚未处理的账号数；deferred 本身只统计 Key。 */
+  /** 整个账号都没成的个数：凭证失效、站型不认……要人去修。 */
+  failed_accounts: number
+  /** "稍后再来"的个数：本渠道明文读取预算用尽，或批次被进程退出打断。 */
   deferred_accounts: number
+  /** 被跳过的个数（账号已停用）。 */
+  skipped_accounts: number
   items: KeyImportItem[]
+}
+
+/**
+ * 一个后台同步批次。
+ *
+ * 队列只在 sla-core 的内存里（服务端 key_import_queue.go 写了为什么）——
+ * 所以进程重启后这个批次会**消失**，轮询会拿到 404。界面要把这件事说出来，
+ * 不能让进度条静静停住。
+ */
+export interface KeyImportJob extends KeyImportBatchResult {
+  id: number
+  status: 'running' | 'done' | 'canceled'
+  started_at: string
+  finished_at?: string
+  /** 这批要处理的账号数 / 已出结果的账号数。 */
+  total: number
+  done: number
+  /** 还排在队里的账号数（含等着退避重试的）。 */
+  pending: number
+  /** 队首那个账号最早什么时候轮到 —— 批次卡在限流退避里时，它回答"是死了还是在等"。 */
+  next_retry_at?: string
+  /** 整批失败的原因（取不到连接之类）。单个账号的失败在 items 里。 */
+  error?: string
 }
 
 export interface KeyProvisionItem {

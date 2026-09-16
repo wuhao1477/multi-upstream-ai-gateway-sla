@@ -43,7 +43,11 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
+	// 同步已有 Key：POST 排一个后台批次并立刻返回 202，进度与逐账号结果走下面
+	// 两条（key_import_queue.go 顶部写了为什么非得是后台）。
 	mux.Handle("POST /admin/keys/import", h(s.importKeys))
+	mux.Handle("GET /admin/keys/import/jobs", h(s.listKeyImportJobs))
+	mux.Handle("GET /admin/keys/import/jobs/{id}", h(s.getKeyImportJob))
 	mux.Handle("POST /admin/keys/provision", h(s.provisionKeys))
 	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))

@@ -230,6 +230,12 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 后台 Key 同步批次的生命周期挂在这个信号 ctx 上（admin.Server.Background）。
+	// 不能让它们跟着 HTTP 请求的 ctx 走：那个在响应写完就取消了，而排队的意义
+	// 恰恰是活得比请求久。挂在这里的额外收益是 Ctrl-C / SIGTERM 能把在跑的批次
+	// 停下来，而不是等它慢慢把剩下三十个站点打完。
+	srv.Background = ctx
+
 	// 单容器部署：周期采集跑在本进程，省掉独立 collector 容器
 	// （06 §8 开放点 3 已定"一期同二进制子命令"，这里只是少起一个容器）。
 	//

@@ -88,6 +88,12 @@ func (r *Runner) adapter(ch store.Channel) (collector.Adapter, error) {
 //
 // 调用方已经提交渠道、账号和凭证事务；本方法只处理 Key，单把失败继续处理，
 // 让导入基础资源与 Key 可用性分开。
+//
+// ⚠️ 三处账号级失败一律 `%w` 裹住**原始错误**，不要退回纯文案。
+// 后台同步队列要靠 `collector.HTTPFailure` 从中读出状态码来分类：429/5xx 值得
+// 退避重排，401/403 重排多少次都是同一个 401。断开这条链之后，队列只能看到
+// "账号 6 会话鉴权失败"这一句话 —— 于是要么全部重试（持续打别人家站点），
+// 要么全部不重试（限流这个最常见的失败再也自愈不了）。两条都错。
 func (r *Runner) ImportKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, creds []collector.Credential,
 	request collector.KeyImportRequest,
@@ -115,18 +121,18 @@ func (r *Runner) ImportKeys(
 			cred, err = r.Auth.EnsureFresh(ctx, cred, refresher, time.Now())
 			if err != nil {
 				r.logKeyImportFailure(ch, cred.AccountID, "renew", "", err)
-				return result, fmt.Errorf("账号 %d 凭证续期失败", cred.AccountID)
+				return result, fmt.Errorf("账号 %d 凭证续期失败: %w", cred.AccountID, err)
 			}
 		}
 		session, err := adapter.Authenticate(ctx, cred)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "authenticate", "", err)
-			return result, fmt.Errorf("账号 %d 会话鉴权失败", cred.AccountID)
+			return result, fmt.Errorf("账号 %d 会话鉴权失败: %w", cred.AccountID, err)
 		}
 		keys, err := adapter.FetchKeys(ctx, session)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "list", "", err)
-			return result, fmt.Errorf("账号 %d 读取 Key 列表失败", cred.AccountID)
+			return result, fmt.Errorf("账号 %d 读取 Key 列表失败: %w", cred.AccountID, err)
 		}
 		imported, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys, &remainingSecrets)
 		mergeKeyImportResult(&result, imported)

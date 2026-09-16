@@ -21,8 +21,10 @@ import UiStat from '@/components/ui/UiStat.vue'
 import UiSegmented from '@/components/ui/UiSegmented.vue'
 import KeyTable from '@/components/res/KeyTable.vue'
 import KeyAutomationDrawer from '@/components/res/KeyAutomationDrawer.vue'
+import KeyImportProgress from '@/components/res/KeyImportProgress.vue'
 import RegisterDrawers from '@/components/res/RegisterDrawers.vue'
 import ScopePicker from '@/components/res/ScopePicker.vue'
+import * as adminApi from '@/api/admin'
 import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import {
@@ -47,6 +49,8 @@ const cols = ref<string[]>([])
 const collapsed = ref<Set<string>>(new Set())
 const drawer = ref<'account' | 'key' | null>(null)
 const automation = ref<'import' | 'provision' | null>(null)
+/** 正在盯的后台同步批次。null = 没有可显示的批次。 */
+const importJobID = ref<number | null>(null)
 
 const VIEW_KEY = 'sla.keys.view'
 const COLS_KEY = 'sla.keys.cols'
@@ -108,7 +112,41 @@ function syncURL(): void {
 onMounted(() => {
   restore()
   void res.load()
+  void pickUpRunningImport()
 })
+
+/** 刚跑完的批次还值得接回来的时长。 */
+const RECENT_JOB_MS = 10 * 60 * 1000
+
+/**
+ * 进这一页时把同步批次接回来。
+ *
+ * 不接的话：点完同步、切去别的页、再回来 —— 那批任务在界面上就消失了，
+ * 而它还在后台打着上游。刷新页面同理。
+ *
+ * **刚跑完的也接**（10 分钟内）：这个功能最有价值的产出就是那份"哪些站没采到"
+ * 的名单，而人多半是过一会儿回来看它的。只接 running 的话，一切页面再回来，
+ * 23 个失败站点的名单就没了 —— 而队列在内存里，那份名单没有第二个地方可查。
+ * 超过 10 分钟就不再自动弹出来：那时它是历史，不是"此刻正在发生的事"。
+ */
+async function pickUpRunningImport(): Promise<void> {
+  try {
+    const jobs = await adminApi.listKeyImportJobs()
+    const latest = jobs.items[0]
+    if (latest === undefined) return
+    if (latest.status === 'running') {
+      importJobID.value = latest.id
+      return
+    }
+    const finished = latest.finished_at === undefined ? 0 : Date.parse(latest.finished_at)
+    if (Number.isFinite(finished) && Date.now() - finished < RECENT_JOB_MS) {
+      importJobID.value = latest.id
+    }
+  } catch {
+    // 接不回来只是少一张进度卡，不该在 Key 页上弹一条错误 ——
+    // 真出问题时下面那张表自己会报。
+  }
+}
 
 watch(filter, syncURL, { deep: true })
 watch(view, (v) => {
@@ -222,6 +260,14 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
         {{ quota.unknown }} 把未采集，都不计入。看规模用合计，<b>看风险用最小值</b>。
       </p>
     </UiCard>
+
+    <!-- 后台同步的进度。放在列表之前：它讲的是"此刻正在发生什么"，
+         该在看列表之前就撞见，而不是翻到页底才发现。 -->
+    <KeyImportProgress
+      :job-id="importJobID"
+      @close="importJobID = null"
+      @changed="res.reload()"
+    />
 
     <UiCard>
       <template #header>
@@ -414,6 +460,7 @@ function chip(kind: 'low' | 'exhausted' | 'unlimited' | 'unknown'): void {
       :account-ids="filter.accountIDs"
       @close="automation = null"
       @changed="res.reload()"
+      @queued="importJobID = $event"
     />
   </div>
 </template>
