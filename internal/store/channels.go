@@ -83,8 +83,12 @@ type Channel struct {
 	Status         string     `json:"status"`
 	DisabledReason string     `json:"disabled_reason,omitempty"`
 	DisabledUntil  *time.Time `json:"disabled_until,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	// Source 是"谁建的"：manual=界面手工建，hub=all-api-hub 导入/同步建或接管（031）。
+	// all-api-hub 的"备份里已移除即停用"只对 hub 的生效 —— 对手工建的渠道生效的话，
+	// 定时同步每轮都会把它再关一次，人每次重新启用，下一轮又被关。
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // CreateChannel 登记一个渠道。
@@ -96,9 +100,9 @@ func CreateChannel(ctx context.Context, conn DBTX, c Channel) (int64, error) {
 	}
 	var id int64
 	err := conn.QueryRow(ctx, `
-INSERT INTO channels (name, site_family, base_url, status)
-VALUES ($1,$2,$3,COALESCE(NULLIF($4,''),'enabled'))
-RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status).Scan(&id)
+INSERT INTO channels (name, site_family, base_url, status, source)
+VALUES ($1,$2,$3,COALESCE(NULLIF($4,''),'enabled'),COALESCE(NULLIF($5,''),'manual'))
+RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status, c.Source).Scan(&id)
 	if err != nil {
 		// 019 的唯一约束是"同地址只一个渠道"的**唯一**真实防线（read-then-insert
 		// 防不住并发）。撞上去时要能被上层区分出来，否则并发导入只会得到一句
@@ -113,7 +117,7 @@ RETURNING id`, c.Name, c.SiteFamily, c.BaseURL, c.Status).Scan(&id)
 func ListChannels(ctx context.Context, conn DBTX) ([]Channel, error) {
 	rows, err := conn.Query(ctx, `
 SELECT id, name, site_family, base_url, status,
-       COALESCE(disabled_reason,''), disabled_until, created_at, updated_at
+       COALESCE(disabled_reason,''), disabled_until, source, created_at, updated_at
   FROM channels ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("列渠道: %w", err)
@@ -123,7 +127,7 @@ SELECT id, name, site_family, base_url, status,
 	for rows.Next() {
 		var c Channel
 		if err := rows.Scan(&c.ID, &c.Name, &c.SiteFamily, &c.BaseURL, &c.Status,
-			&c.DisabledReason, &c.DisabledUntil, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.DisabledReason, &c.DisabledUntil, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -136,9 +140,9 @@ func GetChannel(ctx context.Context, conn *pgx.Conn, id int64) (Channel, error) 
 	var c Channel
 	err := conn.QueryRow(ctx, `
 SELECT id, name, site_family, base_url, status,
-       COALESCE(disabled_reason,''), disabled_until, created_at, updated_at
+       COALESCE(disabled_reason,''), disabled_until, source, created_at, updated_at
   FROM channels WHERE id=$1`, id).Scan(&c.ID, &c.Name, &c.SiteFamily, &c.BaseURL,
-		&c.Status, &c.DisabledReason, &c.DisabledUntil, &c.CreatedAt, &c.UpdatedAt)
+		&c.Status, &c.DisabledReason, &c.DisabledUntil, &c.Source, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, fmt.Errorf("%w: 渠道 %d", ErrNotFound, id)
 	}
@@ -458,6 +462,81 @@ SELECT c.model_name, c.input_price, c.output_price, c.billing_unit,
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AdoptChannelBySource 把渠道标记成由某个来源纳管（目前只有 'hub'）。
+//
+// 已经是该来源时不写 —— updated_at 是"这条渠道什么时候被改过"，
+// 每轮同步都无条件 touch 一遍会让它变成"上次同步时刻"，那是另一回事。
+func AdoptChannelBySource(ctx context.Context, db DBTX, channelID int64, source string) error {
+	_, err := db.Exec(ctx, `
+UPDATE channels SET source=$2, updated_at=now()
+ WHERE id=$1 AND source IS DISTINCT FROM $2`, channelID, source)
+	if err != nil {
+		return fmt.Errorf("标记渠道 %d 来源为 %s: %w", channelID, source, err)
+	}
+	return nil
+}
+
+// DisableHubRemovedChannels 停用"本地还在、备份里已经没有"的 hub 渠道。
+//
+// 三道限制缺一不可：
+//   - `source='hub'`：手工建的渠道备份里本来就没有它，停掉是个会每轮复发的惊吓
+//     （见 031 迁移的说明）。
+//   - `status='enabled'`：已经停用的不重复写，否则每轮都覆盖掉人自己填的停用原因。
+//   - `keep` 为空时**什么都不做**：一次取备份失败或解析出空列表，若照此停用，
+//     一轮就能把整个台账关掉。空列表不是"全都没了"，是"这次没读到"。
+//
+// 停用而不是删除：删渠道会连带账号与已登记的 Key 明文，而那些明文备份里根本
+// 没有（实测 apiCredentialProfiles 为空），删了就再也拿不回来。停用可逆。
+func DisableHubRemovedChannels(
+	ctx context.Context, db DBTX, keepBaseURLs []string, reason string,
+) ([]Channel, error) {
+	if len(keepBaseURLs) == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(ctx, `
+UPDATE channels
+   SET status='disabled', disabled_reason=$2, updated_at=now()
+ WHERE source='hub' AND status='enabled' AND NOT (base_url = ANY($1))
+RETURNING id, name, base_url`, keepBaseURLs, reason)
+	if err != nil {
+		return nil, fmt.Errorf("停用备份里已移除的渠道: %w", err)
+	}
+	defer rows.Close()
+	var out []Channel
+	for rows.Next() {
+		var c Channel
+		if err := rows.Scan(&c.ID, &c.Name, &c.BaseURL); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// HubRemovedChannels 只查不改，供 dry_run 报数。
+func HubRemovedChannels(ctx context.Context, db DBTX, keepBaseURLs []string) ([]Channel, error) {
+	if len(keepBaseURLs) == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(ctx, `
+SELECT id, name, base_url FROM channels
+ WHERE source='hub' AND status='enabled' AND NOT (base_url = ANY($1))
+ ORDER BY id`, keepBaseURLs)
+	if err != nil {
+		return nil, fmt.Errorf("查备份里已移除的渠道: %w", err)
+	}
+	defer rows.Close()
+	var out []Channel
+	for rows.Next() {
+		var c Channel
+		if err := rows.Scan(&c.ID, &c.Name, &c.BaseURL); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

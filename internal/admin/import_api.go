@@ -193,9 +193,21 @@ func (s *Server) ImportHub(
 				remainingSecrets -= keyResult.SecretResolves
 			}
 		}
+		// 备份里已经没有的渠道 → 停用（可逆），只动 source=hub 的那些。
+		// 判据与限制见 store.DisableHubRemovedChannels 的注释，尤其是
+		// "keep 为空时什么都不做" —— 一次取备份失败若照此停用，一轮就能把
+		// 整个台账关掉。
+		gone, err := store.DisableHubRemovedChannels(ctx, conn, keepBaseURLs(res),
+			"all-api-hub 备份里已移除（定时同步自动停用，可手动重新启用）")
+		if err != nil {
+			s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
+		}
+		appendRemovedItems(res, gone)
 		finishImport(res)
 		s.Logger.Info("all-api-hub 导入完成",
 			"total", res.Total, "imported", res.Imported,
+			"updated", res.Updated, "unchanged", res.Unchanged,
+			"removed", res.Removed,
 			"skipped", res.Skipped, "failed", res.Failed,
 			"mismatches", res.Mismatches)
 		return res, nil
@@ -208,8 +220,49 @@ func (s *Server) ImportHub(
 			res.Items[i].Status = "would_import"
 		}
 	}
+	// 差异要能**先看一眼再决定**，所以 dry_run 也报"备份里少了谁"——只查不改。
+	if conn, release, err := s.DB.Acquire(ctx); err == nil {
+		gone, qerr := store.HubRemovedChannels(ctx, conn, keepBaseURLs(res))
+		release()
+		if qerr == nil {
+			appendRemovedItems(res, gone)
+		}
+	}
 	finishImport(res)
 	return res, nil
+}
+
+// keepBaseURLs 是这份备份里**处理到了**的渠道地址。
+//
+// 只收 base_url 已经确定下来的条目（建了、更新了、原样、或已存在）——
+// 探测失败那些的地址我方没认，拿它去和库里比会把一个只是今天连不上的站
+// 判成"备份里已移除"，然后停掉它。宁可漏停。
+func keepBaseURLs(res *collector.HubImportResult) []string {
+	out := make([]string, 0, len(res.Items))
+	for i := range res.Items {
+		switch res.Items[i].Status {
+		case "imported", "would_import", "updated", "unchanged":
+			if u, err := validateBaseURL(res.Items[i].SiteURL); err == nil {
+				out = append(out, u)
+			}
+		}
+	}
+	return out
+}
+
+// appendRemovedItems 把"备份里已移除"的渠道并进报告。
+//
+// 每一条都点名（名字 + 地址）：只给一个"移除 3 个"的数字，人还得自己去渠道页
+// 逐个找哪三个被停了 —— 而这是一次会改变台账状态的动作，必须可核对。
+func appendRemovedItems(res *collector.HubImportResult, gone []store.Channel) {
+	for _, c := range gone {
+		res.Items = append(res.Items, collector.HubImportItem{
+			SiteName: c.Name, SiteURL: c.BaseURL, ChannelID: c.ID,
+			Status: "removed",
+			Reason: "备份里已经没有这个渠道",
+		})
+		res.Removed++
+	}
 }
 
 // importOne 建渠道 + 探测快照 + 账号 + 凭证，**四处同生共死**。
@@ -262,13 +315,40 @@ func (s *Server) importOne(
 			return err
 		}
 		if len(missing) == 0 {
-			it.Status = "skipped"
-			it.Reason = fmt.Sprintf("已存在同地址的渠道 #%d", c.ID)
+			// 渠道齐全 ≠ 无事可做。
+			//
+			// 原先这里直接 return，于是**定时同步对已纳管的站点完全空转** ——
+			// 扩展那边轮换了令牌、重新导出、同步，我们这边照旧是那把死令牌，
+			// 而报告上只有一句"已存在同地址的渠道 #N"。2026-09-16 实测复现：
+			// 备份里 TOKEN-BBBB，库里仍是 TOKEN-AAAA，条目状态 skipped。
+			// 这也正是"入库 0 / 跳过 115 每轮都一样"的由来。
 			it.ChannelID = c.ID
 			it.AccountID, err = importAccountID(ctx, tx, c.ID, a.UserID())
 			if err != nil {
 				return err
 			}
+			// 被 hub 碰过就归 hub 纳管：下面"备份里已移除即停用"只认这个标记，
+			// 而一个已经出现在备份里的渠道，本就该跟着备份走。
+			if err := store.AdoptChannelBySource(ctx, tx, c.ID, "hub"); err != nil {
+				return err
+			}
+			changed, err := s.syncExistingCredential(ctx, tx, a, d, c.ID, it.AccountID, want)
+			if err != nil {
+				return err
+			}
+			if changed {
+				if err := tx.Commit(ctx); err != nil {
+					return fmt.Errorf("提交凭证更新: %w", err)
+				}
+				it.Status = "updated"
+				it.Changes = append(it.Changes, "采集凭证已更新（备份里的令牌与库里不同）")
+				return nil
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("提交来源标记: %w", err)
+			}
+			it.Status = "unchanged"
+			it.Reason = fmt.Sprintf("已存在同地址的渠道 #%d，本轮无变化", c.ID)
 			return nil
 		}
 		// 补齐后提交 —— 同一个事务，补不全就整体回滚。
@@ -304,7 +384,9 @@ func (s *Server) importOne(
 		name = want
 	}
 	chID, err := store.CreateChannel(ctx, tx, store.Channel{
-		Name: name, BaseURL: want, SiteFamily: string(d.Family),
+		// source=hub：它是这份备份建出来的，于是备份里哪天没有它了，
+		// 定时同步敢把它停掉（手工建的不敢，见 031 迁移）。
+		Name: name, BaseURL: want, SiteFamily: string(d.Family), Source: "hub",
 	})
 	if err != nil {
 		return fmt.Errorf("建渠道: %w", err)
@@ -500,6 +582,10 @@ func finishImport(res *collector.HubImportResult) {
 		switch it.Status {
 		case "imported", "would_import":
 			res.Imported++
+		case "updated":
+			res.Updated++
+		case "unchanged":
+			res.Unchanged++
 		case "skipped":
 			res.Skipped++
 		case "failed":
@@ -592,3 +678,48 @@ func shortErr(err error) string {
 // 从 160 抬到 240：错误链里一层"账号 N 会话鉴权失败"加一层"上游拒绝了这把
 // 采集凭证（…）"就已经一百多字，160 不够两头都留下。
 const shortErrLimit = 240
+
+// syncExistingCredential 把备份里的凭证同步到一个**已存在**的渠道上。
+//
+// 只在令牌真的不同时才写：无条件重写会把 collector_credentials.updated_at
+// 变成"上次同步时刻"，而那一列要回答的是"这条凭证什么时候换过"——
+// 两者混成一个，排查"这把令牌用了多久"就没了依据。
+//
+// 取舍（2026-09-16 与需求方确认）：**令牌不同就更新**，不做时间戳新旧比较。
+// 依据是 NewAPI 的不变式 N-1 —— 生成新令牌会立刻作废旧的，所以备份里一旦出现
+// 另一把令牌，库里那把已经是死的，没有"可能覆盖掉好令牌"这回事。
+// 代价写在这里：**手动导入一份旧备份文件会把好令牌覆盖成旧的**（定时同步拉的
+// 始终是同一个 WebDAV 路径，扩展会保持它最新，所以那条路上不存在这个问题）。
+func (s *Server) syncExistingCredential(
+	ctx context.Context, tx pgx.Tx, a collector.HubAccount, d collector.DetectResult,
+	channelID, accountID int64, baseURL string,
+) (bool, error) {
+	if !a.HasCredential() || s.SaveCredential == nil || accountID <= 0 {
+		return false, nil
+	}
+	differs, exists, err := store.CredentialTokenDiffers(
+		ctx, tx, accountID, a.AccountInfo.AccessToken)
+	if err != nil {
+		return false, err
+	}
+	if exists && !differs {
+		return false, nil
+	}
+	reg, ok := collector.Lookup(d.Family)
+	if !ok {
+		return false, fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
+	}
+	credType, err := reg.CredTypeFor(true, a.UserID() != "")
+	if err != nil {
+		return false, fmt.Errorf("导出里的凭证字段不足: %w", err)
+	}
+	if err := s.SaveCredential(ctx, tx, collector.Credential{
+		AccountID: accountID, ChannelID: channelID, Family: d.Family, CredType: credType,
+		BaseURL:        baseURL,
+		AccessToken:    a.AccountInfo.AccessToken,
+		ExternalUserID: a.UserID(),
+	}); err != nil {
+		return false, fmt.Errorf("更新凭证: %w", err)
+	}
+	return true, nil
+}

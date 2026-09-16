@@ -28,6 +28,8 @@ const toast = useToastStore()
 const cfg = ref<HubSyncConfig | null>(null)
 const loaded = ref(false)
 const busy = ref(false)
+/** 正在跑一轮同步。与 busy 分开：busy 也包含"保存配置"那一下，而那一下是瞬时的。 */
+const running = ref(false)
 
 const url = ref('')
 const username = ref('')
@@ -92,9 +94,12 @@ function elapsedLabel(ms: number): string {
 
 /** 明细行的状态 → 徽标类，与手工导入那张表同一套口径。 */
 function itemClass(s: string): string {
-  if (s === 'imported') return 'ok'
+  if (s === 'imported' || s === 'updated') return 'ok'
   if (s === 'would_import') return 'acc'
   if (s === 'failed') return 'bad'
+  // removed 用黄而不是红：它是**我们按备份做的一个决定**（停用，可逆），
+  // 不是故障。用红会让人以为出了错，然后去查一个并不存在的问题。
+  if (s === 'removed') return 'warn'
   return ''
 }
 
@@ -139,27 +144,68 @@ async function save(): Promise<void> {
 /**
  * 立即跑一轮。apply=true 是强制落库 —— 会真的建出渠道，所以要确认一次，
  * 与上面那张卡的「正式导入」同一条理由（不可逆、一次能建上百个）。
+ *
+ * 服务端起了就返回 202（一轮要探测上百个站点，实测 110 站 108 秒，不该挂在
+ * 一个 HTTP 请求上）。这里改成**轮询到它跑完**，中间把"在跑"显式画出来 ——
+ * 原先这两分钟里界面上只有三个变灰的按钮，人分不清是在跑还是卡死了。
  */
 async function runNow(apply: boolean): Promise<void> {
   if (apply && !confirm('立即导入会按远端备份建出渠道与凭证，且不可逆。确定？')) return
   busy.value = true
+  running.value = true
   try {
-    const d = await adminApi.runHubSync(apply)
-    toast.show(
-      `${apply ? '同步并导入完成' : '同步完成（未落库）'}：` +
-        `${d.total} 个条目 / ${apply ? '已入库' : '可入库'} ${d.imported} / ` +
-        `跳过 ${d.skipped} / 失败 ${d.failed}`,
-      'ok',
-    )
-    if (apply) await Promise.all([channels.load(), res.reload()])
+    await adminApi.runHubSync(apply)
+    await waitForRun()
     await Promise.all([load(), loadRuns()])
+    // 结果从历史最新一行读 —— 它是这一轮唯一的落点（服务端不再把结果塞进响应，
+    // 让同一份结果有两个来源正是分叉的起点）。
+    const done = runs.value[0]
+    const r = done?.result
+    if (done !== undefined && (done.error ?? '') !== '') {
+      toast.show(`同步失败：${done.error}`, 'bad')
+    } else if (r !== undefined) {
+      // 报**变化**而不是报"跳过多少"：跳过 115 是常态（台账已经建齐），
+      // 而人想知道的是这一轮动了什么。
+      toast.show(
+        `${done?.applied === true ? '同步并导入完成' : '同步完成（未落库）'}：` +
+          `共 ${r.total} 个条目 —— 新建 ${r.imported} / 更新 ${r.updated} / ` +
+          `未变 ${r.unchanged} / 移除 ${r.removed} / 失败 ${r.failed}`,
+        r.failed > 0 ? 'bad' : 'ok',
+      )
+    } else {
+      toast.show('同步已结束，详情见下方历史', 'ok')
+    }
+    if (apply) await Promise.all([channels.load(), res.reload()])
   } catch (e) {
     toast.fail('同步失败', e)
     // 失败那轮同样进历史，所以照样要重拉 —— 不拉的话界面上看不到刚发生的失败。
     await Promise.all([load(), loadRuns()])
   } finally {
     busy.value = false
+    running.value = false
   }
+}
+
+/**
+ * 轮询到这一轮跑完。
+ *
+ * 判据用服务端的 `running` 而不是"等够多久"：一轮的时长取决于备份里有多少站点、
+ * 以及那些站点今天有多慢，写死任何秒数都会在某一天早退（早退的表现是"同步完成"
+ * 弹出来而历史里还没有那一行）。
+ *
+ * 上限 10 分钟：真卡住时得让人拿回控制权，而不是永远转下去。
+ */
+const POLL_MS = 2000
+const MAX_WAIT_MS = 10 * 60 * 1000
+async function waitForRun(): Promise<void> {
+  const deadline = Date.now() + MAX_WAIT_MS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_MS))
+    const d = await adminApi.getHubSync()
+    cfg.value = d
+    if (!d.running) return
+  }
+  throw new Error('同步超过 10 分钟仍未结束，请看下方历史确认这一轮的结局')
 }
 </script>
 
@@ -234,11 +280,13 @@ async function runNow(apply: boolean): Promise<void> {
       </label>
       <div class="endcap">
         <button class="btn" id="btn-hubsync-save" :disabled="busy" @click="save">保存配置</button>
+        <!-- 按钮上写清此刻在做什么。只把按钮变灰是不够的：这一轮要跑一两分钟，
+             而"灰着"既可能是在跑也可能是卡死了，两者看起来一模一样。 -->
         <button class="btn outline" id="btn-hubsync-run" :disabled="busy" @click="runNow(false)">
-          立即同步（不落库）
+          {{ running ? '同步中…' : '立即同步（不落库）' }}
         </button>
         <button class="btn outline" id="btn-hubsync-apply" :disabled="busy" @click="runNow(true)">
-          立即同步并导入
+          {{ running ? '同步中…' : '立即同步并导入' }}
         </button>
       </div>
     </div>
@@ -246,6 +294,14 @@ async function runNow(apply: boolean): Promise<void> {
       地址填目录即可，服务端会按扩展的默认路径补出
       <code>all-api-hub-backup/all-api-hub-1-0.json</code>；填 <code>.json</code> 直链则原样用。
       间隔下限 5 分钟 —— 每轮要探测备份里的上百个站点，打太勤是在骚扰别人家站点。
+    </p>
+
+    <!-- 正在跑时把"在等什么、大概多久"说出来。数字取自实测（110 站 108 秒），
+         不写"请稍候"那种没有信息量的话 —— 人要判断的是"该等还是该去查"。 -->
+    <p class="note" id="hubsync-running" v-if="running">
+      正在从 WebDAV 取回备份，并逐个探测备份里的站点站型…… 上百个站点通常要
+      <b>一两分钟</b>。这一轮跑在后台，<b>离开本页或关掉标签页都不会中断它</b>，
+      结果会落进下面的同步历史。
     </p>
 
     <div class="sec-t">
@@ -267,7 +323,13 @@ async function runNow(apply: boolean): Promise<void> {
             <th>结果</th>
             <th>是否落库</th>
             <th class="n">条目</th>
-            <th class="n">入库</th>
+            <!-- 「这一轮改了什么」是这张表要回答的问题。原先只有入库/跳过/失败，
+                 而台账建齐之后每一轮都是"入库 0 / 跳过 115" —— 读起来就是
+                 "同步没起作用"，但凭证可能已经换过好几轮了。 -->
+            <th class="n">新建</th>
+            <th class="n">更新</th>
+            <th class="n">未变</th>
+            <th class="n">移除</th>
             <th class="n">跳过</th>
             <th class="n">失败</th>
             <th class="n">耗时</th>
@@ -295,6 +357,15 @@ async function runNow(apply: boolean): Promise<void> {
             <td class="dim">{{ r.applied ? '已落库' : '未落库' }}</td>
             <td class="n">{{ r.result?.total ?? '—' }}</td>
             <td class="n">{{ r.result?.imported ?? '—' }}</td>
+            <!-- 更新与移除是"这轮真的动了台账"的两项，非零时着色 ——
+                 一排全 0 里混着一个 3，不着色是扫不出来的。 -->
+            <td class="n" :class="(r.result?.updated ?? 0) > 0 ? 'ok' : ''">
+              {{ r.result?.updated ?? '—' }}
+            </td>
+            <td class="n dim">{{ r.result?.unchanged ?? '—' }}</td>
+            <td class="n" :class="(r.result?.removed ?? 0) > 0 ? 'warn' : ''">
+              {{ r.result?.removed ?? '—' }}
+            </td>
             <td class="n">{{ r.result?.skipped ?? '—' }}</td>
             <td class="n">{{ r.result?.failed ?? '—' }}</td>
             <td class="n dim">{{ elapsedLabel(r.elapsed_ms) }}</td>
@@ -335,7 +406,10 @@ async function runNow(apply: boolean): Promise<void> {
         <template v-if="detail.result !== undefined">
           <div class="stats">
             <UiStat label="备份条目" :value="detail.result.total" />
-            <UiStat :label="detail.applied ? '已入库' : '可入库'" :value="detail.result.imported" />
+            <UiStat :label="detail.applied ? '新建渠道' : '可新建'" :value="detail.result.imported" />
+            <UiStat label="更新（凭证有变）" :value="detail.result.updated" />
+            <UiStat label="未变" :value="detail.result.unchanged" />
+            <UiStat label="备份里已移除" :value="detail.result.removed" />
             <UiStat label="跳过" :value="detail.result.skipped" />
             <UiStat label="失败" :value="detail.result.failed" />
             <UiStat label="站型声明不符" :value="detail.result.family_mismatches" />
@@ -378,6 +452,11 @@ async function runNow(apply: boolean): Promise<void> {
                     }}</span>
                   </td>
                   <td class="dim" style="font-size: 12px">
+                    <!-- 改了什么排在最前：这一栏最常被用来回答"它到底动了什么"，
+                         而原因与告警是次要的上下文。 -->
+                    <div v-if="(i.changes?.length ?? 0) > 0" class="ok">
+                      {{ i.changes?.join('；') }}
+                    </div>
                     {{ i.reason ?? '' }}
                     <br v-if="i.warning !== undefined && i.reason !== undefined" />
                     <template v-if="i.warning !== undefined">⚠️ {{ i.warning }}</template>

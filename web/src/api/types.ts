@@ -482,7 +482,14 @@ export interface HubSyncConfig {
    * 存了迟早与历史表分叉（定时器按一个时间走、界面显示另一个）。
    * 详情与历史看 `HubSyncRun`。
    */
-  last_run_at?: string
+  last_run_at?: string  /**
+   * 本进程此刻正在跑一轮同步。
+   *
+   * 界面靠它轮询到结束：一轮要探测备份里上百个站点（实测 110 站 108 秒），
+   * 而服务端起了就返回 202，结果落进 hub_sync_runs —— 没有这一位，界面只能
+   * 靠猜一个秒数，猜短了会在历史还没写进去时就报"完成"。
+   */
+  running: boolean
 }
 
 /**
@@ -546,8 +553,14 @@ export interface HubImportItem {
   detected_family?: SiteFamily
   family_mismatch?: boolean
   channel_id?: number
-  /** imported | would_import（dry_run）| skipped | failed。 */
+  /**
+   * imported（新建）| updated（已有，这轮改了）| unchanged（已有，没动）
+   * | would_import（dry_run）| skipped（探测失败/站型未识别）| failed
+   * | removed（本地有、备份里已经没有）。
+   */
   status: string
+  /** 这一条具体改了什么，给人看的短语。只给计数回答不了"它到底动了什么"。 */
+  changes?: string[]
   reason?: string
   /** 可用但需注意：开盾站点、导出里没凭证。 */
   warning?: string
@@ -561,7 +574,20 @@ export interface HubImportItem {
 /** 整次导入的汇总。 */
 export interface HubImportResult {
   total: number
+  /**
+   * ⚠️ 这一组是**这一轮到底改了什么**（2026-09-16 加）。
+   *
+   * 原先只有 imported/skipped/failed，而它们描述的只是"建没建出渠道"。台账一旦
+   * 建齐，之后每轮都是 `imported 0 / skipped N` —— 那行数字读起来就是"同步没
+   * 起作用"，而实际上凭证可能已经换过好几轮了。
+   */
   imported: number
+  /** 已有渠道被改动（目前只有凭证：备份里的令牌与库里不同）。 */
+  updated: number
+  /** 已有且逐字一致、这轮什么都没动。与 skipped 不同：那个含"探测失败"。 */
+  unchanged: number
+  /** 本地还在、备份里已经没有的渠道数（只数 hub 来源的）。apply 时会被停用。 */
+  removed: number
   skipped: number
   failed: number
   family_mismatches: number

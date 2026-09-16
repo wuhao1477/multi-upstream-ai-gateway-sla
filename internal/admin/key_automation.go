@@ -287,7 +287,7 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() {
-		ctx := s.keyImportJobCtx()
+		ctx := s.backgroundCtx()
 		unlock, locked, err := s.keyImportAcquireLock(ctx)
 		if err != nil {
 			s.queue.finish(job, "done", "取得 Key 自动化锁失败: "+shortErr(err))

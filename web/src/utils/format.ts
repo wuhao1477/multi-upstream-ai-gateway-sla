@@ -351,6 +351,12 @@ const STATUS_LABEL: Record<string, string> = {
   imported: '已导入',
   would_import: '可导入',
   detected: '已探测',
+  // all-api-hub 同步的三档差异（2026-09-16）。原先只有"已导入/跳过/失败"，
+  // 而台账建齐之后每一条都是"跳过"——那三个字把"没变"和"探测失败"混成一类，
+  // 于是"这轮到底动了什么"在界面上没有答案。
+  updated: '已更新',
+  unchanged: '无变化',
+  removed: '备份里已移除',
 }
 
 const CAPABILITY_LABEL: Record<string, string> = {

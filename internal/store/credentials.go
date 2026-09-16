@@ -270,3 +270,25 @@ func nullTime(t interface{ IsZero() bool }) any {
 }
 
 var _ collector.CredentialStore = (*CredentialStore)(nil)
+
+// CredentialTokenDiffers 报告该账号已存的 access_token 与给定值是否不同。
+//
+// **比较放在 SQL 里做，明文不进程**：这里只需要一个"要不要更新"的布尔值，
+// 为它把令牌捞回来一趟等于凭空多一个明文的落点（FR-094 的同源纪律 ——
+// 能不碰就不碰）。
+//
+// exists=false 表示这个账号根本还没有凭证，调用方该走"新登记"而不是"更新"。
+func CredentialTokenDiffers(
+	ctx context.Context, db DBTX, accountID int64, token string,
+) (differs bool, exists bool, err error) {
+	err = db.QueryRow(ctx, `
+SELECT COALESCE(access_token,'') <> $2
+  FROM collector_credentials WHERE account_id = $1`, accountID, token).Scan(&differs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("比对账号 %d 的凭证: %w", accountID, err)
+	}
+	return differs, true, nil
+}

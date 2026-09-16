@@ -113,7 +113,12 @@ function statusClass(s: string): string {
           <div class="sec-t">{{ wasDry ? '试运行结果（未落库）' : '导入结果' }}</div>
           <div class="stats">
             <UiStat label="备份条目" :value="result.total" />
-            <UiStat :label="wasDry ? '可入库' : '已入库'" :value="result.imported" />
+            <UiStat :label="wasDry ? '可新建' : '新建渠道'" :value="result.imported" />
+            <!-- 与定时同步那张卡同一组差异计数：重复导入是常态，而"跳过 115"
+                 回答不了"这一轮动了什么"。 -->
+            <UiStat label="更新（凭证有变）" :value="result.updated" />
+            <UiStat label="未变" :value="result.unchanged" />
+            <UiStat label="备份里已移除" :value="result.removed" />
             <UiStat label="跳过" :value="result.skipped" />
             <UiStat label="失败" :value="result.failed" />
             <UiStat label="站型声明不符" :value="result.family_mismatches" />

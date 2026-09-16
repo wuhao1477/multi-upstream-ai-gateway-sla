@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 
@@ -87,7 +88,12 @@ type Server struct {
 	// 懒建，见 keyQueue()。
 	queue     *keyImportQueue
 	queueOnce sync.Once
-	tokens    *tokenStore
+	// hubSyncBusy 标记本进程是否正在跑一轮 all-api-hub 同步。
+	//
+	// 进程内互斥 + 给界面看的"在跑没有"。跨实例互斥仍靠 advisory 锁 ——
+	// 两层缺一不可：锁管得住别的副本，管不住同一个进程里两个标签页同时点。
+	hubSyncBusy atomic.Bool
+	tokens      *tokenStore
 	// onConfigChange 在 apply 成功后触发内存快照重建（09 §2 末条：
 	// 使新配置对决策路径生效；决策路径本身仍只读快照、不查库）。
 	onConfigChange func()

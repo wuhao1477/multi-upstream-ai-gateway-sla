@@ -394,12 +394,12 @@ func sleepUntil(ctx context.Context, at time.Time) error {
 	}
 }
 
-// keyImportJobCtx 是后台批次的生命周期。
+// backgroundCtx 是后台任务的生命周期（Key 同步批次、all-api-hub 同步共用）。
 //
-// **不能用请求的 ctx**：它在响应写完那一刻就被取消，批次会在第一次
-// `DB.Acquire` 上直接死掉 —— 而且死得静悄悄，界面只看到一个永远停在 0/40 的
-// 进度条。用 main 注入的那个信号 ctx，于是 Ctrl-C / SIGTERM 能把在跑的批次停下。
-func (s *Server) keyImportJobCtx() context.Context {
+// **不能用请求的 ctx**：它在响应写完那一刻就被取消，任务会在第一次
+// `DB.Acquire` 上直接死掉 —— 而且死得静悄悄。用 main 注入的那个信号 ctx，
+// 于是 Ctrl-C / SIGTERM 能把在跑的任务停下，而浏览器切走一个页面不能。
+func (s *Server) backgroundCtx() context.Context {
 	if s.Background != nil {
 		return s.Background
 	}

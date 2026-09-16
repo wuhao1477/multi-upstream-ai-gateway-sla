@@ -31,6 +31,12 @@ CREATE TABLE channels (
   disabled_reason TEXT,           -- FR-095 人工停用原因
   disabled_until  TIMESTAMPTZ,    -- FR-095 有效期
   catalog_sync_seq BIGINT NOT NULL DEFAULT 0 CHECK (catalog_sync_seq >= 0), -- 可靠目录成功轮次（FR-126）
+  -- 这个渠道是谁建的（031）。all-api-hub 定时同步要把"备份里已移除的渠道"自动
+  -- 停用，而"不在备份里"有两种含义：hub 建的说明人在扩展那边删了（该停），
+  -- 手工建的说明备份里从来就没有过它（不该停）。两者在数据上一模一样，
+  -- 没有这一列就只能在"漏停"和"每轮把手工渠道再关一次"之间二选一。
+  -- 默认 manual 是保守的那一边；hub 导入碰到同地址的渠道时会接管成 hub。
+  source          TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','hub')),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
