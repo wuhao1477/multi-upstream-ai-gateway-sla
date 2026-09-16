@@ -259,7 +259,7 @@ async function runNow(apply: boolean): Promise<void> {
       还没有跑过。配好上面那几项后点「立即同步」，或等定时器到点。
     </UiEmpty>
     <div v-else class="tw" id="hubsync-runs">
-      <table>
+      <table v-cell-label>
         <thead>
           <tr>
             <th>开始时间</th>
@@ -346,7 +346,7 @@ async function runNow(apply: boolean): Promise<void> {
           </div>
 
           <div class="tw" style="margin-top: 14px" v-if="(detail.result.items?.length ?? 0) > 0">
-            <table>
+            <table v-cell-label>
               <thead>
                 <tr>
                   <th>站点</th>

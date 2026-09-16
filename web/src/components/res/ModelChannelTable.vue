@@ -45,7 +45,7 @@ function usdPerLabel(unit: string | null | undefined, v: number): string {
 
 <template>
   <div class="tw">
-    <table :data-model-channels="modelName">
+    <table v-cell-label :data-model-channels="modelName">
       <thead>
         <tr>
           <th>渠道</th>

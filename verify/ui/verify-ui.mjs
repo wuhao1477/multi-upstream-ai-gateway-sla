@@ -2655,6 +2655,172 @@ try {
     }
   }
 
+  // ── 12sexies. 手机宽度（375px）：同一套真数据，换个宽度再看一遍 ──
+  //
+  // 这不是另起一份验收，是**同一批真渠道、真 Key、真目录**在移动端那一支 CSS 下
+  // 再走一遍。上面每一条都跑在 1280 —— 而 1280 永远走不到 ≤640 那一档，
+  // 窄屏的缺陷不会在宽屏露头，反过来也一样。
+  //
+  // 375 而不是 390/414：iPhone SE 与 13 mini 是现役最窄的那一档，横向溢出先在
+  // 这里出现；宽一点的机型是它的超集。
+  //
+  // 免密的 SPA 验收也有一段 375px，但那一套跑在**空库**上：骨架、导航、浮层、
+  // 控件尺寸它验得了，"表格摊开成卡片、每一格印着列名"它验不了 —— 没有行。
+  // 所以那几条只能落在这里，只在本地跑（CLAUDE.md §1 的 CI 表）。
+  await page.setViewport({ width: 375, height: 812 });
+  await sleep(500);
+  for (const p of ['channels', 'accounts', 'keys', 'models']) {
+    await pane(p);
+    // 两个分栏记得住上次的视图（localStorage + URL），而上面几段把它们切来切去。
+    // 不显式拨回列表/平铺的话，这里可能撞上卡片模式 —— 那时一张表都没有，
+    // 断言会红在"表 0 张"上，而真实情况是"这一页此刻不显示表格"。
+    if (p === 'models') await page.click('[data-seg="list"]');
+    if (p === 'keys') await page.click('[data-seg="flat"]');
+    await sleep(800);
+    const m = await page.evaluate(() => {
+      const tables = [...document.querySelectorAll('table[data-cell-label]')];
+      const cells = tables.flatMap(t => [...t.querySelectorAll('tbody td')]);
+      // 免列名的三类：展开箭头（.x）、操作列（.acts）、跨列的子行 —— 它们
+      // 在表头那一侧本来就是空的，安一个名字比不安更糟。
+      const need = cells.filter(c => c.colSpan === 1
+        && !c.classList.contains('x') && !c.classList.contains('acts'));
+      const missing = need.filter(c => (c.dataset.label ?? '') === '').length;
+      // 属性有了不等于印出来了。屏幕上那行字是 ::before，而它可能被别的规则
+      // 覆盖成 none —— 只验属性的话，断言会在列名整片消失时照样绿。
+      const blank = need.filter(c => {
+        const v = getComputedStyle(c, '::before').content;
+        return v === 'none' || v === 'normal' || v === '""';
+      }).length;
+      // 摊开了却还在横滚 = 有一格没跟着摊（多半是漏了 display:block 的那类）
+      const scrolling = [...document.querySelectorAll('.tw, .picker-b')]
+        .filter(e => e.scrollWidth > e.clientWidth + 1).length;
+      const stacked = tables.length > 0 && tables.every(t =>
+        getComputedStyle(t).display === 'block'
+        && getComputedStyle(t.tHead).display === 'none');
+      return {
+        tables: tables.length, need: need.length, missing, blank, scrolling, stacked,
+        docW: document.documentElement.scrollWidth, winW: window.innerWidth,
+      };
+    });
+    check(`手机 375px · ${p} 分栏无横向溢出`, m.docW <= m.winW + 1,
+      `scrollWidth=${m.docW} innerWidth=${m.winW}`);
+    check(`手机 375px · ${p} 的表格摊成卡片，且每一格都印着列名`,
+      m.stacked && m.missing === 0 && m.blank === 0,
+      `表 ${m.tables} 张、摊开=${m.stacked}，需要列名的格子 ${m.need} 个：` +
+      `缺属性 ${m.missing}、没印出来 ${m.blank}`);
+    check(`手机 375px · ${p} 的表格不再横向滚`, m.scrolling === 0,
+      `仍在横滚的容器 ${m.scrolling} 个`);
+    await page.screenshot({ path: `${SHOT}/14-mobile-${p}.png`, fullPage: false });
+  }
+
+  // 展开箭头挪到了卡片右上角，而同一行后面每个格子都是定位元素（列名要绝对
+  // 定位到格子里），按文档顺序盖在它上面 —— 箭头照旧画得出来，被盖住的只是
+  // 那块透明区域，所以**肉眼完全正常**，点上去却什么都不发生。
+  // 这条只有 elementFromPoint 抓得到（同仓库记忆「断言绿≠断言有效」）。
+  await pane('channels');
+  await sleep(600);
+  await page.evaluate(() =>
+    document.querySelector('[data-ch-toggle]')?.scrollIntoView({ block: 'center' }));
+  await sleep(400);
+  const arrow = await page.evaluate(() => {
+    const t = document.querySelector('[data-ch-toggle]');
+    if (t === null) return { ok: false, why: '页面上没有渠道行' };
+    const r = t.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    return {
+      ok: top === t || t.contains(top),
+      why: `${top?.tagName}.${typeof top?.className === 'string' ? top.className : ''}`,
+    };
+  });
+  check('手机 375px · 卡片右上角的展开箭头点得中（没有被相邻单元格盖住）',
+    arrow.ok, `该点上层元素是 ${arrow.why}`);
+
+  // 点下去要真的展开。上一条只说明"点得着"，而展开区里嵌着两张表
+  // （账号 + Key），它们也得跟着摊开 —— 嵌套那一层漏了的话，卡片里会长出
+  // 一张横滚的小表。
+  await page.click('[data-ch-toggle]');
+  await sleep(700);
+  const nested = await page.evaluate(() => {
+    const sub = document.querySelector('.sub-row');
+    const inner = sub === null ? [] : [...sub.querySelectorAll('table[data-cell-label]')];
+    return {
+      opened: sub !== null,
+      inner: inner.length,
+      stacked: inner.every(t => getComputedStyle(t).display === 'block'),
+      docW: document.documentElement.scrollWidth, winW: window.innerWidth,
+    };
+  });
+  check('手机 375px · 渠道展开区里的嵌套表格同样摊开，且不撑宽页面',
+    nested.opened && nested.inner > 0 && nested.stacked
+    && nested.docW <= nested.winW + 1, JSON.stringify(nested));
+
+  // 抽屉在宽屏是 460px 的右侧面板（「模型明细」那种宽抽屉是 900px）。
+  // 这一条盯的是有没有把定宽带进手机 —— 带进来的表现不是"窄了点"，
+  // 是面板从屏幕右边探出去，整页跟着能横向滚。
+  await pane('keys');
+  await sleep(400);
+  await openDrawer('#btn-import-keys', '#key-auto-channel');
+  const dw = await page.evaluate(() => ({
+    w: Math.round(document.querySelector('.drawer').getBoundingClientRect().width),
+    winW: window.innerWidth,
+    docW: document.documentElement.scrollWidth,
+  }));
+  check('手机 375px · 抽屉铺满屏宽且不把页面撑宽',
+    dw.w === dw.winW && dw.docW <= dw.winW + 1, JSON.stringify(dw));
+  // 选择器弹窗里是一张五列的表，真库 65 个渠道 —— 它是"摊开"这条规则在浮层
+  // 里的那一半，而浮层有自己的滚动容器（.picker-b），单独验。
+  await page.click('#key-auto-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  await sleep(500);
+  const pickBox = await page.evaluate(() => {
+    const el = document.querySelector('.picker');
+    const t = el.querySelector('table[data-cell-label]');
+    const body = el.querySelector('.picker-b');
+    return {
+      w: Math.round(el.getBoundingClientRect().width),
+      winW: window.innerWidth,
+      rows: t === null ? 0 : t.querySelectorAll('tbody tr').length,
+      stacked: t !== null && getComputedStyle(t).display === 'block',
+      hScroll: body.scrollWidth > body.clientWidth + 1,
+      docW: document.documentElement.scrollWidth,
+    };
+  });
+  // 宽度判据是「跟着屏幕走」而不是「等于屏幕宽」：遮罩在手机上仍留 10px 的边,
+  // 那一圈边是"这是一层浮层"的唯一视觉线索(弹窗自己没有阴影可言了)。
+  // 要抓的是它有没有把 880px 那个定宽带进手机 —— 带进来就是 375 减不下去。
+  check('手机 375px · 渠道选择器弹窗宽度跟着屏幕走，其中的表也摊开且不横滚',
+    pickBox.rows > 0 && pickBox.stacked && !pickBox.hScroll
+    && pickBox.w >= pickBox.winW - 24 && pickBox.w <= pickBox.winW
+    && pickBox.docW <= pickBox.winW + 1,
+    JSON.stringify(pickBox));
+  await page.screenshot({ path: `${SHOT}/14-mobile-picker.png` });
+  await page.click('[data-pick-cancel]');
+  await page.click('.drawer-x');
+
+  // 触摸目标与输入框字号。两条都不是审美：
+  //  · 手指落点精度约 8~10mm，30px 高的按钮要点两次才中；
+  //  · iOS Safari 聚焦字号 <16px 的输入框会**整页放大**，且放大后缩不回来。
+  const touch = await page.evaluate(() => {
+    const h = els => [...els].map(e => Math.round(e.getBoundingClientRect().height));
+    const small = h(document.querySelectorAll('.btn.sm, .twist, .chip, .chipf'));
+    const inputs = [...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]), select')]
+      .map(e => Math.round(parseFloat(getComputedStyle(e).fontSize)));
+    return {
+      minTap: small.length === 0 ? 0 : Math.min(...small), taps: small.length,
+      minFont: inputs.length === 0 ? 0 : Math.min(...inputs), inputs: inputs.length,
+    };
+  });
+  check('手机 375px · 行内小控件的触摸目标 ≥34px',
+    touch.taps > 0 && touch.minTap >= 34, `最小 ${touch.minTap}px（共 ${touch.taps} 个）`);
+  check('手机 375px · 输入控件字号 ≥16px（小于它 iOS 聚焦时会整页放大）',
+    touch.inputs > 0 && touch.minFont >= 16,
+    `最小 ${touch.minFont}px（共 ${touch.inputs} 个）`);
+
+  // 换回宽屏收尾：后面那条「无 JavaScript 错误」不挑宽度，但留在 375 会让
+  // 下一次改脚本的人以为整份验收都是窄屏跑的。
+  await page.setViewport({ width: 1280, height: 1400 });
+  await sleep(300);
+
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
   // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷。

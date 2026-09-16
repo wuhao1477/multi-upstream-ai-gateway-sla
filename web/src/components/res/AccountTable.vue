@@ -171,7 +171,7 @@ function openDisable(a: Account): void {
 <template>
   <UiEmpty v-if="items.length === 0">{{ emptyText }}</UiEmpty>
   <div v-else class="tw">
-    <table class="acc-table">
+    <table v-cell-label class="acc-table">
       <thead>
         <!-- 表头带 data-col 且与 <td> 一一对应：窄屏成对隐藏列，
              只给 td 加会让整行右移一格（见 KeyTable 同处注释）。 -->

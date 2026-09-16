@@ -126,7 +126,7 @@ function statusClass(s: string): string {
             <UiStat label="待重试密钥" :value="result.keys_deferred" />
           </div>
           <div class="tw" style="margin-top: 14px">
-            <table>
+            <table v-cell-label>
               <thead>
                 <tr>
                   <th>站点</th>

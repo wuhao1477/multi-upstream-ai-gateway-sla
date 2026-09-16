@@ -3,10 +3,16 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
 import { setUnauthorizedHandler } from './api/client'
+import { cellLabel } from './directives/cellLabel'
 import { useAuthStore } from './stores/auth'
 import './styles/app.css'
 
 const app = createApp(App).use(createPinia()).use(router)
+
+// 手机上表格要竖着摊开，每一格得知道自己属于哪一列（见 directives/cellLabel）。
+// 全局注册而不是逐个组件 import：十来张表，每张都要，漏一张的症状是那张表在
+// 手机上变成一串没有列名的值 —— 不报错，只是读不懂。
+app.directive('cell-label', cellLabel)
 
 /**
  * 令牌失效的统一出口：清掉它，回登录页，并记住人本来在哪一页。

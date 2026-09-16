@@ -223,7 +223,7 @@ function openCred(accountID: number): void {
           <template v-else-if="channels.syncResult !== null">
             <div class="sec-t">采集结果</div>
             <div class="tw">
-              <table>
+              <table v-cell-label>
                 <thead>
                   <tr>
                     <th>能力</th>

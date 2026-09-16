@@ -239,7 +239,7 @@ function blocked(c: Channel): string {
         </UiEmpty>
         <template v-else>
           <div class="tw">
-            <table class="ch-table">
+            <table v-cell-label class="ch-table">
               <thead>
                 <!-- 表头带 data-col 且与 <td> 一一对应：窄屏成对隐藏列，
                      只给 td 加会让整行右移一格（见 KeyTable 同处注释）。 -->

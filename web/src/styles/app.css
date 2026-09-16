@@ -696,8 +696,11 @@ code {
    auto-fit 会把那一张卡拉满整行宽，看起来像出了什么事。 */
 .mcards {
   display: grid;
-  /* 列宽由 --mcard-w 决定（疏密控件改它），列数交给 auto-fill 自己算 */
-  grid-template-columns: repeat(auto-fill, minmax(var(--mcard-w, 280px), 1fr));
+  /* 列宽由 --mcard-w 决定（疏密控件改它），列数交给 auto-fill 自己算。
+     ⚠️ `min(…, 100%)` 不可省：minmax 的下界是**硬下界**，容器比它窄时列不会
+     跟着缩，而是整片网格横向溢出。手机上「宽松」档是 380px，容器只有约 340px
+     —— 溢出的是整个页面，不是这一块。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--mcard-w, 280px), 100%), 1fr));
   gap: 10px;
 }
 
@@ -869,6 +872,15 @@ summary {
 }
 .tb-search {
   width: 220px;
+}
+
+/* 与分段按钮并排、贴右边的那个搜索框（渠道详情的模型目录）。
+   全局 input 是 width:100%，那条给表单里的输入框用，不该管这里。
+   原先写成行内 style，而行内 style 压得住媒体查询 —— 手机上那一档改不动它，
+   于是 200px 的框右对齐、左边留一截空白，看起来像少渲染了一个控件。 */
+.inline-q {
+  width: 200px;
+  margin-left: auto;
 }
 
 /* 快捷筛选 chip。是开关不是按钮：点第二次取消 */
@@ -1362,6 +1374,13 @@ summary {
   .sidebar {
     position: static;
     height: auto;
+    /* ⚠️ `height:auto` 还不够。折行之后侧栏是 .shell 这个网格的第一行，而
+       .shell 有 `min-height: calc(100vh - var(--hdr-h))`，网格默认把多余的
+       高度**摊给各行**（align-content 是 stretch）。于是主区内容短的时候
+       （空库、筛空、加载中），这条导航被拉成 223px 的空带子，里面一行 50px
+       的按钮靠 align-items:center 浮在正中 —— 看起来像"上面留了一大块白"。
+       库里有几十个渠道时主区撑得够高，反而看不出来，所以它只在空库上现形。 */
+    align-self: start;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
@@ -1377,7 +1396,30 @@ summary {
   .nav-item.active::after {
     display: none;
   }
-  /* 窄屏保留核心列，次要信息进详情 —— 不把整张 12 列的表硬塞进 375px。
+  /* 分栏抬头不再吸顶。
+     它的 `top` 是 var(--hdr-h)=60px，而那个数只在顶栏排成一行时才对 ——
+     窄屏上品牌与导航要折成两行，顶栏实测 98px，抬头就吸在顶栏**底下** 38px 处，
+     滚起来被盖掉一半。三条横条（顶栏 + 折成横排的侧栏 + 抬头）叠着吸顶本身
+     也吃掉三分之一屏，而抬头写的是"你在哪一栏"，侧栏里那一项已经高亮着了。 */
+  .topbar {
+    position: static;
+  }
+  .drawer {
+    width: 100%;
+  }
+  .toolbar select,
+  .tb-search {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* 平板这一档（641~900）：表格**还横着**，所以砍列。
+   手机那一档（≤640）表格整个摊开成卡片，每格自己一行，地方有的是 ——
+   在那里砍列反而把「资金概览」这种最该在手机上看的信息弄丢了，
+   所以这段的上界必须封在 641，不能写成 max-width:900 一路盖下去。 */
+@media (min-width: 641px) and (max-width: 900px) {
+  /* 窄屏保留核心列，次要信息进详情 —— 不把整张 12 列的表硬塞进 768px。
      隐藏的是"有它更好"的那些，识别（前缀/账号）与风险（配额/状态）留下 */
   .key-table th[data-col='ref'],
   .key-table td[data-col='ref'],
@@ -1392,14 +1434,6 @@ summary {
   .ch-table th[data-col='synced'],
   .ch-table td[data-col='synced'] {
     display: none;
-  }
-  .drawer {
-    width: 100%;
-  }
-  .toolbar select,
-  .tb-search {
-    min-width: 0;
-    width: 100%;
   }
 }
 
@@ -1639,4 +1673,361 @@ summary {
   gap: 6px;
   width: 100%;
   min-width: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机（≤640px）
+   ══════════════════════════════════════════════════════════════════════════
+
+   断点取 640 而不是 768：641~900 那一档（平板、分屏）表格还横得下，只是要砍
+   几列；640 以下横不下了，形态必须换。两档各自解决各自的问题，见上面那两块。
+
+   这一档改四类东西，其余一概不动：
+
+   ① **表格摊开**。窄屏上真正的问题不是"表格有点挤"，是 375px 里塞 9 列 ——
+      实测渠道表在 375px 下内容宽 623px，横向滚过去就再也对不上是哪一行。
+      摊开之后一行变一张卡，列名印在每一格左边（`data-label`，由
+      directives/cellLabel.ts 抄自表头）。**竖着扫**这件事因此保住了，
+      而那正是台账的全部价值（见文件中部 .content 那条注释）。
+   ② **触摸目标**。全站尺寸是按鼠标定的（`.btn.sm` 高 30px、`.twist` 22px），
+      手指落点精度大约 8~10mm，30px 要点两次才中。只在这一档放大。
+   ③ **输入框 16px**。iOS Safari 聚焦字号小于 16px 的输入框时会**整页放大**，
+      放大后横向超出视口且缩不回去。这不是审美选择，是那条行为的唯一规避方式。
+   ④ **把宽度让出来**。内边距、卡片留白、浮层边距一律收，抽屉与弹窗铺满。
+
+   ⚠️ 新增前端时这一档同样要过（CLAUDE.md §2「移动端适配」）。 */
+@media (max-width: 640px) {
+  /* ── ④ 让出宽度 ── */
+  .content {
+    padding: 14px 12px 32px;
+    gap: 14px;
+  }
+  .mpage {
+    padding: 12px 12px 32px;
+  }
+  .card {
+    padding: 14px 13px;
+  }
+  .card-h {
+    gap: 8px;
+  }
+  .topbar {
+    padding: 10px 12px;
+  }
+  .login {
+    padding: 16px;
+  }
+  /* 顶层导航栏铺满。宽屏那条「两边各留 1/4」是为了让内容居中成一条，
+     手机上没有多余的宽度可以让 —— 留着只是把 375px 又切掉一截。
+     **改成不换行**：品牌 195 + 导航 143 + 主题 38 = 376，比 375 多出一点点，
+     于是主题开关被挤到第二行、孤零零贴在左边，顶栏从 52px 长到 97px
+     （而它是吸顶的，吃掉的是首屏）。让品牌那段字省略号截断，行就永远排得下 ——
+     版本号长短由 -ldflags 注入，按当前这一串"刚好够"去调间距，换个版本号就又挤了。 */
+  .hdr-in {
+    width: 100%;
+    flex-wrap: nowrap;
+    padding: 7px 12px;
+    gap: 8px;
+  }
+  .hdr .brand,
+  .hdr .brand > div {
+    min-width: 0;
+  }
+  .brand-t,
+  .brand-s {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .topnav,
+  .theme-btn {
+    flex: none;
+  }
+  .tnav {
+    padding: 8px 10px;
+  }
+  /* 侧栏折成**一条横着滚的**导航，而不是折成两行。
+     四项固定在那儿，滚得到就够；折行要吃掉约 140px 首屏，而首屏是手机上
+     最贵的东西。滚动条藏掉 —— 它在这条 44px 高的带子上只会挡住图标。 */
+  .sidebar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 4px;
+    padding: 8px 10px;
+    scrollbar-width: none;
+  }
+  .sidebar::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-item {
+    flex: none;
+  }
+
+  /* ── ② 触摸目标 ── */
+  .btn.sm {
+    height: 36px;
+    padding: 0 13px;
+  }
+  .twist {
+    width: 34px;
+    height: 34px;
+  }
+  /* chip 的高度由内容撑，而内容是 12px 的一行字 —— 加内边距只能把它顶到 33px
+     （button 的默认 line-height 是 normal，不是 body 那个 1.55）。
+     min-height 把下限定死,inline-flex 让文字仍然居中。 */
+  .chip,
+  .chipf {
+    min-height: 36px;
+    padding: 6px 13px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+  }
+  .seg-i {
+    height: 34px;
+  }
+  .theme-btn {
+    width: 38px;
+    height: 38px;
+  }
+  .vrow {
+    padding: 9px 7px;
+  }
+  .linkish {
+    /* 纯文字链接在表格里只有一行字高（约 18px），手指点不准。
+       撑到 32px 并不改变它的外观 —— 行高变了，字还在原地。 */
+    min-height: 32px;
+  }
+
+  /* ── ③ 输入控件 ── */
+  input,
+  select,
+  .picker-t {
+    height: 42px;
+    font-size: 16px;
+  }
+  /* 勾选框不吃这一条：它本来就靠 .chk / .picker-table 里那两条把尺寸解绑了，
+     这里只把字号还原 —— 16px 的勾选框在一行文字里高得突兀。 */
+  .chk input,
+  .picker-table input {
+    font-size: 13px;
+  }
+  /* 工具条里每一项自己占一行。并排时每个只剩约 150px，而里面装的是
+     「全部凭证情况」「7 天内到期」这种成句的选项，截断之后选项之间分不出来。 */
+  .toolbar {
+    padding: 12px;
+  }
+  .toolbar > * {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .toolbar .picker-t,
+  .facet [data-picker] {
+    min-width: 0;
+    max-width: none;
+  }
+  /* 表单尾巴上那一排按钮要能换行。`.btn` 是 white-space:nowrap 且不收缩，
+     而定时同步那一格有三个（保存配置 / 立即同步（不落库）/ 立即同步并导入）——
+     一行排下来 404px，从 375 的屏幕右边探出去，**整页**跟着能横向滚。
+     只在这一档加：宽屏那边一行放得下，换行会让按钮组看起来像两组。 */
+  .endcap {
+    flex-wrap: wrap;
+  }
+
+  /* ── ① 表格摊开成卡片 ──
+     选择器挂在 `data-cell-label` 上，而那个属性由 v-cell-label 指令在抄完
+     列名之后才写下 —— 于是"能摊开"与"列名已就位"是同一件事。忘了加指令的
+     新表会照旧横着滚（难看但读得懂），而不是摊成一列没有名字的值。 */
+  table[data-cell-label] {
+    display: block;
+    width: auto;
+  }
+  /* 列名已经印到每一格上了，表头整条撤掉 */
+  table[data-cell-label] > thead {
+    display: none;
+  }
+  table[data-cell-label] > tbody,
+  table[data-cell-label] > tbody > tr,
+  table[data-cell-label] > tbody > tr > td {
+    display: block;
+    width: auto;
+  }
+  /* 一行 = 一张卡。边框从 .tw 那一圈下放到每一行 —— 不再横向滚动，
+     那圈"把滚动区框起来"的边也就没有意义了。 */
+  table[data-cell-label] > tbody > tr {
+    position: relative;
+    margin-bottom: 10px;
+    padding: 3px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
+  table[data-cell-label] > tbody > tr:last-child {
+    margin-bottom: 0;
+  }
+  /* 列名**绝对定位**，不并成 flex 的第一项：一格里常常有好几个子元素
+     （徽标 + .cell-sub 注解 + 进度条），flex 会把它们各自当成一项两端对齐，
+     于是"已停用"和"站点跑路"被拉到一行的两头。 */
+  table[data-cell-label] td {
+    position: relative;
+    min-height: 34px;
+    padding: 8px 12px 8px 41%;
+    border-bottom: 0;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+  table[data-cell-label] td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 9px;
+    width: calc(41% - 22px);
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--muted-foreground);
+  }
+  /* 没有列名的格子（展开箭头、操作列、跨列的子行）不留那块空位。
+     指令只给**有表头文字**的格子写属性，所以这一条不需要另加标记。 */
+  table[data-cell-label] td:not([data-label]) {
+    padding-left: 12px;
+  }
+  /* 展开箭头（渠道/账号的二级展开、选择器里的勾选框）挪到卡片右上角。
+     留在流里的话，一个 34px 的小三角要独占一整行 —— 65 张卡就是 2200px
+     的空白。挪走之后要给它让出位置：紧邻的那一格（识别列）收右边距，
+     否则域名那种长字符串会从箭头底下穿过去。 */
+  table[data-cell-label] > tbody > tr > td.x {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    /* ⚠️ z-index 不可省。上面那条给**每个** td 都加了 position:relative（列名要
+       绝对定位到格子里），于是后面的格子都是定位元素、按文档顺序盖在这一格上面。
+       箭头照旧画得出来（它先绘制，被盖住的那块是识别列的空白），但
+       elementFromPoint 命中的是识别列 —— 点上去什么都不会发生，而界面看不出
+       任何异常。2026-09-16 实测：点中率 0，肉眼完全正常。 */
+    z-index: 1;
+    width: auto;
+    min-height: 0;
+    padding: 0;
+  }
+  table[data-cell-label] > tbody > tr > td.x + td {
+    padding-right: 48px;
+  }
+  /* 数值右对齐是为了竖着比大小，而摊开之后每个数各在一张卡里 ——
+     右对齐只会让它离自己的列名更远。 */
+  table[data-cell-label] td.n {
+    text-align: left;
+  }
+  table[data-cell-label] .cell-money {
+    align-items: flex-start;
+  }
+  /* 行高亮改挂在行上。原来那两条把底色画在每个 <td> 上，摊开之后格与格之间
+     有间隙，底色会断成一截一截。 */
+  table[data-cell-label] > tbody > tr.open,
+  table[data-cell-label] > tbody > tr.picked {
+    background: color-mix(in oklab, var(--primary) 8%, transparent);
+  }
+  table[data-cell-label] > tbody > tr.open > td,
+  table[data-cell-label] > tbody > tr.picked > td {
+    background: none;
+  }
+  /* 操作按钮排到卡片底部，与上面的字段之间画一道线。
+     ⚠️ 这里可以给 <td> 加 display:flex —— 文件中部那条禁令只对**表格布局**
+     成立（会让 width:1% 失去意义），而此刻这张表已经不是表格了。 */
+  table[data-cell-label] td.acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: auto;
+    margin-top: 2px;
+    padding: 10px 12px 4px;
+    border-top: 1px dashed var(--border);
+    white-space: normal;
+    text-align: left;
+  }
+  table[data-cell-label] td.acts > * + * {
+    margin-left: 0;
+  }
+  /* 行内编辑 / 二级展开那一行是整行跨列的，不是一个字段格 */
+  table[data-cell-label] .sub-row > td {
+    padding: 12px;
+  }
+  .row-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* .tw 只剩下"一块内容"的身份：滚动与边框都交给上面那些行了 */
+  .tw {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+  }
+
+  /* ── 浮层：抽屉、确认框、选择器弹窗 ──
+     一律铺满。手机上没有"旁边那一行"可供参照，留一圈边只是把可用宽度再切一截。 */
+  .drawer,
+  .drawer.wide {
+    width: 100%;
+  }
+  .drawer-h,
+  .drawer-b,
+  .drawer-f {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .drawer-scrim.center {
+    padding: 10px;
+  }
+  .picker {
+    width: 100%;
+    max-height: 100%;
+  }
+  .picker-h,
+  .picker-tb,
+  .picker-bulk,
+  .picker-b {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .confirm {
+    padding: 16px;
+  }
+  /* 提示条铺满。原来是 `right:18px; max-width:430px` —— 430 比 375 还宽，
+     于是它从左边缘探出去，整页横向溢出。 */
+  #toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+
+  /* ── 其余零碎 ── */
+  .stats {
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+  }
+  .stat {
+    padding: 10px 11px;
+  }
+  .stat b {
+    font-size: 18px;
+  }
+  .mhero-t {
+    font-size: 19px;
+  }
+  .inline-q {
+    width: 100%;
+    margin-left: 0;
+  }
+  /* 发行方那一列自己滚。宽屏上它在左栏里，右边的结果并排看得见；手机上两栏
+     叠成一列，34 家全铺出来就是 1200px 的墙 —— 人要先划过整面墙才看得到结果。
+     折叠后的 12 家也有 470px。封到约五行，列表自己滚。
+     overscroll-behavior:contain 不可省：滚到底之后手指不该接着把整页带走。 */
+  .vlist {
+    max-height: 232px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  /* 模型名可以有四十个字符，不给断点就会把卡片顶宽 */
+  code {
+    overflow-wrap: anywhere;
+  }
 }
