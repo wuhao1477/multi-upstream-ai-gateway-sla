@@ -440,3 +440,41 @@ export function keyStatusLabel(value: string | undefined | null): string {
 export function anomalyLabel(value: string | undefined | null): string {
   return mappedLabel(value, ANOMALY_LABEL, '未知异常')
 }
+
+// ── 采集能力（internal/admin/collectability.go 的 mode / blocker）─────────────
+
+const COLLECT_MODE_LABEL: Record<string, string> = {
+  auto: '可全自动',
+  partial: '部分可自动',
+  manual: '需人工',
+}
+
+export function collectModeLabel(value: string | undefined | null): string {
+  return mappedLabel(value, COLLECT_MODE_LABEL, '未知')
+}
+
+/**
+ * 阻碍的**短标签**，给表格里那行小字用。
+ *
+ * 服务端的 reason 是一整句（带条款号），放进单元格会把操作列挤没；
+ * 它改挂到 title 上 —— 一眼扫的是这里，要细节才去悬停。
+ */
+const COLLECT_BLOCKER_LABEL: Record<string, string> = {
+  family_unknown: '站型没有适配器',
+  no_account: '未登记账号',
+  no_credential: '未登记采集凭证',
+  credential_invalid: '凭证需重新登记',
+  account_disabled: '账号已停用',
+}
+
+export function collectBlockerLabel(value: string | undefined | null): string {
+  return mappedLabel(value, COLLECT_BLOCKER_LABEL, '')
+}
+
+/** 徽标配色。 */
+export function collectTone(value: string | undefined | null): '' | 'ok' | 'warn' | 'bad' {
+  if (value === 'auto') return 'ok'
+  if (value === 'partial') return 'warn'
+  if (value === 'manual') return 'bad'
+  return ''
+}

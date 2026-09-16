@@ -255,6 +255,40 @@ SELECT (payload->>'quota_per_unit')::float8
 	return *v
 }
 
+// DetectedNoShield 读每个渠道最近一次探测记下的「无盾」位（SaveDetected 落的那行）。
+//
+// **键不存在 = 从未探测过，不是"有盾"。** 这是 FR-020「未采集 ≠ 0」的同一条纪律：
+// 开盾站点服务端采集不可行、只能转人工录入（04 §6），而"没探过"的正确处置是
+// 去探一次 —— 两种处置完全不同，压成一个 bool 就会把后者说成前者。
+//
+// 一次查完全部渠道而不是逐个查：渠道列表要在 65 行上各判一次，
+// N+1 会在这条路径上变成上百次往返（同 ListAccounts 的 LATERAL 注释）。
+func DetectedNoShield(ctx context.Context, conn DBTX) (map[int64]bool, error) {
+	rows, err := conn.Query(ctx, `
+SELECT DISTINCT ON (channel_id) channel_id, (payload->>'no_shield')::bool
+  FROM collector_snapshots
+ WHERE scope_type='pricing' AND scope_id='__detect__' AND payload ? 'no_shield'
+ ORDER BY channel_id, fetched_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("读探测记录: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		var noShield *bool
+		if err := rows.Scan(&id, &noShield); err != nil {
+			return nil, fmt.Errorf("读探测记录: %w", err)
+		}
+		// payload 里写着 no_shield 但值是 null 的行按"没探过"处理：
+		// 留在 map 里会让它伪装成一个确定的判定。
+		if noShield != nil {
+			out[id] = *noShield
+		}
+	}
+	return out, rows.Err()
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

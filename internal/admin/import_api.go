@@ -141,9 +141,18 @@ func (s *Server) ImportHub(
 				declared != d.Family {
 				item.Mismatch = true
 			}
+			// ⚠️ 措辞 2026-09-17 改过。原文是「服务端自动采集不可行，需转人工录入」，
+			// 而同日实测 api.justwoker.icu（turnstile_check=true）鉴权与 /api/token
+			// /api/pricing 全部走通 —— 那一位管的是**网页登录表单**，采集走的是
+			// 长期访问令牌，根本不经过它。照原文报会让运维对着一个采得好好的站
+			// 去手录数据（04 §6 的修正行、collectability.go 文件头）。
+			//
+			// "turnstile" 这个词**不能从文案里去掉**：finishImport 靠
+			// strings.Contains(it.Warning, "turnstile") 数 Shielded。
 			if !d.NoShield {
-				item.Warning = "该站开启 turnstile 人机验证，服务端自动采集不可行，" +
-					"需转人工录入（04 §6）"
+				item.Warning = "该站声明开启了 turnstile 人机验证（04 §6）——" +
+					"实测那一位管的是网页登录，用访问令牌的服务端采集照常可行；" +
+					"但网页那条路要人过验证"
 			}
 			if !a.HasCredential() {
 				if item.Warning != "" {

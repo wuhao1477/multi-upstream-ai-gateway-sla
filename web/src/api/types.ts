@@ -47,6 +47,49 @@ export type ItemStatus = 'ok' | 'partial' | 'failed' | 'unsupported' | 'skipped'
 export type SupportLevel = 'supported' | 'degraded' | 'unsupported'
 export type CapabilityMap = Partial<Record<Capability, SupportLevel>>
 
+// ── 采集能力（internal/admin/collectability.go）───────────────────────────────
+
+/**
+ * 「这个渠道 / 账号能不能全自动采集」。
+ *
+ * - `auto` 全部启用账号都能自动采
+ * - `partial` 一部分能（只在渠道级出现）
+ * - `manual` 现在一个都采不了，要人动手 —— **为什么**看 `blocker`
+ */
+export type CollectMode = 'auto' | 'partial' | 'manual'
+
+/**
+ * 阻碍的机器可读判据。分两类，处置完全不同：
+ *  - `family_unknown` 是**站点性质**：探测都没认出这是什么站（整站 JS 盾的站点
+ *    也落在这里），登记多少凭证都没用，只能人工录入（FR-011）
+ *  - 其余是配置没做完，补上就能自动
+ */
+export type CollectBlocker =
+  | 'family_unknown'
+  | 'no_account'
+  | 'no_credential'
+  | 'credential_invalid'
+  | 'account_disabled'
+
+export interface Collect {
+  mode: CollectMode
+  /** 缺席 = 没有阻碍。 */
+  blocker?: CollectBlocker
+  /** 给人读的一句话，会改。要判断请用 mode / blocker。 */
+  reason: string
+  /** 能自动采的账号数 / 启用中的账号数。只有渠道级有；两个都为 0 时服务端省略。 */
+  ready_accounts?: number
+  total_accounts?: number
+  /**
+   * 站点 `/api/status` 自称的「人机验证已关」。
+   *
+   * **缺席 = 从未探测过，不是"有盾"**（FR-020「未采集 ≠ 0」的同一条纪律）。
+   * ⚠️ 它**不参与** `mode` 的判定，只在 `reason` 里附一句：实测那一位管的是
+   * 网页登录表单，而采集走的是长期访问令牌（见 admin/collectability.go 文件头）。
+   */
+  no_shield?: boolean
+}
+
 // ── 列表实体（internal/store/channels.go）─────────────────────────────────────
 
 export interface Channel {
@@ -59,6 +102,14 @@ export interface Channel {
   disabled_until?: string
   created_at: string
   updated_at: string
+  /**
+   * 采集能力判定。服务端算（admin/collectability.go），不在这边拼 ——
+   * 判据跟采集器用的是同一套，拼两份的漂移方向一定是界面说"能采"、采集器说"采不了"。
+   *
+   * 注意它与 `status` 是**两根轴**：status 说的是"人有没有把它关掉"，
+   * 这里说的是"能不能自动采到数据"。
+   */
+  collect: Collect
 }
 
 export interface Account {
@@ -104,6 +155,14 @@ export interface Account {
   cred_type?: string
   cred_status?: string
   cred_expires_at?: string
+
+  /**
+   * 采集能力判定，**带上了所属渠道那一层的阻碍**。
+   *
+   * 只看 `cred_type` 是不够的：一个开着人机验证的渠道，它下面的账号凭证登记得
+   * 再全也一把都采不到，而那一档看起来恰恰最像"已就绪"。
+   */
+  collect: Collect
 }
 
 export interface Key {

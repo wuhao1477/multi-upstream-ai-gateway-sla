@@ -373,6 +373,36 @@ try {
   const newChannelId = await page.$$eval('#channels [data-ch-name]',
     (ts, i) => ts[i].getAttribute('data-ch-name'), newRowIdx);
 
+  // ── 4ante. 「自动采集」那一列：这个渠道能不能不用人管 ──
+  //
+  // 这一条走的是**真实的三级演进**：刚建好（没账号）→ 有账号没凭证 →
+  // 凭证齐了。三档在界面上必须长得不一样，否则那个徽标只是装饰。
+  //
+  // 此刻是第一档：站型探出来了、账号一个都没有。
+  //
+  // ⚠️ 这里**不能**把挑中的真站点是否开着 turnstile 写进期望 —— pick-upstream
+  // 挑的是"此刻活着的站"，它的 turnstile_check 是什么全看运气。判定不看那一位
+  // 正是 collectability.go 的结论（04 §6 的 2026-09-17 修正），所以这条断言
+  // 对开盾站与无盾站给出同一个期望，而那恰好也是在验这一点。
+  const collectRead = id => page.evaluate(cid => {
+    const el = document.querySelector(`[data-ch-collect="${cid}"]`);
+    if (el === null) return { missing: true };
+    return {
+      mode: el.dataset.collectMode, blocker: el.dataset.collectBlocker,
+      text: el.textContent.trim(),
+      reason: el.getAttribute('title') ?? '',
+      hint: el.parentElement.textContent.replace(/\s+/g, ' ').trim(),
+    };
+  }, id);
+  const c0 = await collectRead(newChannelId);
+  check('新建渠道在列表上标出「需人工」并说明是缺账号（不是缺凭证、也不是未探测）',
+    c0.mode === 'manual' && c0.blocker === 'no_account' && c0.text === '需人工',
+    JSON.stringify(c0));
+  // reason 是给人读的那一句，必须真的说清楚下一步做什么 —— 只有徽标的话，
+  // 「需人工」四个字对着 65 行看是没有信息量的。
+  check('「需人工」带着可操作的原因（悬停可见）',
+    /账号/.test(c0.reason) && c0.reason.length > 8, c0.reason);
+
   // ── 4bis. 渠道行二级展开：直接看到该渠道下的账号与 Key ──
   //
   // 此刻这个渠道**刚建好、什么都没有**，所以正确的展开区不是空白，
@@ -604,6 +634,21 @@ try {
     credBefore.state === 'missing' && credBefore.text.includes('未登记'),
     `data-cred=${credBefore.state} 文案=${credBefore.text}`);
 
+  // 「自动采集」第二档：账号有了、凭证还没有。
+  const accCollect = id => page.evaluate(aid => {
+    const el = document.querySelector(`[data-account-collect="${aid}"]`);
+    if (el === null) return { missing: true };
+    return {
+      mode: el.dataset.collectMode, blocker: el.dataset.collectBlocker,
+      text: el.textContent.trim(), reason: el.getAttribute('title') ?? '',
+    };
+  }, id);
+  const a0Before = await accCollect(accountIDs[0]);
+  check('缺凭证的账号在「自动采集」列上标「需人工」并指向凭证',
+    a0Before.mode === 'manual' && a0Before.blocker === 'no_credential' &&
+    /凭证/.test(a0Before.reason),
+    JSON.stringify(a0Before));
+
   // 真实上游令牌挂在第一个账号上。入口是这一行的按钮 —— 点它就该带着这一行。
   await openDrawer(`[data-account-cred-edit="${accountIDs[0]}"]`, '#cred-token');
   const credPicked = await page.$eval('#cred-account', el => el.dataset.picked);
@@ -630,6 +675,51 @@ try {
   check('账号行显示凭证状态与类型，且页面不含令牌原文',
     /NewAPI 系访问令牌/.test(credCell) && !credDOM.includes(UP_TOKEN),
     credCell);
+
+  // 「自动采集」第三档：这个账号真的不用人管了。
+  //
+  // 两个账号只登记了一个的凭证 —— 于是渠道那一级必须是 **partial 1/2**，
+  // 而不是 auto。这一条守的是"一个就绪就报全绿"那类聚合错误：把 partial
+  // 写成 auto 的话，一个半配好的渠道看起来跟配齐的一模一样。
+  const a0After = await accCollect(accountIDs[0]);
+  const a1After = await accCollect(accountIDs[1]);
+  check('登记凭证后该账号翻成「可全自动」',
+    a0After.mode === 'auto' && (a0After.blocker ?? '') === '' &&
+    a0After.text === '可全自动',
+    JSON.stringify(a0After));
+  check('同渠道另一个还没凭证的账号仍是「需人工」（判定是逐账号的）',
+    a1After.mode === 'manual' && a1After.blocker === 'no_credential',
+    JSON.stringify(a1After));
+
+  await pane('channels');
+  await page.click('#btn-reload');
+  await sleep(800);
+  const cPartial = await collectRead(newChannelId);
+  check('渠道级聚合成「部分可自动」并给出 1/2（不是一个就绪就报全绿）',
+    cPartial.mode === 'partial' && cPartial.blocker === 'no_credential' &&
+    cPartial.text === '部分可自动' && /1\/2/.test(cPartial.hint),
+    JSON.stringify(cPartial));
+
+  // 采集状态要能直接搜 —— 打开这一页最常见的动机就是"哪些站要我动手"。
+  // 搜的是**屏幕上那几个字**，不是内部枚举值：记得住的是界面文案。
+  //
+  // 此刻库里只有这一个渠道且它是 partial，所以搜「部分可自动」应当留下它、
+  // 搜「可全自动」应当一行不剩 —— 后半条是防"干草堆把什么都收进去了"，
+  // 那种写法下任何词都能匹配全部行，筛选看起来一直在工作。
+  await fill('#ch-filter', '部分可自动');
+  await sleep(500);
+  const hitRows = await page.$$eval('#channels tr[data-ch-row] [data-ch-collect]',
+    els => els.map(e => e.dataset.collectMode));
+  check('渠道筛选能按采集状态搜（搜「部分可自动」留下的都是 partial）',
+    hitRows.length > 0 && hitRows.every(m => m === 'partial'),
+    `${hitRows.length} 行：${[...new Set(hitRows)].join(', ') || '无'}`);
+  await fill('#ch-filter', '可全自动');
+  await sleep(500);
+  const missRows = await page.$$eval('#channels tr[data-ch-row]', rs => rs.length);
+  check('搜一个当前没有的采集状态要真的筛空（干草堆没有囫囵收全部）',
+    missRows === 0, `${missRows} 行`);
+  await fill('#ch-filter', '');
+  await sleep(400);
 
   await pane('keys');
   const keySecrets = [
@@ -2837,6 +2927,27 @@ try {
   // 这条只有 elementFromPoint 抓得到（同仓库记忆「断言绿≠断言有效」）。
   await pane('channels');
   await sleep(600);
+
+  // 「自动采集」是本版新加的一列，按 CLAUDE.md §2.1 要在这一段里有自己的断言。
+  // 上面那轮通扫只保证"每个格子都有列名"；这里要的是**这一格**在手机上真的
+  // 读得出来：列名印出来了、徽标文字还在、格子有实际高度（被摊开后压成 0 高
+  // 的格子在通扫里照样算"有列名"）。
+  const mCollect = await page.evaluate(() => {
+    const el = document.querySelector('[data-ch-collect]');
+    if (el === null) return { missing: true };
+    const td = el.closest('td');
+    return {
+      label: td.dataset.label ?? '',
+      before: getComputedStyle(td, '::before').content,
+      badge: el.textContent.trim(),
+      h: Math.round(td.getBoundingClientRect().height),
+    };
+  });
+  check('手机 375px · 「自动采集」这一格印着列名且徽标读得出来',
+    mCollect.label === '自动采集' && mCollect.badge !== '' && mCollect.h > 0 &&
+    mCollect.before.includes('自动采集'),
+    JSON.stringify(mCollect));
+
   await page.evaluate(() =>
     document.querySelector('[data-ch-toggle]')?.scrollIntoView({ block: 'center' }));
   await sleep(400);

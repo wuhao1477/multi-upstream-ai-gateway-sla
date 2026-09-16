@@ -705,7 +705,7 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 | 项 | 要求 | 来源 |
 | --- | --- | --- |
 | **限速** | 同站点请求强制最小间隔（参考 all-api-hub `minIntervalLimiter`），避免触发风控；查询频率默认见 PRD §11（价格 6h / 余额校对 5～15min / Key 额度与目录按 P1 配置），可配置 | FR-116、参数10 |
-| **无盾确认** | 接入前必须确认 `turnstile_check:false`（NewAPI）/ `turnstile_enabled:false`（Sub2API）。**开盾站点服务端采集不可行**，须转人工录入。已实测 upstream-d.invalid、molifang 均无盾 | ISSUE-002 §5 |
+| **无盾确认** | 接入前看一眼 `turnstile_check`（NewAPI）/ `turnstile_enabled`（Sub2API）。已实测 upstream-d.invalid、molifang 均无盾。<br>⚠️ **这一位不是"能不能自动采集"的判据**（2026-09-17 修正，原文写的是"开盾站点服务端采集不可行，须转人工录入"）：同日实测 `api.justwoker.icu` 的 `turnstile_check` 为 `true`，而鉴权、`/api/token`、`/api/pricing` **全部走通**，Key 与定价都采得到。那一位管的是**网页登录表单**，而采集走的是人早就拿到手的长期访问令牌，根本不经过它。<br>据此判"需转人工录入"会对着一个采得好好的站让运维去手录数据 —— 比漏报贵，因为人会照着做。所以 `internal/admin/collectability.go` 的采集能力判定**不看这一位**，只把它当一句提示。<br>真正过不去的那种盾是**整站 JS 盾**（实测 anyrouter.top：任何路径都回混淆 JS），它连 `/api/status` 都不回 JSON，`Detect` 认不出家族 → 落 `unknown` → 建不出可采的渠道。那一档已经被**证据**挡住了，不需要这个声明位来兜。<br>单个反例只够说明"不能拿它当自动判据"，不足以断言"开盾一定不影响"；再攒几个样本可以回来重审本行 | ISSUE-002 §5 |
 | **凭证互斥作废** | 见 §5 的状态机：NewAPI 令牌只生成一次、Sub2API 按账号串行刷新；P1 不接收账密凭证 | ISSUE-002 §4 |
 | **降级一致性** | 任何字段采集失败一律落 FR-011：人工录入 + 数据来源标注 + **7 天有效期** + 过期标记为陈旧。P1 不执行订阅策略 | FR-011、AC-28 |
 | **余额信号输入** | 采集器提供"账户/Key 余量是否归零"的判据，供 `steward` 的余额不足信号自适应识别框架（错误文案正则 + 失败信号 + 余量归零）判定资源置"耗尽" | FR-027、AC-29 |
@@ -770,7 +770,7 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 | 判族用哪个公开端点 | `ProbePath` | 空 → `TestRegistrationsComplete`；探测不到不会红，**只会静默归 unknown**（所以要先手工 curl 确认） |
 | 指纹怎么认 | `Match(m, raw)` | 空 → 同上。指纹**不在 JSON 顶层**时读第二个参数 `raw`：解析失败时 `m` 为 nil 而 `raw` 仍有原文（`TestDetectPassesRawBodyToMatch` 钉住这条通路） |
 | 探测顺序 | 切片位置，**放最后** | 不红。判据只认自己一站，放前面只是让另外两族多一跳 |
-| 版本 / 无盾 / 额度换算基数 | `Extract` | 不填不红（都是可选信息），但无盾没确认就接入违反 §6 |
+| 版本 / 无盾 / 额度换算基数 | `Extract` | 不填不红（都是可选信息）。⚠️ 额度换算基数漏了会让余额差几十万倍；盾位只是提示，不参与"能不能自动采集"的判定（§6 该行的 2026-09-17 修正） |
 | 导出数据里的自称 | `Aliases` | 重复或非小写 → `TestAliasesUniqueAcrossFamilies`。⚠️ **只填实测见过的值** |
 | 凭证形态 | `CredType` + `RequiresUID` + `CredNote` | 任一为空 → `TestRegistrationsComplete`。P1 只允许 access/refresh token |
 | 要不要主动续期 | `RefreshLead` + 适配器实现 `Refresher` | 单边 → `TestRefreshLeadMatchesRefresherImplementation`（双向）。`0` = 永不主动续期 |
@@ -784,7 +784,11 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 
 1. **手工打一遍真站点**，把 `ProbePath` 的响应原文、余额端点的字段名与**类型**（数字还是字符串）记下来。
    照文档或照想象写夹具是本仓库踩过两次的坑（[CLAUDE.md §1](../../CLAUDE.md)）。
-2. **确认无盾**（§6）。开盾站服务端采集不可行，要走 FR-011 人工录入，不是写适配器。
+2. **看一眼盾位**（§6）。⚠️ 原文写的是「开盾站服务端采集不可行，要走 FR-011
+   人工录入」，2026-09-17 实测推翻了这个推论（见 §6 该行）：`turnstile_check`
+   管的是网页登录表单，不影响用访问令牌采集。真正拦得住你的是**整站 JS 盾**，
+   而那种站点 `ProbePath` 拿不到 JSON，第 1 步就过不去 —— 也就是说这两件事里，
+   只有第 1 步是硬的。
 
 > **上表的"哪道守卫会红"已逐格实测**（2026-08-30）：真往注册表注入一族 `probe`
 > 假家族，按每格各犯一次错，看点名的守卫是否真的红。六格全按表所述地红，

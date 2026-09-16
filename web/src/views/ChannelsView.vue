@@ -9,9 +9,11 @@
  *    "它是空的还是采失败了"，得逐个点进详情。展开区的数据来自共享 store
  *    的一次全量拉取，展开不发请求。
  *
- * ② **「启用状态」与「采集健康」分成两列**。旧版只有一个 status 徽标，而
- *    "渠道是 enabled" 和 "这渠道根本采不了（没凭证 / 站型未识别）" 是两回事，
- *    后者才是最常见的"为什么不工作"。
+ * ② **「启用状态」与「自动采集」分成两列**。旧版只有一个 status 徽标，而
+ *    "渠道是 enabled" 和 "这渠道根本采不了"是两回事，后者才是最常见的
+ *    "为什么不工作"。判据（站型 / 有没有开人机验证 / 账号 / 凭证）由服务端
+ *    合成一句话，见 internal/admin/collectability.go —— 这边只负责显示，
+ *    因为同一套判据采集器自己也在用，拼在前端就会有两份。
  *
  * 新建渠道从常驻表单挪进抽屉：65 个渠道的日常操作是查与改，而建渠道一周
  * 一次 —— 让它常年占着首屏是本末倒置。
@@ -30,7 +32,14 @@ import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import type { Channel } from '@/api/types'
 import { totalBalance, totalQuota, usd, usdFine } from '@/utils/money'
-import { familyLabel, fmtAgo, statusLabel } from '@/utils/format'
+import {
+  collectBlockerLabel,
+  collectModeLabel,
+  collectTone,
+  familyLabel,
+  fmtAgo,
+  statusLabel,
+} from '@/utils/format'
 
 const router = useRouter()
 const channels = useChannelsStore()
@@ -201,11 +210,17 @@ function fundsSummary(id: number): string {
   return parts.join(' · ')
 }
 
-/** 该渠道有没有阻断性问题（没凭证 / 站型未识别）。列表上要能一眼看出。 */
-function blocked(c: Channel): string {
-  if (c.site_family === 'unknown') return '站型未识别'
-  if (res.loaded && res.channelAccounts(c.id).length === 0) return '无账号'
-  return ''
+/**
+ * 「自动采集」那一列里跟在徽标后面的那行小字。
+ *
+ * 能采的时候给**分子分母**（3/5 个账号），采不了的时候给**短的阻碍名**。
+ * 服务端的整句 reason 挂在 title 上 —— 它带条款号，塞进单元格会把操作列挤没。
+ */
+function collectHint(c: Channel): string {
+  const { mode, blocker, ready_accounts: ready, total_accounts: total } = c.collect
+  if (mode === 'auto') return `${total ?? 0} 个账号`
+  if (mode === 'partial') return `${ready ?? 0}/${total ?? 0} 个账号`
+  return collectBlockerLabel(blocker)
 }
 </script>
 
@@ -223,7 +238,13 @@ function blocked(c: Channel): string {
         <div class="spacer"></div>
         <div class="tb-search">
           <label class="sr" for="ch-filter">筛选渠道</label>
-          <input id="ch-filter" v-model="channels.filter" placeholder="按渠道名 / 域名 / 站型筛选" />
+          <!-- 采集状态也进筛选词：「需人工」能一把捞出所有要人动手的站，
+               而那正是打开这个页面最常见的动机 -->
+          <input
+            id="ch-filter"
+            v-model="channels.filter"
+            placeholder="按渠道名 / 域名 / 站型 / 采集状态筛选"
+          />
         </div>
         <!-- 刷新连账号与 Key 一起拉：这张表的三列读的是它们，
              只刷渠道会得到一张"渠道更新了、资产还是旧的"的表 -->
@@ -247,6 +268,12 @@ function blocked(c: Channel): string {
                   <th class="x"></th>
                   <th data-col="name">渠道</th>
                   <th data-col="family">站型</th>
+                  <!-- 「自动采集」是运维真正要问的那一列：哪些站我不用管，
+                       哪些站得我自己去录数据。判据（站型 / 有没有开人机验证 /
+                       账号 / 凭证）由服务端合成一句话，见 admin/collectability.go。
+                       它与「启用状态」是两根轴 —— 一个 enabled 却开着盾的渠道，
+                       在只有 status 的那张表上看起来完全正常。 -->
+                  <th data-col="collect">自动采集</th>
                   <th data-col="accounts" class="n">账号</th>
                   <th data-col="keys" class="n">Key</th>
                   <th data-col="funds">资金概览</th>
@@ -284,11 +311,20 @@ function blocked(c: Channel): string {
                     </td>
                     <td data-col="family">
                       <span class="badge" :data-family="c.site_family">{{ familyLabel(c.site_family) }}</span>
-                      <!-- 阻断性问题就摆在站型旁边：站型未识别 = 没有适配器可用，
-                           这个渠道无论如何都采不到任何东西（04 §7） -->
-                      <span v-if="blocked(c) !== ''" class="badge bad" :data-ch-blocked="c.id">{{
-                        blocked(c)
-                      }}</span>
+                    </td>
+                    <td data-col="collect">
+                      <!-- mode/blocker 是给验收与配色用的机器可读判据，
+                           reason 是给人读的整句（挂 title，会改）—— 别拿 reason 做判断 -->
+                      <span
+                        class="badge"
+                        :class="collectTone(c.collect.mode)"
+                        :data-ch-collect="c.id"
+                        :data-collect-mode="c.collect.mode"
+                        :data-collect-blocker="c.collect.blocker ?? ''"
+                        :title="c.collect.reason"
+                        >{{ collectModeLabel(c.collect.mode) }}</span
+                      >
+                      <span v-if="collectHint(c) !== ''" class="dim cell-sub">{{ collectHint(c) }}</span>
                     </td>
                     <td data-col="accounts" class="n">
                       {{ res.loaded ? res.channelAccounts(c.id).length : '—' }}
@@ -360,7 +396,7 @@ function blocked(c: Channel): string {
 
                   <!-- 编辑行。站型不给改：它由 Detect 判定，手改会让字段映射全错 -->
                   <tr v-if="editing === c.id" class="sub-row">
-                    <td colspan="9">
+                    <td colspan="10">
                       <div class="row-form">
                         <UiField label="渠道名称" for="ch-edit-name">
                           <input id="ch-edit-name" v-model="editName" />
@@ -392,7 +428,7 @@ function blocked(c: Channel): string {
                   <!-- 二级展开：账号 + Key 概览。**不再往下嵌第三层表格** ——
                        账号下的 Key 在账号页展开看，这里只给概览与去处 -->
                   <tr v-if="expanded.has(c.id)" class="sub-row">
-                    <td colspan="9">
+                    <td colspan="10">
                       <div class="expand">
                         <section>
                           <div class="sec-t">

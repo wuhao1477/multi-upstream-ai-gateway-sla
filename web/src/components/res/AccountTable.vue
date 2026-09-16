@@ -23,7 +23,14 @@ import { useChannelsStore } from '@/stores/channels'
 import { useResourcesStore } from '@/stores/resources'
 import { useToastStore } from '@/stores/toast'
 import { sharesWallet } from '@/utils/money'
-import { credentialTypeLabel, fmtTime, statusLabel } from '@/utils/format'
+import {
+  collectBlockerLabel,
+  collectModeLabel,
+  collectTone,
+  credentialTypeLabel,
+  fmtTime,
+  statusLabel,
+} from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -75,7 +82,7 @@ async function openChannel(id: number): Promise<void> {
  */
 const colCount = computed(
   () =>
-    6 + // 账号 / 上游用户 ID / 账号余额 / Key 数 / 状态 / 动作
+    7 + // 账号 / 上游用户 ID / 账号余额 / Key 数 / 自动采集 / 状态 / 动作
     (props.compact ? 0 : 2) + // 余额组 + 采集凭证，紧凑模式都砍掉
     (props.showChannel ? 1 : 0) +
     (props.expandable ? 1 : 0),
@@ -189,6 +196,10 @@ function openDisable(a: Account): void {
                它回答的是"这个账号采不采得了" —— 原先要去另一个分栏反查
                "谁不在列表里"才知道。 -->
           <th v-if="!compact" data-col="cred">采集凭证</th>
+          <!-- 「自动采集」紧凑模式也留着（余额组与凭证详情都砍了，这一列不砍）：
+               渠道行展开正是要看"这几个账号里哪个是坏的"，砍掉它就只剩一堆
+               看不出差别的行。判定带着渠道那一层的阻碍，见 admin/collectability.go -->
+          <th data-col="collect">自动采集</th>
           <th data-col="status">状态</th>
           <th data-col="acts"></th>
         </tr>
@@ -267,6 +278,20 @@ function openDisable(a: Account): void {
                   a.cred_expires_at === undefined ? '长期' : `到期 ${fmtTime(a.cred_expires_at)}`
                 }}</span>
               </template>
+            </td>
+            <td data-col="collect">
+              <span
+                class="badge"
+                :class="collectTone(a.collect.mode)"
+                :data-account-collect="a.id"
+                :data-collect-mode="a.collect.mode"
+                :data-collect-blocker="a.collect.blocker ?? ''"
+                :title="a.collect.reason"
+                >{{ collectModeLabel(a.collect.mode) }}</span
+              >
+              <span v-if="a.collect.blocker !== undefined" class="dim cell-sub">{{
+                collectBlockerLabel(a.collect.blocker)
+              }}</span>
             </td>
             <td data-col="status">
               <span class="badge" :class="a.status === 'active' ? 'ok' : 'bad'">{{
