@@ -2564,6 +2564,97 @@ try {
     }
   }
 
+  // ── 12quinquies. 三个页面的搜索都要能按**渠道**搜（站名 / 域名 / 站型）──
+  //
+  // 人记得住的是"钱多多那个站"和它的域名，记不住 Key 前缀或账号 id。
+  // 原先账号页只搜账号自己那几个字段、Key 页只搜前缀与分组，于是
+  // "某个站下面的 Key 在哪"根本搜不出来。
+  //
+  // 关键词**从第二个真站点的地址里现取**，不写死（写死的靶子会随选站漂走）。
+  // 挑主机名第一段：它不在渠道名里、不在 Key 前缀里、也不在账号字段里 ——
+  // 正是"只有搜到渠道身上才找得到"的那种词。
+  if (UP2.url !== '') {
+    const term = new URL(UP2.url).hostname.split('.')[0].toLowerCase();
+    // 自带一个取数助手：上面那个 api() 定义在跨渠道目录那一段的作用域里。
+    const get = path => page.evaluate(async p => {
+      const t = localStorage.getItem('adminToken');
+      const r = await fetch(p, { headers: { Authorization: `Bearer ${t}` } });
+      return r.json();
+    }, path);
+    const chans = (await get('/admin/channels')).items ?? [];
+    const accts = (await get('/admin/accounts')).items ?? [];
+    const keys = (await get('/admin/keys')).items ?? [];
+    const hitCh = chans.filter(c => c.base_url.toLowerCase().includes(term)).map(c => c.id);
+    const wantAcc = accts.filter(a => hitCh.includes(a.channel_id)).map(a => a.id);
+    const wantKey = keys.filter(k => hitCh.includes(k.channel_id)).map(k => k.id);
+    // 这个词只能命中**渠道**。否则账号页/Key 页可能是靠它们自己的字段命中的，
+    // 那两条就退化成"搜自己的字段"，而那本来就是好的。
+    const selfAcc = accts.some(a =>
+      `${a.id} ${a.external_user_id ?? ''} ${a.balance_group_key ?? ''}`
+        .toLowerCase().includes(term));
+    const selfKey = keys.some(k =>
+      `${k.secret_prefix} ${k.external_ref ?? ''} ${k.group_ref ?? ''} ${k.id}`
+        .toLowerCase().includes(term));
+
+    // 回传**框里到底是什么**：中文经由 CDP 的 insertText 走另一条路，
+    // 没进去的话症状是"搜出 0 条"，与"搜错了"长得一模一样。
+    // 清空走 DOM 而不是三击全选：实测三击在这里选不中（上一轮搜完 "freeapi"
+    // 之后再搜，框里剩的是 "freeapNewAPI 系" —— 退格只吃掉了一个字符）。
+    // 症状是"搜出 0 条"，与"搜错了"长得一模一样，所以这一步必须是确定的。
+    const clearBox = id => page.$eval(`#${id}`, el => {
+      el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const searchRows = async (paneName, boxID, rowAttr, text) => {
+      await pane(paneName);
+      await clearBox(boxID);
+      await page.click(`#${boxID}`);
+      await page.type(`#${boxID}`, text);
+      await sleep(500);
+      return page.evaluate((a, id) => ({
+        ids: [...document.querySelectorAll(`[${a}]`)]
+          .map(r => Number(r.getAttribute(a))).sort((x, y) => x - y),
+        typed: document.querySelector(`#${id}`)?.value ?? '',
+      }), rowAttr, boxID);
+    };
+    const asc = a => [...a].sort((x, y) => x - y);
+
+    const chR = await searchRows('channels', 'ch-filter', 'data-ch-row', term);
+    const accR = await searchRows('accounts', 'acc-q', 'data-account-row', term);
+    const keyR = await searchRows('keys', 'key-q', 'data-key-row', term);
+    const chHit = chR.ids, accHit = accR.ids, keyHit = keyR.ids;
+    check('渠道 / 账号 / Key 三个页面都能按域名搜到（搜的是所属渠道，不是自己那几个字段）',
+      // 先确认这是一次**真收窄**，否则下面三条是空转的
+      hitCh.length > 0 && hitCh.length < chans.length &&
+      wantAcc.length > 0 && wantAcc.length < accts.length &&
+      wantKey.length > 0 && wantKey.length < keys.length &&
+      !selfAcc && !selfKey &&
+      JSON.stringify(chHit) === JSON.stringify(asc(hitCh)) &&
+      JSON.stringify(accHit) === JSON.stringify(asc(wantAcc)) &&
+      JSON.stringify(keyHit) === JSON.stringify(asc(wantKey)),
+      `关键词 ${JSON.stringify(term)}（取自第二个站的域名）：` +
+      `渠道 ${JSON.stringify(chHit)}/期望 ${JSON.stringify(asc(hitCh))}（共 ${chans.length}）· ` +
+      `账号 ${JSON.stringify(accHit)}/期望 ${JSON.stringify(asc(wantAcc))}（共 ${accts.length}）· ` +
+      `Key ${JSON.stringify(keyHit)}/期望 ${JSON.stringify(asc(wantKey))}（共 ${keys.length}）；` +
+      `该词是否也命中账号/Key 自己的字段=${selfAcc}/${selfKey}；` +
+      `框里实际是 ${JSON.stringify([chR.typed, accR.typed, keyR.typed])}`);
+
+    // 站型也要能搜，而且按**屏幕上那几个字**搜（库里存的是 newapi，界面写「NewAPI 系」）。
+    const famR = await searchRows('channels', 'ch-filter', 'data-ch-row', 'NewAPI 系');
+    const wantFam = asc(chans.filter(c => c.site_family === 'newapi').map(c => c.id));
+    check('渠道搜索认界面上的站型写法（「NewAPI 系」，不是只认库里的 newapi）',
+      wantFam.length > 0 && JSON.stringify(famR.ids) === JSON.stringify(wantFam),
+      `搜「NewAPI 系」得到 ${JSON.stringify(famR.ids)}，期望 ${JSON.stringify(wantFam)}；` +
+      `框里实际是 ${JSON.stringify(famR.typed)}`);
+
+    // 清干净，别把筛选留给后面的断言
+    for (const [p_, box] of [['channels', 'ch-filter'], ['accounts', 'acc-q'], ['keys', 'key-q']]) {
+      await pane(p_);
+      await clearBox(box);
+      await sleep(300);
+    }
+  }
+
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
   // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷。

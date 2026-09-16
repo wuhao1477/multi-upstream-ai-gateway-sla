@@ -44,13 +44,38 @@ export const useChannelsStore = defineStore('channels', () => {
 
   const count = computed(() => list.value.length)
 
+  /**
+   * 渠道 id → 搜索用的干草堆（名称 + 地址 + 站型原值与展示名 + #id）。
+   *
+   * **账号页与 Key 页也读它**：那两页原先只搜自己那点字段（账号 id / 上游用户 id
+   * / Key 前缀 / 分组），于是"钱多多那个站的 Key 在哪"根本搜不出来 —— 而人记得住
+   * 的恰恰是站名和域名，记不住 Key 前缀。三处共用同一个串，才不会出现
+   * "渠道页搜得到、Key 页搜不到"这种各说各话。
+   *
+   * 站型两种写法都收：库里存的是 `newapi`，界面上显示的是「NewAPI 系」，
+   * 照着屏幕上的字搜是更自然的动作。
+   */
+  const hays = computed(() => {
+    const m = new Map<number, string>()
+    for (const c of list.value) {
+      m.set(
+        c.id,
+        `${c.name} ${c.base_url} ${c.site_family} ${familyLabel(c.site_family)} #${c.id}`.toLowerCase(),
+      )
+    }
+    return m
+  })
+
+  /** 取某个渠道的干草堆。渠道还没拉回来时返回空串 —— 匹配不上，不是匹配全部。 */
+  function hay(id: number): string {
+    return hays.value.get(id) ?? ''
+  }
+
   /** 过滤是**重渲染**而不是隐藏行：验收脚本直接数 tbody tr。 */
   const filtered = computed(() => {
     const q = filter.value.trim().toLowerCase()
     if (q === '') return list.value
-    return list.value.filter((c) =>
-      `${c.name} ${c.base_url} ${c.site_family}`.toLowerCase().includes(q),
-    )
+    return list.value.filter((c) => hay(c.id).includes(q))
   })
 
   /**
@@ -202,6 +227,7 @@ export const useChannelsStore = defineStore('channels', () => {
     families,
     filter,
     filtered,
+    hay,
     count,
     currentID,
     currentName,
