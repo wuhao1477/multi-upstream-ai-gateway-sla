@@ -217,6 +217,7 @@ var ErrInvalidAccessToken = errors.New("Unauthorized, invalid access token")
 var ErrCookieUnavailable = errors.New("Cookie 未配置、已停用或部署密钥不可用")
 var ErrCookieExpired = errors.New("Cookie 已失效，请在原站登录后重新导入 Cookie")
 var ErrCookieNeedsAction = errors.New("Cookie 需要人工检查；不自动登录或处理额外验证")
+var ErrCookieIdentityUnavailable = errors.New("无法从此 Cookie 自动识别用户 ID，请导入包含账号信息的 all-api-hub 完整备份")
 
 func IsAuthenticationFailure(err error) bool {
 	return errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrInvalidAccessToken)

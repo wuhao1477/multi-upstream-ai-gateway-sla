@@ -24,33 +24,6 @@ type Runner struct {
 	LoadCredentials func(context.Context, store.Channel) ([]collector.Credential, error)
 }
 
-// NewRunner builds a production Runner backed by PostgreSQL.
-func NewRunner(pool *store.Pool, client *collector.Client) *Runner {
-	credentials := store.NewCredentialStore(pool)
-	return &Runner{
-		Client: client,
-		Sink:   store.NewCollectorSink(pool),
-		Auth:   collector.NewAuthenticator(credentials),
-		Logger: slog.Default(),
-		LoadCredentials: func(ctx context.Context, ch store.Channel) ([]collector.Credential, error) {
-			conn, release, err := pool.Acquire(ctx)
-			if err != nil {
-				return nil, err
-			}
-			defer release()
-			creds, err := credentials.ListByChannel(ctx, conn, ch)
-			if err != nil {
-				return nil, err
-			}
-			quotaPerUnit := store.QuotaPerUnit(ctx, conn, ch.ID)
-			for i := range creds {
-				creds[i].QuotaPerUnit = quotaPerUnit
-			}
-			return creds, nil
-		},
-	}
-}
-
 // Sync runs all capabilities when capabilities is empty, otherwise only the selected set.
 func (r *Runner) Sync(
 	ctx context.Context, ch store.Channel, capabilities []collector.Capability,
@@ -297,6 +270,11 @@ func (r *Runner) importFetchedKeys(
 			continue
 		}
 		existing[key.KeyRef] = keyID
+		if err := updateImportedKey(ctx, conn, ch.ID, keyID, key); err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "update_created", key.KeyRef, err)
+			result.Failed++
+			continue
+		}
 		result.Imported++
 	}
 	return result, nil

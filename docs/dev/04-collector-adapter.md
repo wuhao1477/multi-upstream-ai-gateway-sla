@@ -295,7 +295,7 @@ NewAPI 系读 Key 明文有**两条互斥的路**，逐站不同，实测打了�
 
 | 站点 | `/api/token` 列表里的 `key` | `POST /api/token/{id}/key` |
 | --- | --- | --- |
-| 钱多多 `api2.aigcbest.top` | 18 字符、含 `*`（脱敏） | `200` → 48 字符完整明文 |
+| 样本站点 `upstream-d.invalid` | 18 字符、含 `*`（脱敏） | `200` → 48 字符完整明文 |
 | VVCode `vvcode.top` | 同上 | 同上 |
 | JustDoWork `api.justwoker.icu` | 同上 | 同上 |
 | **Agent Router `agentrouter.org`** | **48 字符、无 `*`、就是完整明文** | **`404`（没有这个端点）** |
@@ -655,8 +655,10 @@ Cookie 使用独立 AES-256-GCM 存储，绑定本地账号与精确 HTTPS origi
 配置存在性与状态。相同内容重导不激活失效/停用配置，缺失不删除，更新不覆盖令牌。
 
 现有令牌优先；无令牌或明确认证失效时，只切换一次 Cookie。同轮已成功项目不重做，
-Cookie 与 Authorization 不混发。首次使用先验证 `/api/user/self` 的 ID 与登记 ID 一致，
-同轮复用验证结果；每次发送前重新检查启用状态与修订。429、5xx、超时和权限不足
+Cookie 与 Authorization 不混发。首次使用先验证 `/api/user/self` 的 ID 与登记 ID 一致；
+未登记 ID 时，从受支持的签名 session Cookie 解析候选，仅在原站验证一致后保存。
+沿用既有用户 ID 头候选，仅明确鉴权失败才继续尝试。同轮复用验证结果；每次发送前
+重新检查启用状态与修订。429、5xx、超时和权限不足
 不触发切换；Validate 与已有 Key 导入使用现有渠道锁和限流。
 
 允许的请求仅为以下读取，不接收任意 URL、请求头或请求体：
@@ -682,7 +684,8 @@ Cookie 访问拒绝任何重定向、私网/回环/链路本地地址及环境�
 
 不执行登录、自动续期、2FA/CF/Turnstile 自动化；`ProvisionKeys`、远端 Key 创建/
 重置和 `/v1/*` 不使用 Cookie。不增加 agent-browser、Chromium 或生产 Node 服务。
-真实首站身份、余额与已有 Key 仍需用户授权 Cookie 验收，见[验收记录](../acceptance/browser-session-collection.md)。
+首站身份、余额与已有 Key 已通过 Cookie 验收；真实 all-api-hub 文件/WebDAV 认证及
+其他二开站仍待验收，见[验收记录](../acceptance/browser-session-collection.md)。
 
 ### 5.4 到期时间从哪来（`TokenExpiryFrom`，第 49 轮补，**修一个自锁缺陷**）
 

@@ -8,8 +8,12 @@
 共用导入、身份验证与受限读取；保留正常令牌路径，不添加浏览器运行时。需求见
 [Issue #26](../issues/ISSUE-browser-session-collection.md)。
 
-没有获得真实上游 Cookie，**首站身份、余额和已有 Key 仍未验收**。下列数据库/行为
-测试与管理表单检查不能证明真实 Cookie 有效；不把旧密码阶段的结果计入 Cookie 验收。
+用户已在本地管理页手动登记 Cookie。2026-10-08 通过应用验证接口完成首站身份
+验证，缺失的上游用户 ID 已自动补齐，账号 1 的 Cookie 状态由 `needs_action`
+变为 `ready`。随后修复换算基数和首次 Key 元数据保存：账号 1 保留 4 把 Key，
+本轮重新同步后额度与采集时间均完整，失败 0。首站余额、Key、分组、价格和模型
+目录读取已实测；分组仍报告 `available_models` 缺失，真实 all-api-hub 备份导入
+尚未验收。不把旧密码阶段的结果计入 Cookie 验收。
 
 ## Cookie 方案已执行验证
 
@@ -55,17 +59,58 @@ all-api-hub 格式依据固定提交 `949bd8e2ec8b15d16475617e5e4e6b8b4923d441`�
 
 ### 当前本地运行（2026-10-08，Asia/Shanghai）
 
-- `v1.0.9-dev-cookie` 在 `http://127.0.0.1:18391/admin/ui/accounts` 运行，`/healthz` 与账号页面检查通过。
+- `v1.0.9-dev-cookie-sync` 在 `http://127.0.0.1:18391/admin/ui/keys` 运行，`/healthz` 检查通过；管理页沿用上一轮已通过浏览器检查的前端产物，本轮只改 Go 采集流程。
 - 本地使用库 `sla_browser_local` 经真实启动路径从 032 升至 033；迁移前旧密码表为 **0 行**，没有删除已存上游凭据。最终 Cookie 表仅含 `account_id,enabled,cookie_ciphertext,state,updated_at`。
 - 测试库 `sla_browser_test` 与本地库分开；PG 容器 `sla-browser-26-local-pg` 继续运行，仅映射本机 `18439`。数据库卷和仓库外密钥保留。
-- 周期采集未启用（`-collector=false`），WebDAV 同步未启用；没有自动访问首站账号。测试 core `18392` 和测试 Chrome 已停止。
+- 周期采集未启用（`-collector=false`），WebDAV 同步未启用；已通过应用完成首站已存 Cookie 的身份验证、账号 1 的已有 Key 同步及渠道采集。测试 core `18392` 和测试 Chrome 已停止。
 - 功能保留在 `codex/release-v1.0.9`，未推送、未创建标签或 Release。
 
 ### 尚未验收
 
-1. 用户完成登录/2FA 后，真实 Cookie 的首站身份、余额、已有 Key 及其他读取结果。Cookie 只通过本地管理页或导入提供，不发送到聊天。
+1. 首站身份、余额、已有 Key、分组、价格和目录读取已通过；分组 `available_models` 仍缺失并报告 degraded，26 个目录模型尚未登记为可路由模型。其他二开站的自定义用户 ID 头只有行为回归，没有真实站点认证验收。
 2. 使用真实 Cookie 备份文件或真实 WebDAV 同步的端到端认证；共用导入的真 PG 测试不替代这项。
 3. 完整 `verify/test-migrate.sh` 及 Python 文档/schema 检查：Conda 不可用，未运行默认 Python。直接真实迁移、Go 测试和已纳入脚本的新测试不等于整个脚本已执行。
+
+### 验证按钮反馈修正（2026-10-08）
+
+- 实测验证接口快速返回 422，但原全局提示位于抽屉下方，被固定底部遮挡；用户页面也仍加载旧脚本，刷新后恢复最新凭证显示。
+- 仅修改凭证面板：显示「验证中…」、请求及列表刷新期间禁止重复提交、将结果保留在固定底部；缺用户 ID 时直接给出编辑说明，不发送请求。修改 Cookie 或切换账号后清除旧结果。不改变后端认证、存储或采集规则。
+- 先观察到「结果未保留在面板」及「矮窗口下结果不可见」两条回归断言失败，再修正。隔离实例 `18392` 的真实浏览器检查通过：等待状态、真实 `.invalid` 网络失败 502、结果保留、编辑清除旧结果、缺 ID 时验证请求数为 0。最终在本地账号页面确认固定底部提示未被遮挡，未读取或改写用户 Cookie。
+- `make build VERSION=v1.0.9-dev-cookie` 通过；最后调整提示位置后，增量前端构建及 `sla-core` 构建通过。更新了 `verify-cookie-credentials.mjs` 的对应断言并检查语法；本次没有重新运行完整旧验收套件或全量 Go 测试。
+- 本地 `18391` 已加载修正后的界面；测试服务 `18392` 已停止，周期采集仍关闭。修改保留在 `codex/release-v1.0.9`，未推送或发布。
+
+### Cookie 用户 ID 自动识别修正（2026-10-08）
+
+- 根因是本地两个前置条件：适配器和 Cookie 请求都要求已有 `external_user_id`，前端随后也增加了同样的阻断。缺少 ID 不代表 Cookie 无效，旧文案“否则必然 401”不是此次原站返回结果。
+- 首站公开 `/api/status` 报告 `v1.0.0-rc.21`。[该版本会话初始化](https://github.com/QuantumNous/new-api/blob/v1.0.0-rc.21/main.go#L191)使用仅签名的 CookieStore，[登录会话](https://github.com/QuantumNous/new-api/blob/v1.0.0-rc.21/controller/user.go#L138)写入用户 ID。解析只作为候选；必须用原 Cookie 请求 `/api/user/self`，身份一致后才保存。
+- 验证和采集共用身份发现路径。已登记 ID 不改绑；新 ID 与可用状态在事务中写入，并采用身份变更触发器产生的新修订。Cookie/账号变化、401、身份不匹配均不写入推测 ID。没有新增依赖、浏览器运行时或迁移。
+- 新增回归测试先复现失败，再通过。使用独立真实 PG 执行 `go test -race ./internal/collection ./internal/collector ./internal/store ./internal/admin -run Cookie -count=1 -v`，四个包均通过、无跳过；最后标准库简化只增量验证解析与鉴权用例。相关包 `go vet` 通过。
+- `make build VERSION=v1.0.9-dev-cookie-id` 通过；最后 Go 简化后重新编译 core/collector，通过。现有真 Chrome 脚本在独立实例 `18392` 的 1280px、375px 均通过；空 ID 可以发起验证，不可识别的测试 Cookie 得到明确 422 原因，且账号 ID 保持为空。
+- 本地 `18391` 通过应用验证接口复测账号 1 已保存的 Cookie：验证前无用户 ID、状态 `needs_action`；接口返回 `200 {"state":"ready"}`，随后确认用户 ID 已存在、状态 `ready`。未在工具输出中读取、显示 Cookie 或原站响应正文；未执行余额与 Key 采集。测试服务已停止，周期采集保持关闭。
+
+### Key 同步额度换算参数修正（2026-10-08 20:15，Asia/Shanghai）
+
+- 根因：渠道 1 没有 `__detect__` 快照，Key 列表读取成功后因 `quota_per_unit=0` 无法换算额度；不是 Cookie 鉴权失败。公开 `GET https://api.lyjxka.top/api/status` 返回 `200`、`success=true`、`quota_per_unit=500000`。
+- 共用凭证加载流程在 NewAPI 缺少换算基数时复用既有探测与快照保存逻辑；Key 同步入口改用同一加载流程。已有值直接复用，获取失败或非正值明确报错，不设置默认基数。为保持文件不超过 500 行，将 `NewRunner` 原样移至同包 `runner_credentials.go`，没有新增抽象、依赖或迁移。
+- 新增两项回归先复现失败，再修复通过，覆盖自动获取、持久化复用、Cookie 账号信息保留，以及字段缺失、零值和公开接口失败。独立真 PG 下 `go test -race ./internal/collection ./cmd/sla-core -count=1 -v` 退出 0，collection 无跳过；core 无测试文件。相关包 `go vet` 通过。同包移动后增量构建 core/collector 通过，未重复运行此前完整验收。
+- 本地服务更新为 `v1.0.9-dev-cookie-quota`，只通过 `POST /admin/keys/import` 指定 `account_ids:[1]` 实测：`found=4, imported=4, failed=0, deferred=0`，账号状态 `ok`；真库确认登记 4 把 Key，并保存换算基数 `500000`。未创建远端 Key，未重新填写 Cookie，未在工具输出中显示 Cookie、Key 或原站响应正文。余额及其他采集能力仍未验收。
+
+### 首次 Key 元数据与 Cookie 头名修正（2026-10-08 21:13，Asia/Shanghai）
+
+- 新 Key 创建后复用已有 `updateImportedKey`，立即保存额度、无限额标志、有效期、限流和采集时间；写入失败计入失败，不报完整导入。真实隔离 PG 回归先复现“两把均无元数据”和“写入失败仍报成功”，修复后通过；没有删除用户 Key 来重现首次路径。
+- Cookie 身份读取共用既有 7 个用户 ID 头候选，优先已有头名且不重复；仅明确鉴权失败继续尝试，全部失败后才标记失效。身份匹配后在本轮会话复用头名，不新增数据库列。每次仍限速、重读配置，尝试期间替换 Cookie 会中止旧任务；429、5xx、403、未知业务拒绝及身份不匹配不继续尝试。
+- 新回归先观察到预期失败。`go test -race ./internal/collection ./internal/collector ./cmd/sla-core -count=1 -json` 退出 0：collection 75 项、collector 151 项通过（含子测试），无测试跳过；core 无测试文件。相关包 `go vet`、core/collector 构建及差异格式检查通过。本轮未改前端，不重复已有浏览器验收。
+- 本地更新为 `v1.0.9-dev-cookie-sync`：Cookie 验证返回 `200/ready`；账号 1 同步返回 `found=4, imported=0, skipped=4, failed=0, deferred=0`，其中 skipped 表示已有行已更新、未重复登记。数据库确认 4/4 把 Key 的额度及采集时间已保存；首次插入由上述独立测试验证。
+- `POST /admin/channels/1/sync` 返回 200：account 1、groups 6、keys 4、pricing 26、model_catalog 26，均为 `ok`。真库确认 1 条余额信号、1 条账号快照、6 个分组、26 个目录模型；Cookie 保持 `ready`，账号没有令牌凭据。分组仍有 `available_models` 缺失提示，价格只写快照，26 个模型未登记为可路由模型，不把这些限制抹成完整能力。
+- 全程仅应用读取已保存 Cookie，未在工具输出显示 Cookie、Key 或原站响应正文；没有远端创建、账号密码登录、浏览器运行时或新迁移。真实 all-api-hub 文件/WebDAV 认证与其他二开站仍待提供相应真实输入后验收；未提交、推送或发布。
+
+### PR 提交前检查（2026-10-08 21:51，Asia/Shanghai）
+
+- 增量审查 Cookie 身份验证、凭据变更、导入及 Key 同步路径，未发现新的阻断问题；没有新增生产代码修改。
+- `cd web && pnpm test`、`make build VERSION=v1.0.9-dev-cookie-sync` 通过；构建包含前端 lint/typecheck/build 与三个 Go 二进制。
+- 构建完成后，使用独立真实 PG 执行 `go test -race ./... -count=1 -json`，退出 0。admin 132、collection 75、collector 151、config 8、health 5、store 69 项通过，共 440 项（含子测试），无测试跳过。
+- `make fmt-check vet` 通过。前端未再修改，不重复已经通过的真实浏览器验收；本地服务继续运行，未重新采集。
+- Conda 与 golangci-lint 在当前环境不可用，Python 文档/schema、完整迁移脚本及 CI lint 仍待 CI 验证；真实 all-api-hub 文件/WebDAV 认证等未验收边界保持不变。此次结论支持发起 PR 审查，不表示已可发布。
 
 ## 以下为旧密码方案历史
 

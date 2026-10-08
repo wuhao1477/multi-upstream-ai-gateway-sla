@@ -131,6 +131,8 @@ func (s *Server) cookieCredentialError(w http.ResponseWriter, err error) {
 		s.fail(w, http.StatusConflict, collection.ErrChannelReadBusy.Error())
 	case errors.Is(err, collector.ErrCookieExpired):
 		s.fail(w, http.StatusUnprocessableEntity, collector.ErrCookieExpired.Error())
+	case errors.Is(err, collector.ErrCookieIdentityUnavailable):
+		s.fail(w, http.StatusUnprocessableEntity, collector.ErrCookieIdentityUnavailable.Error())
 	case errors.Is(err, collector.ErrCookieNeedsAction):
 		s.fail(w, http.StatusUnprocessableEntity, "Cookie 需人工处理，请检查原站会话和登记的上游用户 ID")
 	default:

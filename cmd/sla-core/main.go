@@ -182,7 +182,7 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 		if err != nil {
 			return store.Channel{}, collector.Credential{}, err
 		}
-		creds, err := credStore.ListByChannel(ctx, conn, ch)
+		creds, err := runner.LoadCredentials(ctx, ch)
 		if err != nil {
 			return store.Channel{}, collector.Credential{}, err
 		}
@@ -190,7 +190,6 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 			if cred.AccountID != accountID {
 				continue
 			}
-			cred.QuotaPerUnit = store.QuotaPerUnit(ctx, conn, channelID)
 			return ch, cred, nil
 		}
 		return store.Channel{}, collector.Credential{}, fmt.Errorf("账号 %d 没有可用采集凭证", accountID)

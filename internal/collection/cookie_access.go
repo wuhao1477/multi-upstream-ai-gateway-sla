@@ -2,6 +2,7 @@ package collection
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -202,51 +203,85 @@ func (a *CookieAccess) mark(ctx context.Context, cred store.CookieCredential, st
 }
 
 func (a *CookieAccess) send(req *http.Request, s collector.Session, explicit bool) (*http.Response, error) {
-	if err := a.Client.Wait(req.Context(), req.URL.Host); err != nil {
+	path, err := cookieReadPath(req, s.BaseURL)
+	if err != nil {
 		return nil, err
+	}
+	s.UserIDHeader = cmp.Or(s.CookieState.UserIDHeader, s.UserIDHeader, "New-API-User")
+	candidates := []string{s.UserIDHeader}
+	if path == "/api/user/self" && s.CookieState.Revision.IsZero() {
+		for _, header := range collector.NewAPIUserIDHeaderCandidates() {
+			if header != s.UserIDHeader {
+				candidates = append(candidates, header)
+			}
+		}
+	}
+	var revision time.Time
+	for {
+		s.UserIDHeader = candidates[0]
+		resp, cred, err := a.sendOnce(req, s, explicit, revision)
+		if collector.IsAuthenticationFailure(err) && len(candidates) > 1 {
+			// 探测期间只接受同一版 Cookie；全部候选失败后才标记失效。
+			revision = cred.UpdatedAt
+			candidates = candidates[1:]
+			continue
+		}
+		return resp, a.reject(req.Context(), cred, err)
+	}
+}
+
+func (a *CookieAccess) sendOnce(req *http.Request, s collector.Session, explicit bool, revision time.Time) (*http.Response, store.CookieCredential, error) {
+	if err := a.Client.Wait(req.Context(), req.URL.Host); err != nil {
+		return nil, store.CookieCredential{}, err
 	}
 	// 限速等待结束后才读配置，关闭、清除或替换后不再发送旧 Cookie。
 	cred, err := a.load(req.Context(), s.AccountID)
 	if err != nil {
-		return nil, err
+		return nil, cred, err
 	}
-	req, path, err := a.prepare(req, cred, s, explicit)
+	req, path, err := a.prepare(req, cred, s, explicit, revision)
 	if err != nil {
-		return nil, err
+		return nil, cred, err
 	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return nil, cookieNetworkError(err)
+		return nil, cred, cookieNetworkError(err)
 	}
 	m, raw, err := collector.ReadAuthResponse(resp, req.Method, path, true)
 	if err != nil {
-		return nil, a.reject(req.Context(), cred, err)
+		return nil, cred, err
 	}
 	if path == "/api/user/self" {
-		if !collector.CookieIdentityMatches(m, cred.ExternalUserID) {
-			return nil, a.reject(req.Context(), cred, errors.Join(collector.ErrCookieNeedsAction, errors.New("Cookie 用户 ID 与登记账号不一致")))
+		userID := req.Header.Get(s.UserIDHeader)
+		if !collector.CookieIdentityMatches(m, userID) {
+			return nil, cred, errors.Join(collector.ErrCookieNeedsAction, errors.New("Cookie 用户 ID 与登记账号不一致"))
 		}
-		if err := a.mark(req.Context(), cred, "ready"); err != nil {
-			return nil, err
+		revision, err := a.confirmIdentity(req.Context(), cred, userID)
+		if err != nil {
+			return nil, cred, err
 		}
-		s.CookieState.Revision = cred.UpdatedAt
+		s.CookieState.Revision, s.CookieState.ExternalUserID = revision, userID
+		s.CookieState.UserIDHeader = s.UserIDHeader
 	}
 	// ponytail: 复用现有 JSON 解析入口，成功响应再解析一次；不用新增通用响应缓存。
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	return resp, nil
+	return resp, cred, nil
 }
 
-func (a *CookieAccess) prepare(req *http.Request, cred store.CookieCredential, s collector.Session, explicit bool) (*http.Request, string, error) {
+func (a *CookieAccess) prepare(req *http.Request, cred store.CookieCredential, s collector.Session, explicit bool, revision time.Time) (*http.Request, string, error) {
 	path, err := cookieReadPath(req, cred.BaseURL)
 	if err != nil {
 		return nil, "", err
+	}
+	if !revision.IsZero() && !revision.Equal(cred.UpdatedAt) {
+		return nil, "", store.ErrCookieCredentialChanged
 	}
 	if err := checkCookieSession(cred, s, explicit); err != nil {
 		return nil, "", err
 	}
 	headers, err := cookieHeaders(cred, s.UserIDHeader)
 	if err != nil {
-		return nil, "", a.reject(req.Context(), cred, err)
+		return nil, "", err
 	}
 	req = req.Clone(req.Context())
 	req.Header = headers
@@ -254,7 +289,11 @@ func (a *CookieAccess) prepare(req *http.Request, cred store.CookieCredential, s
 }
 
 func checkCookieSession(cred store.CookieCredential, s collector.Session, explicit bool) error {
-	if s.BaseURL != cred.BaseURL || s.ExternalUserID != cred.ExternalUserID {
+	userID := s.ExternalUserID
+	if userID == "" {
+		userID = s.CookieState.ExternalUserID
+	}
+	if s.BaseURL != cred.BaseURL || userID != cred.ExternalUserID {
 		return store.ErrCookieCredentialChanged
 	}
 	if !s.CookieState.Revision.IsZero() && !s.CookieState.Revision.Equal(cred.UpdatedAt) {
@@ -273,6 +312,13 @@ func checkCookieSession(cred store.CookieCredential, s collector.Session, explic
 }
 
 func cookieHeaders(cred store.CookieCredential, header string) (http.Header, error) {
+	if cred.ExternalUserID == "" {
+		var err error
+		cred.ExternalUserID, err = cookieUserID(cred.CookieHeader)
+		if err != nil {
+			return nil, err
+		}
+	}
 	uid, err := strconv.ParseInt(cred.ExternalUserID, 10, 64)
 	if err != nil || uid <= 0 {
 		return nil, collector.ErrCookieNeedsAction

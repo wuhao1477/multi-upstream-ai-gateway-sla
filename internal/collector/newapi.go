@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -46,11 +47,11 @@ func (a *NewAPIAdapter) Detect(ctx context.Context, baseURL string) (DetectResul
 // ⚠️ 不变式 N-1：**运行时不调用 /api/user/token**（它是"重新生成"，
 // 会作废正在使用的令牌）。令牌由运维一次性登记，本方法只验证与试探。
 func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Session, error) {
-	if cred.ExternalUserID == "" {
+	if cred.ExternalUserID == "" && !cred.CookieEnabled {
 		return Session{}, fmt.Errorf(
-			"NewAPI 需要 external_user_id（用户 ID 头的值），否则必然 401")
+			"NewAPI 令牌采集需要上游用户 ID（external_user_id）；Cookie 可在验证时自动识别")
 	}
-	if cred.AccessToken != "" {
+	if cred.AccessToken != "" && cred.ExternalUserID != "" {
 		s, authFailed, err := a.authenticateToken(ctx, cred)
 		if err == nil || !cred.CookieEnabled || !authFailed {
 			return s, err
@@ -65,6 +66,8 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 		s.UserIDHeader = newAPIUserIDHeaders[0]
 	}
 	_, _, err := a.C.getJSONAuth(ctx, s, "/api/user/self")
+	s.ExternalUserID = cmp.Or(s.ExternalUserID, s.CookieState.ExternalUserID)
+	s.UserIDHeader = cmp.Or(s.CookieState.UserIDHeader, s.UserIDHeader)
 	return s, err
 }
 

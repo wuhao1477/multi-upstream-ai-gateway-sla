@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -283,6 +284,38 @@ AND a.status='active' AND c.status='enabled' AND c.base_url=$4 AND c.site_family
 		return ErrCookieCredentialChanged
 	}
 	return nil
+}
+
+// BindIdentity 必须在事务中调用，且仅接受已经原站验证的 ID。只补空值，不改绑账号。
+func (s *CookieCredentialStore) BindIdentity(ctx context.Context, db DBTX, cred CookieCredential, userID string) (time.Time, error) {
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if cred.ExternalUserID != "" || err != nil || id <= 0 {
+		return time.Time{}, ErrCookieCredentialInput
+	}
+	var current string
+	err = db.QueryRow(ctx, `SELECT COALESCE(a.external_user_id,'') FROM upstream_accounts a
+JOIN channels c ON c.id=a.channel_id WHERE a.id=$1 FOR UPDATE OF a FOR SHARE OF c`, cred.AccountID).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrCookieCredentialChanged
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if current != "" {
+		return time.Time{}, ErrCookieCredentialChanged
+	}
+	// 先检查 Cookie 修订、启用状态与站点；任一步失败均由调用方回滚。
+	if err := s.MarkState(ctx, db, cred, "ready"); err != nil {
+		return time.Time{}, err
+	}
+	if _, err := db.Exec(ctx, `UPDATE upstream_accounts SET external_user_id=$2 WHERE id=$1`, cred.AccountID, userID); err != nil {
+		return time.Time{}, err
+	}
+	// 身份变更触发器会更新 Cookie 修订；同一事务内恢复 ready 并返回新修订。
+	var revision time.Time
+	err = db.QueryRow(ctx, `UPDATE collector_cookie_credentials SET state='ready'
+WHERE account_id=$1 RETURNING updated_at`, cred.AccountID).Scan(&revision)
+	return revision, err
 }
 
 // DeleteCookieCredential 必须在事务中调用，与 Save 使用相同的账号锁。

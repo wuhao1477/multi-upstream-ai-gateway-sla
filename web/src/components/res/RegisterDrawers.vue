@@ -69,6 +69,8 @@ const credToken = ref('')
 const credRefresh = ref('')
 const cookieEnabled = ref(false)
 const cookieHeader = ref('')
+const cookieValidating = ref(false)
+const cookieValidationResult = ref('')
 const busy = ref(false)
 
 const accChannelID = computed(() => accChannelIDs.value[0] ?? 0)
@@ -82,6 +84,9 @@ const cookieSupported = computed(() => channels.list.find(c => c.id === credCurr
 watch([() => props.mode, credAccountID, credCurrent], () => {
   cookieHeader.value = ''
   cookieEnabled.value = credCurrent.value?.cookie_enabled === true
+})
+watch([() => props.mode, credAccountID, cookieHeader, cookieEnabled], () => {
+  cookieValidationResult.value = ''
 })
 
 /** 打开时重置并吃掉上下文。不重置的话，上一次填了一半的明文会留在下一次。 */
@@ -233,6 +238,7 @@ async function saveCred(): Promise<void> {
 }
 
 async function saveCookieCred(): Promise<void> {
+  cookieValidationResult.value = ''
   if (!credCurrent.value?.cookie_configured && cookieHeader.value.trim() === '') {
     toast.show('首次保存必须提供 Cookie', 'bad')
     return
@@ -254,6 +260,7 @@ async function saveCookieCred(): Promise<void> {
 async function clearCookieCred(): Promise<void> {
   busy.value = true
   cookieHeader.value = ''
+  cookieValidationResult.value = ''
   try {
     await adminApi.clearCookieCredential(credAccountID.value)
     cookieEnabled.value = false
@@ -265,15 +272,24 @@ async function clearCookieCred(): Promise<void> {
 }
 
 async function validateCookieCred(): Promise<void> {
+  if (busy.value) return
+  const accountID = credAccountID.value
   busy.value = true
+  cookieValidating.value = true
+  cookieValidationResult.value = '正在验证已保存的 Cookie，请稍候…'
   try {
-    await adminApi.validateCookieCredential(credAccountID.value)
-    toast.show('Cookie 验证通过，用户 ID 与登记账号一致', 'ok')
+    await adminApi.validateCookieCredential(accountID)
+    if (props.mode === 'cred' && credAccountID.value === accountID) {
+      cookieValidationResult.value = 'Cookie 验证通过，上游用户 ID 已确认'
+    }
   } catch (e) {
-    toast.fail('Cookie 验证失败', e)
+    if (props.mode === 'cred' && credAccountID.value === accountID) {
+      cookieValidationResult.value = `Cookie 验证失败：${e instanceof Error ? e.message : String(e)}`
+    }
   } finally {
-    busy.value = false
     await res.reload()
+    busy.value = false
+    cookieValidating.value = false
   }
 }
 </script>
@@ -289,11 +305,10 @@ async function validateCookieCred(): Promise<void> {
       <ScopePicker id="acc-channel" kind="channel" v-model="accChannelIDs" />
     </UiField>
     <UiField label="上游用户 ID" for="acc-uid">
-      <input id="acc-uid" v-model="accUID" :placeholder="needsUID ? '本站型必填' : '可选'" />
+      <input id="acc-uid" v-model="accUID" :placeholder="needsUID ? '使用 Cookie 时可留空' : '可选'" />
     </UiField>
     <p class="note">
-      采集请求要带「用户 ID 头」，缺了拿不到该账号的数据 ——
-      <template v-if="needsUID">当前渠道的站型<b>要求</b>填它。</template>
+      <template v-if="needsUID">使用令牌采集时需填写；使用 Cookie 时可留空，验证通过后自动识别并保存。</template>
       <template v-else>当前渠道的站型不强制要求。</template>
     </p>
     <UiField label="余额组（共享钱包标识，可选）" for="acc-balance-group">
@@ -408,22 +423,27 @@ async function validateCookieCred(): Promise<void> {
       <UiField label="Cookie 请求头（留空保留已存值）" for="cookie-header">
         <input id="cookie-header" v-model="cookieHeader" type="password" autocomplete="off" :spellcheck="false" maxlength="16384" placeholder="session=…; other=…" />
       </UiField>
-      <p class="note">请先在原站完成登录和 2FA，再粘贴 Cookie 或导入 all-api-hub 备份。Cookie 加密保存，不覆盖令牌；失效后需重新导入，不自动登录。</p>
+      <p class="note">请先在原站完成登录和 2FA，再粘贴 Cookie 或导入 all-api-hub 备份。验证时自动识别缺失的用户 ID。Cookie 加密保存，不覆盖令牌；失效后需重新导入，不自动登录。</p>
       <p v-if="credCurrent?.cookie_configured" class="note" id="cookie-config-state">
         已配置 · {{ credCurrent.cookie_enabled ? '已启用' : '已停用' }} ·
         {{ ({ unverified: '待验证', ready: '可用', expired: '已失效，请重新导入', needs_action: '需人工处理' } as const)[credCurrent.cookie_state ?? 'unverified'] }}
       </p>
       <div class="cookie-actions">
         <button class="btn" id="btn-cookie-save" @click="saveCookieCred">保存 Cookie</button>
-        <button class="btn outline" id="btn-cookie-validate" :disabled="!credCurrent?.cookie_enabled || cookieHeader !== '' || cookieEnabled !== credCurrent?.cookie_enabled" @click="validateCookieCred">验证 Cookie</button>
+        <button class="btn outline" id="btn-cookie-validate" :aria-busy="cookieValidating" :disabled="!credCurrent?.cookie_enabled || cookieHeader !== '' || cookieEnabled !== credCurrent?.cookie_enabled" @click="validateCookieCred">{{ cookieValidating ? '验证中…' : '验证 Cookie' }}</button>
       </div>
       <p class="note">验证使用已保存且启用的 Cookie；修改后请先保存。</p>
     </fieldset>
     <p v-if="credAccountID > 0 && !cookieSupported" class="note">Cookie 访问首批仅支持 NewAPI。</p>
     <button class="btn outline" id="btn-cookie-clear" :disabled="busy || !credCurrent?.cookie_configured" @click="clearCookieCred">清除 Cookie</button>
     <template #footer>
-      <button class="btn" id="btn-cred" :disabled="busy" @click="saveCred">登记凭证</button>
-      <button class="btn outline" @click="emit('close')">取消</button>
+      <div class="credential-footer">
+        <p v-if="cookieValidationResult" class="note" id="cookie-validation-result" role="status">{{ cookieValidationResult }}</p>
+        <div class="cookie-actions">
+          <button class="btn" id="btn-cred" :disabled="busy" @click="saveCred">登记凭证</button>
+          <button class="btn outline" @click="emit('close')">取消</button>
+        </div>
+      </div>
     </template>
   </UiDrawer>
 </template>
@@ -432,4 +452,5 @@ async function validateCookieCred(): Promise<void> {
 fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
 fieldset input:not([type='checkbox']) { box-sizing: border-box; width: 100%; max-width: 100%; }
 .cookie-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.credential-footer { width: 100%; }
 </style>

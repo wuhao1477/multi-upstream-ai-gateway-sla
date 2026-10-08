@@ -172,8 +172,10 @@ type Session struct {
 // CookieSession 是单次采集内的非秘密状态；会话副本共享一次切换和身份验证结果。
 // ponytail: 当前账号读取串行执行；并行化读取时再增加同步保护。
 type CookieSession struct {
-	Active   bool
-	Revision time.Time
+	Active         bool
+	Revision       time.Time
+	ExternalUserID string
+	UserIDHeader   string
 }
 
 // Account 是账号级数据（FR-020/024/026）。

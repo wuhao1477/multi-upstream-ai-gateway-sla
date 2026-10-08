@@ -151,20 +151,38 @@ func TestCookieAccessFailureStateAndNoRedirect(t *testing.T) {
 		{"redirect", 302, "private-cookie-marker", "needs_action"},
 		{"html", 200, "<html>private-cookie-marker</html>", "needs_action"},
 		{"rate_limit", 429, "private-cookie-marker", "unverified"},
+		{"unavailable", 503, "private-cookie-marker", "unverified"},
+		{"forbidden", 403, "private-cookie-marker", "needs_action"},
+		{"unknown_rejection", 200, `{"success":false,"message":"private-cookie-marker"}`, "needs_action"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s := cookieAccessFixture(t)
+			s.UserIDHeader = "Veloera-User"
+			wantCalls := 1
+			if tc.state == "expired" {
+				wantCalls = 7
+			}
 			calls := 0
+			seen := make(map[string]bool)
 			a.http.Transport = cookieWire(func(r *http.Request) (*http.Response, error) {
 				calls++
+				for _, header := range collector.NewAPIUserIDHeaderCandidates() {
+					if r.Header.Get(header) == "" {
+						continue
+					}
+					if seen[header] {
+						t.Error("a failed header must not be retried in the same discovery")
+					}
+					seen[header] = true
+				}
 				resp := cookieAccessResponse(r, tc.status, tc.body)
 				resp.Header.Set("Location", "https://another.example.invalid/api/user/self")
 				resp.Header.Set("Retry-After", "120")
 				return resp, nil
 			})
 			_, err := a.Do(cookieAccessRequest(t, s, "/api/pricing"), s)
-			if err == nil || strings.Contains(err.Error(), "private-cookie-marker") || calls != 1 {
-				t.Fatal("Cookie failure leaked data or continued sending")
+			if err == nil || strings.Contains(err.Error(), "private-cookie-marker") || calls != wantCalls {
+				t.Fatalf("Cookie failure leaked data or used the wrong request count: calls=%d want=%d", calls, wantCalls)
 			}
 			if tc.status == 429 {
 				status, delay, ok := collector.HTTPFailure(err)
@@ -183,7 +201,7 @@ func TestCookieAccessFailureStateAndNoRedirect(t *testing.T) {
 			}
 			if tc.state != "unverified" {
 				_, _ = a.Do(cookieAccessRequest(t, s, "/api/pricing"), s)
-				if calls != 1 {
+				if calls != wantCalls {
 					t.Fatal("invalid Cookie must stop automatic reads")
 				}
 				a.http.Transport = cookieWire(func(r *http.Request) (*http.Response, error) {

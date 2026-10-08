@@ -1,4 +1,4 @@
-// 真 Chrome + 本项目管理 API + 独立真 PG；只验配置输入，不请求/模拟上游站点。
+// 真 Chrome + 本项目管理 API + 独立真 PG；只验配置输入与 .invalid 失败，不模拟上游认证成功。
 // 必须显式指定可写测试实例，禁止对业务部署运行。
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -63,6 +63,16 @@ try {
     await page.waitForFunction(() => !document.querySelector('#cookie-header')?.disabled
       && !document.querySelector('#cookie-header')?.closest('fieldset')?.disabled);
     assert.equal((await api(`/admin/accounts?channel_id=${channel.id}`)).items[0].cookie_state, 'unverified');
+    const feedback = await page.$eval('#cookie-validation-result', el => {
+      const box = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return { text: el.textContent, inDrawer: el.closest('[role="dialog"]') !== null,
+        visible: hit === el || el.contains(hit) };
+    });
+    assert.match(feedback.text, /Cookie 验证失败/, '验证失败没有保留明确原因');
+    assert(feedback.inDrawer, '验证结果必须显示在凭证面板内，不能被抽屉遮住');
+    assert(feedback.visible, '验证结果不可被固定底部遮挡或隐藏在滚动区外');
+    await page.$eval('#btn-cookie-validate', el => el.scrollIntoView({ block: 'nearest' }));
     const layout = await page.evaluate(() => {
       const input = document.querySelector('#cookie-header');
       const box = input.getBoundingClientRect();
@@ -77,6 +87,7 @@ try {
     assert(layout.buttonRight <= width && layout.buttonHeight >= 34 && layout.hit, '验证按钮不适合当前宽度');
     await page.type('#cookie-header', 'session=unsaved-test-input');
     assert.equal(await page.$eval('#btn-cookie-validate', el => el.disabled), true, '不能验证未保存的 Cookie');
+    assert.equal(await page.$('#cookie-validation-result'), null, '修改 Cookie 后不能保留旧验证结果');
     await page.click('.drawer-x');
     // 手机上失败提示会暂时遮住账号行按钮，等待实际隐藏后再点击。
     await page.waitForSelector('#toast', { hidden: true });
@@ -95,6 +106,27 @@ try {
     assert.equal((await api(`/admin/accounts?channel_id=${channel.id}`)).items[0].cookie_configured, false);
     console.log(`PASS ${width}px: 保存、凭证汇总/筛选、验证失败展示、未验证状态、秘密清空、重新打开、清除`);
   }
+  await api(`/admin/accounts/${account.id}`, 'PATCH', { external_user_id: '' });
+  await api(`/admin/accounts/${account.id}/cookie-credentials`, 'PUT', {
+    enabled: true, cookie_header: 'session=not-an-upstream-cookie',
+  });
+  await page.goto(`${BASE}/admin/ui/accounts`, { waitUntil: 'networkidle0' });
+  await page.click(`[data-account-cred-edit="${account.id}"]`);
+  await page.waitForSelector('#btn-cookie-validate');
+  let validationRequests = 0;
+  page.on('request', request => {
+    if (request.url().endsWith('/cookie-credentials/validate')) validationRequests += 1;
+  });
+  const identityValidation = page.waitForResponse(r => r.url().endsWith('/cookie-credentials/validate'));
+  await page.click('#btn-cookie-validate');
+  assert.equal((await identityValidation).status(), 422, '不可解析的测试 Cookie 应由服务端说明原因');
+  await page.waitForFunction(() => !document.querySelector('#btn-cookie-validate')?.disabled);
+  assert.match(await page.$eval('#cookie-validation-result', el => el.textContent), /无法从此 Cookie 自动识别用户 ID/);
+  assert.equal(validationRequests, 1, '缺用户 ID 时仍应允许服务端尝试自动识别');
+  const identityAccount = (await api(`/admin/accounts?channel_id=${channel.id}`)).items[0];
+  assert(!identityAccount.external_user_id, '识别失败不能保存推测的用户 ID');
+  assert.equal(identityAccount.cookie_state, 'needs_action');
+  console.log('PASS 缺上游用户 ID：发起验证、显示识别失败原因、不保存推测身份');
 } finally {
   await browser.close();
 }
