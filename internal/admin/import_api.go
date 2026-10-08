@@ -111,7 +111,7 @@ func (s *Server) ImportHub(
 			// 两个入口共用」—— 共用是真的，但导入侧共用得太晚。本轮自审与
 			// Codex 二次评审各自独立查到（后者判 [high]）。
 			probeURL, err := validateBaseURL(a.SiteURL)
-			if err == nil && a.AuthType == "cookie" {
+			if err == nil && hubCookieWrites(a) {
 				_, err = store.CookieOrigin(probeURL)
 			}
 			if err != nil {
@@ -283,9 +283,6 @@ func (s *Server) importOne(
 	}
 	if err := validateHubCookie(a, d, want); err != nil {
 		return err
-	}
-	if a.AuthType == "cookie" && !a.HasCredential() {
-		appendImportWarning(it, "导出里没有凭证：未提供 Cookie，已有配置保留")
 	}
 
 	tx, err := conn.Begin(ctx)

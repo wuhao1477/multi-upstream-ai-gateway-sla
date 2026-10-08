@@ -411,6 +411,7 @@ TESTS=(
   TestImportCookieAccountIsolationAndDisable
   TestImportCookieRepairAndPreview
   TestImportCookieDryRunDoesNotWriteOrReadKeys
+  TestHubRemovalOnlyOnWebDAVSync
   TestImportRollsBackOnCredentialFailure
   TestImportRepairsIncompleteChannel
   TestImportRepairAddsSnapshotAndKeepsWarning

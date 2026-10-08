@@ -121,7 +121,7 @@ func cookieEndpointAllowed(req *http.Request, path string) bool {
 	switch req.Method {
 	case http.MethodGet:
 		switch path {
-		case "/api/user/self", "/api/pricing":
+		case collector.CookieSessionPath, "/api/pricing":
 			return req.URL.RawQuery == ""
 		case "/api/token", "/api/token/":
 			return cookieKeyQueryAllowed(req.URL.RawQuery)
@@ -170,8 +170,8 @@ func (a *CookieAccess) Do(req *http.Request, session collector.Session) (*http.R
 	if session.CookieState == nil {
 		session.CookieState = &collector.CookieSession{}
 	}
-	if path != "/api/user/self" && session.CookieState.Revision.IsZero() {
-		self, err := http.NewRequestWithContext(req.Context(), http.MethodGet, strings.TrimRight(session.BaseURL, "/")+"/api/user/self", nil)
+	if path != collector.CookieSessionPath && session.CookieState.Revision.IsZero() {
+		self, err := http.NewRequestWithContext(req.Context(), http.MethodGet, strings.TrimRight(session.BaseURL, "/")+collector.CookieSessionPath, nil)
 		if err != nil {
 			return nil, store.ErrCookieSite
 		}
@@ -209,7 +209,7 @@ func (a *CookieAccess) send(req *http.Request, s collector.Session, explicit boo
 	}
 	s.UserIDHeader = cmp.Or(s.CookieState.UserIDHeader, s.UserIDHeader, "New-API-User")
 	candidates := []string{s.UserIDHeader}
-	if path == "/api/user/self" && s.CookieState.Revision.IsZero() {
+	if path == collector.CookieSessionPath && s.CookieState.Revision.IsZero() {
 		for _, header := range collector.NewAPIUserIDHeaderCandidates() {
 			if header != s.UserIDHeader {
 				candidates = append(candidates, header)
@@ -251,7 +251,7 @@ func (a *CookieAccess) sendOnce(req *http.Request, s collector.Session, explicit
 	if err != nil {
 		return nil, cred, err
 	}
-	if path == "/api/user/self" {
+	if path == collector.CookieSessionPath {
 		userID := req.Header.Get(s.UserIDHeader)
 		if !collector.CookieIdentityMatches(m, userID) {
 			return nil, cred, errors.Join(collector.ErrCookieNeedsAction, errors.New("登记账号与 Cookie 用户 ID 不一致"))
@@ -398,7 +398,7 @@ func (a *CookieAccess) Validate(ctx context.Context, accountID int64) error {
 		AccountID: accountID, ChannelID: channelID, Family: collector.FamilyNewAPI,
 		ExternalUserID: cred.ExternalUserID, CookieEnabled: true,
 	}, cred.BaseURL, 0)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cred.BaseURL, "/")+"/api/user/self", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cred.BaseURL, "/")+collector.CookieSessionPath, nil)
 	if err != nil {
 		return store.ErrCookieSite
 	}

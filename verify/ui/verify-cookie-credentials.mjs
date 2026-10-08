@@ -23,9 +23,13 @@ const channel = await api('/admin/channels', 'POST', {
   name: `cookie-form-${run}`, base_url: `https://${run}.example.invalid`, site_family: 'newapi', auto_detect: false,
 });
 const account = await api('/admin/accounts', 'POST', { channel_id: channel.id, external_user_id: '42' });
+// 启动参数与 verify-spa.mjs / verify-ui.mjs 一致：本脚本也在 CI 里跑，
+// 那两份的 --no-sandbox 与 90s 超时是 GitHub runner 上真红过才加的（见 verify-spa.mjs 同处）。
 const browser = await puppeteer.launch({
   executablePath: process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  headless: true,
+  headless: 'shell',
+  args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  timeout: 90_000,
 });
 try {
   const page = await browser.newPage();

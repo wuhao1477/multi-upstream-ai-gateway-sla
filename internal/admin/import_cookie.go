@@ -12,8 +12,14 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
+// hubCookieWrites 报告这个条目会不会写 Cookie：带了 Cookie，或要停用已有的那份。
+// 两者都不是时与没令牌的条目一样，渠道/账号照建，UID 与站型要求只为写入服务。
+func hubCookieWrites(a collector.HubAccount) bool {
+	return a.AuthType == "cookie" && (a.HasCredential() || a.Disabled)
+}
+
 func validateHubCookie(a collector.HubAccount, d collector.DetectResult, base string) error {
-	if a.AuthType != "cookie" {
+	if !hubCookieWrites(a) {
 		return nil
 	}
 	if d.Family != collector.FamilyNewAPI {
@@ -129,7 +135,7 @@ func (s *Server) previewHubCookies(ctx context.Context, accounts []collector.Hub
 	conn, release, err := s.DB.Acquire(ctx)
 	if err != nil {
 		for i, a := range accounts {
-			if a.AuthType == "cookie" && result.Items[i].Status == "would_import" {
+			if hubCookieWrites(a) && result.Items[i].Status == "would_import" {
 				result.Items[i].Status, result.Items[i].Reason = "failed", "无法读取本地 Cookie 配置进行比较"
 			}
 		}
@@ -137,7 +143,7 @@ func (s *Server) previewHubCookies(ctx context.Context, accounts []collector.Hub
 	}
 	defer release()
 	for i, a := range accounts {
-		if a.AuthType != "cookie" || result.Items[i].Status != "would_import" {
+		if !hubCookieWrites(a) || result.Items[i].Status != "would_import" {
 			continue
 		}
 		if err := s.previewCookieImport(ctx, conn, a, detects[i], &result.Items[i]); err != nil {

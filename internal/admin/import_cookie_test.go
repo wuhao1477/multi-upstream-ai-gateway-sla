@@ -157,6 +157,13 @@ func TestImportCookieAccountIsolationAndDisable(t *testing.T) {
 	if _, err := s.CookieCredentials.Load(ctx, conn, noCookie.AccountID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("Cookie-less entry registered a Cookie")
 	}
+	// 既没 Cookie 也没 UID：什么都不写，所以不该因缺 UID 整站失败，也不能动别的账号。
+	if err := s.importOne(ctx, conn, hubCookieAccount(t, base, "", ""), detected(), &collector.HubImportItem{}); err != nil {
+		t.Fatalf("entry without Cookie or ID must not fail the site: %v", err)
+	}
+	if other, err := s.CookieCredentials.Load(ctx, conn, second.AccountID); err != nil || other.CookieHeader != "session=second-account" {
+		t.Fatal("entry without Cookie or ID changed another account's Cookie")
+	}
 }
 
 func TestImportCookieRepairAndPreview(t *testing.T) {

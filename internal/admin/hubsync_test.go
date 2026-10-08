@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +92,65 @@ func TestKeepBaseURLsIgnoresOutcome(t *testing.T) {
 	}})
 	if strings.Join(got, ",") != "https://a.example,https://b.example" {
 		t.Fatalf("保留名单 = %v", got)
+	}
+}
+
+// 「备份里已移除即停用」只挂在 WebDAV 同步上（disableHubRemoved）：手工上传
+// 走同一个 ImportHub，而上传的文件可能只是一部分，它不能停任何渠道。
+// 探测失败是受控输入（真站点不会按需失败），只验停用的接线，不举证上游协议。
+func TestHubRemovalOnlyOnWebDAVSync(t *testing.T) {
+	const listed = "https://hub-removal-listed.example.invalid"
+	const other = "https://hub-removal-other.example.invalid"
+	s, conn, ctx := cookieImportDB(t, other)
+	wipe(ctx, t, conn, listed)
+	t.Cleanup(func() { wipe(ctx, t, conn, listed) })
+	id, err := store.CreateChannel(ctx, conn, store.Channel{
+		Name: "hub-removal-other", BaseURL: other, SiteFamily: "newapi", Source: "hub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := store.NewPool(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s.DB = pool
+	s.Detect = func(context.Context, string) (collector.DetectResult, error) {
+		return collector.DetectResult{}, errors.New("探测失败（受控输入）")
+	}
+	var backup collector.HubBackup
+	backup.Accounts.Accounts = []collector.HubAccount{{SiteURL: listed}}
+	status := func() string {
+		var st string
+		if err := conn.QueryRow(ctx, `SELECT status FROM channels WHERE id=$1`, id).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	reported := func(res *collector.HubImportResult) bool {
+		for _, it := range res.Items {
+			if it.Status == "removed" && it.ChannelID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	res, err := s.ImportHub(ctx, &backup, false)
+	if err != nil || reported(res) || status() != "enabled" {
+		t.Fatalf("手工导入不应停用或报出备份外的渠道: err=%v status=%s", err, status())
+	}
+	s.disableHubRemoved(ctx, res, true)
+	if !reported(res) || status() != "enabled" {
+		t.Fatalf("WebDAV 预览应报出备份外的 hub 渠道且不改它: status=%s", status())
+	}
+	res, err = s.ImportHub(ctx, &backup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.disableHubRemoved(ctx, res, false)
+	if !reported(res) || status() != "disabled" {
+		t.Fatalf("WebDAV 同步应停用备份外的 hub 渠道: status=%s", status())
 	}
 }

@@ -497,20 +497,23 @@ func (s *Server) runHubSyncNow(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusConflict, "已有一轮 all-api-hub 同步在执行，等它跑完再点")
 		return
 	}
+	// 后台 ctx：这一轮要活得比触发它的请求久（见上面第 1 条）。
+	ctx := s.backgroundCtx()
+	// 跨实例互斥仍走 advisory 锁 —— 上面那个布尔只管得住本进程。
+	// **在请求里同步取**：拿不到就当场 409。放进 goroutine 的话，先回 202、
+	// 再在后台静默跳过，界面轮询到"不在跑"后读到的是上一轮的历史。
+	locked, unlock, err := s.tryHubSyncLock(ctx)
+	if err != nil || !locked {
+		s.hubSyncBusy.Store(false)
+		if err != nil {
+			s.fail(w, http.StatusServiceUnavailable, "取 all-api-hub 同步锁失败: "+err.Error())
+			return
+		}
+		s.fail(w, http.StatusConflict, "另一实例正在跑 all-api-hub 同步，等它跑完再点")
+		return
+	}
 	go func() {
 		defer s.hubSyncBusy.Store(false)
-		// 后台 ctx：这一轮要活得比触发它的请求久（见上面第 1 条）。
-		ctx := s.backgroundCtx()
-		// 跨实例互斥仍走 advisory 锁 —— 上面那个布尔只管得住本进程。
-		locked, unlock, err := s.tryHubSyncLock(ctx)
-		if err != nil {
-			s.Logger.Warn("取 all-api-hub 同步锁失败", "err", err)
-			return
-		}
-		if !locked {
-			s.Logger.Info("另一实例正在跑 all-api-hub 同步，本次跳过")
-			return
-		}
 		defer unlock()
 		if _, err := s.RunHubSync(ctx, store.HubSyncTriggerManual, apply); err != nil {
 			// 失败照样进了 hub_sync_runs（RunHubSync 成败都记），界面从那儿读。

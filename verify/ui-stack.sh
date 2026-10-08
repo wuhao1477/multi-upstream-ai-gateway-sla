@@ -377,16 +377,28 @@ BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" node verify-spa.mjs
 
 # Cookie 登记界面（1280 + 375，CLAUDE.md §2.1）：只用 .invalid 站点与本地库，免密，CI 也跑。
 # 它建的测试渠道不清理，所以全量模式下放在 verify-ui.mjs 之后，不掺进真数据那批断言。
+#
+# 跑完再查一次：测试 Cookie 不得进 core 日志（同下面「Key 明文不进日志」，日志只有
+# 起进程这一侧看得到）。反向自检：标记必须真是脚本提交的那个值 —— 否则 grep 一个
+# 谁都不会写进日志的串，这条断言永远绿。
+COOKIE_MARKER='not-an-upstream-cookie'
 cookie_ui() {
   BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" SLA_TEST_DSN="$DSN" \
     node verify-cookie-credentials.mjs
+  grep -qF "$COOKIE_MARKER" verify-cookie-credentials.mjs || {
+    echo "❌ verify-cookie-credentials.mjs 不再提交 ${COOKIE_MARKER} —— 日志断言成了空断言"; exit 1; }
+  if grep -qF "$COOKIE_MARKER" "$CORELOG"; then
+    echo "❌ core 日志里出现了测试 Cookie —— Cookie 明文不得进日志"
+    exit 1
+  fi
+  echo "   ✅ core 日志无测试 Cookie"
 }
 
 if [ -n "$SPA_ONLY" ]; then
   cookie_ui
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（37 项）。功能与数据那 188 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密验收（37 项）与 Cookie 登记界面。功能与数据那 188 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="
