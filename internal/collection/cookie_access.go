@@ -22,6 +22,9 @@ import (
 
 var ErrChannelReadBusy = errors.New("该渠道正在采集、验证 Cookie 或同步 Key，请稍后重试")
 
+// ErrCookieTargetDisabled 是"Cookie 在，但它所属的账号或渠道已停用"。
+var ErrCookieTargetDisabled = errors.New("账号或渠道已停用，启用后再验证 Cookie")
+
 // CookieAccess 只使用用户登记的会话；不登录，不更新 Cookie，不执行远端写操作。
 type CookieAccess struct {
 	Pool        *store.Pool
@@ -379,11 +382,18 @@ func (a *CookieAccess) Validate(ctx context.Context, accountID int64) error {
 	}
 	defer release()
 	var channelID int64
-	if err := conn.QueryRow(ctx, `SELECT channel_id FROM upstream_accounts WHERE id=$1`, accountID).Scan(&channelID); err != nil {
+	var active bool
+	if err := conn.QueryRow(ctx, `SELECT a.channel_id, a.status='active' AND c.status='enabled'
+FROM upstream_accounts a JOIN channels c ON c.id=a.channel_id WHERE a.id=$1`, accountID).Scan(&channelID, &active); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return store.ErrNotFound
 		}
 		return errors.New("读取 Cookie 账号失败")
+	}
+	// 先说停用：Load 对停用的渠道/账号一律回 ErrNotFound，界面上就成了
+	// 「配置不存在」，人会去重导一份其实还好好的 Cookie。
+	if !active {
+		return ErrCookieTargetDisabled
 	}
 	unlock, err := lockChannelRead(ctx, conn, channelID)
 	if err != nil {

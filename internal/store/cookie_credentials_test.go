@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -264,5 +265,25 @@ func TestCookieCipherRejectsTamperingAndCrossAccount(t *testing.T) {
 	encrypted[len(encrypted)-1] ^= 1
 	if _, err := s.open(1, "https://example.com", encrypted); err == nil {
 		t.Fatal("modified ciphertext accepted")
+	}
+}
+
+// Cookie 出站目标的地址判定。嵌在 IPv6 里的 IPv4 按嵌入的那个判：
+// 公网的照常放行（纯 IPv6 + DNS64 主机要靠它连 IPv4 站点），内网的拒绝。
+func TestIsPublicCookieIP(t *testing.T) {
+	for _, tc := range []struct {
+		ip   string
+		want bool
+	}{
+		{"1.1.1.1", true}, {"2606:4700::1111", true},
+		{"10.0.0.5", false}, {"127.0.0.1", false}, {"169.254.1.1", false}, {"100.64.0.1", false},
+		{"0.1.2.3", false}, {"192.0.0.8", false}, {"198.18.0.1", false}, {"240.0.0.1", false},
+		{"::ffff:10.0.0.5", false}, {"::a00:5", false}, {"fc00::1", false}, {"fe80::1", false},
+		{"64:ff9b::a00:5", false}, {"64:ff9b::101:101", true},
+		{"2002:a00:5::1", false}, {"2002:101:101::1", true},
+	} {
+		if got := IsPublicCookieIP(netip.MustParseAddr(tc.ip)); got != tc.want {
+			t.Errorf("IsPublicCookieIP(%s) = %v, want %v", tc.ip, got, tc.want)
+		}
 	}
 }

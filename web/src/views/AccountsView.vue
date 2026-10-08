@@ -60,7 +60,8 @@ const riskCount = computed(
  * 后者是"这次没采到"，前者是"**根本采不了**，而且不会自愈"。
  */
 const noCredCount = computed(
-  () => shown.value.filter((a) => a.cred_type === undefined && !a.cookie_configured).length,
+  () =>
+    shown.value.filter((a) => a.cred_type === undefined && !(a.cookie_configured && a.cookie_enabled)).length,
 )
 
 function reset(): void {

@@ -129,6 +129,8 @@ func (s *Server) cookieCredentialError(w http.ResponseWriter, err error) {
 		s.fail(w, http.StatusConflict, store.ErrCookieCredentialChanged.Error())
 	case errors.Is(err, collection.ErrChannelReadBusy):
 		s.fail(w, http.StatusConflict, collection.ErrChannelReadBusy.Error())
+	case errors.Is(err, collection.ErrCookieTargetDisabled):
+		s.fail(w, http.StatusConflict, collection.ErrCookieTargetDisabled.Error())
 	case errors.Is(err, collector.ErrCookieExpired):
 		s.fail(w, http.StatusUnprocessableEntity, collector.ErrCookieExpired.Error())
 	case errors.Is(err, collector.ErrCookieIdentityUnavailable):

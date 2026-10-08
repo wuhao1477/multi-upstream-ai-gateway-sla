@@ -258,6 +258,8 @@ async function saveCookieCred(): Promise<void> {
 }
 
 async function clearCookieCred(): Promise<void> {
+  // 清除不可逆：恢复要人回原站重新登录、过 2FA 再导入（应用不代登录）。
+  if (!confirm('清除后需在原站重新登录并重新导入 Cookie 才能恢复，确定？')) return
   busy.value = true
   cookieHeader.value = ''
   cookieValidationResult.value = ''

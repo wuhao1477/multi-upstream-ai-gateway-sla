@@ -131,6 +131,12 @@ func (r *Runner) ProvisionKeys(
 ) (collector.KeyProvisionResult, error) {
 	cred.CookieEnabled = false
 	var result collector.KeyProvisionResult
+	// 远端创建 Key 是写操作，只用访问令牌。Cookie-only 账号在这里先说清楚 ——
+	// 否则 Authenticate 报的是"需要令牌或 Cookie"，而它明明登记了 Cookie。
+	if cred.AccessToken == "" {
+		return result, fmt.Errorf("%w：账号 %d 没有访问令牌；远端创建 Key 只用令牌，Cookie 不用于写操作",
+			collector.ErrPrecondition, cred.AccountID)
+	}
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return result, err

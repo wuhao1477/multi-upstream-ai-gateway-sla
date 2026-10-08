@@ -270,6 +270,10 @@ func TestProvisionKeysDoesNotAuthenticateWithCookie(t *testing.T) {
 	if err == nil || calls != 0 {
 		t.Fatal("remote key provisioning must not authenticate with Cookie")
 	}
+	// 报错要说清"只用令牌"，不能让人以为是 Cookie 没登记。
+	if !errors.Is(err, collector.ErrPrecondition) || !strings.Contains(err.Error(), "只用令牌") {
+		t.Fatalf("Cookie-only provisioning must explain tokens are required: %v", err)
+	}
 }
 
 // 单个资源的业务拒绝只让这一次请求失败，不能把已验证的整份会话停掉
@@ -292,5 +296,36 @@ func TestCookieResourceRejectionKeepsSession(t *testing.T) {
 	defer release()
 	if cred, err := a.Credentials.Load(context.Background(), conn, s.AccountID); err != nil || cred.State != "ready" {
 		t.Fatalf("state=%s err=%v", cred.State, err)
+	}
+}
+
+// 渠道或账号停用时，验证要明说"已停用"，且不发任何上游请求；
+// 而不是让 Load 的 ErrNotFound 冒充"配置不存在"。
+func TestCookieValidateReportsDisabledTarget(t *testing.T) {
+	for _, table := range []string{"channels", "upstream_accounts"} {
+		t.Run(table, func(t *testing.T) {
+			a, s := cookieAccessFixture(t)
+			calls := 0
+			a.http.Transport = cookieWire(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return cookieAccessResponse(r, 200, cookieAccessSelf), nil
+			})
+			ctx := context.Background()
+			conn, release, err := a.Pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			id, status := s.ChannelID, "disabled"
+			if table == "upstream_accounts" {
+				id = s.AccountID
+			}
+			if _, err := conn.Exec(ctx, `UPDATE `+table+` SET status=$2 WHERE id=$1`, id, status); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Validate(ctx, s.AccountID); !errors.Is(err, ErrCookieTargetDisabled) || calls != 0 {
+				t.Fatalf("disabled %s must be reported before any request: err=%v calls=%d", table, err, calls)
+			}
+		})
 	}
 }

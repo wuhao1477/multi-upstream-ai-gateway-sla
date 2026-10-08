@@ -207,7 +207,8 @@ export function filterAccounts(
       const s = a.balance_state ?? ''
       if (s === '' || s === 'normal') return false
     }
-    const hasCredential = a.cred_type !== undefined || a.cookie_configured
+    // 已停用的 Cookie 不算：采集器只认启用的那份（与「自动采集」列同一口径）。
+    const hasCredential = a.cred_type !== undefined || (a.cookie_configured && a.cookie_enabled)
     if (f.cred === 'has' && !hasCredential) return false
     if (f.cred === 'missing' && hasCredential) return false
     if (q !== '') {

@@ -2,6 +2,7 @@
 // 必须显式指定可写测试实例，禁止对业务部署运行。
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import puppeteer from 'puppeteer-core';
 
 const BASE = process.env.BASE;
@@ -103,6 +104,21 @@ try {
     await page.click(edit);
     await page.waitForSelector('#cookie-header');
     assert.equal(await page.$eval('#cookie-header', el => el.value), '', '关闭后残留 Cookie');
+    // 清除不可逆，必须先弹确认框：先取消一次（不得发出 DELETE），再确认。
+    let deletes = 0;
+    const countDelete = r => { if (r.url().endsWith('/cookie-credentials') && r.method() === 'DELETE') deletes += 1; };
+    page.on('request', countDelete);
+    // 限时等：没弹框时要当场红在这条断言上，而不是一直等到 CI 作业超时、看不出原因。
+    const dismissed = Promise.race([
+      new Promise(resolve => page.once('dialog', d => { resolve(d.message()); d.dismiss(); })),
+      sleep(3000).then(() => '（3 秒内没有弹出确认框）'),
+    ]);
+    await page.click('#btn-cookie-clear');
+    assert.match(await dismissed, /重新登录/, '清除 Cookie 前没有二次确认');
+    await sleep(300);
+    assert.equal(deletes, 0, '取消确认后仍发出了清除请求');
+    page.off('request', countDelete);
+    page.once('dialog', d => d.accept());
     const cleared = page.waitForResponse(r => r.url().endsWith('/cookie-credentials') && r.request().method() === 'DELETE');
     await page.click('#btn-cookie-clear');
     assert.equal((await cleared).status(), 200, '清除失败');
@@ -131,6 +147,16 @@ try {
   assert(!identityAccount.external_user_id, '识别失败不能保存推测的用户 ID');
   assert.equal(identityAccount.cookie_state, 'needs_action');
   console.log('PASS 缺上游用户 ID：发起验证、显示识别失败原因、不保存推测身份');
+
+  // 已停用的 Cookie 不算凭证：采集器只认启用的那份，「缺采集凭证」与筛选要同一口径。
+  await page.goto(`${BASE}/admin/ui/accounts`, { waitUntil: 'networkidle0' });
+  const missingWhileEnabled = await missingCount();
+  await api(`/admin/accounts/${account.id}/cookie-credentials`, 'PUT', { enabled: false });
+  await page.goto(`${BASE}/admin/ui/accounts`, { waitUntil: 'networkidle0' });
+  assert.equal(await missingCount(), missingWhileEnabled + 1, '已停用的 Cookie 仍被算作有采集凭证');
+  await page.select('#acc-f-cred', 'missing');
+  await page.waitForSelector(`[data-account-cred-edit="${account.id}"]`, { timeout: 3000 });
+  console.log('PASS 已停用 Cookie 计入「缺采集凭证」汇总与筛选');
 } finally {
   await browser.close();
 }
