@@ -295,7 +295,7 @@ NewAPI 系读 Key 明文有**两条互斥的路**，逐站不同，实测打了�
 
 | 站点 | `/api/token` 列表里的 `key` | `POST /api/token/{id}/key` |
 | --- | --- | --- |
-| 钱多多 `api2.aigcbest.top` | 18 字符、含 `*`（脱敏） | `200` → 48 字符完整明文 |
+| 样本站点 `upstream-d.invalid` | 18 字符、含 `*`（脱敏） | `200` → 48 字符完整明文 |
 | VVCode `vvcode.top` | 同上 | 同上 |
 | JustDoWork `api.justwoker.icu` | 同上 | 同上 |
 | **Agent Router `agentrouter.org`** | **48 字符、无 `*`、就是完整明文** | **`404`（没有这个端点）** |
