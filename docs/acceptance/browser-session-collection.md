@@ -112,6 +112,12 @@ all-api-hub 格式依据固定提交 `949bd8e2ec8b15d16475617e5e4e6b8b4923d441`�
 - `make fmt-check vet` 通过。前端未再修改，不重复已经通过的真实浏览器验收；本地服务继续运行，未重新采集。
 - Conda 与 golangci-lint 在当前环境不可用，Python 文档/schema、完整迁移脚本及 CI lint 仍待 CI 验证；真实 all-api-hub 文件/WebDAV 认证等未验收边界保持不变。此次结论支持发起 PR 审查，不表示已可发布。
 
+### PR CI 补充修正（2026-10-08）
+
+- 首次 CI 文档门禁指出 `cookie_ciphertext` 在建表外没有规则引用；已在采集器文档补充管理保存/导入写入密文、采集/显式验证解密读取的规则。
+- CI 可达漏洞扫描检出 `GO-2026-6629`，经 pgx 调用到 `golang.org/x/text/secure/precis`。将 x/text 从 `v0.39.0` 升至最低修复版本 `v0.41.0`，并由其依赖要求将 x/sync 升至 `v0.22.0`；Go 版本及业务代码不变。
+- 依赖更新后，`go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...` 返回 `No vulnerabilities found.`；`go build ./...` 通过。独立真实 PG 下 `go test -race ./internal/store ./cmd/... -count=1 -json` 通过，store 69 项、无失败或跳过，cmd 包无测试文件；未重复整套功能或浏览器验收。
+
 ## 以下为旧密码方案历史
 
 以下记录只供追溯。用户需自行在原站完成登录和 2FA，再登记或导入 Cookie；Cookie
