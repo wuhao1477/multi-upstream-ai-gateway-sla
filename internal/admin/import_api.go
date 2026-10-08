@@ -161,7 +161,13 @@ func (s *Server) ImportHub(
 				if item.Warning != "" {
 					item.Warning += "；"
 				}
-				item.Warning += "导出里没有凭证，需另行登记后才能采集"
+				// "没有凭证"四个字不能改：finishImport 靠它数 NoCredential。
+				if a.AuthType == "cookie" {
+					// 本地已登记的 Cookie 原样保留、照常采集，别让人去重登一份还能用的。
+					item.Warning += "导出里没有凭证（Cookie）：本地已登记的原样保留，未登记的需另行登记后才能采集"
+				} else {
+					item.Warning += "导出里没有凭证，需另行登记后才能采集"
+				}
 			}
 			item.Status = "detected"
 			// 探测结果按下标暂存，落库在下面串行做（避免并发写库争用）

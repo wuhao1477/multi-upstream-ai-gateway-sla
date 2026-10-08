@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
@@ -158,8 +159,20 @@ func TestImportCookieAccountIsolationAndDisable(t *testing.T) {
 		t.Fatal("Cookie-less entry registered a Cookie")
 	}
 	// 既没 Cookie 也没 UID：什么都不写，所以不该因缺 UID 整站失败，也不能动别的账号。
+	// UID 为空时 importAccountID 取 id 最小的账号（first，其 Cookie 已停用）——
+	// 断言必须落在它身上：Load 读不到停用的 Cookie，所以直接比 enabled 与修订。
+	cookieRow := func(id int64) (enabled bool, rev time.Time) {
+		if err := conn.QueryRow(ctx, `SELECT enabled, updated_at FROM collector_cookie_credentials WHERE account_id=$1`, id).Scan(&enabled, &rev); err != nil {
+			t.Fatal(err)
+		}
+		return enabled, rev
+	}
+	_, firstRev := cookieRow(first.AccountID)
 	if err := s.importOne(ctx, conn, hubCookieAccount(t, base, "", ""), detected(), &collector.HubImportItem{}); err != nil {
 		t.Fatalf("entry without Cookie or ID must not fail the site: %v", err)
+	}
+	if enabled, rev := cookieRow(first.AccountID); enabled || !rev.Equal(firstRev) {
+		t.Fatal("entry without Cookie or ID changed the first account's Cookie")
 	}
 	if other, err := s.CookieCredentials.Load(ctx, conn, second.AccountID); err != nil || other.CookieHeader != "session=second-account" {
 		t.Fatal("entry without Cookie or ID changed another account's Cookie")

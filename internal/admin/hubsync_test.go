@@ -104,6 +104,15 @@ func TestHubRemovalOnlyOnWebDAVSync(t *testing.T) {
 	s, conn, ctx := cookieImportDB(t, other)
 	wipe(ctx, t, conn, listed)
 	t.Cleanup(func() { wipe(ctx, t, conn, listed) })
+	// 下面的停用是**全库**的（DisableHubRemovedChannels 按 source='hub' 整表 UPDATE）。
+	// 库里还有别的启用中的 hub 渠道，说明这不是一次性测试库 —— 拒绝跑，别把真台账停掉。
+	var others int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM channels WHERE source='hub' AND status='enabled'`).Scan(&others); err != nil {
+		t.Fatal(err)
+	}
+	if others > 0 {
+		t.Fatalf("库里已有 %d 个启用中的 hub 渠道；本测试会把它们全部停用，只能在一次性测试库上跑", others)
+	}
 	id, err := store.CreateChannel(ctx, conn, store.Channel{
 		Name: "hub-removal-other", BaseURL: other, SiteFamily: "newapi", Source: "hub",
 	})

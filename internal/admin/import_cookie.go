@@ -14,6 +14,13 @@ import (
 
 // hubCookieWrites 报告这个条目会不会写 Cookie：带了 Cookie，或要停用已有的那份。
 // 两者都不是时与没令牌的条目一样，渠道/账号照建，UID 与站型要求只为写入服务。
+//
+// 只用于**校验与预览**（探测前的 https 检查、validateHubCookie、previewHubCookies）。
+// 落库路径仍按 `AuthType == "cookie"` 分流、由 saveImportedCookie 自行判空 ——
+// 那边换成本函数会让无 Cookie 条目跳过补账号。
+//
+// ponytail: 停用条目一律当"可能要写"：本地其实没有 Cookie 时（新站、或该账号从未登记）
+// 也会套 UID/NewAPI/https 要求。要精确就得先查库再校验；等真有这类停用条目被拒再改。
 func hubCookieWrites(a collector.HubAccount) bool {
 	return a.AuthType == "cookie" && (a.HasCredential() || a.Disabled)
 }

@@ -65,7 +65,7 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 	if s.UserIDHeader == "" {
 		s.UserIDHeader = newAPIUserIDHeaders[0]
 	}
-	_, _, err := a.C.getJSONAuth(ctx, s, "/api/user/self")
+	_, _, err := a.C.getJSONAuth(ctx, s, CookieSessionPath)
 	s.ExternalUserID = cmp.Or(s.ExternalUserID, s.CookieState.ExternalUserID)
 	s.UserIDHeader = cmp.Or(s.CookieState.UserIDHeader, s.UserIDHeader)
 	return s, err

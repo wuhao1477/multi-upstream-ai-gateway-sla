@@ -387,6 +387,8 @@ cookie_ui() {
     node verify-cookie-credentials.mjs
   grep -qF "$COOKIE_MARKER" verify-cookie-credentials.mjs || {
     echo "❌ verify-cookie-credentials.mjs 不再提交 ${COOKIE_MARKER} —— 日志断言成了空断言"; exit 1; }
+  # 与下面 Key 那条同一个反向自检：日志空着（路径写错、重定向改了）时 grep 必然找不到。
+  [ -s "$CORELOG" ] || { echo "❌ ${CORELOG} 是空的 —— 「日志无测试 Cookie」是空断言"; exit 1; }
   if grep -qF "$COOKIE_MARKER" "$CORELOG"; then
     echo "❌ core 日志里出现了测试 Cookie —— Cookie 明文不得进日志"
     exit 1
