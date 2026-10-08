@@ -312,12 +312,17 @@ func checkCookieSession(cred store.CookieCredential, s collector.Session, explic
 }
 
 func cookieHeaders(cred store.CookieCredential, header string) (http.Header, error) {
-	if cred.ExternalUserID == "" {
-		var err error
-		cred.ExternalUserID, err = cookieUserID(cred.CookieHeader)
-		if err != nil {
-			return nil, err
-		}
+	fromCookie, parseErr := cookieUserID(cred.CookieHeader)
+	switch {
+	case cred.ExternalUserID == "" && parseErr != nil:
+		return nil, parseErr
+	case cred.ExternalUserID == "":
+		cred.ExternalUserID = fromCookie
+	case parseErr == nil && fromCookie != cred.ExternalUserID:
+		// 据 NewAPI 源码（middleware/auth.go，未实测），ID 头与会话用户不符时回 401；
+		// 不在本地拦下，登记 ID 写错会被标成 expired，让人反复重新登录。
+		// ponytail: 只认默认 securecookie 格式；其他格式读不出 ID，仍落到 401 → expired。
+		return nil, errors.Join(collector.ErrCookieNeedsAction, errors.New("登记账号与 Cookie 用户 ID 不一致"))
 	}
 	uid, err := strconv.ParseInt(cred.ExternalUserID, 10, 64)
 	if err != nil || uid <= 0 {

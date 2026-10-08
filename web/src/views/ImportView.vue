@@ -118,7 +118,6 @@ function statusClass(s: string): string {
                  回答不了"这一轮动了什么"。 -->
             <UiStat label="更新（凭证有变）" :value="result.updated" />
             <UiStat label="未变" :value="result.unchanged" />
-            <UiStat label="备份里已移除" :value="result.removed" />
             <UiStat label="跳过" :value="result.skipped" />
             <UiStat label="失败" :value="result.failed" />
             <UiStat label="站型声明不符" :value="result.family_mismatches" />

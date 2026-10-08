@@ -271,3 +271,26 @@ func TestProvisionKeysDoesNotAuthenticateWithCookie(t *testing.T) {
 		t.Fatal("remote key provisioning must not authenticate with Cookie")
 	}
 }
+
+// 单个资源的业务拒绝只让这一次请求失败，不能把已验证的整份会话停掉
+// （例：Key 在列表与读明文之间被删）。拒绝体是按需造的错误输入，不举证协议。
+func TestCookieResourceRejectionKeepsSession(t *testing.T) {
+	a, s := cookieAccessFixture(t)
+	a.http.Transport = cookieWire(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/api/user/self") {
+			return cookieAccessResponse(r, 200, cookieAccessSelf), nil
+		}
+		return cookieAccessResponse(r, 200, `{"success":false,"message":"private-cookie-marker"}`), nil
+	})
+	if _, err := a.Do(cookieAccessRequest(t, s, "/api/pricing"), s); err == nil || errors.Is(err, collector.ErrCookieNeedsAction) {
+		t.Fatalf("resource rejection must fail without blaming the session: %v", err)
+	}
+	conn, release, err := a.Pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if cred, err := a.Credentials.Load(context.Background(), conn, s.AccountID); err != nil || cred.State != "ready" {
+		t.Fatalf("state=%s err=%v", cred.State, err)
+	}
+}

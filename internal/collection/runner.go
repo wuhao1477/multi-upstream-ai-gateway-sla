@@ -28,8 +28,7 @@ type Runner struct {
 func (r *Runner) Sync(
 	ctx context.Context, ch store.Channel, capabilities []collector.Capability,
 ) (*collector.SyncResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultChannelSyncTimeout)
-	defer cancel()
+	// 不在这里加超时：周期采集由 Service 给（service.go），手动同步由管理端给 5 分钟。
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return nil, err

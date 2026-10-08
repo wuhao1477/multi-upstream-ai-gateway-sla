@@ -47,7 +47,9 @@ func TestCookieHeadersDiscoverUserID(t *testing.T) {
 		{"wrong_id_type", identityTestCookie(t, "1663"), "", ""},
 		{"opaque_session", "session=opaque-test-only", "", ""},
 		{"duplicate_session", identityTestCookie(t, 1663) + "; " + identityTestCookie(t, 1664), "", ""},
-		{"registered_identity", identityTestCookie(t, 1663), "42", "42"},
+		{"registered_identity", identityTestCookie(t, 1663), "1663", "1663"},
+		{"registered_identity_mismatch", identityTestCookie(t, 1663), "42", ""},
+		{"opaque_registered", "session=opaque-test-only", "42", "42"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			headers, err := cookieHeaders(store.CookieCredential{CookieHeader: tc.cookie, ExternalUserID: tc.storedID}, "")

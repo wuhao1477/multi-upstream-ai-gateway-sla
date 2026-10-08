@@ -148,6 +148,15 @@ func TestImportCookieAccountIsolationAndDisable(t *testing.T) {
 	if err := s.importOne(ctx, conn, a, detected(), &collector.HubImportItem{}); err == nil {
 		t.Fatal("missing ID bound Cookie to an arbitrary account")
 	}
+	// 导出里没有 Cookie 的条目与没令牌的条目同样处理：账号照建，不凭空登记。
+	c := hubCookieAccount(t, base, "44", "")
+	var noCookie collector.HubImportItem
+	if err := s.importOne(ctx, conn, c, detected(), &noCookie); err != nil || noCookie.AccountID == 0 {
+		t.Fatalf("Cookie-less entry must still import its account: %v", err)
+	}
+	if _, err := s.CookieCredentials.Load(ctx, conn, noCookie.AccountID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("Cookie-less entry registered a Cookie")
+	}
 }
 
 func TestImportCookieRepairAndPreview(t *testing.T) {

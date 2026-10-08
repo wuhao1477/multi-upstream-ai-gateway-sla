@@ -294,7 +294,9 @@ step "起 sla-core"
 # "dev" —— 那时把版本号写死成 "dev" 也照样绿，断言等于没有。
 CORE_VERSION="ui-verify-$$"
 go build -ldflags "-X main.version=${CORE_VERSION}" -o bin/sla-core ./cmd/sla-core
-DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${PORT}" \
+# Cookie 加密密钥：每轮随机生成，只给这个一次性 core 用（Cookie 登记界面验收要它）。
+COOKIE_KEY="$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))')"
+DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" SLA_COOKIE_SECRET_KEY="$COOKIE_KEY" ./bin/sla-core -addr ":${PORT}" \
   >"$CORELOG" 2>&1 &
 CORE_PID=$!
 ready=false
@@ -373,7 +375,15 @@ cd verify/ui
 # 这是**本地这个 core 自己的**令牌（上面生成的），不是第三方凭证。
 BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" node verify-spa.mjs
 
+# Cookie 登记界面（1280 + 375，CLAUDE.md §2.1）：只用 .invalid 站点与本地库，免密，CI 也跑。
+# 它建的测试渠道不清理，所以全量模式下放在 verify-ui.mjs 之后，不掺进真数据那批断言。
+cookie_ui() {
+  BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" SLA_TEST_DSN="$DSN" \
+    node verify-cookie-credentials.mjs
+}
+
 if [ -n "$SPA_ONLY" ]; then
+  cookie_ui
   echo ""
   echo "=========================================================="
   echo "⚠️  只跑了 SPA 免密验收（37 项）。功能与数据那 188 项**未验**。"
@@ -410,6 +420,7 @@ UP2_URL="$UP2_URL" \
 UP2_TOKEN="$UP2_TOKEN" \
 UP2_UID="$UP2_UID" \
   node verify-ui.mjs
+cookie_ui
 
 # ── Key 明文不得进日志（P1 退出标准③）──
 #

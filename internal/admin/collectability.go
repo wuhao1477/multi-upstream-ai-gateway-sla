@@ -192,17 +192,15 @@ func accountCollect(ch store.Channel, noShield *bool, a store.Account) Collect {
 		case "needs_action":
 			c.Reason = "Cookie 需要人工处理，请检查原站会话和登记的上游用户 ID"
 		default:
-			c.Reason = "Cookie 尚未验证，请点击验证 Cookie"
+			// 采集器只拦 expired/needs_action：未验证的 Cookie 照常自动使用，首次成功即转 ready。
+			c.Mode, c.Blocker, c.Reason = CollectAuto, "", "Cookie 尚未验证；下次采集会先确认身份，也可手动验证"
 		}
 	case a.CredType == "":
 		c.Mode, c.Blocker = CollectManual, BlockNoCredential
 		c.Reason = "没有登记采集凭证，登记后即可自动采集（04 §5 按站型给不同字段）"
-	case a.CredStatus != "valid":
+	default: // 有凭证但状态不是 valid
 		c.Mode, c.Blocker = CollectManual, BlockCredentialInvalid
 		c.Reason = "采集凭证状态是 " + a.CredStatus + "，需要重新登记（04 §5）"
-	default:
-		c.Mode = CollectAuto
-		c.Reason = "站型已识别、凭证有效 —— 可全自动采集"
 	}
 	c.Reason += shieldNote(noShield)
 	return c

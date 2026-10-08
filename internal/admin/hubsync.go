@@ -123,7 +123,37 @@ func (s *Server) runHubSyncOnce(
 		return nil, err
 	}
 	dryRun := !forceImport && cfg.ApplyMode != store.HubSyncModeImport
-	return s.ImportHub(ctx, backup, dryRun)
+	res, err := s.ImportHub(ctx, backup, dryRun)
+	if err == nil {
+		s.disableHubRemoved(ctx, res, dryRun)
+	}
+	return res, err
+}
+
+// disableHubRemoved 停用"本地还在、备份里已经没有"的 hub 渠道；dry_run 只报不改。
+//
+// 只挂在 WebDAV 同步上：那份备份由扩展维护、是全量；手工上传的文件可能只是
+// 一部分，拿它判"已移除"会把其余渠道全停掉。
+func (s *Server) disableHubRemoved(ctx context.Context, res *collector.HubImportResult, dryRun bool) {
+	conn, release, err := s.DB.Acquire(ctx)
+	if err != nil {
+		s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
+		return
+	}
+	defer release()
+	keep := keepBaseURLs(res)
+	var gone []store.Channel
+	if dryRun {
+		gone, err = store.HubRemovedChannels(ctx, conn, keep)
+	} else {
+		gone, err = store.DisableHubRemovedChannels(ctx, conn, keep,
+			"all-api-hub 备份里已移除（定时同步自动停用，可手动重新启用）")
+	}
+	if err != nil {
+		s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
+		return
+	}
+	appendRemovedItems(res, gone)
 }
 
 // StartHubSync 起定时同步循环，直到 ctx 结束。
@@ -156,6 +186,11 @@ func (s *Server) hubSyncTickOnce(ctx context.Context) {
 	if !hubSyncDue(cfg, time.Now()) {
 		return
 	}
+	// 与手动触发共用进程内标记：界面才看得到"在跑"，手动点击拿到 409 而不是空跑。
+	if !s.hubSyncBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.hubSyncBusy.Store(false)
 
 	locked, unlock, err := s.tryHubSyncLock(ctx)
 	if err != nil || !locked {

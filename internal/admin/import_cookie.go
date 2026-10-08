@@ -36,10 +36,9 @@ func (s *Server) saveImportedCookie(ctx context.Context, db store.DBTX, a collec
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
+	// 导出里没有 Cookie：与没令牌的条目同样处理 —— 渠道/账号照建，
+	// "没有凭证"的告警探测阶段已写上；已有配置原样保留。
 	if a.CookieAuth.SessionCookie == "" && (!exists || !a.Disabled || !enabled) {
-		if !exists {
-			return false, store.ErrCookieCredentialInput
-		}
 		return false, nil
 	}
 	if !exists {
@@ -70,7 +69,7 @@ func (s *Server) previewCookieImport(ctx context.Context, db store.DBTX, a colle
 		}
 	}
 	if a.CookieAuth.SessionCookie == "" {
-		return store.ErrCookieCredentialInput
+		return nil // 状态已是 would_import，"没有凭证"的告警探测阶段写过
 	}
 	if _, _, err := s.CookieCredentials.Differs(ctx, db, 0, a.CookieAuth.SessionCookie); err != nil {
 		return err
@@ -112,9 +111,6 @@ func (s *Server) previewCookieChange(ctx context.Context, db store.DBTX, a colle
 	differs, exists, err := s.CookieCredentials.Differs(ctx, db, accountID, a.CookieAuth.SessionCookie)
 	if err != nil {
 		return false, err
-	}
-	if !exists && a.CookieAuth.SessionCookie == "" {
-		return false, store.ErrCookieCredentialInput
 	}
 	if a.Disabled && exists {
 		var enabled bool

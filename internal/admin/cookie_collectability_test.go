@@ -12,7 +12,7 @@ func TestCookieCollectabilityDoesNotOverrideValidToken(t *testing.T) {
 		state        string
 		token, ready bool
 	}{
-		{"ready", false, true}, {"unverified", false, false},
+		{"ready", false, true}, {"unverified", false, true},
 		{"expired", false, false}, {"needs_action", false, false}, {"expired", true, true},
 	} {
 		a := store.Account{Status: "active", CookieConfigured: true, CookieEnabled: true, CookieState: tc.state}

@@ -205,21 +205,12 @@ func (s *Server) ImportHub(
 				remainingSecrets -= keyResult.SecretResolves
 			}
 		}
-		// 备份里已经没有的渠道 → 停用（可逆），只动 source=hub 的那些。
-		// 判据与限制见 store.DisableHubRemovedChannels 的注释，尤其是
-		// "keep 为空时什么都不做" —— 一次取备份失败若照此停用，一轮就能把
-		// 整个台账关掉。
-		gone, err := store.DisableHubRemovedChannels(ctx, conn, keepBaseURLs(res),
-			"all-api-hub 备份里已移除（定时同步自动停用，可手动重新启用）")
-		if err != nil {
-			s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
-		}
-		appendRemovedItems(res, gone)
+		// "备份里已移除即停用"不在这里做：手工上传也走本函数，而上传的文件
+		// 可能只是一部分。只有 WebDAV 同步那份是全量，见 hubsync.go 的 disableHubRemoved。
 		finishImport(res)
 		s.Logger.Info("all-api-hub 导入完成",
 			"total", res.Total, "imported", res.Imported,
 			"updated", res.Updated, "unchanged", res.Unchanged,
-			"removed", res.Removed,
 			"skipped", res.Skipped, "failed", res.Failed,
 			"mismatches", res.Mismatches)
 		return res, nil
@@ -233,31 +224,19 @@ func (s *Server) ImportHub(
 		}
 	}
 	s.previewHubCookies(ctx, accounts, detects, res)
-	// 差异要能**先看一眼再决定**，所以 dry_run 也报"备份里少了谁"——只查不改。
-	if conn, release, err := s.DB.Acquire(ctx); err == nil {
-		gone, qerr := store.HubRemovedChannels(ctx, conn, keepBaseURLs(res))
-		release()
-		if qerr == nil {
-			appendRemovedItems(res, gone)
-		}
-	}
 	finishImport(res)
 	return res, nil
 }
 
-// keepBaseURLs 是这份备份里**处理到了**的渠道地址。
+// keepBaseURLs 是这份备份里**出现过**的渠道地址，与本轮处理成败无关。
 //
-// 只收 base_url 已经确定下来的条目（建了、更新了、原样、或已存在）——
-// 探测失败那些的地址我方没认，拿它去和库里比会把一个只是今天连不上的站
-// 判成"备份里已移除"，然后停掉它。宁可漏停。
+// 探测超时、落库失败的站仍在备份里 —— 按处理结果筛的话，一个只是今天
+// 连不上的站会被判成"备份里已移除"然后停掉，而之后没有任何路径把它启用回来。
 func keepBaseURLs(res *collector.HubImportResult) []string {
 	out := make([]string, 0, len(res.Items))
-	for i := range res.Items {
-		switch res.Items[i].Status {
-		case "imported", "would_import", "updated", "unchanged":
-			if u, err := validateBaseURL(res.Items[i].SiteURL); err == nil {
-				out = append(out, u)
-			}
+	for _, it := range res.Items {
+		if u, err := validateBaseURL(it.SiteURL); err == nil {
+			out = append(out, u)
 		}
 	}
 	return out

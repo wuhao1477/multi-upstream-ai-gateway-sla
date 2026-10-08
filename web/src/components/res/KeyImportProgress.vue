@@ -36,28 +36,36 @@ const detailed = ref(false)
  */
 const POLL_MS = 2000
 let timer: ReturnType<typeof setTimeout> | undefined
+/**
+ * 每次换批次或卸载 +1。clearTimeout 清不掉**在途请求**回来之后新排的定时器，
+ * 不比代数的话，旧批次的轮询会接着跑，与新批次交替覆盖 job（卸载后也停不下来）。
+ */
+let generation = 0
 
 function stop(): void {
+  generation++
   if (timer !== undefined) clearTimeout(timer)
   timer = undefined
 }
 
-async function poll(): Promise<void> {
+async function poll(gen = generation): Promise<void> {
   const id = props.jobId
   if (id === null) return
   try {
     const got = await adminApi.keyImportJob(id)
+    if (gen !== generation) return
     // 每收一条新结果就让外面刷一次 Key 列表：这批任务的产出就是那张表，
     // 等到跑完再刷的话，前面十分钟里看到的都是旧数据。
     const advanced = job.value !== null && got.done > job.value.done
     job.value = got
     if (advanced) emit('changed')
     if (got.status === 'running') {
-      timer = setTimeout(() => void poll(), POLL_MS)
+      timer = setTimeout(() => void poll(gen), POLL_MS)
       return
     }
     emit('changed')
   } catch (error) {
+    if (gen !== generation) return
     // 404 = 这个批次不在内存里了（进程重启过，或被更近的批次挤出历史）。
     // 它与"接口坏了"是两回事，文案必须分开 —— 前者要人重新点一次同步。
     gone.value =

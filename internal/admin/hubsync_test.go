@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
@@ -76,5 +77,18 @@ func TestHubSyncViewHidesSecrets(t *testing.T) {
 	empty := hubSyncViewOf(store.HubSyncConfig{})
 	if empty.HasWebDAVPassword || empty.HasBackupPassword {
 		t.Fatal("没密码却报成有 —— 界面会显示「已配置」而其实是空的")
+	}
+}
+
+// 保留名单只看"备份里有没有"，不看本轮处理成败：探测超时、落库失败的站
+// 仍在备份里，按结果筛会把它判成"已移除"然后停掉。
+func TestKeepBaseURLsIgnoresOutcome(t *testing.T) {
+	got := keepBaseURLs(&collector.HubImportResult{Items: []collector.HubImportItem{
+		{SiteURL: "https://a.example/", Status: "skipped"},
+		{SiteURL: "https://b.example", Status: "failed"},
+		{SiteURL: "", Status: "skipped"},
+	}})
+	if strings.Join(got, ",") != "https://a.example,https://b.example" {
+		t.Fatalf("保留名单 = %v", got)
 	}
 }

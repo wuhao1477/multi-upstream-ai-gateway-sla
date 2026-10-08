@@ -119,8 +119,11 @@ func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m 
 		return nil, raw, authHTTPError(resp, method, path, raw, secret)
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
-		if secret {
+		if secret && path == cookieSessionPath {
 			return nil, nil, fmt.Errorf("%s %s 非 JSON: %w", method, path, ErrCookieNeedsAction)
+		}
+		if secret {
+			return nil, nil, fmt.Errorf("%s %s 非 JSON", method, path)
 		}
 		return nil, raw, fmt.Errorf("解析 %s %s 响应失败（非 JSON）: %s", method, path, snippet(raw))
 	}
@@ -192,11 +195,16 @@ func authRejectionError(m map[string]any, raw []byte, method, path string, secre
 	if !secret {
 		return fmt.Errorf("%w（%s %s）：%s", cause, method, path, upstreamMessage(m, raw))
 	}
-	if !IsAuthenticationFailure(cause) {
+	if !IsAuthenticationFailure(cause) && path == cookieSessionPath {
 		cause = errors.Join(cause, ErrCookieNeedsAction)
 	}
 	return fmt.Errorf("%s %s: %w", method, path, cause)
 }
+
+// cookieSessionPath 是唯一能代表"整份会话"的端点。其余端点的业务拒绝
+// （单把 Key 在列表与读明文之间被删、某接口被关）只算这一次请求失败，
+// 不能把整份 Cookie 标成需人工处理、连带停掉后续所有自动采集。
+const cookieSessionPath = "/api/user/self"
 
 // upstreamMessage 取上游自己给的失败说明。
 //
