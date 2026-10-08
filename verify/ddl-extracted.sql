@@ -1042,6 +1042,15 @@ CREATE TABLE collector_credentials (
     CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
+CREATE TABLE collector_cookie_credentials (
+    account_id BIGINT PRIMARY KEY REFERENCES upstream_accounts(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    cookie_ciphertext BYTEA NOT NULL,
+    state TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (state IN ('unverified', 'ready', 'expired', 'needs_action')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE collector_snapshots (
   id              UUID PRIMARY KEY,             -- UUIDv7
   channel_id      BIGINT NOT NULL REFERENCES channels(id),

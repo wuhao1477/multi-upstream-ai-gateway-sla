@@ -117,6 +117,8 @@ all-api-hub 格式依据固定提交 `949bd8e2ec8b15d16475617e5e4e6b8b4923d441`�
 - 首次 CI 文档门禁指出 `cookie_ciphertext` 在建表外没有规则引用；已在采集器文档补充管理保存/导入写入密文、采集/显式验证解密读取的规则。
 - CI 可达漏洞扫描检出 `GO-2026-6629`，经 pgx 调用到 `golang.org/x/text/secure/precis`。将 x/text 从 `v0.39.0` 升至最低修复版本 `v0.41.0`，并由其依赖要求将 x/sync 升至 `v0.22.0`；Go 版本及业务代码不变。
 - 依赖更新后，`go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...` 返回 `No vulnerabilities found.`；`go build ./...` 通过。独立真实 PG 下 `go test -race ./internal/store ./cmd/... -count=1 -json` 通过，store 69 项、无失败或跳过，cmd 包无测试文件；未重复整套功能或浏览器验收。
+- 后续 CI 文档规则和 DDL 真跑通过，生成文件同步检查发现缺少 Cookie 表；已同步 `verify/ddl-extracted.sql`，其 Git blob 为 `f5fc6d0290f407525c35dbff809fbe334f78f03d`，与 CI 生成结果一致，没有更改迁移。
+- 修正静态检查发现的错误文案格式，原站认证错误仍按已验证原文精确匹配，不扩大失效判断。临时下载并校验 CI 同版本 golangci-lint `v2.13.2`，关闭同类问题输出截断后全库结果为 `0 issues`；`go test -race ./internal/collector -run 'Cookie|Rejection|Rejected' -count=1 -v` 通过。工具仅存于临时目录，未改系统安装；Conda 相关本地限制不变，完整 CI 仍待最终提交验证。
 
 ## 以下为旧密码方案历史
 

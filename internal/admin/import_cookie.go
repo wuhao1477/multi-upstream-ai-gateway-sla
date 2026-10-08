@@ -24,7 +24,7 @@ func validateHubCookie(a collector.HubAccount, d collector.DetectResult, base st
 	}
 	id, err := strconv.ParseInt(a.UserID(), 10, 64)
 	if err != nil || id <= 0 {
-		return errors.New("Cookie 导入需要 account_info.id 中的有效上游用户 ID")
+		return errors.New("导入 Cookie 需要 account_info.id 中的有效上游用户 ID")
 	}
 	return nil
 }

@@ -73,7 +73,7 @@ func dialCookie(ctx context.Context, network, address string) (net.Conn, error) 
 		err = dialErr
 	}
 	if err == nil {
-		err = errors.New("Cookie 站点未解析到地址")
+		err = errors.New("未解析到 Cookie 站点地址")
 	}
 	return nil, err
 }
@@ -254,7 +254,7 @@ func (a *CookieAccess) sendOnce(req *http.Request, s collector.Session, explicit
 	if path == "/api/user/self" {
 		userID := req.Header.Get(s.UserIDHeader)
 		if !collector.CookieIdentityMatches(m, userID) {
-			return nil, cred, errors.Join(collector.ErrCookieNeedsAction, errors.New("Cookie 用户 ID 与登记账号不一致"))
+			return nil, cred, errors.Join(collector.ErrCookieNeedsAction, errors.New("登记账号与 Cookie 用户 ID 不一致"))
 		}
 		revision, err := a.confirmIdentity(req.Context(), cred, userID)
 		if err != nil {
@@ -361,7 +361,7 @@ func cookieNetworkError(err error) error {
 	if errors.As(err, &timeout) && timeout.Timeout() {
 		return context.DeadlineExceeded
 	}
-	return errors.New("Cookie 连接失败，请检查站点与网络")
+	return errors.New("无法连接 Cookie 站点，请检查站点与网络")
 }
 
 // Validate 只使用已存 Cookie，不能用有效令牌掩盖 Cookie 失效。

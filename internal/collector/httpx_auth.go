@@ -185,7 +185,8 @@ func authHTTPError(resp *http.Response, method, path string, raw []byte, secret 
 
 func authRejectionError(m map[string]any, raw []byte, method, path string, secret bool) error {
 	cause := ErrUpstreamRejected
-	if strings.TrimSpace(asString(m["message"])) == ErrInvalidAccessToken.Error() {
+	// 仅采用 api.lyjxka.top 2026-09-16 已实测的认证错误，不把任意 success:false 当作失效。
+	if strings.TrimSpace(asString(m["message"])) == "Unauthorized, invalid access token" {
 		cause = errors.Join(cause, ErrInvalidAccessToken)
 	}
 	if !secret {
@@ -212,11 +213,10 @@ func upstreamMessage(m map[string]any, raw []byte) string {
 	return snippet(raw)
 }
 
-// 仅采用 api.lyjxka.top 2026-09-16 已实测的认证错误，不把任意 success:false 当作失效。
-var ErrInvalidAccessToken = errors.New("Unauthorized, invalid access token")
-var ErrCookieUnavailable = errors.New("Cookie 未配置、已停用或部署密钥不可用")
-var ErrCookieExpired = errors.New("Cookie 已失效，请在原站登录后重新导入 Cookie")
-var ErrCookieNeedsAction = errors.New("Cookie 需要人工检查；不自动登录或处理额外验证")
+var ErrInvalidAccessToken = errors.New("collector: invalid access token")
+var ErrCookieUnavailable = errors.New("未配置 Cookie、已停用或部署密钥不可用")
+var ErrCookieExpired = errors.New("会话 Cookie 已失效，请在原站登录后重新导入 Cookie")
+var ErrCookieNeedsAction = errors.New("需要人工检查 Cookie；不自动登录或处理额外验证")
 var ErrCookieIdentityUnavailable = errors.New("无法从此 Cookie 自动识别用户 ID，请导入包含账号信息的 all-api-hub 完整备份")
 
 func IsAuthenticationFailure(err error) bool {

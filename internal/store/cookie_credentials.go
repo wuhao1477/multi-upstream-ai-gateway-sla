@@ -19,10 +19,10 @@ import (
 )
 
 var (
-	ErrCookieCredentialInput   = errors.New("Cookie 格式无效；首次保存必须提供 Cookie 请求头值，最大 16 KiB")
-	ErrCookieCredentialChanged = errors.New("Cookie 配置已变更，请重新验证")
-	ErrCookieSecret            = errors.New("Cookie 无法解密，请检查部署密钥或重新导入")
-	ErrCookieSite              = errors.New("Cookie 当前仅支持已登记的 NewAPI 公网 HTTPS 站点")
+	ErrCookieCredentialInput   = errors.New("无效的 Cookie 格式；首次保存必须提供 Cookie 请求头值，最大 16 KiB")
+	ErrCookieCredentialChanged = errors.New("已变更 Cookie 配置，请重新验证")
+	ErrCookieSecret            = errors.New("无法解密 Cookie，请检查部署密钥或重新导入")
+	ErrCookieSite              = errors.New("当前 Cookie 仅支持已登记的 NewAPI 公网 HTTPS 站点")
 )
 
 type SaveCookieCredentialInput struct {
