@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
@@ -370,6 +371,7 @@ func TestKeyImportRetryDelayClassifiesErrors(t *testing.T) {
 		{name: "网络超时值得等", err: timeoutErr{}, retry: true},
 		{name: "我们自己取消的不重试", err: context.Canceled, retry: false},
 		{name: "说不清的错不重试", err: errors.New("站型不支持自动读取 Key 明文"), retry: false},
+		{name: "渠道正被采集占用值得等", err: collection.ErrChannelReadBusy, retry: true},
 		// 上游明说拒绝（HTTP 200 + success:false，如"令牌失效"）——
 		// 换个时间再打还是同一句话，重试只是拿同一把废令牌再敲一次别人家的门。
 		{name: "上游明说拒绝不重试",

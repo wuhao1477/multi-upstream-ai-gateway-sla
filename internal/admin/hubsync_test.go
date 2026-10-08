@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
@@ -76,5 +79,87 @@ func TestHubSyncViewHidesSecrets(t *testing.T) {
 	empty := hubSyncViewOf(store.HubSyncConfig{})
 	if empty.HasWebDAVPassword || empty.HasBackupPassword {
 		t.Fatal("没密码却报成有 —— 界面会显示「已配置」而其实是空的")
+	}
+}
+
+// 保留名单只看"备份里有没有"，不看本轮处理成败：探测超时、落库失败的站
+// 仍在备份里，按结果筛会把它判成"已移除"然后停掉。
+func TestKeepBaseURLsIgnoresOutcome(t *testing.T) {
+	got := keepBaseURLs(&collector.HubImportResult{Items: []collector.HubImportItem{
+		{SiteURL: "https://a.example/", Status: "skipped"},
+		{SiteURL: "https://b.example", Status: "failed"},
+		{SiteURL: "", Status: "skipped"},
+	}})
+	if strings.Join(got, ",") != "https://a.example,https://b.example" {
+		t.Fatalf("保留名单 = %v", got)
+	}
+}
+
+// 「备份里已移除即停用」只挂在 WebDAV 同步上（disableHubRemoved）：手工上传
+// 走同一个 ImportHub，而上传的文件可能只是一部分，它不能停任何渠道。
+// 探测失败是受控输入（真站点不会按需失败），只验停用的接线，不举证上游协议。
+func TestHubRemovalOnlyOnWebDAVSync(t *testing.T) {
+	const listed = "https://hub-removal-listed.example.invalid"
+	const other = "https://hub-removal-other.example.invalid"
+	s, conn, ctx := cookieImportDB(t, other)
+	wipe(ctx, t, conn, listed)
+	t.Cleanup(func() { wipe(ctx, t, conn, listed) })
+	// 下面的停用是**全库**的（DisableHubRemovedChannels 按 source='hub' 整表 UPDATE）。
+	// 库里还有别的启用中的 hub 渠道，说明这不是一次性测试库 —— 拒绝跑，别把真台账停掉。
+	var others int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM channels WHERE source='hub' AND status='enabled'`).Scan(&others); err != nil {
+		t.Fatal(err)
+	}
+	if others > 0 {
+		t.Fatalf("库里已有 %d 个启用中的 hub 渠道；本测试会把它们全部停用，只能在一次性测试库上跑", others)
+	}
+	id, err := store.CreateChannel(ctx, conn, store.Channel{
+		Name: "hub-removal-other", BaseURL: other, SiteFamily: "newapi", Source: "hub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := store.NewPool(ctx, testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s.DB = pool
+	s.Detect = func(context.Context, string) (collector.DetectResult, error) {
+		return collector.DetectResult{}, errors.New("探测失败（受控输入）")
+	}
+	var backup collector.HubBackup
+	backup.Accounts.Accounts = []collector.HubAccount{{SiteURL: listed}}
+	status := func() string {
+		var st string
+		if err := conn.QueryRow(ctx, `SELECT status FROM channels WHERE id=$1`, id).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	reported := func(res *collector.HubImportResult) bool {
+		for _, it := range res.Items {
+			if it.Status == "removed" && it.ChannelID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	res, err := s.ImportHub(ctx, &backup, false)
+	if err != nil || reported(res) || status() != "enabled" {
+		t.Fatalf("手工导入不应停用或报出备份外的渠道: err=%v status=%s", err, status())
+	}
+	s.disableHubRemoved(ctx, res, true)
+	if !reported(res) || status() != "enabled" {
+		t.Fatalf("WebDAV 预览应报出备份外的 hub 渠道且不改它: status=%s", status())
+	}
+	res, err = s.ImportHub(ctx, &backup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.disableHubRemoved(ctx, res, false)
+	if !reported(res) || status() != "disabled" {
+		t.Fatalf("WebDAV 同步应停用备份外的 hub 渠道: status=%s", status())
 	}
 }

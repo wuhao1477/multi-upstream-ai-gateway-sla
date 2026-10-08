@@ -237,9 +237,12 @@ type Account struct {
 	//
 	// ⚠️ 只带**存在性与形态**，绝不带 access_token/refresh_token
 	// （FR-094 同源纪律：凭证内容一律不回显，见 saveCredential 的注释）。
-	CredType      string     `json:"cred_type,omitempty"`
-	CredStatus    string     `json:"cred_status,omitempty"`
-	CredExpiresAt *time.Time `json:"cred_expires_at,omitempty"`
+	CredType         string     `json:"cred_type,omitempty"`
+	CredStatus       string     `json:"cred_status,omitempty"`
+	CredExpiresAt    *time.Time `json:"cred_expires_at,omitempty"`
+	CookieEnabled    bool       `json:"cookie_enabled"`
+	CookieConfigured bool       `json:"cookie_configured"`
+	CookieState      string     `json:"cookie_state,omitempty"`
 }
 
 // CreateAccount 登记账号。
@@ -272,7 +275,8 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
        a.status, COALESCE(a.disabled_reason,''), a.disabled_until, a.created_at,
        b.last_confirmed_balance, COALESCE(b.balance_state,''), b.confirmed_at,
        k.total, k.active,
-       COALESCE(cc.cred_type,''), COALESCE(cc.status,''), cc.token_expires_at
+       COALESCE(cc.cred_type,''), COALESCE(cc.status,''), cc.token_expires_at,
+       COALESCE(bc.enabled,false), bc.account_id IS NOT NULL, COALESCE(bc.state,'')
   FROM upstream_accounts a
   LEFT JOIN LATERAL (
     SELECT last_confirmed_balance, balance_state, confirmed_at
@@ -291,6 +295,7 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
   -- 一个账号最多配出一行，不会放大结果集。上面两个之所以用 LATERAL，
   -- 是因为那两张表一个账号有多行、要挑一行/聚一次。
   LEFT JOIN collector_credentials cc ON cc.account_id = a.id
+  LEFT JOIN collector_cookie_credentials bc ON bc.account_id = a.id
  WHERE ($1 <= 0 OR a.channel_id = $1) ORDER BY a.id`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("列账号: %w", err)
@@ -304,7 +309,8 @@ SELECT a.id, a.channel_id, COALESCE(a.external_user_id,''),
 			&a.DisabledUntil, &a.CreatedAt,
 			&a.BalanceUSD, &a.BalanceState, &a.BalanceConfirmedAt,
 			&a.KeysTotal, &a.KeysActive,
-			&a.CredType, &a.CredStatus, &a.CredExpiresAt); err != nil {
+			&a.CredType, &a.CredStatus, &a.CredExpiresAt,
+			&a.CookieEnabled, &a.CookieConfigured, &a.CookieState); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

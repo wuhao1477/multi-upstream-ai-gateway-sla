@@ -2672,7 +2672,6 @@ try {
   // 挑主机名第一段：它不在渠道名里、不在 Key 前缀里、也不在账号字段里 ——
   // 正是"只有搜到渠道身上才找得到"的那种词。
   if (UP2.url !== '') {
-    const term = new URL(UP2.url).hostname.split('.')[0].toLowerCase();
     // 自带一个取数助手：上面那个 api() 定义在跨渠道目录那一段的作用域里。
     const get = path => page.evaluate(async p => {
       const t = localStorage.getItem('adminToken');
@@ -2680,6 +2679,14 @@ try {
       return r.json();
     }, path);
     const chans = (await get('/admin/channels')).items ?? [];
+    // 挑主机名里**只属于第二个站**的那一段（去掉顶级域，按原顺序优先第一段）。
+    // 只取第一段不够：2026-10-09 选中的两站主机名都以 api 开头（形如 api2.<站A> 与
+    // api.<站B>），"api" 两个渠道都命中，下面"真收窄"的前提不成立 —— 搜索本身是对的，
+    // 红的是选词。（真实站点地址不进公开仓库，见 verify/test-public-safety.sh。）
+    const host = new URL(UP2.url).hostname.toLowerCase();
+    const otherURLs = chans.map(c => c.base_url.toLowerCase()).filter(u => !u.includes(host));
+    const term = host.split('.').slice(0, -1)
+      .find(s => s.length >= 3 && !otherURLs.some(u => u.includes(s))) ?? host.split('.')[0];
     const accts = (await get('/admin/accounts')).items ?? [];
     const keys = (await get('/admin/keys')).items ?? [];
     const hitCh = chans.filter(c => c.base_url.toLowerCase().includes(term)).map(c => c.id);

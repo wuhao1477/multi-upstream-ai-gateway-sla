@@ -80,6 +80,13 @@ func run(dsn string, once bool, logger *slog.Logger) error {
 	}
 	httpClient := collector.NewClient(time.Duration(requestInterval) * time.Millisecond)
 	httpClient.WaitHost = store.NewHostRequestLimiter(pool).Wait
+	cookies, err := store.NewCookieCredentialStore(os.Getenv("SLA_COOKIE_SECRET_KEY"))
+	if err != nil {
+		logger.Warn("Cookie 配置不可用；原令牌采集不受影响", "reason", err.Error())
+	}
+	if cookies != nil {
+		collection.NewCookieAccess(pool, cookies, httpClient)
+	}
 	runner := collection.NewRunner(pool, httpClient)
 	service := collection.NewService(pool, runner, collection.NewSchedule(periods), logger)
 

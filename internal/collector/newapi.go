@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -46,15 +47,31 @@ func (a *NewAPIAdapter) Detect(ctx context.Context, baseURL string) (DetectResul
 // ⚠️ 不变式 N-1：**运行时不调用 /api/user/token**（它是"重新生成"，
 // 会作废正在使用的令牌）。令牌由运维一次性登记，本方法只验证与试探。
 func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Session, error) {
-	if cred.AccessToken == "" {
+	if cred.ExternalUserID == "" && !cred.CookieEnabled {
 		return Session{}, fmt.Errorf(
-			"NewAPI 需要预先登记的系统访问令牌（不变式 N-1：运行时不可生成）")
+			"NewAPI 令牌采集需要上游用户 ID（external_user_id）；Cookie 可在验证时自动识别")
 	}
-	if cred.ExternalUserID == "" {
-		return Session{}, fmt.Errorf(
-			"NewAPI 需要 external_user_id（用户 ID 头的值），否则必然 401")
+	if cred.AccessToken != "" && cred.ExternalUserID != "" {
+		s, authFailed, err := a.authenticateToken(ctx, cred)
+		if err == nil || !cred.CookieEnabled || !authFailed {
+			return s, err
+		}
 	}
+	if !cred.CookieEnabled {
+		return Session{}, fmt.Errorf("NewAPI 需要预先登记的系统访问令牌或 Cookie（运行时不可生成）")
+	}
+	s := SessionFrom(cred, cred.BaseURL, cred.QuotaPerUnit)
+	s.Family, s.Token = FamilyNewAPI, ""
+	if s.UserIDHeader == "" {
+		s.UserIDHeader = newAPIUserIDHeaders[0]
+	}
+	_, _, err := a.C.getJSONAuth(ctx, s, CookieSessionPath)
+	s.ExternalUserID = cmp.Or(s.ExternalUserID, s.CookieState.ExternalUserID)
+	s.UserIDHeader = cmp.Or(s.CookieState.UserIDHeader, s.UserIDHeader)
+	return s, err
+}
 
+func (a *NewAPIAdapter) authenticateToken(ctx context.Context, cred Credential) (Session, bool, error) {
 	// 已知头名则直接用，避免每次鉴权都 fan-out（每次试探都是真实请求，
 	// 打七次会无谓消耗限速预算并增加风控暴露）。
 	candidates := NewAPIUserIDHeaderCandidates()
@@ -68,15 +85,14 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 	// 问题根本不在头名上 —— 见下面收尾处的判定。
 	var rejected error
 	rejectedAll := true
+	authFailed := true
 	for _, hdr := range candidates {
-		s := Session{
-			ChannelID: cred.ChannelID, Family: FamilyNewAPI,
-			BaseURL: cred.BaseURL, Token: cred.AccessToken,
-			UserIDHeader: hdr, ExternalUserID: cred.ExternalUserID,
-		}
+		s := SessionFrom(cred, cred.BaseURL, cred.QuotaPerUnit)
+		s.Family, s.UserIDHeader, s.CookieAllowed = FamilyNewAPI, hdr, false
 		m, _, err := a.C.getJSONAuth(ctx, s, "/api/user/self")
 		if err != nil {
 			lastErr = err
+			authFailed = authFailed && IsAuthenticationFailure(err)
 			if errors.Is(err, ErrUpstreamRejected) {
 				if rejected == nil {
 					rejected = err
@@ -87,6 +103,7 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 			continue
 		}
 		rejectedAll = false
+		authFailed = false
 		// 命中判据：能取到 data 且里面有 quota 类字段
 		d := unwrapData(m)
 		if _, ok := d["quota"]; !ok {
@@ -95,8 +112,8 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 				continue
 			}
 		}
-		s.QuotaPerUnit = cred.QuotaPerUnit
-		return s, nil
+		s.CookieAllowed = cred.CookieEnabled
+		return s, false, nil
 	}
 	// 每个候选都被上游用同一套话术拒了 ⇒ **不是头名的问题**，别再让运维往那个
 	// 方向查。2026-09-16 实测 api.lyjxka.top：令牌失效时七个头名齐刷刷回
@@ -104,11 +121,11 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 	// 而旧文案报的是"七个用户 ID 头名全部试探失败"+"头名 neo-api-user 通过但
 	// 响应无预期字段" —— 两句都把矛头指向头名，而上游那句现成的答案被丢掉了。
 	if rejectedAll && rejected != nil {
-		return Session{}, fmt.Errorf(
+		return Session{}, authFailed, fmt.Errorf(
 			"上游拒绝了这把采集凭证（换用户 ID 头名无济于事，七个候选拿到的是同一句话）: %w",
 			rejected)
 	}
-	return Session{}, fmt.Errorf(
+	return Session{}, authFailed, fmt.Errorf(
 		"七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: %w", lastErr)
 }
 

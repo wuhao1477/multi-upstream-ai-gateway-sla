@@ -24,37 +24,11 @@ type Runner struct {
 	LoadCredentials func(context.Context, store.Channel) ([]collector.Credential, error)
 }
 
-// NewRunner builds a production Runner backed by PostgreSQL.
-func NewRunner(pool *store.Pool, client *collector.Client) *Runner {
-	credentials := store.NewCredentialStore(pool)
-	return &Runner{
-		Client: client,
-		Sink:   store.NewCollectorSink(pool),
-		Auth:   collector.NewAuthenticator(credentials),
-		Logger: slog.Default(),
-		LoadCredentials: func(ctx context.Context, ch store.Channel) ([]collector.Credential, error) {
-			conn, release, err := pool.Acquire(ctx)
-			if err != nil {
-				return nil, err
-			}
-			defer release()
-			creds, err := credentials.ListByChannel(ctx, conn, ch)
-			if err != nil {
-				return nil, err
-			}
-			quotaPerUnit := store.QuotaPerUnit(ctx, conn, ch.ID)
-			for i := range creds {
-				creds[i].QuotaPerUnit = quotaPerUnit
-			}
-			return creds, nil
-		},
-	}
-}
-
 // Sync runs all capabilities when capabilities is empty, otherwise only the selected set.
 func (r *Runner) Sync(
 	ctx context.Context, ch store.Channel, capabilities []collector.Capability,
 ) (*collector.SyncResult, error) {
+	// 不在这里加超时：周期采集由 Service 给（service.go），手动同步由管理端给 5 分钟。
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return nil, err
@@ -102,6 +76,13 @@ func (r *Runner) ImportKeys(
 	if len(creds) == 0 {
 		return result, fmt.Errorf("%w：没有可用采集凭证", collector.ErrPrecondition)
 	}
+	ctx, cancel := context.WithTimeout(ctx, defaultChannelSyncTimeout)
+	defer cancel()
+	unlock, err := lockChannelRead(ctx, conn, ch.ID)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return result, err
@@ -148,7 +129,14 @@ func (r *Runner) ProvisionKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, cred collector.Credential,
 	request collector.KeyProvisionRequest,
 ) (collector.KeyProvisionResult, error) {
+	cred.CookieEnabled = false
 	var result collector.KeyProvisionResult
+	// 远端创建 Key 是写操作，只用访问令牌。Cookie-only 账号在这里先说清楚 ——
+	// 否则 Authenticate 报的是"需要令牌或 Cookie"，而它明明登记了 Cookie。
+	if cred.AccessToken == "" {
+		return result, fmt.Errorf("%w：账号 %d 没有访问令牌；远端创建 Key 只用令牌，Cookie 不用于写操作",
+			collector.ErrPrecondition, cred.AccountID)
+	}
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return result, err
@@ -287,6 +275,11 @@ func (r *Runner) importFetchedKeys(
 			continue
 		}
 		existing[key.KeyRef] = keyID
+		if err := updateImportedKey(ctx, conn, ch.ID, keyID, key); err != nil {
+			r.logKeyImportFailure(ch, cred.AccountID, "update_created", key.KeyRef, err)
+			result.Failed++
+			continue
+		}
 		result.Imported++
 	}
 	return result, nil

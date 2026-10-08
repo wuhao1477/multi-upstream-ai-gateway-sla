@@ -992,7 +992,7 @@ func TestRateLimitTableDoesNotGrowUnbounded(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 50; i++ {
-		if err := c.wait(ctx, fmt.Sprintf("host-%d.example", i)); err != nil {
+		if err := c.Wait(ctx, fmt.Sprintf("host-%d.example", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1005,7 +1005,7 @@ func TestRateLimitTableDoesNotGrowUnbounded(t *testing.T) {
 	}
 
 	time.Sleep(interval + 10*time.Millisecond) // 让上面那批全部过期
-	if err := c.wait(ctx, "trigger.example"); err != nil {
+	if err := c.Wait(ctx, "trigger.example"); err != nil {
 		t.Fatal(err)
 	}
 	c.mu.Lock()

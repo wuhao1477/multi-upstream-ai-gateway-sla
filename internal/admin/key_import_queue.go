@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collection"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
@@ -231,6 +232,10 @@ func keyImportRetryDelay(err error, attempts int) (time.Duration, bool) {
 	}
 	if backoff > keyImportRetryCap {
 		backoff = keyImportRetryCap
+	}
+	// 渠道锁被周期采集占着：采完自然释放，属于暂时性。
+	if errors.Is(err, collection.ErrChannelReadBusy) {
+		return backoff, true
 	}
 	if status, retryAfter, ok := collector.HTTPFailure(err); ok {
 		switch {

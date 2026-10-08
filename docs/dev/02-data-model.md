@@ -2939,6 +2939,20 @@ CREATE TABLE collector_credentials (
     CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
+-- Issue #26：033 删除 032 的密码表/触发器，改用用户已登录的 Cookie。
+-- 不接收上游登录用户名、密码或 2FA 密钥；原令牌表不变。
+CREATE TABLE collector_cookie_credentials (
+    account_id BIGINT PRIMARY KEY REFERENCES upstream_accounts(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    cookie_ciphertext BYTEA NOT NULL,
+    state TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (state IN ('unverified', 'ready', 'expired', 'needs_action')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+-- AES-256-GCM 的 AAD 绑定本地账号、精确 HTTPS origin 和 cookie 用途。
+-- 033 触发器：地址/站型变化删除 Cookie；渠道/账号停启、用户 ID 变化更新修订。
+-- 内容与 enabled 均未变化时不改修订或失效状态；状态写回匹配修订且仍启用。
+
 -- 采集快照（FR-011/020/116；ISSUE-002 §5 降级一致性）：每次采集一行，标来源+时效
 CREATE TABLE collector_snapshots (
   id              UUID PRIMARY KEY,             -- UUIDv7

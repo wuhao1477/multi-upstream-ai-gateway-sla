@@ -401,6 +401,17 @@ echo "── 8/8 渠道与导入写路径的真库 Go 测试 ──"
 # 假绿，而它恰恰**不会**被退出码抓到。列表 + 计数各管一头：列表管"别牵连无关测试"，
 # 计数管"列表本身别写错"。
 TESTS=(
+  TestCookieCredentialsRequireAdmin
+  TestCookieCredentialsRejectUnconfiguredEncryption
+  TestCookieCredentialAPI
+  TestCookieValidationRoute
+  TestCookieCollectabilityDoesNotOverrideValidToken
+  TestImportCookieLifecycle
+  TestImportCookieFailureIsAtomic
+  TestImportCookieAccountIsolationAndDisable
+  TestImportCookieRepairAndPreview
+  TestImportCookieDryRunDoesNotWriteOrReadKeys
+  TestHubRemovalOnlyOnWebDAVSync
   TestImportRollsBackOnCredentialFailure
   TestImportRepairsIncompleteChannel
   TestImportRepairAddsSnapshotAndKeepsWarning
@@ -449,6 +460,13 @@ echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 0
 echo "   ✅ 编辑：账号字段可清空 / Key 可解除分组"
 
 STORE_TESTS=(
+  TestCookieSchemaReplacesPasswords
+  TestCookieOnlyCredentialIsCollectable
+  TestCookieHeaderValidation
+  TestCookieCredentialLifecycle
+  TestCookieRevisionAndDisable
+  TestCookieCredentialsInvalidatedWithAccountOrSite
+  TestCookieCipherRejectsTamperingAndCrossAccount
   TestHostRequestLimiterSerializesIndependentInstances
   TestHostRequestLimiterDoesNotBlockDifferentHosts
   TestHostRequestLimiterHonorsCancellation
@@ -496,6 +514,9 @@ echo "   ✅ 分组：降级响应缺少模型字段时保留旧模型清单"
 echo "   ✅ 凭证：跨实例共享 refresh_lock_key 且只刷新一次"
 echo "   ✅ host 限速：跨进程串行 / 不同 host 互不阻塞 / 取消即退出"
 echo "   ✅ 连接池：4 条时并发采集会互等到超时，MinPoolConns 条够用"
+
+# Cookie 读取边界使用同一真 PG；上游响应仅作为按需错误输入，不代替真实站点验收。
+SLA_TEST_DSN="$DSN" go test -race ./internal/collection -run '^TestCookie' -count=1
 
 echo
 echo "✅ 迁移集成测试全部通过"

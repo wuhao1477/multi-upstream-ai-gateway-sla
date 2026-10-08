@@ -15,6 +15,7 @@ name: sla-ai-gateway
 # 并用 extra_hosts 把它映射到 host-gateway（Linux 上没有这行就解析不到）。
 x-core-env: &core-env
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 必须设置——数据库没有安全默认值}
+  SLA_COOKIE_SECRET_KEY: ${SLA_COOKIE_SECRET_KEY:-}
 
 services:
   sla-core:

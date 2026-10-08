@@ -29,6 +29,8 @@ function account(over: Partial<Account>): Account {
     created_at: '',
     keys_total: 1,
     keys_active: 1,
+    cookie_enabled: false,
+    cookie_configured: false,
     // 这一段测的是配额显示，与采集能力无关；给个就绪值占位即可。
     collect: { mode: 'auto', reason: '' },
     ...over,

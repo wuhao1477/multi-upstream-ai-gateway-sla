@@ -123,7 +123,37 @@ func (s *Server) runHubSyncOnce(
 		return nil, err
 	}
 	dryRun := !forceImport && cfg.ApplyMode != store.HubSyncModeImport
-	return s.ImportHub(ctx, backup, dryRun)
+	res, err := s.ImportHub(ctx, backup, dryRun)
+	if err == nil {
+		s.disableHubRemoved(ctx, res, dryRun)
+	}
+	return res, err
+}
+
+// disableHubRemoved 停用"本地还在、备份里已经没有"的 hub 渠道；dry_run 只报不改。
+//
+// 只挂在 WebDAV 同步上：那份备份由扩展维护、是全量；手工上传的文件可能只是
+// 一部分，拿它判"已移除"会把其余渠道全停掉。
+func (s *Server) disableHubRemoved(ctx context.Context, res *collector.HubImportResult, dryRun bool) {
+	conn, release, err := s.DB.Acquire(ctx)
+	if err != nil {
+		s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
+		return
+	}
+	defer release()
+	keep := keepBaseURLs(res)
+	var gone []store.Channel
+	if dryRun {
+		gone, err = store.HubRemovedChannels(ctx, conn, keep)
+	} else {
+		gone, err = store.DisableHubRemovedChannels(ctx, conn, keep,
+			"all-api-hub 备份里已移除（定时同步自动停用，可手动重新启用）")
+	}
+	if err != nil {
+		s.Logger.Warn("停用备份里已移除的渠道失败", "err", err)
+		return
+	}
+	appendRemovedItems(res, gone)
 }
 
 // StartHubSync 起定时同步循环，直到 ctx 结束。
@@ -156,6 +186,11 @@ func (s *Server) hubSyncTickOnce(ctx context.Context) {
 	if !hubSyncDue(cfg, time.Now()) {
 		return
 	}
+	// 与手动触发共用进程内标记：界面才看得到"在跑"，手动点击拿到 409 而不是空跑。
+	if !s.hubSyncBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.hubSyncBusy.Store(false)
 
 	locked, unlock, err := s.tryHubSyncLock(ctx)
 	if err != nil || !locked {
@@ -462,22 +497,26 @@ func (s *Server) runHubSyncNow(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusConflict, "已有一轮 all-api-hub 同步在执行，等它跑完再点")
 		return
 	}
+	// 跨实例互斥仍走 advisory 锁 —— 上面那个布尔只管得住本进程。
+	// **在请求里同步取**：拿不到就当场 409。放进 goroutine 的话，先回 202、
+	// 再在后台静默跳过，界面轮询到"不在跑"后读到的是上一轮的历史。
+	// 取锁用请求的 ctx（连接池耗尽时随请求取消，不让 handler 无限挂着）；
+	// 锁绑在连接上、unlock 用 WithoutCancel，所以请求结束不影响后台那一轮。
+	locked, unlock, err := s.tryHubSyncLock(r.Context())
+	if err != nil || !locked {
+		s.hubSyncBusy.Store(false)
+		if err != nil {
+			s.fail(w, http.StatusServiceUnavailable, "取 all-api-hub 同步锁失败: "+err.Error())
+			return
+		}
+		s.fail(w, http.StatusConflict, "另一实例正在跑 all-api-hub 同步，等它跑完再点")
+		return
+	}
 	go func() {
 		defer s.hubSyncBusy.Store(false)
-		// 后台 ctx：这一轮要活得比触发它的请求久（见上面第 1 条）。
-		ctx := s.backgroundCtx()
-		// 跨实例互斥仍走 advisory 锁 —— 上面那个布尔只管得住本进程。
-		locked, unlock, err := s.tryHubSyncLock(ctx)
-		if err != nil {
-			s.Logger.Warn("取 all-api-hub 同步锁失败", "err", err)
-			return
-		}
-		if !locked {
-			s.Logger.Info("另一实例正在跑 all-api-hub 同步，本次跳过")
-			return
-		}
 		defer unlock()
-		if _, err := s.RunHubSync(ctx, store.HubSyncTriggerManual, apply); err != nil {
+		// 后台 ctx：这一轮要活得比触发它的请求久（见上面第 1 条）。
+		if _, err := s.RunHubSync(s.backgroundCtx(), store.HubSyncTriggerManual, apply); err != nil {
 			// 失败照样进了 hub_sync_runs（RunHubSync 成败都记），界面从那儿读。
 			s.Logger.Warn("all-api-hub 手动同步失败", "err", err)
 		}

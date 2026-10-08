@@ -133,6 +133,8 @@ type Credential struct {
 	CredType     string
 	AccessToken  string
 	RefreshToken string
+	// CookieEnabled 仅允许已有会话读取，不携带 Cookie 明文。
+	CookieEnabled bool
 	// ExternalUserID 是 NewAPI 的数字用户 ID（New-API-User 头必需）。
 	ExternalUserID string
 	// UserIDHeaderName 是二开 fan-out 命中的头名（04 §3.1）。
@@ -149,6 +151,7 @@ type Credential struct {
 
 // Session 是鉴权后的会话句柄。
 type Session struct {
+	AccountID int64
 	ChannelID int64
 	Family    Family
 	BaseURL   string
@@ -161,7 +164,18 @@ type Session struct {
 	// ExpiresAt 令牌到期时刻；到期前阈值内须续期（04 §5）。
 	ExpiresAt time.Time
 	// QuotaPerUnit 见 DetectResult。
-	QuotaPerUnit float64
+	QuotaPerUnit  float64
+	CookieAllowed bool
+	CookieState   *CookieSession
+}
+
+// CookieSession 是单次采集内的非秘密状态；会话副本共享一次切换和身份验证结果。
+// ponytail: 当前账号读取串行执行；并行化读取时再增加同步保护。
+type CookieSession struct {
+	Active         bool
+	Revision       time.Time
+	ExternalUserID string
+	UserIDHeader   string
 }
 
 // Account 是账号级数据（FR-020/024/026）。

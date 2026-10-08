@@ -304,6 +304,23 @@ export function saveCredential(input: SaveCredentialInput): Promise<unknown> {
   return api<unknown>('/admin/collector/credentials', { method: 'POST', body: input })
 }
 
+export interface SaveCookieCredentialInput {
+  enabled: boolean
+  cookie_header?: string
+}
+
+export function saveCookieCredential(id: number, input: SaveCookieCredentialInput): Promise<{ stored: boolean; changed: boolean }> {
+  return api<{ stored: boolean; changed: boolean }>(`/admin/accounts/${id}/cookie-credentials`, { method: 'PUT', body: input })
+}
+
+export function clearCookieCredential(id: number): Promise<{ cleared: boolean }> {
+  return api<{ cleared: boolean }>(`/admin/accounts/${id}/cookie-credentials`, { method: 'DELETE' })
+}
+
+export function validateCookieCredential(id: number): Promise<{ state: 'ready' }> {
+  return api<{ state: 'ready' }>(`/admin/accounts/${id}/cookie-credentials/validate`, { method: 'POST' })
+}
+
 // 这里原来还有一个 listCredentials()：凭证并进账号页后没有调用方了 ——
 // 凭证跟着 listAccounts 的行回来（UNIQUE(account_id)）。
 // 服务端 GET /admin/collector/credentials 仍在（09 §，供脚本用），只是界面不走它。

@@ -159,6 +159,14 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	srv := admin.NewServer(pool, adminToken, logger, rebuild)
 	srv.ReadOnly = readOnly
 	srv.Version = version
+	srv.CookieCredentials, err = store.NewCookieCredentialStore(os.Getenv("SLA_COOKIE_SECRET_KEY"))
+	if err != nil {
+		logger.Warn("Cookie 配置不可用；原令牌采集不受影响", "reason", err.Error())
+	}
+	if !readOnly && srv.CookieCredentials != nil {
+		access := collection.NewCookieAccess(pool, srv.CookieCredentials, hc)
+		srv.ValidateCookie = access.Validate
+	}
 	srv.Snapshot = func() *config.Snapshot { return snap.Load() }
 	srv.Detect = func(ctx context.Context, baseURL string) (collector.DetectResult, error) {
 		return collector.Detect(ctx, hc, baseURL)
@@ -174,7 +182,7 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 		if err != nil {
 			return store.Channel{}, collector.Credential{}, err
 		}
-		creds, err := credStore.ListByChannel(ctx, conn, ch)
+		creds, err := runner.LoadCredentials(ctx, ch)
 		if err != nil {
 			return store.Channel{}, collector.Credential{}, err
 		}
@@ -182,7 +190,6 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 			if cred.AccountID != accountID {
 				continue
 			}
-			cred.QuotaPerUnit = store.QuotaPerUnit(ctx, conn, channelID)
 			return ch, cred, nil
 		}
 		return store.Channel{}, collector.Credential{}, fmt.Errorf("账号 %d 没有可用采集凭证", accountID)
