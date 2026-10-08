@@ -304,18 +304,21 @@ export function saveCredential(input: SaveCredentialInput): Promise<unknown> {
   return api<unknown>('/admin/collector/credentials', { method: 'POST', body: input })
 }
 
-export interface SaveBrowserCredentialInput {
+export interface SaveCookieCredentialInput {
   enabled: boolean
-  username: string
-  password?: string
+  cookie_header?: string
 }
 
-export function saveBrowserCredential(id: number, input: SaveBrowserCredentialInput): Promise<{ stored: boolean }> {
-  return api<{ stored: boolean }>(`/admin/accounts/${id}/browser-credentials`, { method: 'PUT', body: input })
+export function saveCookieCredential(id: number, input: SaveCookieCredentialInput): Promise<{ stored: boolean; changed: boolean }> {
+  return api<{ stored: boolean; changed: boolean }>(`/admin/accounts/${id}/cookie-credentials`, { method: 'PUT', body: input })
 }
 
-export function clearBrowserCredential(id: number): Promise<{ cleared: boolean }> {
-  return api<{ cleared: boolean }>(`/admin/accounts/${id}/browser-credentials`, { method: 'DELETE' })
+export function clearCookieCredential(id: number): Promise<{ cleared: boolean }> {
+  return api<{ cleared: boolean }>(`/admin/accounts/${id}/cookie-credentials`, { method: 'DELETE' })
+}
+
+export function validateCookieCredential(id: number): Promise<{ state: 'ready' }> {
+  return api<{ state: 'ready' }>(`/admin/accounts/${id}/cookie-credentials/validate`, { method: 'POST' })
 }
 
 // 这里原来还有一个 listCredentials()：凭证并进账号页后没有调用方了 ——

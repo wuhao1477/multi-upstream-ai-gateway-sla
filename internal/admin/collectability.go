@@ -137,7 +137,7 @@ func channelCollect(ch store.Channel, noShield *bool, accounts []store.Account) 
 			continue
 		}
 		c.Total++
-		if a.CredType != "" && a.CredStatus == "valid" {
+		if accountCollect(ch, nil, a).Mode == CollectAuto {
 			c.Ready++
 		}
 	}
@@ -180,6 +180,20 @@ func accountCollect(ch store.Channel, noShield *bool, a store.Account) Collect {
 	case a.Status != "active":
 		c.Mode, c.Blocker = CollectManual, BlockAccountDisabled
 		c.Reason = "账号已停用，采集会跳过它"
+	case a.CredType != "" && a.CredStatus == "valid":
+		c.Mode, c.Reason = CollectAuto, "站型已识别、令牌有效 —— 可全自动采集"
+	case ch.SiteFamily == "newapi" && a.CookieConfigured && a.CookieEnabled:
+		c.Mode, c.Blocker = CollectManual, BlockCredentialInvalid
+		switch a.CookieState {
+		case "ready":
+			c.Mode, c.Blocker, c.Reason = CollectAuto, "", "Cookie 已验证，可自动读取"
+		case "expired":
+			c.Reason = "Cookie 已失效，请在原站登录后重新导入 Cookie"
+		case "needs_action":
+			c.Reason = "Cookie 需要人工处理，请检查原站会话和登记的上游用户 ID"
+		default:
+			c.Reason = "Cookie 尚未验证，请点击验证 Cookie"
+		}
 	case a.CredType == "":
 		c.Mode, c.Blocker = CollectManual, BlockNoCredential
 		c.Reason = "没有登记采集凭证，登记后即可自动采集（04 §5 按站型给不同字段）"

@@ -132,14 +132,16 @@ func (s *CredentialStore) ListByChannel(
 	ctx context.Context, db DBTX, ch Channel,
 ) ([]collector.Credential, error) {
 	rows, err := db.Query(ctx, `
-SELECT c.account_id, c.site_family, c.cred_type, c.access_token, c.refresh_token,
-       c.external_user_id, c.user_id_header_name, c.token_expires_at, c.refresh_lock_key,
-       c.channel_id, ch.base_url
-  FROM collector_credentials AS c
-  JOIN upstream_accounts AS a ON a.id = c.account_id
-  JOIN channels AS ch ON ch.id = c.channel_id
- WHERE c.channel_id=$1 AND c.status='valid' AND a.status='active'
- ORDER BY c.account_id`, ch.ID)
+SELECT a.id, ch.site_family, COALESCE(c.cred_type,''), c.access_token, c.refresh_token,
+       COALESCE(NULLIF(a.external_user_id,''),c.external_user_id), c.user_id_header_name,
+       c.token_expires_at, c.refresh_lock_key, a.channel_id, ch.base_url,
+       COALESCE(b.enabled,false)
+  FROM upstream_accounts a JOIN channels ch ON ch.id=a.channel_id
+  LEFT JOIN collector_credentials c ON c.account_id=a.id AND c.channel_id=a.channel_id AND c.status='valid'
+  LEFT JOIN collector_cookie_credentials b ON b.account_id=a.id AND b.enabled
+       AND ch.site_family='newapi' AND ch.status='enabled'
+ WHERE a.channel_id=$1 AND a.status='active' AND (c.account_id IS NOT NULL OR b.account_id IS NOT NULL)
+ ORDER BY a.id`, ch.ID)
 	if err != nil {
 		return nil, fmt.Errorf("列渠道 %d 凭证: %w", ch.ID, err)
 	}
@@ -169,7 +171,7 @@ func (s *CredentialStore) loadByAccount(
 	query := `
 SELECT c.account_id, c.site_family, c.cred_type, c.access_token, c.refresh_token,
        c.external_user_id, c.user_id_header_name, c.token_expires_at, c.refresh_lock_key,
-       c.channel_id, ch.base_url
+       c.channel_id, ch.base_url, false
   FROM collector_credentials AS c
   JOIN channels AS ch ON ch.id = c.channel_id
  WHERE c.account_id=$1`
@@ -196,7 +198,7 @@ func scanCredential(row credentialScanner, cred *collector.Credential) error {
 	var access, refresh, extUID, hdrName, lockKey *string
 	var expiresAt *time.Time
 	if err := row.Scan(&cred.AccountID, &family, &credType, &access, &refresh,
-		&extUID, &hdrName, &expiresAt, &lockKey, &cred.ChannelID, &cred.BaseURL); err != nil {
+		&extUID, &hdrName, &expiresAt, &lockKey, &cred.ChannelID, &cred.BaseURL, &cred.CookieEnabled); err != nil {
 		return err
 	}
 	cred.Family = collector.Family(family)

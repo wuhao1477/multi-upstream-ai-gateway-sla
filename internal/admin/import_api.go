@@ -111,6 +111,9 @@ func (s *Server) ImportHub(
 			// 两个入口共用」—— 共用是真的，但导入侧共用得太晚。本轮自审与
 			// Codex 二次评审各自独立查到（后者判 [high]）。
 			probeURL, err := validateBaseURL(a.SiteURL)
+			if err == nil && a.AuthType == "cookie" {
+				_, err = store.CookieOrigin(probeURL)
+			}
 			if err != nil {
 				item.Status = "skipped"
 				item.Reason = "site_url 不能用于采集：" + err.Error()
@@ -229,6 +232,7 @@ func (s *Server) ImportHub(
 			res.Items[i].Status = "would_import"
 		}
 	}
+	s.previewHubCookies(ctx, accounts, detects, res)
 	// 差异要能**先看一眼再决定**，所以 dry_run 也报"备份里少了谁"——只查不改。
 	if conn, release, err := s.DB.Acquire(ctx); err == nil {
 		gone, qerr := store.HubRemovedChannels(ctx, conn, keepBaseURLs(res))
@@ -298,6 +302,12 @@ func (s *Server) importOne(
 	if err != nil {
 		return err
 	}
+	if err := validateHubCookie(a, d, want); err != nil {
+		return err
+	}
+	if a.AuthType == "cookie" && !a.HasCredential() {
+		appendImportWarning(it, "导出里没有凭证：未提供 Cookie，已有配置保留")
+	}
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -316,8 +326,15 @@ func (s *Server) importOne(
 		return err
 	}
 	for _, c := range existing {
-		if strings.TrimRight(c.BaseURL, "/") != want {
+		normalized, err := validateBaseURL(c.BaseURL)
+		if err != nil || normalized != want {
 			continue
+		}
+		if a.AuthType == "cookie" {
+			// 同站多账号按上游 ID 匹配；并发导入同站时不重复创建账号。
+			if _, err := tx.Exec(ctx, `SELECT id FROM channels WHERE id=$1 FOR UPDATE`, c.ID); err != nil {
+				return err
+			}
 		}
 		missing, err := s.incompleteParts(ctx, tx, c.ID, c.SiteFamily, d.Family, a)
 		if err != nil {
@@ -350,7 +367,11 @@ func (s *Server) importOne(
 					return fmt.Errorf("提交凭证更新: %w", err)
 				}
 				it.Status = "updated"
-				it.Changes = append(it.Changes, "采集凭证已更新（备份里的令牌与库里不同）")
+				if a.AuthType == "cookie" {
+					it.Changes = append(it.Changes, "Cookie 配置已更新")
+				} else {
+					it.Changes = append(it.Changes, "采集凭证已更新（备份里的令牌与库里不同）")
+				}
 				return nil
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -422,12 +443,16 @@ func (s *Server) importOne(
 	// cred_type 与必需字段都走注册表的同一处判定（与 saveCredential 同一函数），
 	// 原先这里是第二份按家族分流的 credType 映射：它与凭证登记那份各写一遍，
 	// 少一个家族就静默写空串。
-	if a.HasCredential() && s.SaveCredential != nil {
+	if a.AuthType == "cookie" {
+		if _, err := s.saveImportedCookie(ctx, tx, a, accountID); err != nil {
+			return err
+		}
+	} else if a.HasCredential() && s.SaveCredential != nil {
 		reg, ok := collector.Lookup(d.Family)
 		if !ok {
 			return fmt.Errorf("站型 %q 无注册信息，无法确定凭证形态", d.Family)
 		}
-		// 导入侧只可能带 token（导出里没有密码），不传账密一路
+		// Cookie 在独立分支处理；此处只登记令牌。
 		credType, err := reg.CredTypeFor(true, a.UserID() != "")
 		if err != nil {
 			// 报出来而不是存一份必然 401 的凭证：那种凭证要等到某次采集
@@ -472,12 +497,16 @@ func (s *Server) incompleteParts(
 	if err := db.QueryRow(ctx, `
 SELECT (SELECT count(*) FROM upstream_accounts
          WHERE channel_id=$1 AND ($2='' OR external_user_id=$2)),
-       (SELECT count(*) FROM collector_credentials AS c
+       CASE WHEN $3='cookie' THEN
+       (SELECT count(*) FROM collector_cookie_credentials AS c
           JOIN upstream_accounts AS a ON a.id=c.account_id
-         WHERE a.channel_id=$1 AND ($2='' OR a.external_user_id=$2)),
+         WHERE a.channel_id=$1 AND a.external_user_id=$2)
+       ELSE (SELECT count(*) FROM collector_credentials AS c
+          JOIN upstream_accounts AS a ON a.id=c.account_id
+         WHERE a.channel_id=$1 AND ($2='' OR a.external_user_id=$2)) END,
        (SELECT count(*) FROM collector_snapshots
          WHERE channel_id=$1 AND scope_type='pricing' AND scope_id='__detect__')`,
-		chID, a.UserID()).Scan(&accounts, &creds, &snaps); err != nil {
+		chID, a.UserID(), a.AuthType).Scan(&accounts, &creds, &snaps); err != nil {
 		return nil, fmt.Errorf("查渠道 %d 完整性: %w", chID, err)
 	}
 	var missing []string
@@ -491,7 +520,8 @@ SELECT (SELECT count(*) FROM upstream_accounts
 		missing = append(missing, "探测快照")
 	}
 	if needsFamilyRepair(existingFamily, detectedFamily) {
-		missing = append(missing, "站型")
+		// 先改站型，再保存 Cookie，避免站型变更触发器删除新凭据。
+		missing = append([]string{"站型"}, missing...)
 	}
 	return missing, nil
 }
@@ -531,6 +561,9 @@ func (s *Server) repairChannel(
 				return fmt.Errorf("补探测快照: %w", err)
 			}
 		case "凭证":
+			if a.AuthType == "cookie" {
+				continue
+			}
 			if s.SaveCredential == nil {
 				return fmt.Errorf("补凭证：未注入 SaveCredential")
 			}
@@ -568,6 +601,17 @@ UPDATE collector_credentials SET site_family=$2, updated_at=now()
 				return fmt.Errorf("补凭证站型: %w", err)
 			}
 		}
+	}
+	if a.AuthType == "cookie" {
+		if accountID == 0 {
+			var err error
+			accountID, err = importAccountID(ctx, db, chID, a.UserID())
+			if err != nil {
+				return err
+			}
+		}
+		_, err := s.saveImportedCookie(ctx, db, a, accountID)
+		return err
 	}
 	return nil
 }
@@ -703,6 +747,9 @@ func (s *Server) syncExistingCredential(
 	ctx context.Context, tx pgx.Tx, a collector.HubAccount, d collector.DetectResult,
 	channelID, accountID int64, baseURL string,
 ) (bool, error) {
+	if a.AuthType == "cookie" {
+		return s.saveImportedCookie(ctx, tx, a, accountID)
+	}
 	if !a.HasCredential() || s.SaveCredential == nil || accountID <= 0 {
 		return false, nil
 	}

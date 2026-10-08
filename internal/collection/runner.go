@@ -55,6 +55,8 @@ func NewRunner(pool *store.Pool, client *collector.Client) *Runner {
 func (r *Runner) Sync(
 	ctx context.Context, ch store.Channel, capabilities []collector.Capability,
 ) (*collector.SyncResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultChannelSyncTimeout)
+	defer cancel()
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return nil, err
@@ -102,6 +104,13 @@ func (r *Runner) ImportKeys(
 	if len(creds) == 0 {
 		return result, fmt.Errorf("%w：没有可用采集凭证", collector.ErrPrecondition)
 	}
+	ctx, cancel := context.WithTimeout(ctx, defaultChannelSyncTimeout)
+	defer cancel()
+	unlock, err := lockChannelRead(ctx, conn, ch.ID)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
 	adapter, err := r.adapter(ch)
 	if err != nil {
 		return result, err
@@ -148,6 +157,7 @@ func (r *Runner) ProvisionKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, cred collector.Credential,
 	request collector.KeyProvisionRequest,
 ) (collector.KeyProvisionResult, error) {
+	cred.CookieEnabled = false
 	var result collector.KeyProvisionResult
 	adapter, err := r.adapter(ch)
 	if err != nil {

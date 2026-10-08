@@ -59,7 +59,9 @@ const riskCount = computed(
  * 缺凭证的账号数。它和「余额未采集」不是一回事，所以单独摆一格：
  * 后者是"这次没采到"，前者是"**根本采不了**，而且不会自愈"。
  */
-const noCredCount = computed(() => shown.value.filter((a) => a.cred_type === undefined).length)
+const noCredCount = computed(
+  () => shown.value.filter((a) => a.cred_type === undefined && !a.cookie_configured).length,
+)
 
 function reset(): void {
   filter.value = emptyAccountFilter()

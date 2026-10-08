@@ -207,8 +207,9 @@ export function filterAccounts(
       const s = a.balance_state ?? ''
       if (s === '' || s === 'normal') return false
     }
-    if (f.cred === 'has' && a.cred_type === undefined) return false
-    if (f.cred === 'missing' && a.cred_type !== undefined) return false
+    const hasCredential = a.cred_type !== undefined || a.cookie_configured
+    if (f.cred === 'has' && !hasCredential) return false
+    if (f.cred === 'missing' && hasCredential) return false
     if (q !== '') {
       const hay = [String(a.id), a.external_user_id ?? '', a.balance_group_key ?? '']
         .join(' ')

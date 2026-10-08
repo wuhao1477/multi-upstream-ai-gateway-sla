@@ -150,21 +150,20 @@ export interface Account {
    *
    * 库里 `collector_credentials` 有 UNIQUE(account_id)，一个账号最多一条 ——
    * 凭证是账号的属性，所以它跟着账号行走，不再有独立的凭证分栏。
-   * `cred_type` 缺席 = 没登记 = **这个账号采不了**。
+   * `cred_type` 只表示令牌凭证；缺席时仍可能已登记独立的 Cookie。
    */
   cred_type?: string
   cred_status?: string
   cred_expires_at?: string
-  browser_enabled: boolean
-  browser_configured: boolean
-  browser_username?: string
-  browser_state?: 'unverified' | 'ready' | 'invalid' | 'needs_action'
+  cookie_enabled: boolean
+  cookie_configured: boolean
+  cookie_state?: 'unverified' | 'ready' | 'expired' | 'needs_action'
 
   /**
    * 采集能力判定，**带上了所属渠道那一层的阻碍**。
    *
-   * 只看 `cred_type` 是不够的：一个开着人机验证的渠道，它下面的账号凭证登记得
-   * 再全也一把都采不到，而那一档看起来恰恰最像"已就绪"。
+   * 只看凭证存在性不够：实际采集还取决于渠道、账号状态和身份验证结果；
+   * Cookie 已登记不等于已验证可用。
    */
   collect: Collect
 }

@@ -283,12 +283,16 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `POST /admin/hub-sync/run?apply=true\|false` | 立即跑一轮：取回 WebDAV 上的备份 → 解密（上游信封为 PBKDF2-SHA256 + AES-256-GCM，见 [04](./04-collector-adapter.md)）→ 走 `/admin/import/all-api-hub` 同一条管线。`apply=true` 强制落库，否则按 `apply_mode`。定时器跑的是同一段代码，只是永远不 force。<br>**起了就回 `202`**（2026-09-16 起），结果不在响应里 —— 去 `/admin/hub-sync/runs` 看，那本来就是它唯一的落点（含逐站明细）。改成后台跑修的是三个缺陷：① 整轮原先跑在**请求的 ctx** 上，浏览器切走页面 / 反向代理超时就把它腰斩，而一轮要探测备份里上百个站点（实测 110 站 108 秒）—— 腰斩时已经建了一部分渠道，且连"这轮失败了"都写不进 `hub_sync_runs`（那条写入用的是同一个 ctx），留下半个状态加零条历史；② 手动触发**没有任何互斥**（定时那条有 advisory 锁，手动这条没有），两个标签页各点一次就是两轮并发的百站导入；③ 前端只能干等两分钟且不知道在等什么。<br>现在：进程内 `CompareAndSwap` + advisory 锁两层互斥，已有一轮在跑时回 `409`；配置问题（如没填 WebDAV 地址）仍**当场**回 `400`，不会变成"202 + 只在日志里的错误"。进度看 `GET /admin/hub-sync` 的 `running` | **P1** |
 | `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容）。⚠️ 管理界面**只用 `POST`**：凭证是账号的属性，列表那一侧已由 `GET /admin/accounts` 的 `cred_*` 三列覆盖（2026-09-13 并栏）。`GET` 保留给脚本 | **P1** |
 
-**v1.0.9 开发中：浏览器凭据配置（Issue #26）**
+**Issue #26：Cookie 凭据（v1.0.9 开发分支）**
 
-- `PUT /admin/accounts/{id}/browser-credentials`：请求为 `{enabled, username, password?}`。首次保存或更换用户名必须输入密码；省略或空密码保留原值。每次保存撤销会话，状态恢复为 `unverified`，不发起上游登录。
-- `DELETE /admin/accounts/{id}/browser-credentials`：清除密码与会话，不影响原令牌；无需部署密钥，重复清除仍成功。
-- 账号列表增加 `browser_enabled`、`browser_configured`、`browser_username`、`browser_state`；没有密码或会话内容。
-- 两个端点沿用管理认证，拒绝只读模式；缺密钥保存返回 503，参数或站型错误 400，不存在的账号 404。该阶段只提供配置，登录与自动采集尚未接入。
+用户先在原站完成登录与 2FA，再登记或导入 Cookie。旧 `browser-credentials` 路由及密码存储已删除，不提供兼容别名。
+
+- `PUT /admin/accounts/{id}/cookie-credentials`：`{enabled, cookie_header?}`。首次必须提供 Cookie，最大 16 KiB；可含 `Cookie:` 前缀，拒绝控制字符、多余字段和尾随 JSON。空值保留已存内容；内容/启用状态均未变化时不重置修订或失效状态。响应 `{stored:true, changed:boolean}`，保存不访问上游。
+- `DELETE /admin/accounts/{id}/cookie-credentials`：清除 Cookie，不影响令牌；无需部署密钥，重复清除仍成功。
+- `POST /admin/accounts/{id}/cookie-credentials/validate`：空请求体；只读取所存 Cookie 的 `/api/user/self`，不能由有效令牌代替。上游 ID 必须与登记账号一致，通过返回 `{state:"ready"}`。与渠道采集、已有 Key 同步共用渠道锁；最长 120 秒。
+- 账号列表只返回 `cookie_enabled`、`cookie_configured`、`cookie_state`，不返回秘密。状态为 `unverified / ready / expired / needs_action`。失效后停止自动尝试，手动验证可再次检查已存 Cookie。
+- 所有端点要求管理认证；只读/修订冲突/渠道忙返回 409，缺密钥保存或验证返回 503，输入或站型错误 400，不存在/停用配置 404；失效或需人工处理返回 422，网络及操作失败返回 502。错误不包含 Cookie 或上游响应正文。
+- all-api-hub 文件与 WebDAV 共用导入路径：`authType:"cookie"` 读取 `cookieAuth.sessionCookie`，账号 ID 取 `account_info.id`。相同内容不更新，缺失不清除已有 Cookie，停用配置不被重复导入启用；`dry_run` 只校验/比较，不读取 Key 或发送 Cookie。
 
 ### 5.0bis `sync` 的编排规范（P1 核心端点，第 45 轮补）
 

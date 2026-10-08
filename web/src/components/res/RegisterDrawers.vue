@@ -67,9 +67,8 @@ const keyGroup = ref('')
 const credAccountIDs = ref<number[]>([])
 const credToken = ref('')
 const credRefresh = ref('')
-const browserEnabled = ref(false)
-const browserUsername = ref('')
-const browserPassword = ref('')
+const cookieEnabled = ref(false)
+const cookieHeader = ref('')
 const busy = ref(false)
 
 const accChannelID = computed(() => accChannelIDs.value[0] ?? 0)
@@ -78,12 +77,11 @@ const keyAccountID = computed(() => keyAccountIDs.value[0] ?? 0)
 const credAccountID = computed(() => credAccountIDs.value[0] ?? 0)
 /** 选中账号现有的凭证（若有）。用来提示"提交会覆盖"，而不是静默替换。 */
 const credCurrent = computed(() => res.accountByID.get(credAccountID.value))
-const browserSupported = computed(() => channels.list.find(c => c.id === credCurrent.value?.channel_id)?.site_family === 'newapi')
+const cookieSupported = computed(() => channels.list.find(c => c.id === credCurrent.value?.channel_id)?.site_family === 'newapi')
 
 watch([() => props.mode, credAccountID, credCurrent], () => {
-  browserPassword.value = ''
-  browserEnabled.value = credCurrent.value?.browser_enabled === true
-  browserUsername.value = credCurrent.value?.browser_username ?? ''
+  cookieHeader.value = ''
+  cookieEnabled.value = credCurrent.value?.cookie_enabled === true
 })
 
 /** 打开时重置并吃掉上下文。不重置的话，上一次填了一半的明文会留在下一次。 */
@@ -234,39 +232,49 @@ async function saveCred(): Promise<void> {
   }
 }
 
-async function saveBrowserCred(): Promise<void> {
-  const username = browserUsername.value.trim()
-  const changedUser = username !== credCurrent.value?.browser_username
-  if (username === '' || ((!credCurrent.value?.browser_configured || changedUser) && browserPassword.value === '')) {
-    toast.show('首次保存或更换用户名必须输入账号密码', 'bad')
+async function saveCookieCred(): Promise<void> {
+  if (!credCurrent.value?.cookie_configured && cookieHeader.value.trim() === '') {
+    toast.show('首次保存必须提供 Cookie', 'bad')
     return
   }
   busy.value = true
   try {
-    await adminApi.saveBrowserCredential(credAccountID.value, {
-      enabled: browserEnabled.value, username,
-      ...(browserPassword.value === '' ? {} : { password: browserPassword.value }),
+    const result = await adminApi.saveCookieCredential(credAccountID.value, {
+      enabled: cookieEnabled.value,
+      ...(cookieHeader.value === '' ? {} : { cookie_header: cookieHeader.value }),
     })
-    browserPassword.value = ''
-    toast.show('浏览器凭据已保存，登录尚未验证', 'ok')
+    cookieHeader.value = ''
+    toast.show(result.changed ? 'Cookie 已保存，需验证后使用' : 'Cookie 配置未变化', 'ok')
     await res.reload()
   } catch (e) {
-    toast.fail('保存浏览器凭据失败', e)
+    toast.fail('保存 Cookie 失败', e)
   } finally { busy.value = false }
 }
 
-async function clearBrowserCred(): Promise<void> {
+async function clearCookieCred(): Promise<void> {
   busy.value = true
-  browserPassword.value = ''
+  cookieHeader.value = ''
   try {
-    await adminApi.clearBrowserCredential(credAccountID.value)
-    browserEnabled.value = false
-    browserUsername.value = ''
-    toast.show('浏览器凭据已清除，原令牌不变', 'ok')
+    await adminApi.clearCookieCredential(credAccountID.value)
+    cookieEnabled.value = false
+    toast.show('Cookie 已清除，原令牌不变', 'ok')
     await res.reload()
   } catch (e) {
-    toast.fail('清除浏览器凭据失败', e)
+    toast.fail('清除 Cookie 失败', e)
   } finally { busy.value = false }
+}
+
+async function validateCookieCred(): Promise<void> {
+  busy.value = true
+  try {
+    await adminApi.validateCookieCredential(credAccountID.value)
+    toast.show('Cookie 验证通过，用户 ID 与登记账号一致', 'ok')
+  } catch (e) {
+    toast.fail('Cookie 验证失败', e)
+  } finally {
+    busy.value = false
+    await res.reload()
+  }
 }
 </script>
 
@@ -394,24 +402,25 @@ async function clearBrowserCred(): Promise<void> {
       NewAPI 长期令牌<b>不可运行时重新生成</b>（会作废正在用的那个）；
       Sub2API 24h JWT 用 refresh 续期、同账号串行。
     </p>
-    <fieldset :disabled="busy || credAccountID <= 0 || !browserSupported">
-      <legend>浏览器访问</legend>
-      <label class="chk" for="browser-enabled"><input id="browser-enabled" v-model="browserEnabled" type="checkbox" /> 启用账号密码访问</label>
-      <UiField label="用户名 / 邮箱" for="browser-username">
-        <input id="browser-username" v-model="browserUsername" autocomplete="off" maxlength="320" />
+    <fieldset :disabled="busy || credAccountID <= 0 || !cookieSupported">
+      <legend>Cookie 访问</legend>
+      <label class="chk" for="cookie-enabled"><input id="cookie-enabled" v-model="cookieEnabled" type="checkbox" /> 启用 Cookie 访问</label>
+      <UiField label="Cookie 请求头（留空保留已存值）" for="cookie-header">
+        <input id="cookie-header" v-model="cookieHeader" type="password" autocomplete="off" :spellcheck="false" maxlength="16384" placeholder="session=…; other=…" />
       </UiField>
-      <UiField label="密码（留空保留已存密码）" for="browser-password">
-        <input id="browser-password" v-model="browserPassword" type="password" autocomplete="new-password" maxlength="4096" />
-      </UiField>
-      <p class="note">凭据加密保存，不覆盖访问令牌。更换用户名必须重新输入密码；保存不会发起登录。</p>
-      <p v-if="credCurrent?.browser_configured" class="note" id="browser-config-state">
-        已配置 · {{ credCurrent.browser_enabled ? '已启用' : '已停用' }} ·
-        {{ ({ unverified: '待验证', ready: '已验证', invalid: '需更新密码', needs_action: '需人工处理' } as const)[credCurrent.browser_state ?? 'unverified'] }}
+      <p class="note">请先在原站完成登录和 2FA，再粘贴 Cookie 或导入 all-api-hub 备份。Cookie 加密保存，不覆盖令牌；失效后需重新导入，不自动登录。</p>
+      <p v-if="credCurrent?.cookie_configured" class="note" id="cookie-config-state">
+        已配置 · {{ credCurrent.cookie_enabled ? '已启用' : '已停用' }} ·
+        {{ ({ unverified: '待验证', ready: '可用', expired: '已失效，请重新导入', needs_action: '需人工处理' } as const)[credCurrent.cookie_state ?? 'unverified'] }}
       </p>
-      <button class="btn" id="btn-browser-save" @click="saveBrowserCred">保存浏览器凭据</button>
+      <div class="cookie-actions">
+        <button class="btn" id="btn-cookie-save" @click="saveCookieCred">保存 Cookie</button>
+        <button class="btn outline" id="btn-cookie-validate" :disabled="!credCurrent?.cookie_enabled || cookieHeader !== '' || cookieEnabled !== credCurrent?.cookie_enabled" @click="validateCookieCred">验证 Cookie</button>
+      </div>
+      <p class="note">验证使用已保存且启用的 Cookie；修改后请先保存。</p>
     </fieldset>
-    <p v-if="credAccountID > 0 && !browserSupported" class="note">账号密码访问首批仅支持 NewAPI。</p>
-    <button class="btn outline" id="btn-browser-clear" :disabled="busy || !credCurrent?.browser_configured" @click="clearBrowserCred">清除浏览器凭据</button>
+    <p v-if="credAccountID > 0 && !cookieSupported" class="note">Cookie 访问首批仅支持 NewAPI。</p>
+    <button class="btn outline" id="btn-cookie-clear" :disabled="busy || !credCurrent?.cookie_configured" @click="clearCookieCred">清除 Cookie</button>
     <template #footer>
       <button class="btn" id="btn-cred" :disabled="busy" @click="saveCred">登记凭证</button>
       <button class="btn outline" @click="emit('close')">取消</button>
@@ -422,4 +431,5 @@ async function clearBrowserCred(): Promise<void> {
 <style scoped>
 fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
 fieldset input:not([type='checkbox']) { box-sizing: border-box; width: 100%; max-width: 100%; }
+.cookie-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 </style>

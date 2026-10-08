@@ -259,13 +259,13 @@ function openDisable(a: Account): void {
               <!-- 缺凭证用红而不是灰：它不是"这一格没数据"，是**这个账号采不了**，
                    和渠道总览里 credential_missing 被划进阻断性异常是同一条理由。 -->
               <span
-                v-if="a.cred_type === undefined"
+                v-if="a.cred_type === undefined && !a.cookie_configured"
                 class="badge bad"
                 :data-account-cred="a.id"
                 data-cred="missing"
                 >未登记</span
               >
-              <template v-else>
+              <template v-else-if="a.cred_type !== undefined">
                 <span
                   class="badge"
                   :class="a.cred_status === 'valid' ? 'ok' : 'warn'"
@@ -277,6 +277,16 @@ function openDisable(a: Account): void {
                 <span class="dim cell-sub">{{
                   a.cred_expires_at === undefined ? '长期' : `到期 ${fmtTime(a.cred_expires_at)}`
                 }}</span>
+              </template>
+              <template v-else>
+                <span
+                  class="badge"
+                  :class="a.cookie_enabled && a.cookie_state === 'ready' ? 'ok' : 'warn'"
+                  :data-account-cred="a.id"
+                  data-cred="has"
+                  >Cookie</span
+                >
+                <span class="dim cell-sub">{{ a.cookie_enabled ? '已启用' : '已停用' }}</span>
               </template>
             </td>
             <td data-col="collect">
@@ -311,7 +321,7 @@ function openDisable(a: Account): void {
                 :data-account-cred-edit="a.id"
                 @click="emit('editCred', a.id)"
               >
-                {{ a.cred_type === undefined ? '登记凭证' : '换凭证' }}
+                {{ a.cred_type === undefined && !a.cookie_configured ? '登记凭证' : '换凭证' }}
               </button>
               <button
                 v-if="!compact"

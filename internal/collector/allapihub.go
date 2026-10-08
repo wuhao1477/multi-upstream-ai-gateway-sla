@@ -42,8 +42,12 @@ type HubAccount struct {
 	// 留给 P3 决定如何折算。
 	ExchangeRate float64 `json:"exchange_rate"`
 	AuthType     string  `json:"authType"`
-	Disabled     bool    `json:"disabled"`
-	Health       struct {
+	CookieAuth   struct {
+		// Cookie 请求头值，只用于入站解析；禁止序列化整个 HubAccount 为响应。
+		SessionCookie string `json:"sessionCookie"`
+	} `json:"cookieAuth"`
+	Disabled bool `json:"disabled"`
+	Health   struct {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
 	} `json:"health"`
@@ -83,7 +87,14 @@ func (a HubAccount) QuotaRaw() float64 {
 
 // HasCredential 报告该条目是否带可用凭证。
 func (a HubAccount) HasCredential() bool {
-	return strings.TrimSpace(a.AccountInfo.AccessToken) != ""
+	switch a.AuthType {
+	case "cookie":
+		return strings.TrimSpace(a.CookieAuth.SessionCookie) != ""
+	case "", "access_token":
+		return strings.TrimSpace(a.AccountInfo.AccessToken) != ""
+	default:
+		return false
+	}
 }
 
 // ParseHubBackup 解析导出文件。

@@ -212,7 +212,13 @@ docker compose -f deploy/docker-compose.yml down -v
 
 下一版本在 `codex/release-v1.0.9` 开发，包含 Issue #26，完成验收后一并发布；不提前修改上述发布镜像。
 
-浏览器凭据配置需要为主服务设置 `SLA_BROWSER_SECRET_KEY`（使用 `openssl rand -base64 32` 生成，并保存至受保护的部署环境变量）。两份 Compose 配置均传入此可选变量；当前发布镜像尚不具备此功能，开发验证须运行本分支构建。密钥不写数据库或 Git，需独立备份；丢失后无法解密旧密码与会话。缺少或格式错误只禁用新增凭据能力，不阻止原令牌采集。该阶段不安装 Chromium、不自动登录上游；登录采集部分尚待实现与真实账号验证。
+Issue #26 在开发分支改为 Cookie 登记、all-api-hub 文件/WebDAV 导入和受限读取，尚未发布到 v1.0.8 镜像。旧密码接口与 `SLA_BROWSER_SECRET_KEY` 已删除，迁移 033 会删除旧密码表，不自动把旧密码转换为 Cookie。
+
+使用包含该功能的新构建时，在 core 与 collector 配置同一个 `SLA_COOKIE_SECRET_KEY`（`openssl rand -base64 32` 生成），单独备份，不提交 Git。缺失/格式错误不影响原令牌路径，但不能保存/读取 Cookie；密钥丢失需重新导入 Cookie，仍可清除旧配置。
+
+在账号的凭据抽屉中保存并启用 Cookie，再点击“验证 Cookie”；也支持 all-api-hub 的 `cookieAuth.sessionCookie` 请求头字符串。用户自行完成原站登录与 2FA；失效后重新导入，不自动登录、续期或处理 CF/Turnstile。
+
+Cookie 仅适用于公网 HTTPS NewAPI 读取：逐连接检查 DNS 目标，不使用环境 HTTP 代理，不跟随重定向。已有令牌优先；Cookie 不用于远端 Key 创建/重置或推理请求。不安装生产浏览器、agent-browser 或 Node 服务。首站真实认证状态见[验收记录](acceptance/browser-session-collection.md)。
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |

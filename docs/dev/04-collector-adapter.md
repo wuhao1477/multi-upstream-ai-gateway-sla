@@ -272,7 +272,7 @@ type SubscriptionQuota struct {
 
 | 项 | 结论 |
 | --- | --- |
-| 鉴权 | `Authorization: <token>` 或 `Bearer <token>` **均可**；**必须同时带 `New-API-User: <数字用户ID>`**，只带 Cookie 会 401 |
+| 鉴权 | 已验证的令牌路径：`Authorization: <token>` 或 `Bearer <token>` **均可**，同时带 `New-API-User: <数字用户ID>`。当时样本只带 Cookie 返回 401，不代表所有站点均不支持 Cookie；v1.0.9 增加独立 Cookie 读取，见 §5.3 |
 | 二开头名 fan-out | 首次鉴权对多头名逐一试探命中：`New-API-User` / `Veloera-User` / `X-Api-User` / `voapi-user` / `User-id` / `Rix-Api-User` / `neo-api-user`，命中后记入 `Session.UserIDHeader` |
 | 额度换算 | `金额(USD) = quota / quota_per_unit`（upstream-d.invalid `quota_per_unit=500000`，已实测与页面一致）。换算在适配器内完成（FR-018、AC-17） |
 | 订阅 | P1 不采集；订阅台账属于后续阶段 |
@@ -378,7 +378,7 @@ HTTP 200
 
 > ⚠️ **`quota_type` 决定口径，不可省略**：`quota_type=1` 的 `model_price` 是**每次调用的绝对美元价**（`billing_unit=per_call`），与倍率**数值区间重叠**（实测按次 0.08~0.56，倍率 0.685~30），无法从数值反推。实测某站 1369 个模型中 208 个（15%）为按次计价。落库必须带 `billing_unit`（[02 §1.3bis](./02-data-model.md)）。
 
-> ⚠️ **`/api/user/token` 是"重新生成"而非"读取"** —— 实测每次调用都返回新令牌并**立即作废旧令牌**。本版本 `/api/user/self` 不回显 `access_token`，无法惰性"读不到再建"。采集器**只在初始化时调用一次并持久化**，运行时**禁止**重新生成（§5 状态机 N-1）。
+> ⚠️ **`/api/user/token` 是"重新生成"而非"读取"** —— 实测每次调用都返回新令牌并**立即作废旧令牌**。该版本 `/api/user/self` 不回显 `access_token`，不能据此自动生成。用户在原站获取令牌后登记/导入；采集器不调用此端点，Cookie 路径也明确禁止访问（§5 状态机 N-1）。
 
 **Capabilities：**
 ```
@@ -601,7 +601,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 
 ## 5. 凭证生命周期状态机（核心风险区）
 
-**任何家族都有"凭证互斥作废"风险**，这是采集器最容易出事的地方。凭证操作按站型分套状态机（现役两套 + 账密重登一套，§5.3），均以 `collector_credential` 持久化为唯一真相。
+**任何家族都有"凭证互斥作废"风险**。令牌使用 `collector_credentials` 的两套生命周期；v1.0.9 增加 `collector_cookie_credentials` 保存用户导入的会话（§5.3），不接收上游账号密码，也不自动登录。
 
 **两列的持久化落点**（第 40 轮补：`collector_credentials.user_id_header_name` 与 `refresh_lock_key`
 建好后**零引用** —— §3.1 的 fan-out 结果只写进内存 `Session.UserIDHeader`，进程一重启就得重新试探
@@ -619,7 +619,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 ### 5.1 NewAPI 系统访问令牌（长期，互斥作废）
 
 ```
-[未接入] --初始化: 登录取令牌; 若 self 无 access_token 则 /api/user/token 生成一次--> [持有令牌]
+[未接入] --用户在原站获取令牌后登记/导入--> [持有令牌]
 [持有令牌] --正常采集 (Authorization + New-API-User 头 fan-out)--> [持有令牌]
 [持有令牌] --401/令牌被后台重置--> [失效] --告警, 人工介入重新登录取新令牌--> [持有令牌]
 
@@ -635,25 +635,59 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | --- | --- | --- | --- |
 | 1 主动刷新 | JWT 到期前 **120s** | `POST /api/v1/auth/refresh {refresh_token}` 换新 access+refresh | ✅ 纯 HTTP |
 | 2 被动刷新 | 请求 401 | 用 refresh_token 再试一次 | ✅ 纯 HTTP |
-| 3 重同步 | refresh_token 也失效 | 从浏览器会话读新 JWT | ❌ **不可移植**；服务端等价：保存登录 Cookie 或账密重登换 JWT |
+| 3 重同步 | refresh_token 也失效 | 用户在原站重新登录后导入新 JWT | 不自动登录；§5.3 的 Cookie 读取首版仅支持 NewAPI |
 | 4 放弃 | 全失败 | 抛"需要重新登录"错误 + 告警 | —— |
 
 ```
 [持有 access+refresh] --到期前120s / 401--> [刷新中(持账号锁)] --成功--> [持有 access+refresh(已轮换)]
-[刷新中] --refresh 失效--> [需重登] --账密/Cookie 重登--> [持有 access+refresh]
+[刷新中] --refresh 失效--> [需人工处理] --用户在原站登录后重新导入--> [持有 access+refresh]
 
 不变式 S-1（硬约束）: refresh 会轮换 refresh_token, 并发刷新互相作废 → 同一账号刷新必须串行(互斥锁), 刷新结果先持久化再释放锁。
 设备绑定: 已确认 Sub2API 未开启 bnd 绑定, 服务端换 IP/UA 续期不被拒（风险解除）。
 ```
 
-### 5.3 账密重登
+### 5.3 用户导入 Cookie（v1.0.9，NewAPI）
 
-P1 不接收或存储上游账号密码，也不实现账密重登。新增站型必须提供可采集的
-access token（需要续期时同时提供 refresh token），否则应停用渠道并转人工处理。
+用户自行在原站完成登录和 2FA，然后手工登记 Cookie 请求头或导入 all-api-hub
+的 `accounts.accounts[].cookieAuth.sessionCookie`（`authType="cookie"`）。文件上传
+与 WebDAV 共用 `ParseHubBackup → ImportHub`，按站点和 `account_info.id` 匹配账号。
+Cookie 使用独立 AES-256-GCM 存储，绑定本地账号与精确 HTTPS origin；管理接口仅返回
+配置存在性与状态。相同内容重导不激活失效/停用配置，缺失不删除，更新不覆盖令牌。
+
+现有令牌优先；无令牌或明确认证失效时，只切换一次 Cookie。同轮已成功项目不重做，
+Cookie 与 Authorization 不混发。首次使用先验证 `/api/user/self` 的 ID 与登记 ID 一致，
+同轮复用验证结果；每次发送前重新检查启用状态与修订。429、5xx、超时和权限不足
+不触发切换；Validate 与已有 Key 导入使用现有渠道锁和限流。
+
+允许的请求仅为以下读取，不接收任意 URL、请求头或请求体：
+
+| 方法 | 路径 | 限制 |
+| --- | --- | --- |
+| GET | `/api/user/self`、`/api/pricing` | 无查询参数 |
+| GET | `/api/token/` | 仅 `p`、`size` 分页参数 |
+| POST | `/api/token/{正整数}/key` | 仅读取已有 Key 明文，无查询参数和请求体，不创建/重置 Key |
+
+2026-10-08 对首站 `api.lyjxka.top` 的免密请求确认：`/api/token?p=1&size=100`
+返回 301 至带尾斜杠地址，而 `/api/token/?p=1&size=100` 返回 401、无跳转。
+因此 Cookie 的列表请求直接使用规范路径；这不证明真实 Cookie 认证成功。
+
+Cookie 访问拒绝任何重定向、私网/回环/链路本地地址及环境代理；DNS 验证后直接拨
+已检查 IP，不使用 Cookie jar，不保存 Set-Cookie。单次请求最多 30 秒，整轮最多
+120 秒，沿用 8 MiB 响应上限。异常只保留固定分类/路径/状态，不记录响应正文。
+
+新值为 `unverified`，身份匹配后为 `ready`；401 或明确的无效凭证业务响应标记
+`expired`；403、重定向、非 JSON、未知业务拒绝标记 `needs_action`。后两态停止
+自动读取，用户可重新导入或显式“验证 Cookie”；网络故障/429/5xx 保留重试信息。
+有效令牌不因 Cookie 失效而变为不可用。
+
+不执行登录、自动续期、2FA/CF/Turnstile 自动化；`ProvisionKeys`、远端 Key 创建/
+重置和 `/v1/*` 不使用 Cookie。不增加 agent-browser、Chromium 或生产 Node 服务。
+真实首站身份、余额与已有 Key 仍需用户授权 Cookie 验收，见[验收记录](../acceptance/browser-session-collection.md)。
 
 ### 5.4 到期时间从哪来（`TokenExpiryFrom`，第 49 轮补，**修一个自锁缺陷**）
 
-上面三套状态机都以"剩余有效期 < `RefreshLead`"为触发条件，却没写**到期时间从哪读**。
+令牌的主动续期以"剩余有效期 < `RefreshLead`"为触发条件，却没写**到期时间从哪读**。
+本节不适用于 §5.3：导入的 Cookie 请求头没有到期属性，不推断有效期，也不自动续期。
 2026-08-30 全量采集实测暴露了后果：
 
 | 实测事实 | 值 |

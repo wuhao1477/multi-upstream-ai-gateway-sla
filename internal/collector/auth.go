@@ -180,7 +180,8 @@ func (a *Authenticator) EnsureFresh(
 
 // SessionFrom 把凭证转成会话句柄。
 func SessionFrom(cred Credential, baseURL string, quotaPerUnit float64) Session {
-	return Session{
+	s := Session{
+		AccountID:      cred.AccountID,
 		ChannelID:      cred.ChannelID,
 		Family:         cred.Family,
 		BaseURL:        baseURL,
@@ -189,7 +190,12 @@ func SessionFrom(cred Credential, baseURL string, quotaPerUnit float64) Session 
 		ExternalUserID: cred.ExternalUserID,
 		ExpiresAt:      cred.TokenExpiresAt,
 		QuotaPerUnit:   quotaPerUnit,
+		CookieAllowed:  cred.CookieEnabled,
 	}
+	if cred.CookieEnabled {
+		s.CookieState = &CookieSession{}
+	}
+	return s
 }
 
 // newAPIUserIDHeaders 是 NewAPI 二开的用户 ID 头名候选（04 §3.1）。
