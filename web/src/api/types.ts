@@ -155,6 +155,10 @@ export interface Account {
   cred_type?: string
   cred_status?: string
   cred_expires_at?: string
+  browser_enabled: boolean
+  browser_configured: boolean
+  browser_username?: string
+  browser_state?: 'unverified' | 'ready' | 'invalid' | 'needs_action'
 
   /**
    * 采集能力判定，**带上了所属渠道那一层的阻碍**。

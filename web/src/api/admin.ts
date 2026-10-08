@@ -304,6 +304,20 @@ export function saveCredential(input: SaveCredentialInput): Promise<unknown> {
   return api<unknown>('/admin/collector/credentials', { method: 'POST', body: input })
 }
 
+export interface SaveBrowserCredentialInput {
+  enabled: boolean
+  username: string
+  password?: string
+}
+
+export function saveBrowserCredential(id: number, input: SaveBrowserCredentialInput): Promise<{ stored: boolean }> {
+  return api<{ stored: boolean }>(`/admin/accounts/${id}/browser-credentials`, { method: 'PUT', body: input })
+}
+
+export function clearBrowserCredential(id: number): Promise<{ cleared: boolean }> {
+  return api<{ cleared: boolean }>(`/admin/accounts/${id}/browser-credentials`, { method: 'DELETE' })
+}
+
 // 这里原来还有一个 listCredentials()：凭证并进账号页后没有调用方了 ——
 // 凭证跟着 listAccounts 的行回来（UNIQUE(account_id)）。
 // 服务端 GET /admin/collector/credentials 仍在（09 §，供脚本用），只是界面不走它。

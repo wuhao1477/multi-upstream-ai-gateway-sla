@@ -53,7 +53,8 @@ type Server struct {
 	// ⚠️ 收 `store.DBTX` 而不自己取连接（2026-08-29 改）：导入要把四处写入放进
 	// 同一个事务，而这个函数原先自己 `Pool.Acquire` 取**另一条连接**独立提交 ——
 	// 调用方无论怎么包事务都盖不住它。传 `*pgx.Conn` 时行为与从前一致。
-	SaveCredential func(ctx context.Context, db store.DBTX, cred collector.Credential) error
+	SaveCredential     func(ctx context.Context, db store.DBTX, cred collector.Credential) error
+	BrowserCredentials *store.BrowserCredentialStore
 	// SaveDetected 持久化站型探测结果。
 	// **必须落库**：quota_per_unit 是 NewAPI 系额度归一的必需输入，
 	// 而 FetchAccount 缺它会直接报错（不猜，猜错差 50 万倍）——

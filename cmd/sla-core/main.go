@@ -159,6 +159,10 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	srv := admin.NewServer(pool, adminToken, logger, rebuild)
 	srv.ReadOnly = readOnly
 	srv.Version = version
+	srv.BrowserCredentials, err = store.NewBrowserCredentialStore(os.Getenv("SLA_BROWSER_SECRET_KEY"))
+	if err != nil {
+		logger.Warn("浏览器凭据配置不可用；原令牌采集不受影响", "reason", err.Error())
+	}
 	srv.Snapshot = func() *config.Snapshot { return snap.Load() }
 	srv.Detect = func(ctx context.Context, baseURL string) (collector.DetectResult, error) {
 		return collector.Detect(ctx, hc, baseURL)

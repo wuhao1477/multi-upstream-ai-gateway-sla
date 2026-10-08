@@ -401,6 +401,9 @@ echo "── 8/8 渠道与导入写路径的真库 Go 测试 ──"
 # 假绿，而它恰恰**不会**被退出码抓到。列表 + 计数各管一头：列表管"别牵连无关测试"，
 # 计数管"列表本身别写错"。
 TESTS=(
+  TestBrowserCredentialsRequireAdmin
+  TestBrowserCredentialsRejectUnconfiguredEncryption
+  TestBrowserCredentialAPI
   TestImportRollsBackOnCredentialFailure
   TestImportRepairsIncompleteChannel
   TestImportRepairAddsSnapshotAndKeepsWarning
@@ -449,6 +452,10 @@ echo "   ✅ 渠道：PATCH 与 POST 共用地址校验 / 尾斜杠规范化 + 0
 echo "   ✅ 编辑：账号字段可清空 / Key 可解除分组"
 
 STORE_TESTS=(
+  TestBrowserCredentialLifecycle
+  TestBrowserSessionRevisionAndDisable
+  TestBrowserCredentialsInvalidatedWithAccountOrSite
+  TestBrowserCipherRejectsTamperingAndCrossAccount
   TestHostRequestLimiterSerializesIndependentInstances
   TestHostRequestLimiterDoesNotBlockDifferentHosts
   TestHostRequestLimiterHonorsCancellation

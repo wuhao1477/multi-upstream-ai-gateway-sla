@@ -26,6 +26,7 @@ services:
     environment:
       <<: *core-env
       ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置——管理平面没有它会拒绝全部请求}
+      SLA_BROWSER_SECRET_KEY: ${SLA_BROWSER_SECRET_KEY:-}
       SLA_ADDR: ":8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"

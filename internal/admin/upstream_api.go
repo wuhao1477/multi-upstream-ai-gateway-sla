@@ -40,6 +40,8 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /admin/accounts", h(s.listAccounts))
 	mux.Handle("POST /admin/accounts", h(s.createAccount))
 	mux.Handle("PATCH /admin/accounts/{id}", h(s.patchAccount))
+	mux.Handle("PUT /admin/accounts/{id}/browser-credentials", h(s.saveBrowserCredential))
+	mux.Handle("DELETE /admin/accounts/{id}/browser-credentials", h(s.deleteBrowserCredential))
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))

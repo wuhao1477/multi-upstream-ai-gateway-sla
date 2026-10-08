@@ -67,6 +67,9 @@ const keyGroup = ref('')
 const credAccountIDs = ref<number[]>([])
 const credToken = ref('')
 const credRefresh = ref('')
+const browserEnabled = ref(false)
+const browserUsername = ref('')
+const browserPassword = ref('')
 const busy = ref(false)
 
 const accChannelID = computed(() => accChannelIDs.value[0] ?? 0)
@@ -75,6 +78,13 @@ const keyAccountID = computed(() => keyAccountIDs.value[0] ?? 0)
 const credAccountID = computed(() => credAccountIDs.value[0] ?? 0)
 /** 选中账号现有的凭证（若有）。用来提示"提交会覆盖"，而不是静默替换。 */
 const credCurrent = computed(() => res.accountByID.get(credAccountID.value))
+const browserSupported = computed(() => channels.list.find(c => c.id === credCurrent.value?.channel_id)?.site_family === 'newapi')
+
+watch([() => props.mode, credAccountID, credCurrent], () => {
+  browserPassword.value = ''
+  browserEnabled.value = credCurrent.value?.browser_enabled === true
+  browserUsername.value = credCurrent.value?.browser_username ?? ''
+})
 
 /** 打开时重置并吃掉上下文。不重置的话，上一次填了一半的明文会留在下一次。 */
 watch(
@@ -223,6 +233,41 @@ async function saveCred(): Promise<void> {
     busy.value = false
   }
 }
+
+async function saveBrowserCred(): Promise<void> {
+  const username = browserUsername.value.trim()
+  const changedUser = username !== credCurrent.value?.browser_username
+  if (username === '' || ((!credCurrent.value?.browser_configured || changedUser) && browserPassword.value === '')) {
+    toast.show('首次保存或更换用户名必须输入账号密码', 'bad')
+    return
+  }
+  busy.value = true
+  try {
+    await adminApi.saveBrowserCredential(credAccountID.value, {
+      enabled: browserEnabled.value, username,
+      ...(browserPassword.value === '' ? {} : { password: browserPassword.value }),
+    })
+    browserPassword.value = ''
+    toast.show('浏览器凭据已保存，登录尚未验证', 'ok')
+    await res.reload()
+  } catch (e) {
+    toast.fail('保存浏览器凭据失败', e)
+  } finally { busy.value = false }
+}
+
+async function clearBrowserCred(): Promise<void> {
+  busy.value = true
+  browserPassword.value = ''
+  try {
+    await adminApi.clearBrowserCredential(credAccountID.value)
+    browserEnabled.value = false
+    browserUsername.value = ''
+    toast.show('浏览器凭据已清除，原令牌不变', 'ok')
+    await res.reload()
+  } catch (e) {
+    toast.fail('清除浏览器凭据失败', e)
+  } finally { busy.value = false }
+}
 </script>
 
 <template>
@@ -349,9 +394,32 @@ async function saveCred(): Promise<void> {
       NewAPI 长期令牌<b>不可运行时重新生成</b>（会作废正在用的那个）；
       Sub2API 24h JWT 用 refresh 续期、同账号串行。
     </p>
+    <fieldset :disabled="busy || credAccountID <= 0 || !browserSupported">
+      <legend>浏览器访问</legend>
+      <label class="chk" for="browser-enabled"><input id="browser-enabled" v-model="browserEnabled" type="checkbox" /> 启用账号密码访问</label>
+      <UiField label="用户名 / 邮箱" for="browser-username">
+        <input id="browser-username" v-model="browserUsername" autocomplete="off" maxlength="320" />
+      </UiField>
+      <UiField label="密码（留空保留已存密码）" for="browser-password">
+        <input id="browser-password" v-model="browserPassword" type="password" autocomplete="new-password" maxlength="4096" />
+      </UiField>
+      <p class="note">凭据加密保存，不覆盖访问令牌。更换用户名必须重新输入密码；保存不会发起登录。</p>
+      <p v-if="credCurrent?.browser_configured" class="note" id="browser-config-state">
+        已配置 · {{ credCurrent.browser_enabled ? '已启用' : '已停用' }} ·
+        {{ ({ unverified: '待验证', ready: '已验证', invalid: '需更新密码', needs_action: '需人工处理' } as const)[credCurrent.browser_state ?? 'unverified'] }}
+      </p>
+      <button class="btn" id="btn-browser-save" @click="saveBrowserCred">保存浏览器凭据</button>
+    </fieldset>
+    <p v-if="credAccountID > 0 && !browserSupported" class="note">账号密码访问首批仅支持 NewAPI。</p>
+    <button class="btn outline" id="btn-browser-clear" :disabled="busy || !credCurrent?.browser_configured" @click="clearBrowserCred">清除浏览器凭据</button>
     <template #footer>
       <button class="btn" id="btn-cred" :disabled="busy" @click="saveCred">登记凭证</button>
       <button class="btn outline" @click="emit('close')">取消</button>
     </template>
   </UiDrawer>
 </template>
+
+<style scoped>
+fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+fieldset input:not([type='checkbox']) { box-sizing: border-box; width: 100%; max-width: 100%; }
+</style>

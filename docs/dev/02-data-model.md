@@ -2939,6 +2939,20 @@ CREATE TABLE collector_credentials (
     CHECK (site_family <> 'sub2api' OR NULLIF(refresh_lock_key, '') IS NOT NULL)
 );
 
+-- 账号密码与会话单独加密存储（Issue #26，032），不改变原令牌表。
+CREATE TABLE collector_browser_credentials (
+    account_id BIGINT PRIMARY KEY REFERENCES upstream_accounts(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    username TEXT NOT NULL CHECK (btrim(username) <> ''),
+    password_ciphertext BYTEA NOT NULL,
+    session_ciphertext BYTEA,
+    state TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (state IN ('unverified', 'ready', 'invalid', 'needs_action')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+-- 032 的触发器覆盖管理/导入等写入来源：渠道地址或站型变化删除旧凭据；
+-- 渠道/账号停启及用户 ID 变化撤销会话并更新修订时间，拒绝旧任务写回。
+
 -- 采集快照（FR-011/020/116；ISSUE-002 §5 降级一致性）：每次采集一行，标来源+时效
 CREATE TABLE collector_snapshots (
   id              UUID PRIMARY KEY,             -- UUIDv7
