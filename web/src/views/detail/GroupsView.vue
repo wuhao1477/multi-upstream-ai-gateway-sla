@@ -48,7 +48,7 @@ async function openModels(g: ChannelGroup): Promise<void> {
   <template v-else-if="groups.length > 0">
     <div class="sec-t">分组 <span class="badge">{{ groups.length }} 个</span></div>
     <div class="tw">
-      <table>
+      <table v-cell-label>
         <thead>
           <tr>
             <th>分组</th>

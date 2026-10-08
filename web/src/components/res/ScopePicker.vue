@@ -353,7 +353,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           ><template v-else>先登记账号，或换一个渠道范围。</template>
         </p>
         <p v-else-if="shown.length === 0" class="note">没有符合当前搜索与筛选的{{ noun }}</p>
-        <table v-else class="picker-table">
+        <table v-else v-cell-label class="picker-table">
           <thead>
             <tr>
               <th class="x"></th>

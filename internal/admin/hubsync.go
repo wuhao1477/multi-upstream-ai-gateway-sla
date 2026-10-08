@@ -279,8 +279,24 @@ type hubSyncView struct {
 	// 上次同步的时刻。取自 hub_sync_runs 最新一行，配置表上不存第二份。
 	// 详情与历史走 /admin/hub-sync/runs。
 	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+	// Running = 本进程此刻正在跑一轮。
+	//
+	// 界面靠它显示"正在同步"并轮询到结束 —— 一轮要探测上百个站点（实测 110 站
+	// 108 秒），没有这一位的话人只能对着一个变灰的按钮干等，不知道是在跑还是卡了。
+	// **进程级**：另一个副本在跑时这里是 false，那种情况由 advisory 锁挡住，
+	// 界面会从历史里看到那一轮。
+	Running bool `json:"running"`
 }
 
+// hubSyncViewNow 是"配置 + 此刻在不在跑"。
+func (s *Server) hubSyncViewNow(c store.HubSyncConfig) hubSyncView {
+	v := hubSyncViewOf(c)
+	v.Running = s.hubSyncBusy.Load()
+	return v
+}
+
+// hubSyncViewOf 只管把配置转成视图；Running 由调用方补 —— 它是进程状态，
+// 不属于配置，硬塞进这个纯函数会逼它收一个 *Server。
 func hubSyncViewOf(c store.HubSyncConfig) hubSyncView {
 	v := hubSyncView{
 		WebDAVURL:         c.WebDAVURL,
@@ -334,7 +350,7 @@ func (s *Server) getHubSync(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.ok(w, hubSyncViewOf(cfg))
+		s.ok(w, s.hubSyncViewNow(cfg))
 	})
 }
 
@@ -400,26 +416,75 @@ func (s *Server) putHubSync(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Info("all-api-hub 同步配置已更新",
 			"enabled", cfg.Enabled, "interval_min", cfg.IntervalMinutes,
 			"apply_mode", cfg.ApplyMode)
-		s.ok(w, hubSyncViewOf(cfg))
+		s.ok(w, s.hubSyncViewNow(cfg))
 	})
 }
 
 // runHubSyncNow 手动跑一轮。?apply=true 强制落库（界面上的"立即导入"）。
+// runHubSyncNow 起一轮同步并**立刻返回 202**，结果去 /admin/hub-sync/runs 看。
+//
+// 从"同步等结果"改成"起了就走"（2026-09-16），修三个缺陷：
+//
+//  1. **整轮跑在 `r.Context()` 上** —— 它在浏览器切走页面、关标签页、或反向代理
+//     超时那一刻就被取消。而这一轮要探测备份里的上百个站点（实测 110 站 108 秒），
+//     被取消时已经建了一部分渠道：留下**半拉子导入**。更糟的是 RunHubSync 末尾
+//     写 hub_sync_runs 那一步用的也是这个 ctx，于是连"这轮失败了"都记不下来 ——
+//     半个状态 + 零条历史，事后完全无从追查。
+//  2. **手动触发没有任何互斥**。定时那条路有 advisory 锁（hubSyncTickOnce），
+//     手动这条直接调 RunHubSync。开两个标签页各点一次，就是两轮并发的百站导入
+//     互相抢同一批渠道 —— 界面上的 `busy` 只管得住它自己那个标签页。
+//  3. 前端因此只能干等两分钟，而且不知道自己在等什么（见 HubSyncCard）。
+//
+// 结果不在响应里，因为它本来就不在响应里才对：每一轮都已经完整落进 hub_sync_runs
+// （含逐站明细），界面读那张表即可 —— 让同一份结果有两个来源才是分叉。
 func (s *Server) runHubSyncNow(w http.ResponseWriter, r *http.Request) {
-	res, err := s.RunHubSync(r.Context(), store.HubSyncTriggerManual,
-		r.URL.Query().Get("apply") == "true")
+	apply := r.URL.Query().Get("apply") == "true"
+	// **配置问题要当场报**，别让它变成一句 202 + 一条只在日志里的错误。
+	// 改成后台跑之后，RunHubSync 里"还没有配置 WebDAV 地址"那条早退发生在
+	// goroutine 里 —— 界面会先收到 202、再发现历史里什么都没多出来，
+	// 而那正是最难排查的一种反馈。这一条 SELECT 很快，放在同步路径上不亏。
+	conn, release, err := s.DB.Acquire(r.Context())
 	if err != nil {
-		switch {
-		case errors.Is(err, collector.ErrHubBackupNotFound):
-			s.fail(w, http.StatusNotFound, err.Error())
-		case errors.Is(err, collector.ErrHubBackupEncrypted),
-			errors.Is(err, collector.ErrHubBackupDecrypt):
-			// 4xx：远端好好地把文件给了我们，解不开是**我方配置**的问题。
-			s.fail(w, http.StatusBadRequest, err.Error())
-		default:
-			s.fail(w, http.StatusBadGateway, err.Error())
-		}
+		s.fail(w, http.StatusServiceUnavailable, "获取连接失败: "+err.Error())
 		return
 	}
-	s.ok(w, res)
+	cfg, err := store.LoadHubSyncConfig(r.Context(), conn)
+	release()
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if strings.TrimSpace(cfg.WebDAVURL) == "" {
+		s.fail(w, http.StatusBadRequest, "还没有配置 WebDAV 地址")
+		return
+	}
+	if !s.hubSyncBusy.CompareAndSwap(false, true) {
+		s.fail(w, http.StatusConflict, "已有一轮 all-api-hub 同步在执行，等它跑完再点")
+		return
+	}
+	go func() {
+		defer s.hubSyncBusy.Store(false)
+		// 后台 ctx：这一轮要活得比触发它的请求久（见上面第 1 条）。
+		ctx := s.backgroundCtx()
+		// 跨实例互斥仍走 advisory 锁 —— 上面那个布尔只管得住本进程。
+		locked, unlock, err := s.tryHubSyncLock(ctx)
+		if err != nil {
+			s.Logger.Warn("取 all-api-hub 同步锁失败", "err", err)
+			return
+		}
+		if !locked {
+			s.Logger.Info("另一实例正在跑 all-api-hub 同步，本次跳过")
+			return
+		}
+		defer unlock()
+		if _, err := s.RunHubSync(ctx, store.HubSyncTriggerManual, apply); err != nil {
+			// 失败照样进了 hub_sync_runs（RunHubSync 成败都记），界面从那儿读。
+			s.Logger.Warn("all-api-hub 手动同步失败", "err", err)
+		}
+	}()
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"started": true, "apply": apply,
+		"note": "已在后台开始；进度看 GET /admin/hub-sync 的 running，结果看 /admin/hub-sync/runs",
+	})
 }

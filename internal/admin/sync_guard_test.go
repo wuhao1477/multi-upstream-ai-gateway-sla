@@ -79,38 +79,27 @@ func TestSyncGuardZeroIntervalNeverThrottles(t *testing.T) {
 	}
 }
 
-func TestKeyAutomationOperationsUseSeparateGuardSlots(t *testing.T) {
+// 补齐用的槽位是负数，与渠道 sync 用的渠道 id（正数）不可能撞上 ——
+// 撞上的表现是"采过一次渠道之后补齐预览被挡 60 秒"，而两件事毫无关系。
+//
+// 「同步已有 Key」原先也占一个槽位（keyImportGuardSlot），2026-09-16 改成后台
+// 批次之后它不再走 guard：要防的是两批并发去花同一份上游限流预算，而那由
+// keyImportQueue.begin 的"同时只跑一个"保证，比"两次点击间隔 60 秒"贴切。
+func TestKeyProvisionGuardSlotDoesNotCollideWithChannels(t *testing.T) {
 	g := newSyncGuard()
-	if err := g.acquire(keyImportGuardSlot, time.Minute); err != nil {
-		t.Fatalf("导入槽位首次 acquire 应成功，得到 %v", err)
-	}
-	g.release(keyImportGuardSlot, true)
-
 	if err := g.acquire(keyProvisionGuardSlot, time.Minute); err != nil {
-		t.Fatalf("补齐预览不应被导入窗口阻塞，得到 %v", err)
+		t.Fatalf("补齐槽位首次 acquire 应成功，得到 %v", err)
 	}
-	g.release(keyProvisionGuardSlot, false)
+	g.release(keyProvisionGuardSlot, true)
 
-	if err := g.acquire(keyImportGuardSlot, time.Minute); !errors.Is(err, errSyncTooSoon) {
-		t.Fatalf("导入槽位自身仍应遵守间隔，得到 %v", err)
+	// 任意渠道都不该被补齐的窗口挡住
+	if err := g.acquire(int64(1), time.Minute); err != nil {
+		t.Fatalf("渠道 sync 不应被补齐窗口阻塞，得到 %v", err)
 	}
-}
+	g.release(int64(1), false)
 
-func TestDeferredImportAccountsCountRemainingTargets(t *testing.T) {
-	for _, tc := range []struct {
-		name                   string
-		total, processed, want int
-	}{
-		{name: "all remaining", total: 5, processed: 2, want: 3},
-		{name: "none remaining", total: 2, processed: 2, want: 0},
-		{name: "processed cannot exceed total", total: 2, processed: 3, want: 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := deferredImportAccounts(tc.total, tc.processed); got != tc.want {
-				t.Fatalf("deferredImportAccounts(%d, %d) = %d，期望 %d",
-					tc.total, tc.processed, got, tc.want)
-			}
-		})
+	if err := g.acquire(keyProvisionGuardSlot, time.Minute); !errors.Is(err, errSyncTooSoon) {
+		t.Fatalf("补齐槽位自身仍应遵守间隔，得到 %v", err)
 	}
 }
 

@@ -88,6 +88,12 @@ func (r *Runner) adapter(ch store.Channel) (collector.Adapter, error) {
 //
 // 调用方已经提交渠道、账号和凭证事务；本方法只处理 Key，单把失败继续处理，
 // 让导入基础资源与 Key 可用性分开。
+//
+// ⚠️ 三处账号级失败一律 `%w` 裹住**原始错误**，不要退回纯文案。
+// 后台同步队列要靠 `collector.HTTPFailure` 从中读出状态码来分类：429/5xx 值得
+// 退避重排，401/403 重排多少次都是同一个 401。断开这条链之后，队列只能看到
+// "账号 6 会话鉴权失败"这一句话 —— 于是要么全部重试（持续打别人家站点），
+// 要么全部不重试（限流这个最常见的失败再也自愈不了）。两条都错。
 func (r *Runner) ImportKeys(
 	ctx context.Context, conn *pgx.Conn, ch store.Channel, creds []collector.Credential,
 	request collector.KeyImportRequest,
@@ -115,18 +121,18 @@ func (r *Runner) ImportKeys(
 			cred, err = r.Auth.EnsureFresh(ctx, cred, refresher, time.Now())
 			if err != nil {
 				r.logKeyImportFailure(ch, cred.AccountID, "renew", "", err)
-				return result, fmt.Errorf("账号 %d 凭证续期失败", cred.AccountID)
+				return result, fmt.Errorf("账号 %d 凭证续期失败: %w", cred.AccountID, err)
 			}
 		}
 		session, err := adapter.Authenticate(ctx, cred)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "authenticate", "", err)
-			return result, fmt.Errorf("账号 %d 会话鉴权失败", cred.AccountID)
+			return result, fmt.Errorf("账号 %d 会话鉴权失败: %w", cred.AccountID, err)
 		}
 		keys, err := adapter.FetchKeys(ctx, session)
 		if err != nil {
 			r.logKeyImportFailure(ch, cred.AccountID, "list", "", err)
-			return result, fmt.Errorf("账号 %d 读取 Key 列表失败", cred.AccountID)
+			return result, fmt.Errorf("账号 %d 读取 Key 列表失败: %w", cred.AccountID, err)
 		}
 		imported, err := r.importFetchedKeys(ctx, conn, ch, cred, session, resolver, keys, &remainingSecrets)
 		mergeKeyImportResult(&result, imported)
@@ -236,23 +242,33 @@ func (r *Runner) importFetchedKeys(
 			result.Skipped++
 			continue
 		}
-		if remainingSecrets != nil && *remainingSecrets <= 0 {
-			result.Deferred += len(keys) - index
-			break
-		}
-		if remainingSecrets != nil {
-			(*remainingSecrets)--
-		}
-		result.SecretResolves++
-		secret, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
-		if err != nil {
-			r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
-			if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+		// 上游在列表里就给了完整明文时，**一个额外请求都不用发**。
+		//
+		// 这不只是省一次往返：那个专用端点正是按 IP 限流的那一个（实测 20 次 /
+		// 20 分钟），也是"同步已有 Key"要排队跑的全部理由。这种站因此完全不消耗
+		// 预算。而且有的二开**根本没有**那个端点（Agent Router 实测 404），
+		// 无条件去调的结果是一把都导不进来。见 collector.Key.Secret 的注释。
+		secret := key.Secret
+		if secret == "" {
+			if remainingSecrets != nil && *remainingSecrets <= 0 {
 				result.Deferred += len(keys) - index
 				break
 			}
-			result.Failed++
-			continue
+			if remainingSecrets != nil {
+				(*remainingSecrets)--
+			}
+			result.SecretResolves++
+			resolved, err := resolver.ResolveKeySecret(ctx, session, key.KeyRef)
+			if err != nil {
+				r.logKeyImportFailure(ch, cred.AccountID, "resolve_secret", key.KeyRef, err)
+				if status, _, ok := collector.HTTPFailure(err); ok && status == 429 {
+					result.Deferred += len(keys) - index
+					break
+				}
+				result.Failed++
+				continue
+			}
+			secret = resolved
 		}
 		groupID, err := importedGroupID(ctx, conn, ch.ID, key.GroupRef)
 		if err != nil {

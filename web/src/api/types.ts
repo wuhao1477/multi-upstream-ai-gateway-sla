@@ -47,6 +47,49 @@ export type ItemStatus = 'ok' | 'partial' | 'failed' | 'unsupported' | 'skipped'
 export type SupportLevel = 'supported' | 'degraded' | 'unsupported'
 export type CapabilityMap = Partial<Record<Capability, SupportLevel>>
 
+// ── 采集能力（internal/admin/collectability.go）───────────────────────────────
+
+/**
+ * 「这个渠道 / 账号能不能全自动采集」。
+ *
+ * - `auto` 全部启用账号都能自动采
+ * - `partial` 一部分能（只在渠道级出现）
+ * - `manual` 现在一个都采不了，要人动手 —— **为什么**看 `blocker`
+ */
+export type CollectMode = 'auto' | 'partial' | 'manual'
+
+/**
+ * 阻碍的机器可读判据。分两类，处置完全不同：
+ *  - `family_unknown` 是**站点性质**：探测都没认出这是什么站（整站 JS 盾的站点
+ *    也落在这里），登记多少凭证都没用，只能人工录入（FR-011）
+ *  - 其余是配置没做完，补上就能自动
+ */
+export type CollectBlocker =
+  | 'family_unknown'
+  | 'no_account'
+  | 'no_credential'
+  | 'credential_invalid'
+  | 'account_disabled'
+
+export interface Collect {
+  mode: CollectMode
+  /** 缺席 = 没有阻碍。 */
+  blocker?: CollectBlocker
+  /** 给人读的一句话，会改。要判断请用 mode / blocker。 */
+  reason: string
+  /** 能自动采的账号数 / 启用中的账号数。只有渠道级有；两个都为 0 时服务端省略。 */
+  ready_accounts?: number
+  total_accounts?: number
+  /**
+   * 站点 `/api/status` 自称的「人机验证已关」。
+   *
+   * **缺席 = 从未探测过，不是"有盾"**（FR-020「未采集 ≠ 0」的同一条纪律）。
+   * ⚠️ 它**不参与** `mode` 的判定，只在 `reason` 里附一句：实测那一位管的是
+   * 网页登录表单，而采集走的是长期访问令牌（见 admin/collectability.go 文件头）。
+   */
+  no_shield?: boolean
+}
+
 // ── 列表实体（internal/store/channels.go）─────────────────────────────────────
 
 export interface Channel {
@@ -59,6 +102,14 @@ export interface Channel {
   disabled_until?: string
   created_at: string
   updated_at: string
+  /**
+   * 采集能力判定。服务端算（admin/collectability.go），不在这边拼 ——
+   * 判据跟采集器用的是同一套，拼两份的漂移方向一定是界面说"能采"、采集器说"采不了"。
+   *
+   * 注意它与 `status` 是**两根轴**：status 说的是"人有没有把它关掉"，
+   * 这里说的是"能不能自动采到数据"。
+   */
+  collect: Collect
 }
 
 export interface Account {
@@ -104,6 +155,14 @@ export interface Account {
   cred_type?: string
   cred_status?: string
   cred_expires_at?: string
+
+  /**
+   * 采集能力判定，**带上了所属渠道那一层的阻碍**。
+   *
+   * 只看 `cred_type` 是不够的：一个开着人机验证的渠道，它下面的账号凭证登记得
+   * 再全也一把都采不到，而那一档看起来恰恰最像"已就绪"。
+   */
+  collect: Collect
 }
 
 export interface Key {
@@ -250,8 +309,11 @@ export interface GroupModelsResp {
 export interface KeyImportItem {
   channel_id: number
   account_id: number
+  /** ok / partial / deferred / skipped / failed。 */
   status: string
   error?: string
+  /** 这条结果是第几次尝试得出的（限流退避会重排）。 */
+  attempts?: number
   found: number
   imported: number
   skipped: number
@@ -259,6 +321,14 @@ export interface KeyImportItem {
   deferred: number
 }
 
+/**
+ * 一批同步的汇总。
+ *
+ * ⚠️ 两组计数**单位不同**，不可混着读：`found/imported/skipped/failed/deferred`
+ * 的单位是**把**（Key），`*_accounts` 的单位是**个**（账号）。实测撞到过：
+ * 10 个渠道里 6 个站整个连不上，而 `failed` 是 2（那 2 把来自唯一连得上的站）——
+ * 只显示 `failed` 会把"半数站点没采到"写成"两处小问题"。
+ */
 export interface KeyImportBatchResult {
   count: number
   found: number
@@ -266,9 +336,36 @@ export interface KeyImportBatchResult {
   skipped: number
   failed: number
   deferred: number
-  /** 因明文读取预算耗尽而尚未处理的账号数；deferred 本身只统计 Key。 */
+  /** 整个账号都没成的个数：凭证失效、站型不认……要人去修。 */
+  failed_accounts: number
+  /** "稍后再来"的个数：本渠道明文读取预算用尽，或批次被进程退出打断。 */
   deferred_accounts: number
+  /** 被跳过的个数（账号已停用）。 */
+  skipped_accounts: number
   items: KeyImportItem[]
+}
+
+/**
+ * 一个后台同步批次。
+ *
+ * 队列只在 sla-core 的内存里（服务端 key_import_queue.go 写了为什么）——
+ * 所以进程重启后这个批次会**消失**，轮询会拿到 404。界面要把这件事说出来，
+ * 不能让进度条静静停住。
+ */
+export interface KeyImportJob extends KeyImportBatchResult {
+  id: number
+  status: 'running' | 'done' | 'canceled'
+  started_at: string
+  finished_at?: string
+  /** 这批要处理的账号数 / 已出结果的账号数。 */
+  total: number
+  done: number
+  /** 还排在队里的账号数（含等着退避重试的）。 */
+  pending: number
+  /** 队首那个账号最早什么时候轮到 —— 批次卡在限流退避里时，它回答"是死了还是在等"。 */
+  next_retry_at?: string
+  /** 整批失败的原因（取不到连接之类）。单个账号的失败在 items 里。 */
+  error?: string
 }
 
 export interface KeyProvisionItem {
@@ -444,7 +541,14 @@ export interface HubSyncConfig {
    * 存了迟早与历史表分叉（定时器按一个时间走、界面显示另一个）。
    * 详情与历史看 `HubSyncRun`。
    */
-  last_run_at?: string
+  last_run_at?: string  /**
+   * 本进程此刻正在跑一轮同步。
+   *
+   * 界面靠它轮询到结束：一轮要探测备份里上百个站点（实测 110 站 108 秒），
+   * 而服务端起了就返回 202，结果落进 hub_sync_runs —— 没有这一位，界面只能
+   * 靠猜一个秒数，猜短了会在历史还没写进去时就报"完成"。
+   */
+  running: boolean
 }
 
 /**
@@ -508,8 +612,14 @@ export interface HubImportItem {
   detected_family?: SiteFamily
   family_mismatch?: boolean
   channel_id?: number
-  /** imported | would_import（dry_run）| skipped | failed。 */
+  /**
+   * imported（新建）| updated（已有，这轮改了）| unchanged（已有，没动）
+   * | would_import（dry_run）| skipped（探测失败/站型未识别）| failed
+   * | removed（本地有、备份里已经没有）。
+   */
   status: string
+  /** 这一条具体改了什么，给人看的短语。只给计数回答不了"它到底动了什么"。 */
+  changes?: string[]
   reason?: string
   /** 可用但需注意：开盾站点、导出里没凭证。 */
   warning?: string
@@ -523,7 +633,20 @@ export interface HubImportItem {
 /** 整次导入的汇总。 */
 export interface HubImportResult {
   total: number
+  /**
+   * ⚠️ 这一组是**这一轮到底改了什么**（2026-09-16 加）。
+   *
+   * 原先只有 imported/skipped/failed，而它们描述的只是"建没建出渠道"。台账一旦
+   * 建齐，之后每轮都是 `imported 0 / skipped N` —— 那行数字读起来就是"同步没
+   * 起作用"，而实际上凭证可能已经换过好几轮了。
+   */
   imported: number
+  /** 已有渠道被改动（目前只有凭证：备份里的令牌与库里不同）。 */
+  updated: number
+  /** 已有且逐字一致、这轮什么都没动。与 skipped 不同：那个含"探测失败"。 */
+  unchanged: number
+  /** 本地还在、备份里已经没有的渠道数（只数 hub 来源的）。apply 时会被停用。 */
+  removed: number
   skipped: number
   failed: number
   family_mismatches: number

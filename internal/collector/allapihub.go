@@ -111,9 +111,14 @@ type HubImportItem struct {
 	Mismatch       bool   `json:"family_mismatch,omitempty"`
 	ChannelID      int64  `json:"channel_id,omitempty"`
 	// AccountID 只供导入完成后定位该条目的账号，不进入响应。
-	AccountID int64  `json:"-"`
-	Status    string `json:"status"` // imported | skipped | failed
-	Reason    string `json:"reason,omitempty"`
+	AccountID int64 `json:"-"`
+	// Status：imported（新建）| updated（已有，这轮改了）| unchanged（已有，没动）
+	//        | skipped（没处理：探测失败/站型未识别）| failed | removed（备份里没了）
+	Status string `json:"status"`
+	// Changes 是这一条具体改了什么，给人看的短语（如"采集凭证已更新"）。
+	// 只给计数不给内容的话，"更新 7 条"没法回答"它到底动了什么"。
+	Changes []string `json:"changes,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
 	// Warning 记录可用但需注意的情形（如开盾站点采集不可行）。
 	Warning      string `json:"warning,omitempty"`
 	KeysFound    int    `json:"keys_found,omitempty"`
@@ -125,8 +130,22 @@ type HubImportItem struct {
 
 // HubImportResult 是整次导入的汇总。
 type HubImportResult struct {
-	Total        int             `json:"total"`
-	Imported     int             `json:"imported"`
+	Total int `json:"total"`
+	// ── 这一轮到底改了什么（2026-09-16 加）──
+	//
+	// 原先只有 imported/skipped/failed，而它们描述的只是"建没建出渠道"。
+	// 一旦台账已经建齐，之后每一轮都是 `imported 0 / skipped 115` —— 那行数字
+	// 读起来就是"同步没起作用"，而实际上凭证可能已经换过好几轮了。
+	// 现在把"变化"单独报出来：新建多少、更新多少、原样多少、备份里少了多少。
+	Imported int `json:"imported"`
+	// Updated 是**已有渠道被改动**的条数（目前只有凭证：备份里的令牌与库里不同）。
+	Updated int `json:"updated"`
+	// Unchanged 是已有且逐字一致、这一轮什么都没动的条数。
+	// 它与 Skipped 的差别：Skipped 还含"探测失败/站型未识别"那类根本没处理的。
+	Unchanged int `json:"unchanged"`
+	// Removed 是**本地有、备份里已经没有**的渠道数（只数 source=hub 的）。
+	// apply 时它们会被停用（可逆），dry_run 时只报数。
+	Removed      int             `json:"removed"`
 	Skipped      int             `json:"skipped"`
 	Failed       int             `json:"failed"`
 	Mismatches   int             `json:"family_mismatches"`

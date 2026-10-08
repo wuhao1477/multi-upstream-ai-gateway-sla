@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 
@@ -73,9 +75,25 @@ type Server struct {
 	// HubHTTP 取 all-api-hub WebDAV 备份用的客户端。留空则用默认带超时的那个。
 	// 存在的理由只有一个：验收要把它指向一台真 WebDAV 容器。
 	HubHTTP *http.Client
+	// Background 是后台批次的生命周期 ctx（main 把信号 ctx 注进来）。
+	//
+	// 在结构体里存 ctx 通常是坏味道，这里有一个具体理由：后台 Key 同步批次要
+	// **活得比触发它的那个 HTTP 请求久**，而请求的 ctx 在响应写完那一刻就取消了 ——
+	// 用它会让批次在第一次 DB.Acquire 上静悄悄死掉，界面只看到一个永远停在
+	// 0/40 的进度条。留空退化成 context.Background()，于是单测不必装配它。
+	Background context.Context
 
-	guard  *syncGuard
-	tokens *tokenStore
+	guard *syncGuard
+	// queue 是后台「同步已有 Key」批次的内存队列（key_import_queue.go）。
+	// 懒建，见 keyQueue()。
+	queue     *keyImportQueue
+	queueOnce sync.Once
+	// hubSyncBusy 标记本进程是否正在跑一轮 all-api-hub 同步。
+	//
+	// 进程内互斥 + 给界面看的"在跑没有"。跨实例互斥仍靠 advisory 锁 ——
+	// 两层缺一不可：锁管得住别的副本，管不住同一个进程里两个标签页同时点。
+	hubSyncBusy atomic.Bool
+	tokens      *tokenStore
 	// onConfigChange 在 apply 成功后触发内存快照重建（09 §2 末条：
 	// 使新配置对决策路径生效；决策路径本身仍只读快照、不查库）。
 	onConfigChange func()
@@ -89,6 +107,7 @@ func NewServer(db DB, token string, logger *slog.Logger, onConfigChange func()) 
 	return &Server{
 		DB: db, Token: token, Logger: logger,
 		guard:          newSyncGuard(),
+		queue:          newKeyImportQueue(),
 		tokens:         newTokenStore(),
 		onConfigChange: onConfigChange,
 	}

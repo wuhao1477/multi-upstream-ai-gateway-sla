@@ -16,6 +16,10 @@ import (
 
 // ── 账号 ──
 
+// listAccounts 每行附一条 collect 判定（collectability.go）。
+//
+// 账号那一条**必须带上渠道层面的阻碍**：一个开盾渠道下的账号，凭证登记得再全
+// 也一把都采不到。只看 cred_type 的话它看起来是就绪的，而那正是最误导的一档。
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	chID, _ := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
 	s.withConn(w, r, func(conn *pgx.Conn) {
@@ -24,10 +28,32 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if as == nil {
-			as = []store.Account{}
+		shields, err := store.DetectedNoShield(r.Context(), conn)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
 		}
-		s.ok(w, map[string]any{"count": len(as), "items": as})
+		cs, err := store.ListChannels(r.Context(), conn)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		byID := make(map[int64]store.Channel, len(cs))
+		for _, c := range cs {
+			byID[c.ID] = c
+		}
+		type row struct {
+			store.Account
+			Collect Collect `json:"collect"`
+		}
+		out := make([]row, 0, len(as))
+		for _, a := range as {
+			out = append(out, row{
+				Account: a,
+				Collect: accountCollect(byID[a.ChannelID], shieldOf(shields, a.ChannelID), a),
+			})
+		}
+		s.ok(w, map[string]any{"count": len(out), "items": out})
 	})
 }
 

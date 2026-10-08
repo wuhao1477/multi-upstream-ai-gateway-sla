@@ -43,7 +43,11 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	// Key
 	mux.Handle("GET /admin/keys", h(s.listKeys))
 	mux.Handle("POST /admin/keys", h(s.createKey))
+	// 同步已有 Key：POST 排一个后台批次并立刻返回 202，进度与逐账号结果走下面
+	// 两条（key_import_queue.go 顶部写了为什么非得是后台）。
 	mux.Handle("POST /admin/keys/import", h(s.importKeys))
+	mux.Handle("GET /admin/keys/import/jobs", h(s.listKeyImportJobs))
+	mux.Handle("GET /admin/keys/import/jobs/{id}", h(s.getKeyImportJob))
 	mux.Handle("POST /admin/keys/provision", h(s.provisionKeys))
 	mux.Handle("PATCH /admin/keys/{id}", h(s.patchKey))
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
@@ -88,6 +92,11 @@ func (s *Server) listSiteFamilies(w http.ResponseWriter, r *http.Request) {
 
 // ── 渠道 ──
 
+// listChannels 每行附一条 collect 判定（collectability.go）。
+//
+// 多打两条查询是故意的：不带这个判定的渠道列表回答不了"哪些站我不用管" ——
+// 判据散在站型、探测记录、账号、凭证四处，让界面自己去拼就会拼出与采集器
+// 不一致的那一份。两条查询都是全表一次，不随渠道数放大（N+1 才会）。
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	s.withConn(w, r, func(conn *pgx.Conn) {
 		cs, err := store.ListChannels(r.Context(), conn)
@@ -95,10 +104,32 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if cs == nil {
-			cs = []store.Channel{}
+		shields, err := store.DetectedNoShield(r.Context(), conn)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
 		}
-		s.ok(w, map[string]any{"count": len(cs), "items": cs})
+		accounts, err := store.ListAccounts(r.Context(), conn, 0)
+		if err != nil {
+			s.fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		byChannel := map[int64][]store.Account{}
+		for _, a := range accounts {
+			byChannel[a.ChannelID] = append(byChannel[a.ChannelID], a)
+		}
+		type row struct {
+			store.Channel
+			Collect Collect `json:"collect"`
+		}
+		out := make([]row, 0, len(cs))
+		for _, ch := range cs {
+			out = append(out, row{
+				Channel: ch,
+				Collect: channelCollect(ch, shieldOf(shields, ch.ID), byChannel[ch.ID]),
+			})
+		}
+		s.ok(w, map[string]any{"count": len(out), "items": out})
 	})
 }
 
@@ -193,10 +224,12 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 				"family": detected.Family, "version": detected.Version,
 				"no_shield": detected.NoShield, "quota_per_unit": detected.QuotaPerUnit,
 			}
-			// 开盾站点服务端采集不可行，须转人工录入（04 §6）—— 明确告知
+			// 站点声明开着 turnstile（04 §6）—— 告知，但**不说"采不了"**。
+			// 措辞 2026-09-17 改过，理由同 import_api.go 同处：实测那一位管的是
+			// 网页登录表单，不影响用访问令牌采集。
 			if !detected.NoShield && detected.Family != collector.FamilyUnknown {
-				resp["warning"] = "该站点疑似开启 turnstile 人机验证，" +
-					"服务端自动采集可能不可行，需转人工录入（04 §6）"
+				resp["warning"] = "该站点声明开启了 turnstile 人机验证（04 §6）——" +
+					"实测那一位管的是网页登录，用访问令牌的服务端采集照常可行"
 			}
 		}
 		if err := tx.Commit(r.Context()); err != nil {

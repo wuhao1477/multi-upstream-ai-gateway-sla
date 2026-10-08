@@ -55,14 +55,14 @@ onMounted(async () => {
       <input
         id="cat-q"
         v-model="qInput"
+        class="inline-q"
         placeholder="按模型名筛选"
-        style="width: 200px; margin-left: auto"
         @input="cat.setQuery(qInput)"
       />
     </div>
 
     <div class="tw" v-if="cat.items.length > 0">
-      <table>
+      <table v-cell-label>
         <thead>
           <tr>
             <th>模型</th>

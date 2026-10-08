@@ -373,6 +373,36 @@ try {
   const newChannelId = await page.$$eval('#channels [data-ch-name]',
     (ts, i) => ts[i].getAttribute('data-ch-name'), newRowIdx);
 
+  // ── 4ante. 「自动采集」那一列：这个渠道能不能不用人管 ──
+  //
+  // 这一条走的是**真实的三级演进**：刚建好（没账号）→ 有账号没凭证 →
+  // 凭证齐了。三档在界面上必须长得不一样，否则那个徽标只是装饰。
+  //
+  // 此刻是第一档：站型探出来了、账号一个都没有。
+  //
+  // ⚠️ 这里**不能**把挑中的真站点是否开着 turnstile 写进期望 —— pick-upstream
+  // 挑的是"此刻活着的站"，它的 turnstile_check 是什么全看运气。判定不看那一位
+  // 正是 collectability.go 的结论（04 §6 的 2026-09-17 修正），所以这条断言
+  // 对开盾站与无盾站给出同一个期望，而那恰好也是在验这一点。
+  const collectRead = id => page.evaluate(cid => {
+    const el = document.querySelector(`[data-ch-collect="${cid}"]`);
+    if (el === null) return { missing: true };
+    return {
+      mode: el.dataset.collectMode, blocker: el.dataset.collectBlocker,
+      text: el.textContent.trim(),
+      reason: el.getAttribute('title') ?? '',
+      hint: el.parentElement.textContent.replace(/\s+/g, ' ').trim(),
+    };
+  }, id);
+  const c0 = await collectRead(newChannelId);
+  check('新建渠道在列表上标出「需人工」并说明是缺账号（不是缺凭证、也不是未探测）',
+    c0.mode === 'manual' && c0.blocker === 'no_account' && c0.text === '需人工',
+    JSON.stringify(c0));
+  // reason 是给人读的那一句，必须真的说清楚下一步做什么 —— 只有徽标的话，
+  // 「需人工」四个字对着 65 行看是没有信息量的。
+  check('「需人工」带着可操作的原因（悬停可见）',
+    /账号/.test(c0.reason) && c0.reason.length > 8, c0.reason);
+
   // ── 4bis. 渠道行二级展开：直接看到该渠道下的账号与 Key ──
   //
   // 此刻这个渠道**刚建好、什么都没有**，所以正确的展开区不是空白，
@@ -604,6 +634,21 @@ try {
     credBefore.state === 'missing' && credBefore.text.includes('未登记'),
     `data-cred=${credBefore.state} 文案=${credBefore.text}`);
 
+  // 「自动采集」第二档：账号有了、凭证还没有。
+  const accCollect = id => page.evaluate(aid => {
+    const el = document.querySelector(`[data-account-collect="${aid}"]`);
+    if (el === null) return { missing: true };
+    return {
+      mode: el.dataset.collectMode, blocker: el.dataset.collectBlocker,
+      text: el.textContent.trim(), reason: el.getAttribute('title') ?? '',
+    };
+  }, id);
+  const a0Before = await accCollect(accountIDs[0]);
+  check('缺凭证的账号在「自动采集」列上标「需人工」并指向凭证',
+    a0Before.mode === 'manual' && a0Before.blocker === 'no_credential' &&
+    /凭证/.test(a0Before.reason),
+    JSON.stringify(a0Before));
+
   // 真实上游令牌挂在第一个账号上。入口是这一行的按钮 —— 点它就该带着这一行。
   await openDrawer(`[data-account-cred-edit="${accountIDs[0]}"]`, '#cred-token');
   const credPicked = await page.$eval('#cred-account', el => el.dataset.picked);
@@ -630,6 +675,51 @@ try {
   check('账号行显示凭证状态与类型，且页面不含令牌原文',
     /NewAPI 系访问令牌/.test(credCell) && !credDOM.includes(UP_TOKEN),
     credCell);
+
+  // 「自动采集」第三档：这个账号真的不用人管了。
+  //
+  // 两个账号只登记了一个的凭证 —— 于是渠道那一级必须是 **partial 1/2**，
+  // 而不是 auto。这一条守的是"一个就绪就报全绿"那类聚合错误：把 partial
+  // 写成 auto 的话，一个半配好的渠道看起来跟配齐的一模一样。
+  const a0After = await accCollect(accountIDs[0]);
+  const a1After = await accCollect(accountIDs[1]);
+  check('登记凭证后该账号翻成「可全自动」',
+    a0After.mode === 'auto' && (a0After.blocker ?? '') === '' &&
+    a0After.text === '可全自动',
+    JSON.stringify(a0After));
+  check('同渠道另一个还没凭证的账号仍是「需人工」（判定是逐账号的）',
+    a1After.mode === 'manual' && a1After.blocker === 'no_credential',
+    JSON.stringify(a1After));
+
+  await pane('channels');
+  await page.click('#btn-reload');
+  await sleep(800);
+  const cPartial = await collectRead(newChannelId);
+  check('渠道级聚合成「部分可自动」并给出 1/2（不是一个就绪就报全绿）',
+    cPartial.mode === 'partial' && cPartial.blocker === 'no_credential' &&
+    cPartial.text === '部分可自动' && /1\/2/.test(cPartial.hint),
+    JSON.stringify(cPartial));
+
+  // 采集状态要能直接搜 —— 打开这一页最常见的动机就是"哪些站要我动手"。
+  // 搜的是**屏幕上那几个字**，不是内部枚举值：记得住的是界面文案。
+  //
+  // 此刻库里只有这一个渠道且它是 partial，所以搜「部分可自动」应当留下它、
+  // 搜「可全自动」应当一行不剩 —— 后半条是防"干草堆把什么都收进去了"，
+  // 那种写法下任何词都能匹配全部行，筛选看起来一直在工作。
+  await fill('#ch-filter', '部分可自动');
+  await sleep(500);
+  const hitRows = await page.$$eval('#channels tr[data-ch-row] [data-ch-collect]',
+    els => els.map(e => e.dataset.collectMode));
+  check('渠道筛选能按采集状态搜（搜「部分可自动」留下的都是 partial）',
+    hitRows.length > 0 && hitRows.every(m => m === 'partial'),
+    `${hitRows.length} 行：${[...new Set(hitRows)].join(', ') || '无'}`);
+  await fill('#ch-filter', '可全自动');
+  await sleep(500);
+  const missRows = await page.$$eval('#channels tr[data-ch-row]', rs => rs.length);
+  check('搜一个当前没有的采集状态要真的筛空（干草堆没有囫囵收全部）',
+    missRows === 0, `${missRows} 行`);
+  await fill('#ch-filter', '');
+  await sleep(400);
 
   await pane('keys');
   const keySecrets = [
@@ -1398,10 +1488,18 @@ try {
         .accounts?.accounts || [];
       check('试运行读出备份全部条目', val('备份条目') === accounts.length,
         `文件里 ${accounts.length} 条，界面显示 ${val('备份条目')} 条`);
-      check('试运行区分可入库与跳过',
-        val('可入库') > 0 && val('跳过') > 0 &&
-        val('可入库') + val('跳过') + val('失败') === val('备份条目'),
-        `可入库=${val('可入库')} 跳过=${val('跳过')} 失败=${val('失败')}`);
+      // 五档必须**恰好切分**备份条目：新建 / 更新 / 未变 / 跳过 / 失败。
+      // 这是个守恒断言，比"某一档 > 0"扎实得多 —— 少数一档、或把同一条计进
+      // 两档，都会让等式破掉，而那正是加了 updated/unchanged 之后最容易出的错。
+      //
+      // ⚠️「备份里已移除」**不在**这个等式里：那些渠道本地有、备份里没有，
+      // 它们压根不是备份条目，算进来等式反而错。
+      const partition = ['可新建', '更新（凭证有变）', '未变', '跳过', '失败'];
+      const summed = partition.reduce((acc, k) => acc + (val(k) ?? 0), 0);
+      check('试运行把备份条目恰好切分成「新建/更新/未变/跳过/失败」五档',
+        val('可新建') > 0 && val('跳过') > 0 && summed === val('备份条目'),
+        partition.map(k => `${k}=${val(k)}`).join(' ') +
+        ` 合计=${summed} 备份条目=${val('备份条目')}`);
 
       // 站型声明不符必须**报出来而不是静默采信**：站型决定全部字段映射，
       // 信错一次余额/额度/模型全解析错，且错得没有任何报错。
@@ -2655,14 +2753,315 @@ try {
     }
   }
 
+  // ── 12sexies-pre. 后台同步已有 Key：一个站失败不再中断整批 ──
+  //
+  // 这一段守的是 2026-09-16 那个缺陷：旧实现在任何一个账号出错时 `break` 整个
+  // 循环，于是"选 10 个渠道、第 2 个站鉴权失败、后面 8 个站一个字节都没发出去"
+  // 而响应里 `deferred_accounts` 还是 0 —— 界面上读起来就是"全都同步完了"。
+  //
+  // **判据是"每个账号都留下了一条结果"**，不是"成功了几个"。后者取决于那几个
+  // 真站点今天活着没有（写死就是把"它一定可用"那个假设又搬回来）；前者是编排
+  // 的性质，与站点死活无关，而它正是坏掉的那一条。
+  //
+  // 失败样本不用造：这个库里本来就有**没登记采集凭证**的账号（上面几段建出来
+  // 的），真依赖对它们必然报"没有可用采集凭证"。不需要假上游，也不需要假凭证。
+  await pane('keys');
+  await sleep(400);
+  await openDrawer('#btn-import-keys', '#key-auto-channel');
+  await page.click('#key-auto-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  await page.click('[data-pick-all]');
+  await page.click('[data-pick-ok]');
+  await sleep(300);
+  const queued = await page.evaluate(async () => {
+    const t = localStorage.getItem('adminToken');
+    const picked = document.querySelector('#key-auto-channel')?.getAttribute('data-picked') ?? '';
+    const ids = picked.split(',').filter(x => x !== '').map(Number);
+    const r = await fetch('/admin/keys/import', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: ids, account_ids: [], all: false }),
+    });
+    return { status: r.status, job: await r.json(), channels: ids.length };
+  });
+  check('同步已有 Key 立刻返回一个后台批次（202，不再同步等上游）',
+    queued.status === 202 && queued.job.status === 'running' && queued.job.total > 0,
+    `HTTP ${queued.status} 批次 #${queued.job?.id} 共 ${queued.job?.total} 个账号` +
+    `（${queued.channels} 个渠道）`);
+
+  // 已有批次在跑时必须回 409 **并带上那一批的 id** —— 界面据此直接切到它的进度，
+  // 而不是丢一句"正忙"让人自己去找是哪一批。
+  const second = await page.evaluate(async () => {
+    const t = localStorage.getItem('adminToken');
+    const r = await fetch('/admin/keys/import', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: [1], account_ids: [], all: false }),
+    });
+    return { status: r.status, body: await r.json() };
+  });
+  check('同时只跑一个批次：再点一次回 409 并带上正在跑的批次 id',
+    second.status === 409 && second.body.running_job_id === queued.job.id,
+    `HTTP ${second.status} running_job_id=${second.body?.running_job_id}`);
+
+  // 等它跑完。上限给足：每个账号都要真打上游，站点慢的时候一个要好几秒。
+  const finished = await page.evaluate(async id => {
+    const t = localStorage.getItem('adminToken');
+    const deadline = Date.now() + 240_000;
+    let last = null;
+    while (Date.now() < deadline) {
+      const r = await fetch(`/admin/keys/import/jobs/${id}`, {
+        headers: { Authorization: `Bearer ${t}` },
+      });
+      last = await r.json();
+      if (last.status !== 'running') return last;
+      await new Promise(x => setTimeout(x, 1500));
+    }
+    return last;
+  }, queued.job.id);
+  check('后台批次跑到结束（不是停在半路）',
+    finished?.status === 'done',
+    `status=${finished?.status} ${finished?.done}/${finished?.total}`);
+
+  // 核心那一条：**每个账号都有结果**。旧实现这里是 count=2/10。
+  check('每个账号都留下了一条结果 —— 一个站失败不再中断整批',
+    finished?.done === finished?.total && finished?.count === finished?.total &&
+    (finished?.items?.length ?? 0) === finished?.total,
+    `done=${finished?.done}/${finished?.total} count=${finished?.count} ` +
+    `items=${finished?.items?.length}`);
+
+  // 账号级计数必须与 items 对得上。这是同一个缺陷的第二半：汇总里的 `failed`
+  // 数的是**把**（Key），整站连不上的账号对它的贡献是 0 —— 只报它的话，
+  // "6 个站没采到"会显示成"失败 2"。
+  const byStatus = (finished?.items ?? []).reduce((acc, i) => {
+    acc[i.status] = (acc[i.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  check('账号级计数与逐条结果一致（failed_accounts 数的是账号，不是 Key）',
+    finished?.failed_accounts === (byStatus.failed ?? 0) &&
+    finished?.skipped_accounts === (byStatus.skipped ?? 0),
+    `failed_accounts=${finished?.failed_accounts} deferred_accounts=${finished?.deferred_accounts} ` +
+    `skipped_accounts=${finished?.skipped_accounts}；逐条 ${JSON.stringify(byStatus)}`);
+
+  // 每条失败都要指名道姓。只给一个总数的话，"哪个站要去修凭证"还得人去翻日志。
+  const mute = (finished?.items ?? []).filter(i => i.status === 'failed' && !i.error);
+  check('每条失败都带原因（没有光秃秃的 failed）', mute.length === 0,
+    mute.length === 0 ? `失败 ${byStatus.failed ?? 0} 条，均有原因`
+      : `${mute.length} 条 failed 没有 error`);
+
+  // 界面那张进度卡：跑完之后要能在 Key 页上看到这一批的结果。
+  // 队列只在内存里，这张卡是那份"哪些站没采到"名单的**唯一**去处。
+  await page.goto(`${BASE}/admin/ui/keys`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#key-import-progress', { timeout: 10000 });
+  const card = await page.evaluate(() => ({
+    status: document.querySelector('#key-import-status')?.textContent?.trim(),
+    line: document.querySelector('#key-import-progress-line')?.textContent?.replace(/\s+/g, ' ').trim(),
+    rows: document.querySelectorAll('#key-import-items tbody tr').length,
+  }));
+  check('Key 页上能看到刚跑完那一批的结果（刷新页面也接得回来）',
+    card.status === '已完成' && /已处理/.test(card.line ?? ''),
+    `${card.status} · ${card.line} · 明细 ${card.rows} 行`);
+  await page.screenshot({ path: `${SHOT}/15-key-import-job.png`, fullPage: true });
+
+  // ── 12sexies. 手机宽度（375px）：同一套真数据，换个宽度再看一遍 ──
+  //
+  // 这不是另起一份验收，是**同一批真渠道、真 Key、真目录**在移动端那一支 CSS 下
+  // 再走一遍。上面每一条都跑在 1280 —— 而 1280 永远走不到 ≤640 那一档，
+  // 窄屏的缺陷不会在宽屏露头，反过来也一样。
+  //
+  // 375 而不是 390/414：iPhone SE 与 13 mini 是现役最窄的那一档，横向溢出先在
+  // 这里出现；宽一点的机型是它的超集。
+  //
+  // 免密的 SPA 验收也有一段 375px，但那一套跑在**空库**上：骨架、导航、浮层、
+  // 控件尺寸它验得了，"表格摊开成卡片、每一格印着列名"它验不了 —— 没有行。
+  // 所以那几条只能落在这里，只在本地跑（CLAUDE.md §1 的 CI 表）。
+  await page.setViewport({ width: 375, height: 812 });
+  await sleep(500);
+  for (const p of ['channels', 'accounts', 'keys', 'models']) {
+    await pane(p);
+    // 两个分栏记得住上次的视图（localStorage + URL），而上面几段把它们切来切去。
+    // 不显式拨回列表/平铺的话，这里可能撞上卡片模式 —— 那时一张表都没有，
+    // 断言会红在"表 0 张"上，而真实情况是"这一页此刻不显示表格"。
+    if (p === 'models') await page.click('[data-seg="list"]');
+    if (p === 'keys') await page.click('[data-seg="flat"]');
+    await sleep(800);
+    const m = await page.evaluate(() => {
+      const tables = [...document.querySelectorAll('table[data-cell-label]')];
+      const cells = tables.flatMap(t => [...t.querySelectorAll('tbody td')]);
+      // 免列名的三类：展开箭头（.x）、操作列（.acts）、跨列的子行 —— 它们
+      // 在表头那一侧本来就是空的，安一个名字比不安更糟。
+      const need = cells.filter(c => c.colSpan === 1
+        && !c.classList.contains('x') && !c.classList.contains('acts'));
+      const missing = need.filter(c => (c.dataset.label ?? '') === '').length;
+      // 属性有了不等于印出来了。屏幕上那行字是 ::before，而它可能被别的规则
+      // 覆盖成 none —— 只验属性的话，断言会在列名整片消失时照样绿。
+      const blank = need.filter(c => {
+        const v = getComputedStyle(c, '::before').content;
+        return v === 'none' || v === 'normal' || v === '""';
+      }).length;
+      // 摊开了却还在横滚 = 有一格没跟着摊（多半是漏了 display:block 的那类）
+      const scrolling = [...document.querySelectorAll('.tw, .picker-b')]
+        .filter(e => e.scrollWidth > e.clientWidth + 1).length;
+      const stacked = tables.length > 0 && tables.every(t =>
+        getComputedStyle(t).display === 'block'
+        && getComputedStyle(t.tHead).display === 'none');
+      return {
+        tables: tables.length, need: need.length, missing, blank, scrolling, stacked,
+        docW: document.documentElement.scrollWidth, winW: window.innerWidth,
+      };
+    });
+    check(`手机 375px · ${p} 分栏无横向溢出`, m.docW <= m.winW + 1,
+      `scrollWidth=${m.docW} innerWidth=${m.winW}`);
+    check(`手机 375px · ${p} 的表格摊成卡片，且每一格都印着列名`,
+      m.stacked && m.missing === 0 && m.blank === 0,
+      `表 ${m.tables} 张、摊开=${m.stacked}，需要列名的格子 ${m.need} 个：` +
+      `缺属性 ${m.missing}、没印出来 ${m.blank}`);
+    check(`手机 375px · ${p} 的表格不再横向滚`, m.scrolling === 0,
+      `仍在横滚的容器 ${m.scrolling} 个`);
+    await page.screenshot({ path: `${SHOT}/14-mobile-${p}.png`, fullPage: false });
+  }
+
+  // 展开箭头挪到了卡片右上角，而同一行后面每个格子都是定位元素（列名要绝对
+  // 定位到格子里），按文档顺序盖在它上面 —— 箭头照旧画得出来，被盖住的只是
+  // 那块透明区域，所以**肉眼完全正常**，点上去却什么都不发生。
+  // 这条只有 elementFromPoint 抓得到（同仓库记忆「断言绿≠断言有效」）。
+  await pane('channels');
+  await sleep(600);
+
+  // 「自动采集」是本版新加的一列，按 CLAUDE.md §2.1 要在这一段里有自己的断言。
+  // 上面那轮通扫只保证"每个格子都有列名"；这里要的是**这一格**在手机上真的
+  // 读得出来：列名印出来了、徽标文字还在、格子有实际高度（被摊开后压成 0 高
+  // 的格子在通扫里照样算"有列名"）。
+  const mCollect = await page.evaluate(() => {
+    const el = document.querySelector('[data-ch-collect]');
+    if (el === null) return { missing: true };
+    const td = el.closest('td');
+    return {
+      label: td.dataset.label ?? '',
+      before: getComputedStyle(td, '::before').content,
+      badge: el.textContent.trim(),
+      h: Math.round(td.getBoundingClientRect().height),
+    };
+  });
+  check('手机 375px · 「自动采集」这一格印着列名且徽标读得出来',
+    mCollect.label === '自动采集' && mCollect.badge !== '' && mCollect.h > 0 &&
+    mCollect.before.includes('自动采集'),
+    JSON.stringify(mCollect));
+
+  await page.evaluate(() =>
+    document.querySelector('[data-ch-toggle]')?.scrollIntoView({ block: 'center' }));
+  await sleep(400);
+  const arrow = await page.evaluate(() => {
+    const t = document.querySelector('[data-ch-toggle]');
+    if (t === null) return { ok: false, why: '页面上没有渠道行' };
+    const r = t.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    return {
+      ok: top === t || t.contains(top),
+      why: `${top?.tagName}.${typeof top?.className === 'string' ? top.className : ''}`,
+    };
+  });
+  check('手机 375px · 卡片右上角的展开箭头点得中（没有被相邻单元格盖住）',
+    arrow.ok, `该点上层元素是 ${arrow.why}`);
+
+  // 点下去要真的展开。上一条只说明"点得着"，而展开区里嵌着两张表
+  // （账号 + Key），它们也得跟着摊开 —— 嵌套那一层漏了的话，卡片里会长出
+  // 一张横滚的小表。
+  await page.click('[data-ch-toggle]');
+  await sleep(700);
+  const nested = await page.evaluate(() => {
+    const sub = document.querySelector('.sub-row');
+    const inner = sub === null ? [] : [...sub.querySelectorAll('table[data-cell-label]')];
+    return {
+      opened: sub !== null,
+      inner: inner.length,
+      stacked: inner.every(t => getComputedStyle(t).display === 'block'),
+      docW: document.documentElement.scrollWidth, winW: window.innerWidth,
+    };
+  });
+  check('手机 375px · 渠道展开区里的嵌套表格同样摊开，且不撑宽页面',
+    nested.opened && nested.inner > 0 && nested.stacked
+    && nested.docW <= nested.winW + 1, JSON.stringify(nested));
+
+  // 抽屉在宽屏是 460px 的右侧面板（「模型明细」那种宽抽屉是 900px）。
+  // 这一条盯的是有没有把定宽带进手机 —— 带进来的表现不是"窄了点"，
+  // 是面板从屏幕右边探出去，整页跟着能横向滚。
+  await pane('keys');
+  await sleep(400);
+  await openDrawer('#btn-import-keys', '#key-auto-channel');
+  const dw = await page.evaluate(() => ({
+    w: Math.round(document.querySelector('.drawer').getBoundingClientRect().width),
+    winW: window.innerWidth,
+    docW: document.documentElement.scrollWidth,
+  }));
+  check('手机 375px · 抽屉铺满屏宽且不把页面撑宽',
+    dw.w === dw.winW && dw.docW <= dw.winW + 1, JSON.stringify(dw));
+  // 选择器弹窗里是一张五列的表，真库 65 个渠道 —— 它是"摊开"这条规则在浮层
+  // 里的那一半，而浮层有自己的滚动容器（.picker-b），单独验。
+  await page.click('#key-auto-channel');
+  await page.waitForSelector('.picker', { visible: true, timeout: 5000 });
+  await sleep(500);
+  const pickBox = await page.evaluate(() => {
+    const el = document.querySelector('.picker');
+    const t = el.querySelector('table[data-cell-label]');
+    const body = el.querySelector('.picker-b');
+    return {
+      w: Math.round(el.getBoundingClientRect().width),
+      winW: window.innerWidth,
+      rows: t === null ? 0 : t.querySelectorAll('tbody tr').length,
+      stacked: t !== null && getComputedStyle(t).display === 'block',
+      hScroll: body.scrollWidth > body.clientWidth + 1,
+      docW: document.documentElement.scrollWidth,
+    };
+  });
+  // 宽度判据是「跟着屏幕走」而不是「等于屏幕宽」：遮罩在手机上仍留 10px 的边,
+  // 那一圈边是"这是一层浮层"的唯一视觉线索(弹窗自己没有阴影可言了)。
+  // 要抓的是它有没有把 880px 那个定宽带进手机 —— 带进来就是 375 减不下去。
+  check('手机 375px · 渠道选择器弹窗宽度跟着屏幕走，其中的表也摊开且不横滚',
+    pickBox.rows > 0 && pickBox.stacked && !pickBox.hScroll
+    && pickBox.w >= pickBox.winW - 24 && pickBox.w <= pickBox.winW
+    && pickBox.docW <= pickBox.winW + 1,
+    JSON.stringify(pickBox));
+  await page.screenshot({ path: `${SHOT}/14-mobile-picker.png` });
+  await page.click('[data-pick-cancel]');
+  await page.click('.drawer-x');
+
+  // 触摸目标与输入框字号。两条都不是审美：
+  //  · 手指落点精度约 8~10mm，30px 高的按钮要点两次才中；
+  //  · iOS Safari 聚焦字号 <16px 的输入框会**整页放大**，且放大后缩不回来。
+  const touch = await page.evaluate(() => {
+    const h = els => [...els].map(e => Math.round(e.getBoundingClientRect().height));
+    const small = h(document.querySelectorAll('.btn.sm, .twist, .chip, .chipf'));
+    const inputs = [...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]), select')]
+      .map(e => Math.round(parseFloat(getComputedStyle(e).fontSize)));
+    return {
+      minTap: small.length === 0 ? 0 : Math.min(...small), taps: small.length,
+      minFont: inputs.length === 0 ? 0 : Math.min(...inputs), inputs: inputs.length,
+    };
+  });
+  check('手机 375px · 行内小控件的触摸目标 ≥34px',
+    touch.taps > 0 && touch.minTap >= 34, `最小 ${touch.minTap}px（共 ${touch.taps} 个）`);
+  check('手机 375px · 输入控件字号 ≥16px（小于它 iOS 聚焦时会整页放大）',
+    touch.inputs > 0 && touch.minFont >= 16,
+    `最小 ${touch.minFont}px（共 ${touch.inputs} 个）`);
+
+  // 换回宽屏收尾：后面那条「无 JavaScript 错误」不挑宽度，但留在 375 会让
+  // 下一次改脚本的人以为整份验收都是窄屏跑的。
+  await page.setViewport({ width: 1280, height: 1400 });
+  await sleep(300);
+
   // ── 13. 页面无 JS 错误 ──
   // 只看真正的脚本错误：429（限流）与 422（5bis 故意的缺凭证采集）都是
   // 本脚本自己触发的断言，favicon 404 是浏览器自动请求 —— 都不是页面缺陷。
   // /admin/hub-sync/run 同理：12ter 里有两轮**故意**失败的同步（地址不通、
   // 密码错），按**这个 URL** 放行而不是按它的状态码放行 —— 后者会把别处真的
   // 5xx 一起放过去。
+  // /admin/keys/import 的 409 也是故意打出来的（12sexies-pre 要验"同时只跑一个
+  // 批次"）。**按 URL + 状态码两条一起放行**，不要只写 409：那会把别处真的冲突
+  // 一起放过去，而 409 恰恰是这套界面用来表达"已有同类操作在跑"的那个码。
   const realErrors = consoleErrors.filter(e =>
-    !/429|422|favicon/.test(e) && !/hub-sync\/run/.test(e));
+    !/429|422|favicon/.test(e) && !/hub-sync\/run/.test(e) &&
+    !(/keys\/import/.test(e) && /409/.test(e)));
   check('页面无 JavaScript 错误', realErrors.length === 0,
     realErrors.slice(0, 2).join(' | ') || '无（已排除预期的 429/422 与 favicon）');
 

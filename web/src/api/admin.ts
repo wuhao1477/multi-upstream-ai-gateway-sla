@@ -18,7 +18,7 @@ import type {
   HubSyncRun,
   InventoryResp,
   Key,
-  KeyImportBatchResult,
+  KeyImportJob,
   KeyProvisionBatchResult,
   ListResp,
   SiteFamilyInfo,
@@ -246,8 +246,27 @@ export interface KeyAutomationInput {
   only_without_keys: boolean
 }
 
-export function importKeys(input: KeyAutomationInput): Promise<KeyImportBatchResult> {
-  return api<KeyImportBatchResult>('/admin/keys/import', { method: 'POST', body: input })
+/**
+ * 排一批「同步已有 Key」到后台，**立刻返回**那个批次（status=running）。
+ *
+ * 不再等结果：一批的时长由上游的限流窗口决定（实测每站 20 次 / 20 分钟），
+ * 跨几十个站点天然是小时级的。进度与逐账号结果走 keyImportJob()。
+ *
+ * 已有批次在跑时服务端回 409，body 里带 `running_job_id` —— 界面据此直接切到
+ * 那一批的进度，而不是丢一句"正忙"让人自己去找是哪一批。
+ */
+export function importKeys(input: KeyAutomationInput): Promise<KeyImportJob> {
+  return api<KeyImportJob>('/admin/keys/import', { method: 'POST', body: input })
+}
+
+/** 最近的批次，新的在前。列表**不含** items（一批可能几百条）。 */
+export function listKeyImportJobs(): Promise<ListResp<KeyImportJob>> {
+  return api<ListResp<KeyImportJob>>('/admin/keys/import/jobs')
+}
+
+/** 单个批次，含逐账号明细。进程重启过的话会 404（队列只在内存里）。 */
+export function keyImportJob(id: number): Promise<KeyImportJob> {
+  return api<KeyImportJob>(`/admin/keys/import/jobs/${id}`)
 }
 
 export function provisionKeys(

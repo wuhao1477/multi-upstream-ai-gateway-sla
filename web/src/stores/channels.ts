@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import * as adminApi from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { Channel, InventoryResp, SiteFamilyInfo, SyncItem, SyncResult } from '@/api/types'
-import { familyLabel } from '@/utils/format'
+import { collectBlockerLabel, collectModeLabel, familyLabel } from '@/utils/format'
 import { useResourcesStore } from './resources'
 import { useToastStore } from './toast'
 
@@ -60,7 +60,13 @@ export const useChannelsStore = defineStore('channels', () => {
     for (const c of list.value) {
       m.set(
         c.id,
-        `${c.name} ${c.base_url} ${c.site_family} ${familyLabel(c.site_family)} #${c.id}`.toLowerCase(),
+        (
+          `${c.name} ${c.base_url} ${c.site_family} ${familyLabel(c.site_family)} #${c.id} ` +
+          // 采集状态也收进来：「需人工」一搜就能把所有要人动手的站捞出来。
+          // 原值与展示名都收（同站型那两种写法），照着屏幕上的字搜是更自然的动作。
+          `${c.collect.mode} ${collectModeLabel(c.collect.mode)} ` +
+          `${c.collect.blocker ?? ''} ${collectBlockerLabel(c.collect.blocker)}`
+        ).toLowerCase(),
       )
     }
     return m

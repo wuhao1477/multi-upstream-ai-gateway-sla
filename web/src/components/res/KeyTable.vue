@@ -212,7 +212,7 @@ async function runPending(): Promise<void> {
   <UiEmpty v-if="items.length === 0">{{ emptyText }}</UiEmpty>
   <template v-else>
     <div class="tw">
-      <table class="key-table">
+      <table v-cell-label class="key-table">
         <!-- ⚠️ 表头也必须带 data-col，且与下面的 <td> 一一对应。
              窄屏靠 `th[data-col=x], td[data-col=x] { display:none }` 成对隐藏列 ——
              只给 td 加的话，表头留在原地而单元格少一个，**整行右移一格**，

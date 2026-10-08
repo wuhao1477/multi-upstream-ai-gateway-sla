@@ -670,7 +670,7 @@ function endpointsOf(m: ModelEntry): string[] {
         </div>
 
         <div class="tw" v-else-if="view === 'list' && cat.items.length > 0">
-          <table>
+          <table v-cell-label>
             <thead>
               <tr>
                 <th data-col="model">模型</th>

@@ -31,12 +31,30 @@ type keyAutomationRequest struct {
 	OnlyWithoutKey bool    `json:"only_without_keys"`
 }
 
+// maxKeyAutomationAccounts 是**批量补齐**的单次上限。
+//
+// 保持 20 不变：补齐会在别人家站点上**真的创建 Key**，这是不可逆的写操作，
+// 一次点错波及 20 个账号已经够疼了。它与下面那个上限不是一个数，也不该是 ——
+// 两个操作的后果差着一整个数量级。
 const maxKeyAutomationAccounts = 20
+
+// maxKeyImportAccounts 是**同步已有 Key**的单次上限。
+//
+// 从 20 抬到 200（2026-09-16）。原来那个 20 不是上游的要求，是被同步响应的
+// 时长逼出来的：一个 HTTP 请求里跑不完更多。改成后台批次之后这个理由没了，
+// 而 20 反过来成了这个功能最大的痛点 —— 真库 65 个渠道，要分四次点。
+//
+// 仍然保留一个上限：范围选错（比如把 all 当成"全选"）时，一个手滑不该变成
+// 几百个站点的后台扫描。200 覆盖得住"把整份台账同步一遍"，又拦得住数量级错误。
+const maxKeyImportAccounts = 200
 
 // Key 自动化与渠道 sync 共用同一进程内 guard，但两个操作不能互相消耗
 // 采集间隔：补齐预览是只读上游查询，不应被导入窗口挡住，反之亦然。
+//
+// 同步已有 Key 不再走这个 guard：它现在是后台批次，"同时只跑一个"由队列自己
+// 保证（keyImportQueue.begin），而那比"两次点击之间隔 60 秒"更贴切 —— 真正
+// 要防的是两批并发去花同一份限流预算，不是点得太快。
 const (
-	keyImportGuardSlot    int64 = -1
 	keyProvisionGuardSlot int64 = -2
 )
 
@@ -152,29 +170,46 @@ func validateKeyAutomationTargetLimit(targets []store.Account) error {
 }
 
 type keyImportItem struct {
-	ChannelID int64  `json:"channel_id"`
-	AccountID int64  `json:"account_id"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	ChannelID int64 `json:"channel_id"`
+	AccountID int64 `json:"account_id"`
+	// Status：ok / partial / deferred / skipped / failed。
+	// `deferred` 是新的一档：这个账号没出错，只是本渠道的明文读取预算用完了 ——
+	// 它要人做的事（过一会儿再来）与 failed（去修凭证）完全不同，
+	// 合成一档会让"等一会儿就好"和"这个站废了"在界面上长得一样。
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+	// Attempts 是这条结果是第几次尝试得出的。退避重试之后，
+	// 不写出来的话界面上只看得到最后那次的结果，看不出它重来过。
+	Attempts int `json:"attempts,omitempty"`
 	collector.KeyImportResult
 }
 
 type keyImportBatchResult struct {
-	Count            int             `json:"count"`
-	Found            int             `json:"found"`
-	Imported         int             `json:"imported"`
-	Skipped          int             `json:"skipped"`
-	Failed           int             `json:"failed"`
-	Deferred         int             `json:"deferred"`
-	DeferredAccounts int             `json:"deferred_accounts"`
-	Items            []keyImportItem `json:"items"`
-}
+	Count int `json:"count"`
+	Found int `json:"found"`
+	// Imported 是**新登记**的 Key 数，Skipped 是已经有了、这次只刷新了额度的。
+	Imported int `json:"imported"`
+	Skipped  int `json:"skipped"`
+	Failed   int `json:"failed"`
+	Deferred int `json:"deferred"`
 
-func deferredImportAccounts(total, processed int) int {
-	if processed >= total {
-		return 0
-	}
-	return total - processed
+	// ── 账号级计数 ──
+	//
+	// ⚠️ 上面那四个数的单位是**把**（Key），下面三个的单位是**个**（账号），
+	// 两组不可混着读。2026-09-16 实测撞到过：10 个渠道里 5 个站整个连不上，
+	// 而汇总里 `failed` 是 2 —— 那个 2 来自唯一一个连得上的站里失败的两把 Key，
+	// 5 个连不上的站一把 Key 都没轮到，对 `failed` 的贡献是 0。于是界面上
+	// "失败 2" 读起来像"只有两处小问题"，而事实是半数站点根本没采到。
+	// 账号级计数必须单独给，不能让人从 items 里自己数。
+
+	// FailedAccounts 是整个账号都没成的个数（凭证失效、站型不认……要人去修）。
+	FailedAccounts int `json:"failed_accounts"`
+	// DeferredAccounts 是"稍后再来"的个数：本渠道明文读取预算用尽，
+	// 或批次被进程退出打断时还没轮到的那些。它与 FailedAccounts 要人做的事不同。
+	DeferredAccounts int `json:"deferred_accounts"`
+	// SkippedAccounts 是被跳过的个数（账号已停用）。
+	SkippedAccounts int             `json:"skipped_accounts"`
+	Items           []keyImportItem `json:"items"`
 }
 
 func mergeKeyProvisionBatchResult(dst *keyProvisionBatchResult, src collector.KeyProvisionResult) {
@@ -188,6 +223,16 @@ func mergeKeyProvisionBatchResult(dst *keyProvisionBatchResult, src collector.Ke
 	dst.Deferred += src.Deferred
 }
 
+// importKeys 排一个后台批次，**立刻返回**。
+//
+// 从「同步等结果」改成「排队 + 轮询」（2026-09-16）。不是为了让接口好看：
+// 这个操作的时长由上游的限流窗口决定（实测每站 20 次 / 20 分钟），跨几十个
+// 站点的一批天然是小时级的，塞不进一个 HTTP 请求。旧实现只好反过来迁就请求
+// 时长 —— 全批共用 20 次明文预算、一个账号出错就 break 整批、单次最多 20 个
+// 账号。那三条限制都不是上游要求的，是被同步响应逼出来的。
+//
+// 进度与结果走 GET /admin/keys/import/jobs[/{id}]（同一份 keyImportBatchResult，
+// 只是晚一点到）。
 func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 	request, ok := s.keyAutomationRequest(w, r)
 	if !ok {
@@ -207,80 +252,107 @@ func (s *Server) importKeys(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotImplemented, "Key 自动导入未配置")
 		return
 	}
-	if err := s.guard.acquire(keyImportGuardSlot, s.syncMinInterval()); err != nil {
-		code := http.StatusTooManyRequests
-		if errors.Is(err, errSyncRunning) {
-			code = http.StatusConflict
+	// 展开范围要查库，而这一步必须在**请求的** ctx 里做：它是同步的，
+	// 拿不到目标就没有批次可排，该让调用方当场看到 400。
+	var targets []store.Account
+	failed := false
+	s.withConn(w, r, func(conn *pgx.Conn) {
+		got, err := keyAutomationTargets(r, conn, request)
+		if err != nil {
+			s.fail(w, http.StatusBadRequest, err.Error())
+			failed = true
+			return
 		}
-		s.fail(w, code, "Key 自动化正在执行或间隔未到: "+err.Error())
+		targets = got
+	})
+	if failed {
 		return
 	}
-	reachedUpstream := false
-	defer func() { s.guard.release(keyImportGuardSlot, reachedUpstream) }()
-	s.withConn(w, r, func(conn *pgx.Conn) {
-		locked, err := store.TryKeyAutomationLock(r.Context(), conn)
+	if len(targets) == 0 {
+		s.fail(w, http.StatusBadRequest, "所选范围内没有账号，先在这些渠道下登记账号")
+		return
+	}
+	if len(targets) > maxKeyImportAccounts {
+		s.fail(w, http.StatusBadRequest,
+			fmt.Sprintf("一次最多排 %d 个账号，请缩小到渠道或账号范围", maxKeyImportAccounts))
+		return
+	}
+
+	job, started := s.keyQueue().begin(len(targets))
+	if !started {
+		// 409 带上正在跑的那个批次 id：界面据此直接切到它的进度，
+		// 而不是丢一句"正忙"让人自己去找是哪一批。
+		s.failWith(w, http.StatusConflict, "已有一批 Key 同步在后台执行",
+			map[string]any{"running_job_id": job.ID})
+		return
+	}
+	go func() {
+		ctx := s.backgroundCtx()
+		unlock, locked, err := s.keyImportAcquireLock(ctx)
 		if err != nil {
-			s.fail(w, http.StatusInternalServerError, "取得 Key 自动化锁失败: "+err.Error())
+			s.queue.finish(job, "done", "取得 Key 自动化锁失败: "+shortErr(err))
 			return
 		}
 		if !locked {
-			s.fail(w, http.StatusConflict, "另一实例正在执行 Key 自动化")
+			s.queue.finish(job, "done", "另一实例正在执行 Key 自动化")
 			return
 		}
-		defer func() {
-			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := store.UnlockKeyAutomation(unlockCtx, conn); err != nil {
-				s.Logger.Error("释放 Key 自动化锁失败", "err", err)
-			}
-		}()
-		targets, err := keyAutomationTargets(r, conn, request)
-		if err != nil {
-			s.fail(w, http.StatusBadRequest, err.Error())
-			return
+		defer unlock()
+		s.Logger.Info("后台 Key 同步开始", "job_id", job.ID, "accounts", len(targets))
+		s.runKeyImportJob(ctx, job, targets)
+		snapshot, _ := s.queue.snapshot(job.ID)
+		s.Logger.Info("后台 Key 同步结束", "job_id", job.ID, "status", snapshot.Status,
+			"found", snapshot.Found, "imported", snapshot.Imported,
+			"skipped", snapshot.Skipped, "failed", snapshot.Failed,
+			"deferred", snapshot.Deferred)
+	}()
+	snapshot, _ := s.keyQueue().snapshot(job.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(snapshot)
+}
+
+// keyQueue 懒建队列。NewServer 之外还有别的构造路径（单测直接取结构体字面量），
+// 在那里漏掉队列的表现是一个 nil map panic，而不是"这个功能没配"。
+func (s *Server) keyQueue() *keyImportQueue {
+	s.queueOnce.Do(func() {
+		if s.queue == nil {
+			s.queue = newKeyImportQueue()
 		}
-		if err := validateKeyAutomationTargetLimit(targets); err != nil {
-			s.fail(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		result := keyImportBatchResult{Items: []keyImportItem{}}
-		remainingSecrets := collector.DefaultKeySecretResolveLimit
-		for index, account := range targets {
-			if remainingSecrets == 0 {
-				result.DeferredAccounts += deferredImportAccounts(len(targets), index)
-				break
-			}
-			item := keyImportItem{ChannelID: account.ChannelID, AccountID: account.ID}
-			if account.Status != "active" {
-				item.Status, item.Error = "skipped", "账号已停用"
-				result.Items = append(result.Items, item)
-				continue
-			}
-			reachedUpstream = true
-			got, err := s.ImportKeys(r.Context(), conn, account.ChannelID, account.ID,
-				collector.KeyImportRequest{MaxSecretResolves: remainingSecrets})
-			item.KeyImportResult = got
-			if err != nil {
-				item.Status, item.Error = "failed", shortErr(err)
-			} else if got.Failed > 0 || got.Deferred > 0 {
-				item.Status = "partial"
-			} else {
-				item.Status = "ok"
-			}
-			result.Found += got.Found
-			result.Imported += got.Imported
-			result.Skipped += got.Skipped
-			result.Failed += got.Failed
-			result.Deferred += got.Deferred
-			result.Items = append(result.Items, item)
-			remainingSecrets -= got.SecretResolves
-			if err != nil || got.Failed > 0 || got.Deferred > 0 {
-				break
-			}
-		}
-		result.Count = len(result.Items)
-		s.ok(w, result)
 	})
+	return s.queue
+}
+
+// listKeyImportJobs 回最近的批次（新的在前）。
+//
+// 只给汇总不给逐账号明细：列表要回答的是"有没有在跑、上一批什么结果"，
+// 而一批可能有两百条 Items —— 全塞进列表会让这个每两秒轮询一次的接口
+// 每次回几百 KB。明细在 /{id} 那条。
+func (s *Server) listKeyImportJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := s.keyQueue().list()
+	out := make([]keyImportJob, 0, len(jobs))
+	for _, job := range jobs {
+		job.Items = nil
+		out = append(out, job)
+	}
+	s.ok(w, map[string]any{"count": len(out), "items": out})
+}
+
+func (s *Server) getKeyImportJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.pathID(w, r)
+	if !ok {
+		return
+	}
+	job, found := s.keyQueue().snapshot(id)
+	if !found {
+		// 404 的原因**必须说出来**：队列在内存里，重启与超出保留条数都会让
+		// 一个真实存在过的批次消失。只回"不存在"会被读成"这个 id 是假的"。
+		s.fail(w, http.StatusNotFound,
+			fmt.Sprintf("批次 %d 不在内存里：进程重启过，或它已被更近的 %d 批挤出历史",
+				id, keyImportJobHistory))
+		return
+	}
+	s.ok(w, job)
 }
 
 type keyProvisionItem struct {

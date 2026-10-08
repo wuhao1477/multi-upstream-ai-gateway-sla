@@ -33,7 +33,15 @@ var regNewAPI = &Registration{
 	},
 
 	// 实测在 all-api-hub 导出里见过的自称。**不凭想象加**（CLAUDE.md §1）。
-	Aliases: []string{"new-api", "newapi", "rix-api"},
+	//
+	// `anyrouter` 是 2026-09-17 实测加的：导出里声明这个自称的三个站，
+	// agentrouter.org 与 api.justwoker.icu 的 `/api/status` 都命中 NewAPI 指纹
+	// （quota_per_unit / turnstile_check / checkin_enabled），逐个端点也都走通了；
+	// 第三个 anyrouter.top 挂了 JS 盾（任何路径都回混淆 JS 的 HTML），探测不出
+	// 任何家族 —— 那是反爬不是协议，不构成"它不是 NewAPI"的证据。
+	// 加进来的作用是让"声明 anyrouter、实际探测出别的族"能被报成 mismatch；
+	// 不加的话 FamilyOfAlias 回 unknown，那种不一致永远不会被标出来。
+	Aliases: []string{"new-api", "newapi", "rix-api", "anyrouter"},
 
 	CredType:    "newapi_access_token",
 	RequiresUID: true,

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -62,6 +63,11 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 	}
 
 	var lastErr error
+	// 上游**明说拒绝**（HTTP 200 + success:false）的那条消息单独留一份。
+	// 它与"这个头名不对"是两回事，而全部候选都拿到同一句拒绝时，
+	// 问题根本不在头名上 —— 见下面收尾处的判定。
+	var rejected error
+	rejectedAll := true
 	for _, hdr := range candidates {
 		s := Session{
 			ChannelID: cred.ChannelID, Family: FamilyNewAPI,
@@ -71,8 +77,16 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 		m, _, err := a.C.getJSONAuth(ctx, s, "/api/user/self")
 		if err != nil {
 			lastErr = err
+			if errors.Is(err, ErrUpstreamRejected) {
+				if rejected == nil {
+					rejected = err
+				}
+			} else {
+				rejectedAll = false
+			}
 			continue
 		}
+		rejectedAll = false
 		// 命中判据：能取到 data 且里面有 quota 类字段
 		d := unwrapData(m)
 		if _, ok := d["quota"]; !ok {
@@ -83,6 +97,16 @@ func (a *NewAPIAdapter) Authenticate(ctx context.Context, cred Credential) (Sess
 		}
 		s.QuotaPerUnit = cred.QuotaPerUnit
 		return s, nil
+	}
+	// 每个候选都被上游用同一套话术拒了 ⇒ **不是头名的问题**，别再让运维往那个
+	// 方向查。2026-09-16 实测 api.lyjxka.top：令牌失效时七个头名齐刷刷回
+	// `{"success":false,"message":"Unauthorized, invalid access token"}`，
+	// 而旧文案报的是"七个用户 ID 头名全部试探失败"+"头名 neo-api-user 通过但
+	// 响应无预期字段" —— 两句都把矛头指向头名，而上游那句现成的答案被丢掉了。
+	if rejectedAll && rejected != nil {
+		return Session{}, fmt.Errorf(
+			"上游拒绝了这把采集凭证（换用户 ID 头名无济于事，七个候选拿到的是同一句话）: %w",
+			rejected)
 	}
 	return Session{}, fmt.Errorf(
 		"七个用户 ID 头名全部试探失败（04 §3.1 fan-out）: %w", lastErr)
@@ -149,6 +173,10 @@ func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error)
 			Unlimited: asBool(t["unlimited_quota"]),
 			GroupRef:  asString(t["group"]),
 			Meta:      NewAPIMeta("/api/token", now),
+			// 有些二开在列表里就给了完整明文（见 Key.Secret 的注释与实测表）。
+			// 判据与 ResolveKeySecret 共用一个函数：两处若各写一份，
+			// "什么算可用明文"迟早会岔开，而岔开的那一侧会把脱敏串当明文存进库。
+			Secret: usableSecret(asString(t["key"])),
 		}
 		if remain, ok := asFloat(t["remain_quota"]); ok {
 			remain /= qpu
@@ -190,27 +218,41 @@ func (a *NewAPIAdapter) ResolveKeySecret(ctx context.Context, s Session, keyRef 
 	if err != nil {
 		return "", err
 	}
-	key := strings.TrimSpace(asString(unwrapData(m)["key"]))
-	if key == "" || strings.Contains(key, "*") {
+	key := usableSecret(asString(unwrapData(m)["key"]))
+	if key == "" {
 		return "", fmt.Errorf("上游未返回可用 Key 明文")
 	}
 	return key, nil
+}
+
+// usableSecret 判断上游给的这一串是不是**能直接用的完整明文**，不是就回空串。
+//
+// 判据只有"非空且不含 `*`"，这是实测出来的分界（2026-09-17 打四个真站点）：
+// 脱敏串一律是 18 字符且带 `*`（如 `4lF…****…`），完整明文是 48 字符无 `*`。
+// **不按长度判**：48 是这四个站今天的长度，换个站或换个版本就不是了，
+// 而按长度判错的方向是"把明文当脱敏串丢掉"——那会静默退化成一把都导不进来。
+func usableSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.Contains(v, "*") {
+		return ""
+	}
+	return v
 }
 
 // CreateRemoteKey 在 NewAPI 账号中创建一把不限额度、永不过期的 Key。
 func (a *NewAPIAdapter) CreateRemoteKey(
 	ctx context.Context, s Session, request RemoteKeyRequest,
 ) error {
-	m, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/token/", map[string]any{
+	_, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/token/", map[string]any{
 		"name": request.Name, "group": request.GroupRef,
 		"expired_time": -1, "remain_quota": 0, "unlimited_quota": true,
 		"model_limits_enabled": false, "model_limits": "", "allow_ips": "",
 	})
 	if err != nil {
+		// success:false 现在由客户端层统一拦下并带出上游原话（httpx.go 的
+		// ErrUpstreamRejected），所以这里**不再**单独判它 —— 留着会是一段
+		// 永远走不到的代码，而读的人会以为只有这个端点需要判。
 		return err
-	}
-	if success, exists := m["success"]; exists && !asBool(success) {
-		return fmt.Errorf("上游拒绝创建 Key: %s", asString(m["message"]))
 	}
 	return nil
 }
