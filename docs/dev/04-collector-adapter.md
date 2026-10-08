@@ -651,8 +651,9 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 用户自行在原站完成登录和 2FA，然后手工登记 Cookie 请求头或导入 all-api-hub
 的 `accounts.accounts[].cookieAuth.sessionCookie`（`authType="cookie"`）。文件上传
 与 WebDAV 共用 `ParseHubBackup → ImportHub`，按站点和 `account_info.id` 匹配账号。
-Cookie 使用独立 AES-256-GCM 存储，绑定本地账号与精确 HTTPS origin；管理接口仅返回
-配置存在性与状态。相同内容重导不激活失效/停用配置，缺失不删除，更新不覆盖令牌。
+管理保存和导入时，将 AES-256-GCM 密文写入 `collector_cookie_credentials.cookie_ciphertext`，
+绑定本地账号与精确 HTTPS origin；采集或显式验证时解密使用，管理接口仅返回配置存在性与状态。
+相同内容重导不激活失效/停用配置，缺失不删除，更新不覆盖令牌。
 
 现有令牌优先；无令牌或明确认证失效时，只切换一次 Cookie。同轮已成功项目不重做，
 Cookie 与 Authorization 不混发。首次使用先验证 `/api/user/self` 的 ID 与登记 ID 一致；
