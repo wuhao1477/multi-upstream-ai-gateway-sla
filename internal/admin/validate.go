@@ -49,13 +49,13 @@ func validateBaseURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return "", fmt.Errorf("base_url 解析失败: %w", err)
+		return "", fmt.Errorf("base_url 解析失败")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("base_url 须以 http:// 或 https:// 开头")
 	}
 	if u.Host == "" {
-		return "", fmt.Errorf("base_url 缺主机名：%q", raw)
+		return "", fmt.Errorf("base_url 缺主机名")
 	}
 	u.Host = strings.ToLower(u.Host)
 	return strings.TrimRight(u.String(), "/"), nil

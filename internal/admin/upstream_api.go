@@ -154,7 +154,7 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 校验并就地换成规范形态：**下面所有用到 in.BaseURL 的地方（探测、落库、
-	// 日志）都必须是同一个字符串**。原先是"校验一次、落库时再 TrimRight 一次"，
+	// 写入）都必须是同一个字符串**。原先是"校验一次、落库时再 TrimRight 一次"，
 	// 于是探测打的地址与落库的地址可以不同。
 	canon, err := validateBaseURL(in.BaseURL)
 	if err != nil {
@@ -173,7 +173,7 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 				in.SiteFamily = string(res.Family)
 			}
 		} else {
-			s.Logger.Warn("站型探测失败，仍继续建渠道", "base_url", in.BaseURL, "err", err)
+			s.Logger.Warn("站型探测失败，仍继续建渠道", "err", err)
 		}
 	}
 
@@ -216,7 +216,7 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 			if s.SaveDetected != nil {
 				if err := s.SaveDetected(r.Context(), tx, id, *detected); err != nil {
 					s.Logger.Error("探测结果落库失败，整笔回滚",
-						"base_url", in.BaseURL, "err", err)
+						"channel_id", id, "err", err)
 					s.fail(w, http.StatusInternalServerError,
 						"站型探测结果未能落库，渠道未创建（避免留下采不到数据的半成品）："+
 							err.Error())
