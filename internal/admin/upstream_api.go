@@ -145,8 +145,8 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
 		// 站型可以后补，而"先建上再探测"是运维的自然顺序。
 		AutoDetect bool `json:"auto_detect"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.BaseURL) == "" {
@@ -258,8 +258,8 @@ func (s *Server) patchChannel(w http.ResponseWriter, r *http.Request) {
 		DisabledReason string     `json:"disabled_reason"`
 		DisabledUntil  *time.Time `json:"disabled_until"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	// status 只认两个值。不校验的话非法值会撞 CHECK 约束，变成一句 PG 错误 ——
@@ -833,8 +833,8 @@ func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 		RefreshToken string `json:"refresh_token"`
 		UserIDHeader string `json:"user_id_header_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if in.AccountID <= 0 {

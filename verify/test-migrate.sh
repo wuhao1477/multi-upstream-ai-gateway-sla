@@ -401,6 +401,8 @@ echo "── 8/8 渠道与导入写路径的真库 Go 测试 ──"
 # 假绿，而它恰恰**不会**被退出码抓到。列表 + 计数各管一头：列表管"别牵连无关测试"，
 # 计数管"列表本身别写错"。
 TESTS=(
+  TestAdminJSONLimitsBeforeSideEffects
+  TestAdminJSONBoundaryAndImportLimit
   TestCookieCredentialsRequireAdmin
   TestCookieCredentialsRejectUnconfiguredEncryption
   TestCookieCredentialAPI

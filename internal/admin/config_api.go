@@ -7,6 +7,7 @@ package admin
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,10 +142,17 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 			return
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if got != s.Token {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
 			// 不回显收到的令牌（FR-094 同源纪律：凭证不进日志与响应）
 			s.fail(w, http.StatusUnauthorized, "管理令牌无效")
 			return
+		}
+		limit := int64(1 << 20)
+		if r.Method == http.MethodPost && r.URL.Path == "/admin/import/all-api-hub" {
+			limit = 32 << 20
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -258,8 +266,8 @@ type previewReq struct {
 
 func (s *Server) previewConfig(w http.ResponseWriter, r *http.Request) {
 	var req previewReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &req); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	spec, ok := config.Spec(req.ParamKey)
@@ -322,8 +330,8 @@ type applyReq struct {
 
 func (s *Server) applyConfig(w http.ResponseWriter, r *http.Request) {
 	var req applyReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &req); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	spec, ok := config.Spec(req.ParamKey)

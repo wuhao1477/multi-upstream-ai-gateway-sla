@@ -38,7 +38,7 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 
 	backup, err := collector.ParseHubBackup(r.Body)
 	if err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+		s.requestBodyError(w, err)
 		return
 	}
 	res, err := s.ImportHub(r.Context(), backup, dryRun)

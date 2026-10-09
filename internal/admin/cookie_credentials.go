@@ -29,7 +29,11 @@ func (s *Server) validateCookieCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
-	if err != nil || strings.TrimSpace(string(body)) != "" {
+	if err != nil {
+		s.requestBodyError(w, err)
+		return
+	}
+	if strings.TrimSpace(string(body)) != "" {
 		s.fail(w, http.StatusBadRequest, "验证仅使用已存 Cookie，不接收请求字段")
 		return
 	}
@@ -58,12 +62,8 @@ func (s *Server) saveCookieCredential(w http.ResponseWriter, r *http.Request) {
 	var in store.SaveCookieCredentialInput
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, "Cookie 请求格式无效")
-		return
-	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		s.fail(w, http.StatusBadRequest, "Cookie 请求格式无效")
+	if err := decodeJSON(dec, &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	s.withConn(w, r, func(conn *pgx.Conn) {

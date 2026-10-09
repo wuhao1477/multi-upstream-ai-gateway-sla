@@ -35,7 +35,7 @@ var version = "dev"
 
 func main() {
 	var (
-		addr     = flag.String("addr", envOr("SLA_ADDR", ":8080"), "监听地址（管理平面 + /healthz）")
+		addr     = flag.String("addr", envOr("SLA_ADDR", "127.0.0.1:8080"), "监听地址（管理平面 + /healthz）")
 		dsn      = flag.String("dsn", os.Getenv("DATABASE_URL"), "PG 连接串")
 		readOnly = flag.Bool("read-only", false, "只读启动：跳过迁移和种子，并让 PG 会话拒绝写入")
 		collect  = flag.Bool("collector", os.Getenv("SLA_COLLECTOR") != "",
