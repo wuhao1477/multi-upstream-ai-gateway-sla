@@ -24,6 +24,10 @@ services:
     # 以后改 Dockerfile 时不会静默改掉这里的行为。
     entrypoint: ["/sla-core"]
     user: "nonroot:nonroot"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       <<: *core-env
       ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 必须设置——管理平面没有它会拒绝全部请求}
@@ -53,6 +57,10 @@ services:
     #    多余参数照常启动，于是"采集器"容器里跑的其实是第二个管理面。
     entrypoint: ["/collector"]
     user: "nonroot:nonroot"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # 不给 ADMIN_TOKEN：collector 全程不读它（cmd/collector 与 internal/collection
     # 里零引用），多一个容器持有密钥没有收益。
     environment: *core-env

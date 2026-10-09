@@ -39,6 +39,10 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment: *core-env
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy

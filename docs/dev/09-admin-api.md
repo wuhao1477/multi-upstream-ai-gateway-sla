@@ -37,6 +37,12 @@
 Cookie 保存/验证分别保留 128 KiB/1 KiB。限制不依赖 `Content-Length`。解码后必须到达 EOF，
 额外 JSON 返回 400，超限返回 413，且在数据库访问和上游调用前拒绝；错误不回显请求正文。
 
+生产 SPA 入口及 history 回退使用同源 CSP：脚本仅允许 `'self'`，不允许内联脚本或
+`unsafe-eval`；主题通过同步同源 `theme-init.js` 在首次绘制前初始化。样式保留
+`'unsafe-inline'` 以支持现有动态样式，图片/字体允许 `data:`，连接与表单仅允许同源，
+禁止 object、base 和 frame 嵌入。页面与静态资源均返回 `X-Content-Type-Options: nosniff`。
+错误继续通过 Vue 文本插值展示；这些措施不代表消除全部 XSS，也不改变本地令牌存储方式。
+
 ---
 
 ## 2. 配置读写 API（对应 [02 `config_params`](./02-data-model.md)）

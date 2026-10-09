@@ -11,6 +11,10 @@
 可显式覆盖。两份 Compose 继续在容器内设置 `SLA_ADDR=:8080`，宿主发布端口保持
 回环绑定。管理令牌为空时 API 返回 503，错误令牌返回 401，不增加认证失败计数。
 
+应用 core/collector 保持非 root，并设置 `cap_drop: [ALL]` 与
+`security_opt: [no-new-privileges:true]`；部署版通过应用 anchor 继承给 A/B 和 collector，
+不将该设置套用到 PostgreSQL/Caddy。`gate.yml` 的默认令牌权限为 `contents: read`。
+
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |

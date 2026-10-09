@@ -15,6 +15,10 @@ deploy/.env
 all-api-hub-backup-*.json
 docs/ARCHIFY-*
 docs/superpowers/plans/
+/ai-gateway-architecture-review/
+/ai-gateway-architecture-review.zip
+/ai-gateway-uiux-optimization/
+/ai-gateway-uiux-optimization (1)/
 
 # Go
 *.test

@@ -24,6 +24,9 @@ on:
     branches: [main, 'codex/release-*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   gate:
     runs-on: ubuntu-latest
@@ -49,7 +52,9 @@ jobs:
         run: ./verify/gate.sh
 
       - name: 公开仓库安全基线
-        run: ./verify/test-public-safety.sh
+        run: |
+          ./verify/test-public-safety.sh
+          bash verify/test-public-safety-rules.sh
 
       # ⚠️ 刻意不上传 ddl-extracted.sql 为 artifact（第 45 轮删除）：
       #    该文件**已入库**，且随时可由 `python3 verify/extract_ddl.py` 从

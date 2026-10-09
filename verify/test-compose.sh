@@ -37,6 +37,21 @@ $ready || {
   exit 1; }
 echo "   ✅ 栈已就绪"
 
+# 检查实际创建的容器，而非只在 YAML 中搜索配置字段。
+for service in sla-core-a sla-core-b collector; do
+  id=$("${COMPOSE[@]}" ps -q "$service")
+  docker inspect --format '{"user":{{json .Config.User}},"cap_drop":{{json .HostConfig.CapDrop}},"security_opt":{{json .HostConfig.SecurityOpt}},"running":{{json .State.Running}}}' "$id" |
+    python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+assert c["running"], "应用容器未运行"
+assert c["user"].split(":")[0] not in ("", "0", "root"), "应用容器必须为非 root"
+assert "ALL" in c["cap_drop"], "应用容器未删除全部 capabilities"
+assert "no-new-privileges:true" in c["security_opt"], "应用容器未禁止提权"
+'
+  echo "   ✅ $service：非 root、cap_drop ALL、no-new-privileges"
+done
+
 echo "── 2/5 /healthz 内容正确 ──"
 # 状态码与响应体分开取：先断言 200 再解析 JSON。
 # 直接 json.load 会在非 JSON 响应（重定向空体、404 文本）上抛栈，
