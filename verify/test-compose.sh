@@ -49,7 +49,7 @@ assert c["user"].split(":")[0] not in ("", "0", "root"), "应用容器必须为�
 assert "ALL" in c["cap_drop"], "应用容器未删除全部 capabilities"
 assert "no-new-privileges:true" in c["security_opt"], "应用容器未禁止提权"
 '
-  echo "   ✅ $service：非 root、cap_drop ALL、no-new-privileges"
+  echo "   ✅ ${service}：非 root、cap_drop ALL、no-new-privileges"
 done
 
 echo "── 2/5 /healthz 内容正确 ──"
