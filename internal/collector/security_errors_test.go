@@ -30,7 +30,7 @@ func TestReadAuthResponseRedactsFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &http.Response{StatusCode: tc.status, Header: http.Header{"Retry-After": {"2"}},
 				Body: io.NopCloser(strings.NewReader(tc.body))}
-			_, raw, err := ReadAuthResponse(resp, http.MethodGet, "/api/user/self?token="+marker, false)
+			_, raw, err := ReadAuthResponse(resp, FamilyNewAPI, http.MethodGet, "/api/user/self?token="+marker, false)
 			if err == nil || len(raw) != 0 || strings.Contains(err.Error(), marker) {
 				t.Fatal("failed response exposed its body or query, or was accepted")
 			}
@@ -113,7 +113,7 @@ func (s securityErrorBody) Close() error             { return nil }
 
 func TestReadAuthResponseRedactsBodyReadError(t *testing.T) {
 	resp := &http.Response{StatusCode: 200, Body: securityErrorBody{errors.New("test-secret-marker")}}
-	_, raw, err := ReadAuthResponse(resp, http.MethodGet, "/api/user/self", false)
+	_, raw, err := ReadAuthResponse(resp, FamilyNewAPI, http.MethodGet, "/api/user/self", false)
 	if err == nil || len(raw) != 0 || strings.Contains(err.Error(), "test-secret-marker") {
 		t.Fatal("body read error was exposed or accepted")
 	}

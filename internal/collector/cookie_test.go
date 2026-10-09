@@ -27,7 +27,7 @@ func (cookieTimeoutBody) Read([]byte) (int, error) { return 0, context.DeadlineE
 func TestCookieReadTimeoutKeepsRetryCause(t *testing.T) {
 	resp := cookieResponse(200, "")
 	resp.Body = io.NopCloser(cookieTimeoutBody{})
-	_, raw, err := ReadAuthResponse(resp, http.MethodGet, "/api/user/self", true)
+	_, raw, err := ReadAuthResponse(resp, FamilyNewAPI, http.MethodGet, "/api/user/self", true)
 	if !errors.Is(err, context.DeadlineExceeded) || len(raw) != 0 {
 		t.Fatal("Cookie response timeout must remain retryable without exposing a partial body")
 	}

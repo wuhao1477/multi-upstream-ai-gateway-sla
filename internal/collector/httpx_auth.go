@@ -81,7 +81,7 @@ func (c *Client) doJSONBodyAuth(
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s %s: %w", method, diagnosticPath(path), err)
 	}
-	m, raw, err := ReadAuthResponse(resp, method, path, false)
+	m, raw, err := ReadAuthResponse(resp, s.Family, method, path, false)
 	if s.CookieAllowed && IsAuthenticationFailure(err) {
 		return c.cookieJSON(req, s, path)
 	}
@@ -100,11 +100,11 @@ func (c *Client) cookieJSON(req *http.Request, s Session, path string) (map[stri
 	if err != nil {
 		return nil, nil, err
 	}
-	return ReadAuthResponse(resp, req.Method, path, true)
+	return ReadAuthResponse(resp, s.Family, req.Method, path, true)
 }
 
 // ReadAuthResponse 复用认证响应解析；所有错误均不返回正文或上游自定义消息。
-func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m map[string]any, raw []byte, err error) {
+func ReadAuthResponse(resp *http.Response, family Family, method, path string, secret bool) (m map[string]any, raw []byte, err error) {
 	path = diagnosticPath(path)
 	defer func() {
 		if err != nil {
@@ -117,6 +117,11 @@ func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m 
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, authHTTPError(resp, method, path, secret)
+	}
+	if family == FamilySub2API {
+		if err := sub2APIBusinessError(resp, raw, method, path); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		if secret && path == CookieSessionPath {
@@ -139,12 +144,42 @@ func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m 
 	// 已失效的令牌打 /api/user/self，七个候选头名**全部**返回
 	// `HTTP 200 {"message":"Unauthorized, invalid access token","success":false}`。
 	//
-	// 只在 `success` 这一位**存在且为 false** 时才拦：Sub2API 系用的是
-	// `{code,message,data}`，没有这个字段，行为完全不变。
+	// 只在 `success` 这一位**存在且为 false** 时才拦；Sub2API 的 code 在上面独立判断。
 	if ok, exists := m["success"].(bool); exists && !ok {
 		return nil, nil, authRejectionError(m, method, path, secret)
 	}
 	return m, raw, nil
+}
+
+func sub2APIBusinessError(resp *http.Response, raw []byte, method, path string) error {
+	var envelope struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return newHTTPError(resp, fmt.Sprintf("解析 %s %s 响应失败（非 JSON 对象）", method, path), nil)
+	}
+	if len(envelope.Code) == 0 {
+		return nil
+	}
+	// 单独解析 code，避免 float64 的舍入/下溢把非法值转换成成功码。
+	var number json.Number
+	if err := json.Unmarshal(envelope.Code, &number); err != nil {
+		return newHTTPError(resp, fmt.Sprintf("%s %s 业务状态码无效", method, path), ErrUpstreamRejected)
+	}
+	code, err := number.Int64()
+	if err != nil {
+		return newHTTPError(resp, fmt.Sprintf("%s %s 业务状态码无效", method, path), ErrUpstreamRejected)
+	}
+	if code == 0 {
+		return nil
+	}
+	cause := ErrUpstreamRejected
+	if code == 401 {
+		cause = errors.Join(cause, ErrUnauthorized)
+	}
+	failure := newHTTPError(resp, fmt.Sprintf("%s %s 业务失败（code=%d）", method, path, code), cause)
+	failure.BusinessCode = code
+	return failure
 }
 
 func readAuthBody(resp *http.Response) ([]byte, error) {

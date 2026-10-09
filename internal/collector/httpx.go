@@ -116,10 +116,11 @@ var ErrUpstreamRejected = errors.New("collector: 上游拒绝了请求")
 
 // HTTPError preserves response metadata needed by the collection scheduler.
 type HTTPError struct {
-	StatusCode int
-	RetryAfter time.Duration
-	Message    string
-	Cause      error
+	StatusCode   int
+	BusinessCode int64
+	RetryAfter   time.Duration
+	Message      string
+	Cause        error
 }
 
 func (e *HTTPError) Error() string { return e.Message }

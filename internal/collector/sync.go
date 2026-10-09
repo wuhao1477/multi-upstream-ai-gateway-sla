@@ -32,6 +32,7 @@ type SyncItem struct {
 	Error        string       `json:"error,omitempty"`
 	Note         string       `json:"note,omitempty"`
 	HTTPStatus   int          `json:"http_status,omitempty"`
+	BusinessCode int64        `json:"business_code,omitempty"`
 	RetryAfterMs int64        `json:"retry_after_ms,omitempty"`
 }
 
@@ -572,9 +573,11 @@ func (s *Syncer) run(
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Rows:       rows, Failed: failed, Note: note,
 	}
-	if status, retryAfter, ok := HTTPFailure(err); ok {
-		item.HTTPStatus = status
-		item.RetryAfterMs = retryAfter.Milliseconds()
+	var failure *HTTPError
+	if errors.As(err, &failure) {
+		item.HTTPStatus = failure.StatusCode
+		item.BusinessCode = failure.BusinessCode
+		item.RetryAfterMs = failure.RetryAfter.Milliseconds()
 	}
 	switch {
 	case err != nil && failed > 0:

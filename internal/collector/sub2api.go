@@ -217,18 +217,10 @@ func (a *Sub2APIAdapter) CreateRemoteKey(
 	if err != nil || groupID <= 0 {
 		return fmt.Errorf("Sub2API 分组标识无效")
 	}
-	m, _, err := a.C.postJSONBodyAuth(ctx, s, "/api/v1/keys", map[string]any{
+	_, _, err = a.C.postJSONBodyAuth(ctx, s, "/api/v1/keys", map[string]any{
 		"name": request.Name, "group_id": groupID, "quota": 0,
 	})
-	if err != nil {
-		return err
-	}
-	if code, exists := m["code"]; exists {
-		if value, ok := asFloat(code); ok && value != 0 {
-			return errors.New("上游拒绝创建 Key")
-		}
-	}
-	return nil
+	return err
 }
 
 // FetchGroups 取分组倍率、可用模型与限流（04 §3.2 /api/v1/groups/available）。
