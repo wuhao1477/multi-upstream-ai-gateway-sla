@@ -167,7 +167,7 @@ func (a *NewAPIAdapter) FetchAccount(ctx context.Context, s Session) (Account, e
 // FetchKeys 取 Key 级额度、有效期、限流、模型权限（FR-003/028/031/122/125/127）。
 func (a *NewAPIAdapter) FetchKeys(ctx context.Context, s Session) ([]Key, error) {
 	items, err := fetchAllKeyItems(ctx, a.C, s, func(page int) string {
-		return "/api/token?p=" + strconv.Itoa(page) + "&size=100"
+		return "/api/token/?p=" + strconv.Itoa(page) + "&size=100"
 	}, true)
 	if err != nil {
 		return nil, err
@@ -266,7 +266,7 @@ func (a *NewAPIAdapter) CreateRemoteKey(
 		"model_limits_enabled": false, "model_limits": "", "allow_ips": "",
 	})
 	if err != nil {
-		// success:false 现在由客户端层统一拦下并带出上游原话（httpx.go 的
+		// success:false 由客户端层统一拦下并返回安全错误（httpx.go 的
 		// ErrUpstreamRejected），所以这里**不再**单独判它 —— 留着会是一段
 		// 永远走不到的代码，而读的人会以为只有这个端点需要判。
 		return err

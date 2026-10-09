@@ -342,7 +342,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 ```
 
 - `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
-- 上游 HTTP 失败时可附 `http_status`；存在有效 `Retry-After` 时同时附 `retry_after_ms`，供周期采集调度退避使用。
+- 上游失败时可附 `http_status`，始终表示真实 HTTP 状态。Sub2API 非零业务码另附 `business_code`，因此 HTTP 200 + 业务 401 仍记作失败并采用至少五分钟的认证退避；不伪造 HTTP 401。存在有效 `Retry-After` 时同时附 `retry_after_ms`。
+- 2026-10-09 起，采集、探测与 WebDAV 默认客户端均不跟随自动重定向。令牌和 WebDAV 的内网直连仍允许；这不代表完整私网网段或 DNS 重绑定防护已经实施。错误仅含安全操作名、路径与状态/类别，不回显任意远端消息、原始 URL 或响应正文。
 - P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
 - **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 

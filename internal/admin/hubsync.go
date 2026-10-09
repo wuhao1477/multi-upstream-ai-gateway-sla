@@ -49,7 +49,10 @@ func (s *Server) hubSyncClient() *http.Client {
 	if s.HubHTTP != nil {
 		return s.HubHTTP
 	}
-	return &http.Client{Timeout: hubSyncHTTPTimeout}
+	return &http.Client{
+		Timeout:       hubSyncHTTPTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // RunHubSync 跑一轮同步，并把这一轮记进 hub_sync_runs。

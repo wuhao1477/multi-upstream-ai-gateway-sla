@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // all-api-hub 的 WebDAV 备份：取回 + 解密。
@@ -124,6 +125,12 @@ func hubBackupURL(raw string) (string, error) {
 func FetchHubBackup(
 	ctx context.Context, client *http.Client, cfg HubWebDAVConfig,
 ) ([]byte, error) {
+	if client == nil {
+		client = &http.Client{
+			Timeout:       60 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	}
 	target, err := hubBackupURL(cfg.URL)
 	if err != nil {
 		return nil, err
