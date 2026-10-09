@@ -100,7 +100,7 @@ collector ───────────────────────�
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8` | 要运行的发布镜像，可用于升级/回滚 |
+| `SLA_IMAGE` | 否 | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9` | 要运行的发布镜像，可用于升级/回滚 |
 | `DATABASE_URL` | 是 | 无 | 外部 PostgreSQL 16+ 连接串；库需已存在且账号可建表 |
 | `ADMIN_TOKEN` | 是 | 无 | 管理 API 令牌；不会写入 `config_params`。`collector` 不需要它，别顺手也注进去 |
 | `ADMIN_PORT` | 否 | `18081` | 本机管理 UI/API 端口，**只绑 `127.0.0.1`** |
@@ -153,7 +153,7 @@ docker compose down
 修改 `.env` 中的 `SLA_IMAGE`，然后拉取并重建容器：
 
 ```bash
-SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8
+SLA_IMAGE=ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:18081/healthz
@@ -203,18 +203,16 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ## 10. 发布信息
 
-- Release：[v1.0.8](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.8)
-- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8`
+- Release：[v1.0.9](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.9)
+- 镜像：`ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9`
 - 发布工作流：[`.github/workflows/release.yml`](../.github/workflows/release.yml)
 - P1 验收记录：[P1 release readiness](acceptance/P1-release-readiness.md)
 
 ## 11. 当前路线图
 
-下一版本在 `codex/release-v1.0.9` 开发，包含 Issue #26，完成验收后一并发布；不提前修改上述发布镜像。
+v1.0.9 起包含 Issue #26：Cookie 登记、all-api-hub 文件/WebDAV 导入和受限读取。旧密码接口与 `SLA_BROWSER_SECRET_KEY` 已删除，迁移 033 会删除旧密码表，不自动把旧密码转换为 Cookie。从 v1.0.8 升级时，sla-core 启动会自动执行迁移 032、033。
 
-Issue #26 在开发分支改为 Cookie 登记、all-api-hub 文件/WebDAV 导入和受限读取，尚未发布到 v1.0.8 镜像。旧密码接口与 `SLA_BROWSER_SECRET_KEY` 已删除，迁移 033 会删除旧密码表，不自动把旧密码转换为 Cookie。
-
-使用包含该功能的新构建时，在 core 与 collector 配置同一个 `SLA_COOKIE_SECRET_KEY`（`openssl rand -base64 32` 生成），单独备份，不提交 Git。缺失/格式错误不影响原令牌路径，但不能保存/读取 Cookie；密钥丢失需重新导入 Cookie，仍可清除旧配置。
+要使用 Cookie 时，在 core 与 collector 配置同一个 `SLA_COOKIE_SECRET_KEY`（`openssl rand -base64 32` 生成），单独备份，不提交 Git。缺失/格式错误不影响原令牌路径，但不能保存/读取 Cookie；密钥丢失需重新导入 Cookie，仍可清除旧配置。
 
 在账号的凭据抽屉中保存并启用 Cookie，再点击“验证 Cookie”；也支持 all-api-hub 的 `cookieAuth.sessionCookie` 请求头字符串。用户自行完成原站登录与 2FA；失效后重新导入，不自动登录、续期或处理 CF/Turnstile。
 

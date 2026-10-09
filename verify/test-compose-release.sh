@@ -8,7 +8,7 @@ compose() {
     DATABASE_URL='postgres://sla_gateway:compose-test-pg@db.example:5432/sla_gateway?sslmode=require' \
     ADMIN_TOKEN='compose-test-admin' \
     ADMIN_PORT='18080' \
-    SLA_IMAGE='ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8' \
+    SLA_IMAGE='ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9' \
     docker compose --env-file /dev/null -f compose.yml "$@"
 }
 
@@ -28,7 +28,7 @@ if echo "$services" | grep -qx postgres; then
 fi
 
 config=$(compose config)
-grep -q 'ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8' <<<"$config"
+grep -q 'ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9' <<<"$config"
 grep -q 'db.example:5432' <<<"$config"
 grep -q '/collector' <<<"$config"
 grep -q 'host.docker.internal' <<<"$config"

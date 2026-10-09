@@ -2,9 +2,9 @@
 
 一个面向个人和内网环境的多上游 AI 渠道管理系统。它把不同站型的渠道、账号、Key、分组、额度和模型目录统一采集到 PostgreSQL，并提供管理 UI、手动采集和周期采集。
 
-当前发布版本：`v1.0.8` · 当前交付阶段：**P1 上游采集与管理**
+当前发布版本：`v1.0.9` · 当前交付阶段：**P1 上游采集与管理**
 
-[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.8](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.8) · [Apache-2.0](LICENSE)
+[部署指南](docs/DEPLOYMENT.md) · [Release v1.0.9](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.9) · [Apache-2.0](LICENSE)
 
 ## P1 已交付什么
 
@@ -18,7 +18,8 @@
 - **跨渠道模型目录**：一个模型哪些渠道有；按发行方 / 上游渠道 / 定价类型 / 端点类型筛，也能按"我这把 Key 的分组调得到哪些"筛；倍率按各站的 `quota_per_unit` 折成绝对美元价（跨站点才可比）
 - NewAPI / Sub2API 站型探测与采集适配器
 - 手动采集、周期采集、部分成功和 `degraded` 能力标记
-- All API Hub 备份导入，以及从 WebDAV 定时同步（支持其加密备份）。**同步会报出这一轮的增删改**：新建 / 更新 / 未变 / 已移除各多少，逐站写清改了什么 —— 此前对已纳管的站点是空转，扩展那边轮换了令牌也不会更新，报告上永远是「入库 0 / 跳过 N」。备份里已移除的渠道**自动停用而不是删除**（可逆；只对 hub 建的生效，手工建的不碰）。一轮同步要探测上百个站点，所以改成后台跑并立刻返回，进度在界面上看
+- All API Hub 备份导入，以及从 WebDAV 定时同步（支持其加密备份）。**同步会报出这一轮的增删改**：新建 / 更新 / 未变 / 已移除各多少，逐站写清改了什么 —— 此前对已纳管的站点是空转，扩展那边轮换了令牌也不会更新，报告上永远是「入库 0 / 跳过 N」。备份里已移除的渠道**自动停用而不是删除**（可逆；只对 hub 建的生效，手工建的不碰；只在 WebDAV 同步时按「是否还在备份里」判，手工上传的文件可能只是一部分，不据此停用）。一轮同步要探测上百个站点，所以改成后台跑并立刻返回，进度在界面上看
+- **NewAPI 会话 Cookie 读取**：账号可手工登记或从 all-api-hub 导入原站会话 Cookie（加密保存，需配置 `SLA_COOKIE_SECRET_KEY`），令牌缺失或明确失效时用它只读采集余额、Key、价格；原站登录与 2FA 由用户自己完成，应用不代登录、不续期、不处理人机验证，远端创建 Key 不用 Cookie。只连公网 HTTPS、不跟随重定向、连接前逐个检查 DNS 结果
 - 资产总览、异常项、管理 API 和 Vue 管理 UI（登录页只要 `ADMIN_TOKEN`，存本地不上传；令牌失效自动回登录页）
 - **渠道与账号列表直接标出「能不能全自动采集」**：可全自动 / 部分可自动 / 需人工三档，采不了的当场说是哪一环（站型没有适配器 / 没登记账号 / 没登记凭证 / 凭证要重登 / 账号已停用），悬停看整句原因。判定在服务端算，用的跟采集器同一套判据 —— 不是界面自己拼一份。搜索框可直接按这三个字筛
 - **管理 UI 在手机上可用**：≤640px 时台账表格摊成卡片（一行一张卡、每格印着列名），导航收成一条横滚的带子，抽屉与选择器弹窗铺满屏宽，触摸目标与输入框字号按手指和 iOS 的实际约束放大 —— 不是把宽屏那套缩小给手机看
@@ -70,7 +71,7 @@ collector ───────────────────────�
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8` | 发布镜像版本 |
+| `SLA_IMAGE` | `ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9` | 发布镜像版本 |
 | `DATABASE_URL` | 无 | 必填；外部 PostgreSQL 16+ 连接串 |
 | `ADMIN_TOKEN` | 无 | 必填；管理 API/UI 令牌，建议 `openssl rand -hex 32` |
 | `ADMIN_PORT` | `18081` | 本机管理端口，只绑 `127.0.0.1` |
@@ -118,10 +119,10 @@ docker compose -f deploy/docker-compose.yml down -v
 Release 工作流由 Tag 触发，构建 Linux amd64/arm64 二进制并推送多架构 GHCR 镜像：
 
 ```text
-ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.8
+ghcr.io/wuhao1477/multi-upstream-ai-gateway-sla:v1.0.9
 ```
 
-当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.8](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.8) 与 [发布工作流](.github/workflows/release.yml)。
+当前 Release 包含两个平台的二进制包和 `SHA256SUMS`，详见 [Release v1.0.9](https://github.com/wuhao1477/multi-upstream-ai-gateway-sla/releases/tag/v1.0.9) 与 [发布工作流](.github/workflows/release.yml)。
 
 ## 文档地图
 
