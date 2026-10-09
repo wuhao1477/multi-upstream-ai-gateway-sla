@@ -42,7 +42,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return hc.Do(req)
+	resp, err := hc.Do(req)
+	return resp, transportError(err)
 }
 
 // NewClient 构造采集客户端。
@@ -152,16 +153,6 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return at.Sub(now)
 	}
 	return 0
-}
-
-// snippet 截取响应片段用于错误信息。
-// 限长是刻意的：上游可能返回整页 HTML，全塞进 error 会污染日志。
-func snippet(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if len(s) > 200 {
-		return s[:200] + "…"
-	}
-	return s
 }
 
 // ── 取值助手：上游 JSON 字段类型不稳定（数字可能是字符串），统一容错 ──

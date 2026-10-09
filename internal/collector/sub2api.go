@@ -1,12 +1,9 @@
 package collector
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -81,34 +78,14 @@ func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credenti
 		return cred, fmt.Errorf("%w: 无 refresh_token 可用（需人工重登：%w）",
 			ErrPrecondition, ErrNeedsRelogin)
 	}
-	body, _ := json.Marshal(map[string]string{"refresh_token": cred.RefreshToken})
-	url := strings.TrimRight(cred.BaseURL, "/") + "/api/v1/auth/refresh"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	m, _, err := a.C.postJSONBodyAuth(ctx, Session{BaseURL: cred.BaseURL, Family: FamilySub2API},
+		"/api/v1/auth/refresh", map[string]string{"refresh_token": cred.RefreshToken})
 	if err != nil {
-		return cred, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := a.C.Do(req)
-	if err != nil {
-		return cred, fmt.Errorf("刷新请求失败: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-
-	if resp.StatusCode == http.StatusUnauthorized {
 		// refresh_token 也失效 → 只能人工重登（04 §5.2 第 4 层）
-		return cred, newHTTPError(resp,
-			fmt.Sprintf("%v: refresh_token 已失效", ErrNeedsRelogin), ErrNeedsRelogin)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return cred, newHTTPError(resp,
-			fmt.Sprintf("刷新返回 %d: %s", resp.StatusCode, snippet(raw)), nil)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return cred, fmt.Errorf("刷新响应非 JSON: %s", snippet(raw))
+		if IsAuthenticationFailure(err) {
+			return cred, errors.Join(err, ErrNeedsRelogin)
+		}
+		return cred, err
 	}
 	d := unwrapData(m)
 
@@ -116,7 +93,7 @@ func (a *Sub2APIAdapter) Refresh(ctx context.Context, cred Credential) (Credenti
 	if v := asString(d["access_token"]); v != "" {
 		next.AccessToken = v
 	} else {
-		return cred, fmt.Errorf("刷新响应无 access_token: %s", snippet(raw))
+		return cred, errors.New("刷新响应无 access_token")
 	}
 	// **必须接住新 refresh_token**：旧的已被这次调用作废，
 	// 不更新会让下一次刷新必然失败。
@@ -248,7 +225,7 @@ func (a *Sub2APIAdapter) CreateRemoteKey(
 	}
 	if code, exists := m["code"]; exists {
 		if value, ok := asFloat(code); ok && value != 0 {
-			return fmt.Errorf("上游拒绝创建 Key: %s", asString(m["message"]))
+			return errors.New("上游拒绝创建 Key")
 		}
 	}
 	return nil
