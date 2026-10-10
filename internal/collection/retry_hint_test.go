@@ -2,6 +2,7 @@ package collection
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -56,17 +57,27 @@ func TestRunOnceReportsMissingCapabilityItems(t *testing.T) {
 }
 
 func TestRunOnceUsesHTTPFailureRetryHints(t *testing.T) {
+	// These are scheduler failure inputs, not upstream protocol fixtures.
 	tests := []struct {
-		name         string
-		status       int
-		retryAfterMs int64
-		before       time.Duration
-		after        time.Duration
+		name   string
+		item   string
+		before time.Duration
+		after  time.Duration
 	}{
-		{name: "unauthorized", status: 401, before: 4 * time.Minute, after: 5*time.Minute + time.Second},
-		{name: "forbidden", status: 403, before: 4 * time.Minute, after: 5*time.Minute + time.Second},
-		{name: "retry-after", status: 429, retryAfterMs: 120_000,
+		{name: "unauthorized", item: `{"status":"failed","http_status":401}`,
+			before: 4 * time.Minute, after: 5*time.Minute + time.Second},
+		{name: "forbidden", item: `{"status":"failed","http_status":403}`,
+			before: 4 * time.Minute, after: 5*time.Minute + time.Second},
+		{name: "retry-after", item: `{"status":"failed","http_status":429,"retry_after_ms":120000}`,
 			before: 119 * time.Second, after: 121 * time.Second},
+		{name: "newapi_failed", item: `{"status":"failed","http_status":200,"authentication_failed":true}`,
+			before: 4 * time.Minute, after: 5*time.Minute + time.Second},
+		{name: "newapi_partial", item: `{"status":"partial","rows":1,"failed":1,"http_status":200,"authentication_failed":true}`,
+			before: 4 * time.Minute, after: 5*time.Minute + time.Second},
+		{name: "newapi_retry_after", item: `{"status":"failed","http_status":200,"authentication_failed":true,"retry_after_ms":600000}`,
+			before: 599 * time.Second, after: 601 * time.Second},
+		{name: "other_rejection", item: `{"status":"failed","http_status":200}`,
+			before: 23 * time.Second, after: 37 * time.Second},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,10 +101,10 @@ func TestRunOnceUsesHTTPFailureRetryHints(t *testing.T) {
 					for _, capability := range caps {
 						item := collector.SyncItem{Capability: capability, Status: collector.StatusOK}
 						if calls == 1 && capability == collector.CapAccount {
-							item.Status = collector.StatusFailed
+							if err := json.Unmarshal([]byte(tc.item), &item); err != nil {
+								return nil, err
+							}
 							item.Error = "upstream rejected request"
-							item.HTTPStatus = tc.status
-							item.RetryAfterMs = tc.retryAfterMs
 						}
 						items = append(items, item)
 					}

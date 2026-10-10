@@ -146,7 +146,7 @@ func ReadAuthResponse(resp *http.Response, family Family, method, path string, s
 	//
 	// 只在 `success` 这一位**存在且为 false** 时才拦；Sub2API 的 code 在上面独立判断。
 	if ok, exists := m["success"].(bool); exists && !ok {
-		return nil, nil, authRejectionError(m, method, path, secret)
+		return nil, nil, authRejectionError(resp, m, method, path, secret)
 	}
 	return m, raw, nil
 }
@@ -206,7 +206,7 @@ func authHTTPError(resp *http.Response, method, path string, secret bool) error 
 	return newHTTPError(resp, message, cause)
 }
 
-func authRejectionError(m map[string]any, method, path string, secret bool) error {
+func authRejectionError(resp *http.Response, m map[string]any, method, path string, secret bool) error {
 	cause := ErrUpstreamRejected
 	// 仅采用 api.lyjxka.top 2026-09-16 已实测的认证错误，不把任意 success:false 当作失效。
 	if strings.TrimSpace(asString(m["message"])) == "Unauthorized, invalid access token" {
@@ -215,7 +215,7 @@ func authRejectionError(m map[string]any, method, path string, secret bool) erro
 	if secret && !IsAuthenticationFailure(cause) && path == CookieSessionPath {
 		cause = errors.Join(cause, ErrCookieNeedsAction)
 	}
-	return fmt.Errorf("%s %s: %w", method, path, cause)
+	return newHTTPError(resp, fmt.Sprintf("%s %s: %v", method, path, cause), cause)
 }
 
 // CookieSessionPath 是唯一能代表"整份会话"的端点，Cookie 读取侧（collection）共用这一份。

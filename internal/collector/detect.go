@@ -43,7 +43,7 @@ func detectWith(ctx context.Context, hc httpDoer, baseURL string, regs []*Regist
 	if hc == nil {
 		hc = &http.Client{
 			Timeout:       10 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			CheckRedirect: NoRedirect,
 		}
 	}
 	base := strings.TrimRight(baseURL, "/")

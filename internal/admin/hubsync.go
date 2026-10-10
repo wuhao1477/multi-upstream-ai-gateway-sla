@@ -51,7 +51,7 @@ func (s *Server) hubSyncClient() *http.Client {
 	}
 	return &http.Client{
 		Timeout:       hubSyncHTTPTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		CheckRedirect: collector.NoRedirect,
 	}
 }
 

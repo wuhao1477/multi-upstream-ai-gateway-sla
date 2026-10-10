@@ -128,7 +128,7 @@ func FetchHubBackup(
 	if client == nil {
 		client = &http.Client{
 			Timeout:       60 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			CheckRedirect: NoRedirect,
 		}
 	}
 	target, err := hubBackupURL(cfg.URL)
