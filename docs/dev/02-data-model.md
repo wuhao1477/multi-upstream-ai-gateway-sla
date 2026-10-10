@@ -471,7 +471,7 @@ ON CONFLICT (channel_id, model_name) DO UPDATE
 **`upstream_keys` 的用量列：只更新、不插入**
 
 - Key 行由 `/admin/keys` 人工登记（我们持有的凭证不可能从上游"发现"），采集只 `UPDATE` 用量列 + `channel_group_id` + `quota_synced_at`。
-- **采集到一把库里没有的 Key**（运营在上游侧新建但没登记）：**不自动插入**，记 `collector_snapshots(scope_type='key')` 并在 `inventory` 的异常项计数里 +1 提示运维补登记。理由：`upstream_keys.secret` 是明文凭证，上游列表接口通常只回前缀或掩码，**凭空插一行没有 secret 的 Key 会让它永远不可用**且污染资产台账。
+- **采集到一把库里没有的 Key**（运营在上游侧新建但没登记）：**不自动插入**，记 `collector_snapshots(scope_type='key')` 并在 `inventory` 的异常项计数里 +1 提示运维补登记。理由：`upstream_keys.secret_ciphertext` 存的是完整凭证，上游列表接口通常只回前缀或掩码，**凭空插一行没有 secret 的 Key 会让它永远不可用**且污染资产台账。
 
 **几处刻意的取舍**
 
@@ -619,9 +619,9 @@ CREATE INDEX idx_config_active    ON config_params(scope_type, scope_id, param_k
 
 ## 2bis. 网关调用方凭证域（**入站鉴权**，对抗性审查新增）
 
-> **此前的空白**：设计里唯一的密钥模型是 `upstream_keys.secret`——那是**我们打上游用的**。`/v1/*` 的入站鉴权从未定义，开发只能二选一：复用上游 Key（把高价值凭证暴露给调用方）或不鉴权（**任何能访问端口的人都能烧额度**）。两者都不可接受。
+> **此前的空白**：设计里唯一的密钥模型是上游 Key（`upstream_keys.secret_ciphertext`）——那是**我们打上游用的**。`/v1/*` 的入站鉴权从未定义，开发只能二选一：复用上游 Key（把高价值凭证暴露给调用方）或不鉴权（**任何能访问端口的人都能烧额度**）。两者都不可接受。
 
-**铁律：`upstream_keys.secret` 严禁用作入站凭证。** 入站与出站是两套完全独立的凭证体系。
+**铁律：上游 Key（`upstream_keys.secret_ciphertext`）严禁用作入站凭证。** 入站与出站是两套完全独立的凭证体系。
 
 ```sql
 -- 网关调用方凭证（入站）：只存哈希，永不存明文
@@ -2999,6 +2999,23 @@ CREATE TABLE balance_signals (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+#### 7.0bis 凭证密文列的读写规则（FR-113，034/035，#34）
+
+所有密文由 `internal/store/credential_cipher.go` 生成：格式版本 ‖ 密钥版本 ‖ 随机 nonce ‖ AES-256-GCM 密文，
+AAD 绑定表名、记录 ID 与字段名。空秘密存 NULL，不需要密钥；非空秘密在缺密钥、错密钥或密文被改动时**明确失败**，
+不退回明文。
+
+- `upstream_keys.secret_ciphertext`：`CreateKey` 先取 `id` 再加密插入；`UpdateKey` 仅在提交了新 secret 时重写，
+  并同时更新 `upstream_keys.secret_prefix`。列表（`GET /admin/keys`）只读 `secret_prefix`，不为展示解密。
+- `collector_credentials.access_token_ciphertext` / `collector_credentials.refresh_token_ciphertext`：AAD 绑定
+  `account_id`。导入与登记经 `SaveTx` 写入，空值表示保留旧值；刷新在刷新锁事务内对共用 `refresh_lock_key`
+  的**每一行分别加密**后写回，再释放锁；采集读取时逐行解密。令牌比对（导入时判断是否需要更新）解密后比较。
+- `hub_sync_config.webdav_url_ciphertext` 存完整地址，`hub_sync_config.webdav_url_display` 存去掉
+  userinfo/query/fragment 的展示值，管理接口只回后者。保存时提交值**等于当前展示值即保持原地址**，其他值替换，
+  空串清空。`hub_sync_config.webdav_password_ciphertext` / `hub_sync_config.backup_password_ciphertext` 留空即保持原值。
+- 035 删除明文列前，迁移器在同一事务里加密全部旧值并逐行解密比对，失败即整体回滚（`credential_migration.go`）。
+
 
 #### 7.1 `collector_snapshots.payload` 的逐 scope_type 结构（**P1 必需**，第 45 轮补）
 

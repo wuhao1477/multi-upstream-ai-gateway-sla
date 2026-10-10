@@ -16,7 +16,7 @@
 
 | 平面 | 端点前缀 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用 `upstream_keys.secret`**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
+| 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用上游 Key（`upstream_keys.secret_ciphertext`）**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
 | 健康 | `/healthz` | 无 | LB 探针（[06](./06-deployment-and-operations.md)） |
 | **管理平面** | **`/admin/*`**、`/metrics` | **两层都要**：① 网络边界（Caddy 不代理，仅容器网络/本机可达）② **独立管理令牌** `ADMIN_TOKEN`（env 注入，非业务 Key，与 `gateway_clients` 无关） | 本篇；配置读写、策略、审计查询 |
 
