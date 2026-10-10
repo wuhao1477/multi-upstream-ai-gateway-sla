@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
 var (
@@ -79,58 +81,9 @@ func cookieHostAllowed(host string) bool {
 		return false
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		return IsPublicCookieIP(ip)
+		return collector.IsPublicIP(ip)
 	}
 	return true
-}
-
-// IsPublicCookieIP 同时供 URL 字面量与连接时的 DNS 结果校验使用。
-func IsPublicCookieIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	// NAT64 / 6to4 把 IPv4 嵌在 IPv6 里：按嵌入的那个 IPv4 判。不拆的话 64:ff9b::a00:5
-	// 在 NAT64 网络里就是 10.0.0.5；整段拒绝又会让纯 IPv6 + DNS64 主机连不上任何公网站。
-	if v4, ok := embeddedIPv4(ip); ok {
-		return IsPublicCookieIP(v4)
-	}
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.Zone() != "" {
-		return false
-	}
-	for _, p := range cookieBlockedPrefixes {
-		if p.Contains(ip) {
-			return false
-		}
-	}
-	return true
-}
-
-// cookieBlockedPrefixes 是 IsGlobalUnicast 放行、但不是公网站点的段。
-var cookieBlockedPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),     // 本网络；部分系统把 0.x 当本机
-	netip.MustParsePrefix("100.64.0.0/10"), // 运营商级 NAT
-	netip.MustParsePrefix("192.0.0.0/24"),  // IETF 协议分配
-	netip.MustParsePrefix("198.18.0.0/15"), // 基准测试网
-	netip.MustParsePrefix("240.0.0.0/4"),   // 保留（含广播）
-	netip.MustParsePrefix("::/96"),         // 已废弃的 IPv4 兼容地址 ::a.b.c.d
-}
-
-var (
-	nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
-	sixToFour   = netip.MustParsePrefix("2002::/16")
-)
-
-// embeddedIPv4 取出 NAT64（末 32 位）与 6to4（第 2~5 字节）里嵌的 IPv4。
-func embeddedIPv4(ip netip.Addr) (netip.Addr, bool) {
-	if !ip.Is6() {
-		return netip.Addr{}, false
-	}
-	b := ip.As16()
-	switch {
-	case nat64Prefix.Contains(ip):
-		return netip.AddrFrom4([4]byte(b[12:16])), true
-	case sixToFour.Contains(ip):
-		return netip.AddrFrom4([4]byte(b[2:6])), true
-	}
-	return netip.Addr{}, false
 }
 
 func normalizeCookieHeader(raw string) (string, error) {

@@ -358,7 +358,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 
 - `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
 - 上游失败时可附 `http_status`，始终表示真实 HTTP 状态。Sub2API 非零业务码另附 `business_code`。已识别的认证失败附 `authentication_failed: true`，包括 NewAPI 的 HTTP 200 + `success:false` / `Unauthorized, invalid access token`，以及 Sub2API 业务 401；逐项失败和多账号部分失败均采用至少五分钟的认证退避，不伪造 HTTP 或业务 401。存在有效 `Retry-After` 时同时附 `retry_after_ms`，多账号取最长等待时间；普通业务拒绝不按认证失败处理。
-- 2026-10-09 起，采集、探测与 WebDAV 默认客户端均不跟随自动重定向。令牌和 WebDAV 的内网直连仍允许；这不代表完整私网网段或 DNS 重绑定防护已经实施。错误仅含安全操作名、路径与状态/类别，不回显任意远端消息、原始 URL 或响应正文。
+- 2026-10-09 起，采集、探测与 WebDAV 默认客户端均不跟随自动重定向。2026-10-10 起（#33）连接前校验全部解析地址并直接拨已校验的 IP，默认只连公网；内网目标须在部署环境的 `SLA_OUTBOUND_PRIVATE_TARGETS` 中授权，未授权时报固定文案的出站拒绝错误。错误仅含安全操作名、路径与状态/类别，不回显任意远端消息、原始 URL 或响应正文。
 - P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
 - **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 

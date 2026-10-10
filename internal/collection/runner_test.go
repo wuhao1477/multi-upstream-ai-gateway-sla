@@ -357,7 +357,7 @@ VALUES ('runner-import-keys','newapi',$1,'enabled') RETURNING id`, base).Scan(&c
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/user/self":
 			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
-		case "GET /api/token":
+		case "GET /api/token/":
 			_, _ = w.Write([]byte(`{"data":[
                 {"id":101,"remain_quota":90,"used_quota":10,"expired_time":-1},
                 {"id":102,"remain_quota":80,"used_quota":20,"expired_time":-1}
@@ -495,7 +495,7 @@ VALUES ($1,'vip',0.8,'auto_collect',now())`, channelID); err != nil {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/user/self":
 			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
-		case "GET /api/token":
+		case "GET /api/token/":
 			items := []map[string]any{}
 			if created {
 				items = append(items, map[string]any{"id": 501, "group": "vip", "remain_quota": 100})
@@ -586,7 +586,7 @@ VALUES ('runner-provision-secret-budget','newapi',$1,'enabled') RETURNING id`, b
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/user/self":
 			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":100,"used_quota":1}}`))
-		case "GET /api/token":
+		case "GET /api/token/":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{
 				"id": 1, "group": "default", "remain_quota": 100,
 			}}})

@@ -52,6 +52,10 @@ func run(dsn string, once bool, logger *slog.Logger) error {
 	if dsn == "" {
 		return errors.New("缺少 DSN：设 DATABASE_URL 或用 -dsn")
 	}
+	// 先于任何采集/WebDAV 客户端构造：配置非法就拒绝启动，不退回"全部放行"。
+	if err := collector.ConfigureOutbound(os.Getenv("SLA_OUTBOUND_PRIVATE_TARGETS")); err != nil {
+		return err
+	}
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancelStart()
 	pool, err := store.NewPool(startCtx, dsn)

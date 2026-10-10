@@ -126,10 +126,7 @@ func FetchHubBackup(
 	ctx context.Context, client *http.Client, cfg HubWebDAVConfig,
 ) ([]byte, error) {
 	if client == nil {
-		client = &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: NoRedirect,
-		}
+		client = OutboundHTTPClient(60 * time.Second)
 	}
 	target, err := hubBackupURL(cfg.URL)
 	if err != nil {

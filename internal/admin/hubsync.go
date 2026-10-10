@@ -49,10 +49,7 @@ func (s *Server) hubSyncClient() *http.Client {
 	if s.HubHTTP != nil {
 		return s.HubHTTP
 	}
-	return &http.Client{
-		Timeout:       hubSyncHTTPTimeout,
-		CheckRedirect: collector.NoRedirect,
-	}
+	return collector.OutboundHTTPClient(hubSyncHTTPTimeout)
 }
 
 // RunHubSync 跑一轮同步，并把这一轮记进 hub_sync_runs。
@@ -410,8 +407,8 @@ func (s *Server) putHubSync(w http.ResponseWriter, r *http.Request) {
 	// 地址在这里就要校验，而不是等定时器跑起来才在日志里报错 ——
 	// 填错的人正站在界面前，此刻告诉他最便宜。
 	//
-	// WebDAV 保留管理员配置的内网直连；validateBaseURL 也不是私网防护。
-	// 出站客户端单独禁止自动重定向，不改变已有地址格式与目录补全规则。
+	// 这里只校验格式。自建 WebDAV 多半在内网（NAS 等），能否连接由部署环境的
+	// SLA_OUTBOUND_PRIVATE_TARGETS 决定，在连接时校验（collector/outbound.go）。
 	if in.WebDAVURL != "" {
 		if _, err := collector.ResolveHubBackupURL(in.WebDAVURL); err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())

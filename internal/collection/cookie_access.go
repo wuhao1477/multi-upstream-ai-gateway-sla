@@ -52,33 +52,13 @@ func NewCookieAccess(pool *store.Pool, credentials *store.CookieCredentialStore,
 	return access
 }
 
+// dialCookie 只连公网：部署环境给令牌采集的内网授权不适用于 Cookie。
 func dialCookie(ctx context.Context, network, address string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
+	conn, err := collector.DialPublic(ctx, network, address)
+	if errors.Is(err, collector.ErrOutboundBlocked) {
 		return nil, store.ErrCookieSite
 	}
-	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return nil, err
-	}
-	for _, ip := range addresses {
-		if !store.IsPublicCookieIP(ip) {
-			return nil, store.ErrCookieSite
-		}
-	}
-	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	for _, ip := range addresses {
-		// 使用已经检查的 IP 建连，不让第二次 DNS 查询改变目标。
-		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		if dialErr == nil {
-			return conn, nil
-		}
-		err = dialErr
-	}
-	if err == nil {
-		err = errors.New("未解析到 Cookie 站点地址")
-	}
-	return nil, err
+	return conn, err
 }
 
 // cookieReadPath 同时限制 origin、路径、方法和查询参数，不提供任意 URL/头注入。

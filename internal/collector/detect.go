@@ -41,10 +41,7 @@ func Detect(ctx context.Context, hc httpDoer, baseURL string) (DetectResult, err
 // 而那些测试正是靠遍历 All() 来断言"每族都合规"的。
 func detectWith(ctx context.Context, hc httpDoer, baseURL string, regs []*Registration) (DetectResult, error) {
 	if hc == nil {
-		hc = &http.Client{
-			Timeout:       10 * time.Second,
-			CheckRedirect: NoRedirect,
-		}
+		hc = OutboundHTTPClient(10 * time.Second)
 	}
 	base := strings.TrimRight(baseURL, "/")
 	res := DetectResult{Family: FamilyUnknown}
