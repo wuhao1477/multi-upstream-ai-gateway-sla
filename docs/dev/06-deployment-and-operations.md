@@ -1,5 +1,19 @@
 # 06 部署与运维（单机 Docker Compose · v0.1 草案）
 
+> 2026-10-10 凭证加密（Issue #34）：上游 Key、采集令牌与 WebDAV 地址/密码改为加密存储，
+> 部署密钥为 `SLA_CREDENTIAL_SECRET_KEY`（`openssl rand -base64 32`，与 Cookie 密钥分开，
+> core 与 collector 必须相同）。迁移 035 在启动时把库中明文加密、逐行解密比对后删除明文列，
+> 全部在一个事务里：**库里有明文却没配密钥时整体回滚并拒绝启动**，旧版本仍可继续运行。
+> 已有数据的部署按以下顺序升级（需维护窗口）：
+>
+> 1. 停止全部 core 与 collector，避免迁移期间旧进程继续写明文或轮换 refresh token。
+> 2. 备份数据库并实际验证可恢复；生成密钥并与该备份**分开但成对**保管。
+> 3. 给所有实例配置同一把密钥，先只启动一个 core 完成迁移，确认日志出现
+>    `035_drop_plaintext_credentials.sql` 已应用，再启动其余实例。
+>
+> 密钥丢失后已存凭证无法解密，只能重新登记；恢复数据库时必须同时提供加密时的那把密钥。
+> 已有的明文备份、WAL 与旧日志不会因此消失，其清理另行授权。
+
 > 2026-10-10 出站兼容性变更（Issue #33，取代下条中"内网和回环直连及环境代理保持原样"
 > 与"网段限制与 DNS 重绑定防护仍未实施"）：采集、探测与 WebDAV **默认只连公网**，并且
 > 不再读取 `HTTP_PROXY`/`HTTPS_PROXY`。升级前先找出解析到内网、回环或运营商 NAT（含
@@ -55,7 +69,7 @@
 | `caddy` | caddy:2 | 443/80 | core-a/b | TLS + 轮询 LB + 健康探测摘除故障实例。⚠️ **`Caddyfile` 只代理 `/v1/*` 与 `/healthz`；`/admin/*` 与 `/metrics` 一律不代理**——二者仅容器网络/本机可达。一期不做的是**多用户/RBAC**（仅本人使用），但**仍有一把静态 `ADMIN_TOKEN`**（[09 §1](./09-admin-api.md) 冻结：网络边界 + 管理令牌**两层都要**）。**两层缺一不可**：网络边界防外部，令牌防同机其它进程（compose 里还跑着 collector、caddy、postgres） |
 | `sla-core-a/b` | 本仓库构建（Go） | 8080 | postgres | 无本地状态；`/healthz` 就绪探针；**内含自研上游透传层**（[03](./03-upstream-layer.md)）。**必须 ≥2 实例**（FR-110） |
 | `postgres` | postgres:16 | 5432 | — | 单库；账本/台账/价格/健康（单一真相源） |
-| `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证明文（FR-113） |
+| `collector` | 同 core 二进制 `collector` 子命令 | — | postgres、上游站点 | 异步旁路；限速；凭证加密存储（FR-113） |
 
 > **为何 core ≥2**：FR-110 要求任一实例宕机不中断。Caddy 对 `/healthz` 失败的实例自动摘除；两实例无差别（状态全在 PG，账本主键 UUIDv7 无序列争用，[02 §9.3](./02-data-model.md)）。转向自研后**数据面不再有外部网关单点**（[11](./11-decision-full-selfbuilt.md)）。
 
@@ -67,7 +81,7 @@
 
 ### 2.1 上游渠道与凭证
 
-- 渠道、Key、URL 全部登记在 PG 的 `channels`/`upstream_keys`（一期明文，FR-113），经 [09 `/admin/bindings`](./09-admin-api.md) 管理。
+- 渠道、Key、URL 全部登记在 PG 的 `channels`/`upstream_keys`（Key 加密存储，FR-113），经 [09 `/admin/bindings`](./09-admin-api.md) 管理。
 - sla-core 启动时从 PG 加载并构建内存快照；新增/变更渠道经管理 API 落库后刷新快照，**无需重启**。
 - 每个 Binding 独立 HTTP 连接池（[03 §6](./03-upstream-layer.md)），避免单个上游卡死拖垮其他渠道。
 
@@ -107,10 +121,10 @@ sla-core 启动做一次幂等 bootstrap：建表/迁移（`migrations/`）、�
 | --- | --- | --- |
 | 策略参数 | 存 PG `config_params`，非环境变量；关键项二次确认（FR-115） | [02 §2](./02-data-model.md) |
 | 基础设施配置 | 环境变量/`.env`（DSN、端口、监听地址） | — |
-| 上游 Key / 采集凭证 | **一期明文**存 PG（`upstream_keys.secret`、`collector_credentials.*`）；日志与管理界面脱敏不显示完整 Key（FR-094/113） | FR-113 |
+| 上游 Key / 采集凭证 | **加密**存 PG（`upstream_keys.secret_ciphertext`、`collector_credentials.*_ciphertext`、`hub_sync_config.*_ciphertext`），密钥 `SLA_CREDENTIAL_SECRET_KEY` 来自部署环境；日志与管理界面脱敏不显示完整 Key（FR-094/113） | FR-113 |
 | TLS | Caddy 自动证书（内部可用自签） | — |
 
-> 一期明文是已确认决策（DECISIONS 遗漏 4）；对外提供服务前须重评加密与轮换（FR-113 备注）。
+> 原"一期明文"决策（DECISIONS 遗漏 4）已由 #34 撤销，改为加密存储；密钥轮换尚未实施，对外提供服务前须评估（FR-113 备注）。
 
 ---
 
@@ -241,7 +255,7 @@ wire_api = "responses"
 | 1 | 数据面单点 | ✅ **已消除**：转向自研后无外部网关容器（[11](./11-decision-full-selfbuilt.md)）；上游直连由 ≥2 个 core 实例承载 |
 | 2 | LB 选型 | ✅ **定** Caddy（自动 TLS、配置简单、单机足够） |
 | 3 | collector 打包 | ✅ **定** 一期 core 二进制子命令（部署简单）；量级上来再拆独立容器/独立扩缩 |
-| 4 | 备份加密（含明文 Key 的 dump） | ✅ **定** 一期 dump 落本机加密卷；对外提供服务前随 FR-113 一起升级 |
+| 4 | 备份加密 | ✅ **定** dump 落本机加密卷。#34 起 dump 里的凭证已是密文，但恢复必须配同一把 `SLA_CREDENTIAL_SECRET_KEY`；#34 之前的旧 dump 仍含明文 |
 
 ---
 

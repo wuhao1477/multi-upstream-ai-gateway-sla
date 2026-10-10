@@ -61,7 +61,9 @@ CREATE TABLE upstream_accounts (
 CREATE TABLE upstream_keys (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   account_id    BIGINT NOT NULL REFERENCES upstream_accounts(id),
-  secret        TEXT NOT NULL,    -- 明文（FR-113）；展示层脱敏（FR-094）
+  -- 035 起只存密文（AES-256-GCM，AAD 绑定表/记录 ID/字段，见 internal/store/credential_cipher.go）
+  secret_ciphertext BYTEA NOT NULL,
+  secret_prefix TEXT NOT NULL,    -- 写入时存下的前 8 个字符，列表只读它，不为展示解密（FR-094）
   key_multiplier NUMERIC(12,6),   -- Key 级倍率（FR-003）
   expired_time  TIMESTAMPTZ,      -- NewAPI /api/token.expired_time（ISSUE-002 §3.1）
   unlimited_quota BOOLEAN DEFAULT false,
@@ -997,10 +999,12 @@ CREATE TABLE collector_host_rate_limits (
 
 CREATE TABLE hub_sync_config (
   id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  webdav_url       TEXT NOT NULL DEFAULT '',
+  -- 地址与两个密码加密存储（034/035，#34）；NULL = 未配置
+  webdav_url_ciphertext      BYTEA,             -- 完整地址（query/userinfo 可能承载认证信息）
+  webdav_url_display         TEXT NOT NULL DEFAULT '', -- 去掉 userinfo/query/fragment 的展示值，管理接口只回它
   webdav_username  TEXT NOT NULL DEFAULT '',
-  webdav_password  TEXT NOT NULL DEFAULT '',    -- 明文（FR-113 一期）
-  backup_password  TEXT NOT NULL DEFAULT '',    -- all-api-hub 的备份加密密码，明文备份时留空
+  webdav_password_ciphertext BYTEA,
+  backup_password_ciphertext BYTEA,             -- all-api-hub 的备份加密密码，明文备份时为 NULL
   enabled          BOOLEAN NOT NULL DEFAULT false,
   interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
   apply_mode       TEXT NOT NULL DEFAULT 'report'
@@ -1027,9 +1031,9 @@ CREATE TABLE collector_credentials (
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   cred_type       TEXT NOT NULL CHECK (cred_type IN
                     ('newapi_access_token','sub2api_jwt')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
-  access_token    TEXT,
-  refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
+  -- 加密存储（FR-113，034/035，#34）；AAD 绑定 account_id。NewAPI 长期令牌 / Sub2API access+refresh
+  access_token_ciphertext  BYTEA,
+  refresh_token_ciphertext BYTEA,               -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
   token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期

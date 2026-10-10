@@ -24,7 +24,7 @@
 | 一期不存正文/上下文/请求头/请求体 | **全库无 `body`/`messages`/`prompt_text`/`headers` 列**；只存 token 计数、延迟、状态、费用等元数据；采集侧只存额度/价格数值，不存上游返回正文 | FR-112 |
 | 多实例共享（sla-core ×2 无本地状态） | 所有写入走同一 PG；账本主键用 **UUIDv7**（时间有序、无需跨实例协调序列），配置/注册表用 `BIGINT IDENTITY` | FR-110 |
 | 决策 P99≤50ms | 同步决策路径**只读内存快照**，不查 PG；本库承担写路径与后台快照重建，不在关键路径上 | FR-110、01-架构 §5 |
-| 上游 Key 一期明文 | `upstream_keys.secret` / `collector_credentials` 的 token 明文列，仅在应用层脱敏展示（FR-094） | FR-113 |
+| 上游凭证加密存储 | `upstream_keys.secret_ciphertext`、`collector_credentials` 的 token 密文列与 `hub_sync_config` 的地址/密码密文列（034/035，#34）；列表只读写入时存下的 `secret_prefix`（FR-094） | FR-113 |
 | TTFT 不采信网关字段 | attempt 同时存**自算内容感知 TTFT** 与**网关上报值（仅存证）**两列，语义上永不混用 | AC-31、假设 3/6 |
 | 取消按 errorMessage 归并 | attempt 存**网关原始 status** 与**归并后的 `cancel_reason`** 两列 | AC-30、假设 2 |
 | 记账不假设「一次调用=一次上游用量」 | attempt 存 `upstream_call_count`（隐藏重试补算）与外部调用恒为 1 attempt 的关系 | FR-119、假设 6 |
@@ -145,11 +145,13 @@ CREATE TABLE upstream_accounts (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 上游 Key（FR-002/003/031）：独立倍率/额度/模型权限；一期明文（FR-113）
+-- 上游 Key（FR-002/003/031）：独立倍率/额度/模型权限；secret 加密存储（FR-113，#34）
 CREATE TABLE upstream_keys (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   account_id    BIGINT NOT NULL REFERENCES upstream_accounts(id),
-  secret        TEXT NOT NULL,    -- 明文（FR-113）；展示层脱敏（FR-094）
+  -- 035 起只存密文（AES-256-GCM，AAD 绑定表/记录 ID/字段，见 internal/store/credential_cipher.go）
+  secret_ciphertext BYTEA NOT NULL,
+  secret_prefix TEXT NOT NULL,    -- 写入时存下的前 8 个字符，列表只读它，不为展示解密（FR-094）
   key_multiplier NUMERIC(12,6),   -- Key 级倍率（FR-003）
   expired_time  TIMESTAMPTZ,      -- NewAPI /api/token.expired_time（ISSUE-002 §3.1）
   unlimited_quota BOOLEAN DEFAULT false,
@@ -2872,7 +2874,7 @@ CREATE INDEX idx_canary_active ON canary_claims(binding_id) WHERE state = 'activ
 
 ## 7. 采集快照 / 余额信号 / 凭证域
 
-> 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证明文（FR-113）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
+> 承接 [ISSUE-002 采集适配器](../issues/ISSUE-002-collector-adapter-design.md)。采集侧凭证加密存储（FR-113，#34）；余额非实时、后台校对 + 信号自适应识别（FR-027、参数5）；快照标数据来源 + 更新时间 + 7 天有效（FR-011）；余额状态五态、订阅数据未知降级。
 
 ```sql
 -- 跨进程采集限速：sla-core 手动采集/探测与 collector 周期采集共用同一 host 时隙。
@@ -2889,10 +2891,12 @@ CREATE TABLE collector_host_rate_limits (
 -- 凭证类一律"明文存库、只报存在性、不回显内容"，与 collector_credentials 同源。
 CREATE TABLE hub_sync_config (
   id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  webdav_url       TEXT NOT NULL DEFAULT '',
+  -- 地址与两个密码加密存储（034/035，#34）；NULL = 未配置
+  webdav_url_ciphertext      BYTEA,             -- 完整地址（query/userinfo 可能承载认证信息）
+  webdav_url_display         TEXT NOT NULL DEFAULT '', -- 去掉 userinfo/query/fragment 的展示值，管理接口只回它
   webdav_username  TEXT NOT NULL DEFAULT '',
-  webdav_password  TEXT NOT NULL DEFAULT '',    -- 明文（FR-113 一期）
-  backup_password  TEXT NOT NULL DEFAULT '',    -- all-api-hub 的备份加密密码，明文备份时留空
+  webdav_password_ciphertext BYTEA,
+  backup_password_ciphertext BYTEA,             -- all-api-hub 的备份加密密码，明文备份时为 NULL
   enabled          BOOLEAN NOT NULL DEFAULT false,
   interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 5),
   apply_mode       TEXT NOT NULL DEFAULT 'report'
@@ -2924,9 +2928,9 @@ CREATE TABLE collector_credentials (
   site_family     TEXT NOT NULL CHECK (site_family IN ('newapi','sub2api','unknown')),
   cred_type       TEXT NOT NULL CHECK (cred_type IN
                     ('newapi_access_token','sub2api_jwt')),
-  -- 明文（FR-113）；NewAPI 长期令牌 / Sub2API access+refresh
-  access_token    TEXT,
-  refresh_token   TEXT,                         -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
+  -- 加密存储（FR-113，034/035，#34）；AAD 绑定 account_id。NewAPI 长期令牌 / Sub2API access+refresh
+  access_token_ciphertext  BYTEA,
+  refresh_token_ciphertext BYTEA,               -- 仅有 refresh 路径的站型（Sub2API：24h JWT + 无密码续期）
   external_user_id TEXT,                        -- NewAPI New-API-User 头必需
   user_id_header_name TEXT,                     -- 二开 fan-out：New-API-User/Veloera-User/...（§3.1）
   token_expires_at TIMESTAMPTZ,                 -- 有到期时间的站型填（Sub2API 24h）；到期前 RefreshLead 内续期

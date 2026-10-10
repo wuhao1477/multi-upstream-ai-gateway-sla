@@ -20,7 +20,7 @@
 ```
 
 - **sla-core**：同步请求路径 + 决策引擎 + **自研上游透传层** + 账本写入。无本地持久状态，实例无差别（FR-110 多实例）。
-- **上游直连**：不再经任何外部网关（[11](./11-decision-full-selfbuilt.md)）。渠道与 Key 来自 PG 的 `channels`/`upstream_keys`（一期明文，FR-113）。
+- **上游直连**：不再经任何外部网关（[11](./11-decision-full-selfbuilt.md)）。渠道与 Key 来自 PG 的 `channels`/`upstream_keys`（Key 加密存储，FR-113）。
 - **collector**：异步控制路径，承接 [ISSUE-002 适配器契约](../issues/ISSUE-002-collector-adapter-design.md#2-适配器契约)。
 - **健康语义分层**：`/healthz`（LB 就绪，只看实例自身）≠ 渠道健康（selector 状态）≠ 全候选不可用（请求路径返回明确错误）。三者不可混用，详见 [06 §6](./06-deployment-and-operations.md)。
 
@@ -145,5 +145,5 @@
 | --- | --- | --- |
 | 1 | 上游执行由谁承担 | ✅ **已定（2026-07-25）：自研直连，移除 AxonHub/ccLoad** —— 依据 [11 转向决策](./11-decision-full-selfbuilt.md)。数据面不再有外部网关单点 |
 | 2 | Responses 协议如何处理 | ✅ **已定：字节级透传（硬约束）** —— 三个独立项目走解析-重组全部在 Codex 兼容性翻车（[13 §5](./13-research-reassessment.md)）；透传天然保真 35 字段与 reasoning item |
-| 3 | 上游 Key 管理 | ✅ **已定**：直接读 PG `channels`/`upstream_keys`（一期明文，FR-113），无需向外部网关开通；经 [09 `/admin/bindings`](./09-admin-api.md) 登记 |
+| 3 | 上游 Key 管理 | ✅ **已定**：直接读 PG `channels`/`upstream_keys`（Key 加密存储，FR-113），无需向外部网关开通；经 [09 `/admin/bindings`](./09-admin-api.md) 登记 |
 | 4 | 内容感知首字判定的实现 | ✅ **已定**：旁路观察 SSE 事件元数据判定（[03 §3.2](./03-upstream-layer.md)），不接管字节流；判定标准对齐 [ISSUE-001 假设3](../issues/ISSUE-001-tech-assumption-verification.md) 的三条铁证 |

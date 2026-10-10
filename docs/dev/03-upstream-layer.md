@@ -57,7 +57,7 @@ type Client interface {
 type Binding struct {
     ID           int64  // bindings.id → attempts.binding_id
     BaseURL      string // bindings.effective_url —— **实际发往的上游地址**，一 binding 一个
-    APIKey       string // upstream_keys.secret（一期明文，FR-113）；覆盖 Authorization 头（§7）
+    APIKey       string // upstream_keys.secret_ciphertext 解密所得（FR-113，#34）；覆盖 Authorization 头（§7）
     UpstreamModel string // = COALESCE(channel_models.upstream_model_name, models.canonical_name)
     Protocol     Protocol // 该 binding 在本协议下 support='supported'（05 §1.1 序 2 已保证）
 }
@@ -148,7 +148,7 @@ type ProtocolSupport struct {
 }
 ```
 
-**与旧 GatewayAdapter 的差别**：不再有 `ProvisionBinding`/`SetPricing`/`Reconcile`/`Teardown` —— 渠道与 Key 直接来自 [02](./02-data-model.md) 的 `channels`/`upstream_keys`（一期明文，FR-113），无需向外部网关开通；账本是**单一真相源**，无对账环节。
+**与旧 GatewayAdapter 的差别**：不再有 `ProvisionBinding`/`SetPricing`/`Reconcile`/`Teardown` —— 渠道与 Key 直接来自 [02](./02-data-model.md) 的 `channels`/`upstream_keys`（Key 加密存储，FR-113），无需向外部网关开通；账本是**单一真相源**，无对账环节。
 
 ---
 
