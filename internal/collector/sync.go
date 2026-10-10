@@ -32,6 +32,7 @@ type SyncItem struct {
 	Error        string       `json:"error,omitempty"`
 	Note         string       `json:"note,omitempty"`
 	HTTPStatus   int          `json:"http_status,omitempty"`
+	BusinessCode int64        `json:"business_code,omitempty"`
 	RetryAfterMs int64        `json:"retry_after_ms,omitempty"`
 }
 
@@ -352,10 +353,31 @@ func capabilityResult(rows int, errs []error, note string) (int, int, string, er
 	if len(errs) == 0 {
 		return rows, 0, note, nil
 	}
-	if rows == 0 {
-		return 0, 0, note, errors.Join(errs...)
+	err := errors.Join(errs...)
+	var selected *HTTPError
+	var retryAfter time.Duration
+	for _, cause := range errs {
+		var failure *HTTPError
+		if !errors.As(cause, &failure) {
+			continue
+		}
+		retryAfter = max(retryAfter, failure.RetryAfter)
+		if selected == nil || IsAuthenticationFailure(cause) {
+			selected = failure
+		}
 	}
-	return rows, len(errs), note, errors.Join(errs...)
+	if selected != nil {
+		// 汇总元数据优先保留认证失败，且不能缩短另一账号的 Retry-After。
+		// Cause 仍包含全部账号错误，不修改原始 HTTPError 或丢失成功数据。
+		failure := *selected
+		failure.Message, failure.Cause = err.Error(), err
+		failure.RetryAfter = retryAfter
+		err = &failure
+	}
+	if rows == 0 {
+		return 0, 0, note, err
+	}
+	return rows, len(errs), note, err
 }
 
 func accountErr(cred Credential, stage string, err error) error {
@@ -572,9 +594,11 @@ func (s *Syncer) run(
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Rows:       rows, Failed: failed, Note: note,
 	}
-	if status, retryAfter, ok := HTTPFailure(err); ok {
-		item.HTTPStatus = status
-		item.RetryAfterMs = retryAfter.Milliseconds()
+	var failure *HTTPError
+	if errors.As(err, &failure) {
+		item.HTTPStatus = failure.StatusCode
+		item.BusinessCode = failure.BusinessCode
+		item.RetryAfterMs = failure.RetryAfter.Milliseconds()
 	}
 	switch {
 	case err != nil && failed > 0:

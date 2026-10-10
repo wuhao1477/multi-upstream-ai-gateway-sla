@@ -75,7 +75,7 @@ func mergeScopeIDs(single int64, many []int64) []int64 {
 
 func decodeKeyAutomationRequest(r *http.Request) (keyAutomationRequest, error) {
 	var request keyAutomationRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSON(json.NewDecoder(r.Body), &request); err != nil {
 		return request, err
 	}
 	request.Model = strings.TrimSpace(request.Model)
@@ -99,7 +99,7 @@ func validateKeyAutomationRequest(request keyAutomationRequest) error {
 func (s *Server) keyAutomationRequest(w http.ResponseWriter, r *http.Request) (keyAutomationRequest, bool) {
 	request, err := decodeKeyAutomationRequest(r)
 	if err != nil {
-		s.fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		s.requestBodyError(w, err)
 		return request, false
 	}
 	if err := validateKeyAutomationRequest(request); err != nil {

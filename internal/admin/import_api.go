@@ -38,6 +38,11 @@ func (s *Server) importAllAPIHub(w http.ResponseWriter, r *http.Request) {
 
 	backup, err := collector.ParseHubBackup(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.requestBodyError(w, err)
+			return
+		}
 		s.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}

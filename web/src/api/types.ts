@@ -292,6 +292,7 @@ export interface SyncItem {
   error?: string
   note?: string
   http_status?: number
+  business_code?: number
   retry_after_ms?: number
 }
 

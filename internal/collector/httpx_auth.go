@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,7 +57,7 @@ func (c *Client) postJSONBodyAuth(
 ) (map[string]any, []byte, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("编码 %s 请求失败: %w", path, err)
+		return nil, nil, fmt.Errorf("编码 %s 请求失败", diagnosticPath(path))
 	}
 	return c.doJSONBodyAuth(ctx, s, http.MethodPost, path, raw)
 }
@@ -69,7 +68,7 @@ func (c *Client) doJSONBodyAuth(
 	url := strings.TrimRight(s.BaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("构造 %s %s 请求失败", method, diagnosticPath(path))
 	}
 	req.Header = authHeaders(s)
 	if body != nil {
@@ -80,9 +79,9 @@ func (c *Client) doJSONBodyAuth(
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, nil, fmt.Errorf("%s %s: %w", method, diagnosticPath(path), err)
 	}
-	m, raw, err := ReadAuthResponse(resp, method, path, false)
+	m, raw, err := ReadAuthResponse(resp, s.Family, method, path, false)
 	if s.CookieAllowed && IsAuthenticationFailure(err) {
 		return c.cookieJSON(req, s, path)
 	}
@@ -101,31 +100,34 @@ func (c *Client) cookieJSON(req *http.Request, s Session, path string) (map[stri
 	if err != nil {
 		return nil, nil, err
 	}
-	return ReadAuthResponse(resp, req.Method, path, true)
+	return ReadAuthResponse(resp, s.Family, req.Method, path, true)
 }
 
-// ReadAuthResponse 复用认证响应解析；Cookie 错误不返回正文或上游自定义消息。
-func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m map[string]any, raw []byte, err error) {
+// ReadAuthResponse 复用认证响应解析；所有错误均不返回正文或上游自定义消息。
+func ReadAuthResponse(resp *http.Response, family Family, method, path string, secret bool) (m map[string]any, raw []byte, err error) {
+	path = diagnosticPath(path)
 	defer func() {
-		if secret && err != nil {
+		if err != nil {
 			raw = nil
 		}
 	}()
-	raw, err = readAuthBody(resp, secret)
+	raw, err = readAuthBody(resp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("读 %s %s 响应: %w", method, path, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, raw, authHTTPError(resp, method, path, raw, secret)
+		return nil, nil, authHTTPError(resp, method, path, secret)
+	}
+	if family == FamilySub2API {
+		if err := sub2APIBusinessError(resp, raw, method, path); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		if secret && path == CookieSessionPath {
 			return nil, nil, fmt.Errorf("%s %s 非 JSON: %w", method, path, ErrCookieNeedsAction)
 		}
-		if secret {
-			return nil, nil, fmt.Errorf("%s %s 非 JSON", method, path)
-		}
-		return nil, raw, fmt.Errorf("解析 %s %s 响应失败（非 JSON）: %s", method, path, snippet(raw))
+		return nil, nil, fmt.Errorf("解析 %s %s 响应失败（非 JSON）", method, path)
 	}
 	// ⚠️ NewAPI 系用 **HTTP 200 + `{"success":false,"message":"…"}`** 表达失败，
 	// 不是用状态码。上面那两个状态码判断一个都拦不住它，于是调用方拿到的是一个
@@ -142,29 +144,49 @@ func ReadAuthResponse(resp *http.Response, method, path string, secret bool) (m 
 	// 已失效的令牌打 /api/user/self，七个候选头名**全部**返回
 	// `HTTP 200 {"message":"Unauthorized, invalid access token","success":false}`。
 	//
-	// 只在 `success` 这一位**存在且为 false** 时才拦：Sub2API 系用的是
-	// `{code,message,data}`，没有这个字段，行为完全不变。
+	// 只在 `success` 这一位**存在且为 false** 时才拦；Sub2API 的 code 在上面独立判断。
 	if ok, exists := m["success"].(bool); exists && !ok {
-		return nil, raw, authRejectionError(m, raw, method, path, secret)
+		return nil, nil, authRejectionError(m, method, path, secret)
 	}
 	return m, raw, nil
 }
 
-func readAuthBody(resp *http.Response, secret bool) ([]byte, error) {
+func sub2APIBusinessError(resp *http.Response, raw []byte, method, path string) error {
+	var envelope struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return newHTTPError(resp, fmt.Sprintf("解析 %s %s 响应失败（非 JSON 对象）", method, path), nil)
+	}
+	if len(envelope.Code) == 0 {
+		return nil
+	}
+	// 单独解析 code，避免 float64 的舍入/下溢把非法值转换成成功码。
+	var number json.Number
+	if err := json.Unmarshal(envelope.Code, &number); err != nil {
+		return newHTTPError(resp, fmt.Sprintf("%s %s 业务状态码无效", method, path), ErrUpstreamRejected)
+	}
+	code, err := number.Int64()
+	if err != nil {
+		return newHTTPError(resp, fmt.Sprintf("%s %s 业务状态码无效", method, path), ErrUpstreamRejected)
+	}
+	if code == 0 {
+		return nil
+	}
+	cause := ErrUpstreamRejected
+	if code == 401 {
+		cause = errors.Join(cause, ErrUnauthorized)
+	}
+	failure := newHTTPError(resp, fmt.Sprintf("%s %s 业务失败（code=%d）", method, path, code), cause)
+	failure.BusinessCode = code
+	return failure
+}
+
+func readAuthBody(resp *http.Response) ([]byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
-		var timeout net.Error
-		switch {
-		case !secret:
-			return nil, err
-		case errors.Is(err, context.Canceled):
-			return nil, context.Canceled
-		case errors.As(err, &timeout) && timeout.Timeout():
-			return nil, context.DeadlineExceeded
-		default:
-			return nil, errors.New("响应读取失败")
-		}
+		return nil, networkError(err)
 	}
 	if len(raw) > maxBodyBytes {
 		return nil, errors.New("响应超过 8 MiB")
@@ -172,30 +194,25 @@ func readAuthBody(resp *http.Response, secret bool) ([]byte, error) {
 	return raw, nil
 }
 
-func authHTTPError(resp *http.Response, method, path string, raw []byte, secret bool) error {
+func authHTTPError(resp *http.Response, method, path string, secret bool) error {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return newHTTPError(resp, fmt.Sprintf("%v: %s %s", ErrUnauthorized, method, path), ErrUnauthorized)
 	}
 	message := fmt.Sprintf("%s %s 返回 %d", method, path, resp.StatusCode)
 	var cause error
-	if !secret {
-		message += ": " + snippet(raw)
-	} else if resp.StatusCode == 403 || (resp.StatusCode >= 300 && resp.StatusCode < 400) {
+	if secret && (resp.StatusCode == 403 || (resp.StatusCode >= 300 && resp.StatusCode < 400)) {
 		cause = ErrCookieNeedsAction
 	}
 	return newHTTPError(resp, message, cause)
 }
 
-func authRejectionError(m map[string]any, raw []byte, method, path string, secret bool) error {
+func authRejectionError(m map[string]any, method, path string, secret bool) error {
 	cause := ErrUpstreamRejected
 	// 仅采用 api.lyjxka.top 2026-09-16 已实测的认证错误，不把任意 success:false 当作失效。
 	if strings.TrimSpace(asString(m["message"])) == "Unauthorized, invalid access token" {
 		cause = errors.Join(cause, ErrInvalidAccessToken)
 	}
-	if !secret {
-		return fmt.Errorf("%w（%s %s）：%s", cause, method, path, upstreamMessage(m, raw))
-	}
-	if !IsAuthenticationFailure(cause) && path == CookieSessionPath {
+	if secret && !IsAuthenticationFailure(cause) && path == CookieSessionPath {
 		cause = errors.Join(cause, ErrCookieNeedsAction)
 	}
 	return fmt.Errorf("%s %s: %w", method, path, cause)
@@ -205,21 +222,6 @@ func authRejectionError(m map[string]any, raw []byte, method, path string, secre
 // 其余端点的业务拒绝（单把 Key 在列表与读明文之间被删、某接口被关）只算这一次
 // 请求失败，不能把整份 Cookie 标成需人工处理、连带停掉后续所有自动采集。
 const CookieSessionPath = "/api/user/self"
-
-// upstreamMessage 取上游自己给的失败说明。
-//
-// 优先用 message —— 那是人家写给人看的一句话，比我们能编的任何措辞都准。
-// 空的时候退回响应片段，**不要退回一句泛泛的"请求失败"**：那等于把上游递到
-// 手里的唯一线索丢掉。
-func upstreamMessage(m map[string]any, raw []byte) string {
-	if msg, _ := m["message"].(string); strings.TrimSpace(msg) != "" {
-		return strings.TrimSpace(msg)
-	}
-	if msg, _ := m["msg"].(string); strings.TrimSpace(msg) != "" {
-		return strings.TrimSpace(msg)
-	}
-	return snippet(raw)
-}
 
 var ErrInvalidAccessToken = errors.New("collector: invalid access token")
 var ErrCookieUnavailable = errors.New("未配置 Cookie、已停用或部署密钥不可用")

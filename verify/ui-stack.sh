@@ -362,7 +362,7 @@ echo "   ✅ 依赖就绪"
 step "真 Chrome 验收"
 # 两份脚本分工：verify-ui.mjs 验功能与数据，verify-spa.mjs 验前端工程化后
 # 新增的那几条性质（history 路由刷新、900px 断点、静态资源缓存与占位文件不可取）。
-# 后者先跑：它不写库、几秒钟出结果，路由挂了的话功能验收全都白跑。
+# 后者先跑：安全用例仅临时写入一条危险错误文本并删除，不创建上游数据。
 mkdir -p /tmp/sla-ui-shots
 # 批量导入试运行同样用同一份导出（只 dry_run，不落库）。它会真的去探测备份里的
 # 上百个陌生站点（实测 106 站 24 秒）—— 慢，但那是真实结果。
@@ -373,7 +373,8 @@ cd verify/ui
 
 # 令牌要传给它：登录页是现在唯一的入口，SPA 那一份也得先登进去。
 # 这是**本地这个 core 自己的**令牌（上面生成的），不是第三方凭证。
-BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" node verify-spa.mjs
+BASE="http://127.0.0.1:${PORT}" ADMIN_TOKEN="$TOKEN" SLA_TEST_DSN="$DSN" \
+  SLA_TEST_PG_CONTAINER="${USE_DOCKER:+$PGNAME}" SLA_TEST_PSQL="${PGBIN:-}/psql" node verify-spa.mjs
 
 # Cookie 登记界面（1280 + 375，CLAUDE.md §2.1）：只用 .invalid 站点与本地库，免密，CI 也跑。
 # 它建的测试渠道不清理，所以全量模式下放在 verify-ui.mjs 之后，不掺进真数据那批断言。
@@ -400,7 +401,7 @@ if [ -n "$SPA_ONLY" ]; then
   cookie_ui
   echo ""
   echo "=========================================================="
-  echo "⚠️  只跑了 SPA 免密验收（37 项）与 Cookie 登记界面。功能与数据那 188 项**未验**。"
+  echo "⚠️  只跑了 SPA 免密与安全验收、Cookie 登记界面。功能与数据那 188 项**未验**。"
   echo "    原因：无 HUB_FILE，拿不到真上游凭证；令牌不进 GitHub secrets。"
   echo "    这不等于功能通过 —— 全量结论只能来自本地跑。"
   echo "=========================================================="

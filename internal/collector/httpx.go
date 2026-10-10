@@ -40,15 +40,21 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 	hc := c.HC
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
-	return hc.Do(req)
+	resp, err := hc.Do(req)
+	return resp, transportError(err)
 }
 
 // NewClient 构造采集客户端。
 func NewClient(minInterval time.Duration) *Client {
 	return &Client{
-		HC:          &http.Client{Timeout: 30 * time.Second},
+		HC: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		MinInterval: minInterval,
 		last:        map[string]time.Time{},
 	}
@@ -115,10 +121,11 @@ var ErrUpstreamRejected = errors.New("collector: 上游拒绝了请求")
 
 // HTTPError preserves response metadata needed by the collection scheduler.
 type HTTPError struct {
-	StatusCode int
-	RetryAfter time.Duration
-	Message    string
-	Cause      error
+	StatusCode   int
+	BusinessCode int64
+	RetryAfter   time.Duration
+	Message      string
+	Cause        error
 }
 
 func (e *HTTPError) Error() string { return e.Message }
@@ -152,16 +159,6 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return at.Sub(now)
 	}
 	return 0
-}
-
-// snippet 截取响应片段用于错误信息。
-// 限长是刻意的：上游可能返回整页 HTML，全塞进 error 会污染日志。
-func snippet(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if len(s) > 200 {
-		return s[:200] + "…"
-	}
-	return s
 }
 
 // ── 取值助手：上游 JSON 字段类型不稳定（数字可能是字符串），统一容错 ──

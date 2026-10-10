@@ -63,8 +63,8 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		ExternalUserID  string `json:"external_user_id"`
 		BalanceGroupKey string `json:"balance_group_key"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if in.ChannelID <= 0 {
@@ -97,8 +97,8 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		DisabledReason  *string    `json:"disabled_reason"`
 		DisabledUntil   *time.Time `json:"disabled_until"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if in.Status != nil && *in.Status != "active" && *in.Status != "disabled" {
@@ -149,8 +149,8 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		ExternalRef string `json:"external_ref"`
 		GroupRef    string `json:"group_ref"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if in.AccountID <= 0 || in.Secret == "" {
@@ -214,8 +214,8 @@ func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
 		Status            *string         `json:"status"`
 		ExpiredTime       *time.Time      `json:"expired_time"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	if in.Secret != nil && *in.Secret == "" {

@@ -11,6 +11,7 @@
 // 3) 点号开头的路径必须拒绝。webdist/.gitignore 是给 go:embed 用的占位文件
 //    （模式匹配不到文件就是编译错误），它不该能被当静态资源取走。
 import puppeteer from 'puppeteer-core';
+import { verifySPASecurity } from './verify-spa-security.mjs';
 
 const CHROME = process.env.CHROME ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -38,6 +39,7 @@ const browser = await puppeteer.launch({
 });
 
 try {
+  await verifySPASecurity(browser, { base: BASE, token: TOKEN, check });
   const page = await browser.newPage();
   const consoleErrors = [];
   page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });

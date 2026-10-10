@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,8 +59,8 @@ func TestNewAPIFetchKeysRejectionIsErrorNotEmptyList(t *testing.T) {
 		t.Fatalf("上游拒绝时必须报错，实际返回 %d 把 Key 且 err 为 nil —— "+
 			"这正是「同步完了却一把 Key 都没有」的来源", len(keys))
 	}
-	if !strings.Contains(err.Error(), "Unauthorized, invalid access token") {
-		t.Fatalf("错误里必须带上上游自己那句话，实际：%v", err)
+	if !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("脱敏后必须保留已识别的令牌失效语义，实际：%v", err)
 	}
 }
 
@@ -93,8 +94,8 @@ func TestNewAPIAuthenticateBlamesTokenNotHeaderWhenAllCandidatesRejected(t *test
 		t.Fatal("令牌被拒时 Authenticate 必须失败")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "Unauthorized, invalid access token") {
-		t.Fatalf("必须带上上游原话，否则运维没有任何线索。实际：%v", err)
+	if !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("必须保留已识别的令牌失效语义。实际：%v", err)
 	}
 	if !strings.Contains(msg, "拒绝了这把采集凭证") {
 		t.Fatalf("结论要指向凭证。实际：%v", err)

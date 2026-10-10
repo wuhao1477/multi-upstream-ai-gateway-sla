@@ -73,7 +73,7 @@ func TestProvisionRemoteKeysCreatesOnlyMissingModelGroup(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/token":
+		case "GET /api/token/":
 			items := []map[string]any{{"id": 1, "group": "default", "remain_quota": 10}}
 			if created {
 				items = append(items, map[string]any{"id": 2, "group": "vip", "remain_quota": 10})
@@ -125,7 +125,7 @@ func TestProvisionRemoteKeysStopsAfterRegistrationFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/token":
+		case "GET /api/token/":
 			items := make([]map[string]any, 0, len(createdGroups))
 			for index, group := range createdGroups {
 				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
@@ -175,7 +175,7 @@ func TestProvisionRemoteKeysSkipsExistingKeyBeforeImport(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/token":
+		case "GET /api/token/":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
 				"page": 1, "page_size": 100, "total": 1,
 				"items": []map[string]any{{"id": 1, "group": "default", "remain_quota": 10}},
@@ -216,7 +216,7 @@ func TestProvisionRemoteKeysRespectsCreateLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/token":
+		case "GET /api/token/":
 			items := make([]map[string]any, 0, len(createdGroups))
 			for index, group := range createdGroups {
 				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
@@ -264,7 +264,7 @@ func TestProvisionRemoteKeysUsesLimitReducedDuringDiscovery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/token":
+		case "GET /api/token/":
 			items := make([]map[string]any, 0, len(createdGroups))
 			for index, group := range createdGroups {
 				items = append(items, map[string]any{"id": index + 1, "group": group, "remain_quota": 10})
@@ -686,7 +686,7 @@ func TestRunnerCollectsEveryAccountAndMergesChannelData(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{"id": userID, "quota": 100, "used_quota": 10},
 			})
-		case "/api/token":
+		case "/api/token/":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": []map[string]any{{
 					"id": "key-" + userID, "group": group,

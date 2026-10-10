@@ -40,7 +40,7 @@ COPY web/ ./
 # 而不是产出一个"能跑但类型是错的"镜像。
 RUN pnpm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25.13 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.9 AS build
 WORKDIR /src
 
 # 先只拷依赖清单，让 go mod download 能命中 Docker 层缓存
@@ -67,6 +67,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
         -o /out/migrate ./cmd/migrate
 
 FROM gcr.io/distroless/static-debian12:nonroot
+ENV SLA_ADDR=:8080
 COPY --from=build /out/sla-core /sla-core
 COPY --from=build /out/collector /collector
 COPY --from=build /out/migrate /migrate

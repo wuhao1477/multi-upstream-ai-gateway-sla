@@ -41,7 +41,10 @@ func Detect(ctx context.Context, hc httpDoer, baseURL string) (DetectResult, err
 // 而那些测试正是靠遍历 All() 来断言"每族都合规"的。
 func detectWith(ctx context.Context, hc httpDoer, baseURL string, regs []*Registration) (DetectResult, error) {
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Second}
+		hc = &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	base := strings.TrimRight(baseURL, "/")
 	res := DetectResult{Family: FamilyUnknown}
@@ -79,22 +82,22 @@ func detectWith(ctx context.Context, hc httpDoer, baseURL string, regs []*Regist
 func getJSON(ctx context.Context, hc httpDoer, url string) (map[string]any, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("构造探测请求失败")
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("探测请求失败: %w", transportError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, newHTTPError(resp,
-			fmt.Sprintf("%s 返回 %d", url, resp.StatusCode), nil)
+			fmt.Sprintf("探测端点返回 %d", resp.StatusCode), nil)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, probeMaxBytes))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("读探测响应失败: %w", networkError(err))
 	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {

@@ -117,7 +117,7 @@ func newAPISite(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"data":{"quota_per_unit":500000,"turnstile_check":false}}`))
 		case "/api/user/self":
 			_, _ = w.Write([]byte(`{"data":{"id":42,"quota":1000000,"used_quota":250000}}`))
-		case "/api/token":
+		case "/api/token/":
 			_, _ = w.Write([]byte(`{"data":[
 				{"id":7,"remain_quota":500000,"used_quota":100000,"unlimited_quota":false,
 				 "expired_time":-1,"group":"vip","model_limits_enabled":true,
@@ -248,7 +248,7 @@ func TestNewAPIFetchKeysPagedEnvelope(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
-					if r.URL.Path != "/api/token" {
+					if r.URL.Path != "/api/token/" {
 						w.WriteHeader(http.StatusNotFound)
 						return
 					}

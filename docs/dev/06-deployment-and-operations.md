@@ -1,5 +1,21 @@
 # 06 部署与运维（单机 Docker Compose · v0.1 草案）
 
+> 2026-10-09 出站兼容性变更（Issue #30）：采集、探测与 WebDAV 不再自动跟随
+> 301/302/303/307/308。原先依赖 HTTP→HTTPS、旧域名或下载地址跳转的部署，应将
+> 渠道/WebDAV 配置改为最终地址；NewAPI Key 列表已直接使用 `/api/token/`。
+> 内网和回环直连及令牌路径的环境代理保持原样，无需新增私网授权配置。
+> Cookie 的公网 HTTPS、逐 IP、同 origin 与方法/路径/查询限制不变；完整 SSRF
+> 网段限制与 DNS 重绑定防护仍未实施。
+
+直接运行 `sla-core` 时，默认监听 `127.0.0.1:8080`；使用 `SLA_ADDR` 或 `-addr`
+可显式覆盖。发布镜像默认设置 `SLA_ADDR=:8080`，保证不额外传入监听配置时，
+容器发布端口仍可访问。两份 Compose 保留同样的显式设置，宿主发布端口保持
+回环绑定。管理令牌为空时 API 返回 503，错误令牌返回 401，不增加认证失败计数。
+
+应用 core/collector 保持非 root，并设置 `cap_drop: [ALL]` 与
+`security_opt: [no-new-privileges:true]`；部署版通过应用 anchor 继承给 A/B 和 collector，
+不将该设置套用到 PostgreSQL/Caddy。`gate.yml` 的默认令牌权限为 `contents: read`。
+
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | ✅ **v1.0 基线（2026-07-26 冻结）** —— 经 42 轮对抗性审查（含 5 轮开发视角）+ PM 开工前裁决；变更须走版本记录 |

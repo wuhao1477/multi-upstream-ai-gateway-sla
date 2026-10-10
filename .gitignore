@@ -9,11 +9,16 @@
 deploy/.env
 *.env
 !deploy/.env.example
+/.public-safety-rules
 
 # 真实渠道导出和本地生成的架构图只用于本地验收，禁止进入公开仓库
 all-api-hub-backup-*.json
 docs/ARCHIFY-*
 docs/superpowers/plans/
+/ai-gateway-architecture-review/
+/ai-gateway-architecture-review.zip
+/ai-gateway-uiux-optimization/
+/ai-gateway-uiux-optimization (1)/
 
 # Go
 *.test

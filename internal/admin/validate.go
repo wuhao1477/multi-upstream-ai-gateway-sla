@@ -35,14 +35,13 @@ import (
 // 而"规范化端口"要先知道 scheme 的默认端口表，收益不抵那份表。
 //
 // ⚠️ **这是格式校验，不是出站策略。** loopback 与私网地址**按设计放行** ——
-// 把采集器指向内网地址正是本系统的用途（真库地址由部署环境提供；真库里那行夹具渠道
-// 就是 `http://127.0.0.1:18099`，35 项验收的 3 条 Key 断言全靠它）。
-// 缺的那层（拒绝 loopback/私有/链路本地/云元数据网段、自定义 Transport 在每次
-// 连接前复核 DNS、CheckRedirect 拦重定向）记在
-// docs/acceptance/P1-release-readiness.md §3.7，连触发条件一起：当前管理面是
+// 把采集器指向内网地址正是本系统的用途。历史回环夹具渠道已停用，35 项验收中的
+// 3 条 Key 断言只读取已有数据，不依赖已删除的假上游服务。
+// 2026-10-09 起，采集、探测与 WebDAV 默认客户端已单独禁止自动重定向。
+// 仍缺少网段限制与连接前 DNS 复核，见
+// docs/acceptance/P1-release-readiness.md 的“P1 内的非阻塞事项”：当前管理面是
 // **单一 admin 令牌、无角色分级**，能改 base_url 的人已经握有配置面本身，
-// 故那层加固挂到引入 RBAC 或把管理面暴露到公网时做。
-// Codex 2026-09-01 三次评审按 [high] 重提了这一条，判定未改，理由同上。
+// 故完整私网/DNS 防护仍留待引入 RBAC 或把管理面暴露到公网时实施。
 func validateBaseURL(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -50,13 +49,13 @@ func validateBaseURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return "", fmt.Errorf("base_url 解析失败: %w", err)
+		return "", fmt.Errorf("base_url 解析失败")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("base_url 须以 http:// 或 https:// 开头")
 	}
 	if u.Host == "" {
-		return "", fmt.Errorf("base_url 缺主机名：%q", raw)
+		return "", fmt.Errorf("base_url 缺主机名")
 	}
 	u.Host = strings.ToLower(u.Host)
 	return strings.TrimRight(u.String(), "/"), nil

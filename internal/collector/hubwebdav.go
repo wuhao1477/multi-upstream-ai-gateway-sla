@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // all-api-hub 的 WebDAV 备份：取回 + 解密。
@@ -105,10 +106,10 @@ func hubBackupURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return "", fmt.Errorf("WebDAV 地址无法解析: %w", err)
+		return "", errors.New("WebDAV 地址无法解析")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("WebDAV 地址必须是 http/https，收到 %q", u.Scheme)
+		return "", errors.New("WebDAV 地址必须是 http/https")
 	}
 	if strings.HasSuffix(strings.ToLower(u.Path), ".json") {
 		return u.String(), nil
@@ -124,20 +125,26 @@ func hubBackupURL(raw string) (string, error) {
 func FetchHubBackup(
 	ctx context.Context, client *http.Client, cfg HubWebDAVConfig,
 ) ([]byte, error) {
+	if client == nil {
+		client = &http.Client{
+			Timeout:       60 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	}
 	target, err := hubBackupURL(cfg.URL)
 	if err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("构造 WebDAV 请求失败")
 	}
 	req.SetBasicAuth(cfg.Username, cfg.Password)
 	req.Header.Set("Accept", "application/json")
 
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("取 WebDAV 备份失败: %w", err)
+		return nil, fmt.Errorf("取 WebDAV 备份失败: %w", transportError(err))
 	}
 	defer func() { _ = res.Body.Close() }()
 
@@ -152,7 +159,7 @@ func FetchHubBackup(
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, hubMaxBackupBytes))
 	if err != nil {
-		return nil, fmt.Errorf("读 WebDAV 备份正文失败: %w", err)
+		return nil, fmt.Errorf("读 WebDAV 备份正文失败: %w", networkError(err))
 	}
 	// 空正文也算"还没有备份"：坚果云等实现会先建出一个 0 字节的占位文件。
 	if len(strings.TrimSpace(string(body))) == 0 {

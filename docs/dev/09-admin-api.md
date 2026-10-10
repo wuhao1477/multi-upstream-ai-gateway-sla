@@ -28,6 +28,21 @@
 - 管理平面挂在 sla-core 上，是**我方核心对运维暴露的面**；与上游站点自身的管理接口（采集器访问，[04](./04-collector-adapter.md)）互不相干。
 - 一期鉴权：单个**管理令牌**（环境变量注入，明文一期可接受，随 FR-113 一起在对外前升级）；管理平面**只在内网/本机可达**，不经公网。
 
+2026-10-09 修订：使用标准库恒时比较令牌；未配置 `ADMIN_TOKEN` 返回 503，提交令牌
+缺失或错误返回 401，不回显输入。不新增认证失败计数或认证限速，已有采集限速不变。
+程序默认监听 `127.0.0.1:8080`，`SLA_ADDR` 和显式 `-addr` 仍可覆盖；Compose 容器内
+显式使用 `:8080`，宿主端口只绑定回环。
+
+认证通过后，普通 JSON 请求限制为 1 MiB；`POST /admin/import/all-api-hub` 保留 32 MiB，
+Cookie 保存/验证分别保留 128 KiB/1 KiB。限制不依赖 `Content-Length`。解码后必须到达 EOF，
+额外 JSON 返回 400，超限返回 413，且在数据库访问和上游调用前拒绝；错误不回显请求正文。
+
+生产 SPA 入口及 history 回退使用同源 CSP：脚本仅允许 `'self'`，不允许内联脚本或
+`unsafe-eval`；主题通过同步同源 `theme-init.js` 在首次绘制前初始化。样式保留
+`'unsafe-inline'` 以支持现有动态样式，图片/字体允许 `data:`，连接与表单仅允许同源，
+禁止 object、base 和 frame 嵌入。页面与静态资源均返回 `X-Content-Type-Options: nosniff`。
+错误继续通过 Vue 文本插值展示；这些措施不代表消除全部 XSS，也不改变本地令牌存储方式。
+
 ---
 
 ## 2. 配置读写 API（对应 [02 `config_params`](./02-data-model.md)）
@@ -342,7 +357,8 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 ```
 
 - `status` 枚举：`ok` / `partial`（多账号采集部分成功，已保存可用账号结果并保留失败信息）/ `failed` / `unsupported` / `skipped`（**未打上游就跳过**：被限流 429、互斥 409，或前置条件不满足 422）。
-- 上游 HTTP 失败时可附 `http_status`；存在有效 `Retry-After` 时同时附 `retry_after_ms`，供周期采集调度退避使用。
+- 上游失败时可附 `http_status`，始终表示真实 HTTP 状态。Sub2API 非零业务码另附 `business_code`，因此 HTTP 200 + 业务 401 仍记作失败并采用至少五分钟的认证退避；不伪造 HTTP 401。存在有效 `Retry-After` 时同时附 `retry_after_ms`。
+- 2026-10-09 起，采集、探测与 WebDAV 默认客户端均不跟随自动重定向。令牌和 WebDAV 的内网直连仍允许；这不代表完整私网网段或 DNS 重绑定防护已经实施。错误仅含安全操作名、路径与状态/类别，不回显任意远端消息、原始 URL 或响应正文。
 - P1 不支持的能力应在其所属后续阶段实现，不作为本期 `items` 占位项；P1 五项能力必须按 `supported`/`degraded` 规则返回。
 - **`supported`/`degraded`/`unsupported` 的判定**：见 [04 §3.4bis](./04-collector-adapter.md)。`supported` 空结果判 `failed`；`degraded` 可返回部分数据或空结果，但必须在 `note` 说明；`unsupported` 显式返回，不留空。
 

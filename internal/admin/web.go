@@ -29,6 +29,10 @@ var webFS embed.FS
 // 不一致的话 index.html 里引用的 /admin/ui/assets/xxx.js 会 404，页面白屏。
 const uiPrefix = "/admin/ui/"
 
+const uiCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; " +
+	"base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
 // WebRoutes 挂载管理界面。
 //
 // ⚠️ **界面本身不做鉴权**（它是静态资源，没有秘密），
@@ -69,6 +73,8 @@ func (s *Server) WebRoutes(mux *http.ServeMux) {
 	}
 
 	serveIndex := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Security-Policy", uiCSP)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// 不缓存 index.html：它引用的是带 hash 的资源名，每次发布都变。
 		// 缓存住它会让运维打开旧壳子去引用已经不存在的资源 —— 白屏且难查。
@@ -82,6 +88,8 @@ func (s *Server) WebRoutes(mux *http.ServeMux) {
 
 	// 前缀路由兜底：既发静态资源，也承担 SPA 的 history 回退。
 	mux.HandleFunc("GET "+uiPrefix, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", uiCSP)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		rel := strings.TrimPrefix(r.URL.Path, uiPrefix)
 		if rel == "" {
 			serveIndex(w, r)
@@ -131,6 +139,7 @@ func hasDotSegment(p string) bool {
 // 那条 404 无害，但会淹没真正的错误 —— 排障时"控制台干净"本身有价值。
 func (s *Server) faviconRoute(mux *http.ServeMux) {
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" ` +

@@ -49,7 +49,10 @@ func (s *Server) hubSyncClient() *http.Client {
 	if s.HubHTTP != nil {
 		return s.HubHTTP
 	}
-	return &http.Client{Timeout: hubSyncHTTPTimeout}
+	return &http.Client{
+		Timeout:       hubSyncHTTPTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // RunHubSync 跑一轮同步，并把这一轮记进 hub_sync_runs。
@@ -399,17 +402,16 @@ func (s *Server) putHubSync(w http.ResponseWriter, r *http.Request) {
 		IntervalMinutes int    `json:"interval_minutes"`
 		ApplyMode       string `json:"apply_mode"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error())
+	if err := decodeJSON(json.NewDecoder(r.Body), &in); err != nil {
+		s.requestBodyError(w, err)
 		return
 	}
 	in.WebDAVURL = strings.TrimSpace(in.WebDAVURL)
 	// 地址在这里就要校验，而不是等定时器跑起来才在日志里报错 ——
 	// 填错的人正站在界面前，此刻告诉他最便宜。
 	//
-	// ⚠️ 刻意**不**走 validateBaseURL 那套 SSRF 校验：它拦私网地址，而自建
-	// WebDAV 十有八九就在内网（NAS、群晖、局域网里的 nginx）。这个地址是管理员
-	// 在鉴权之后自己填的，与导入文件里那一百个陌生站点不是同一类输入。
+	// WebDAV 保留管理员配置的内网直连；validateBaseURL 也不是私网防护。
+	// 出站客户端单独禁止自动重定向，不改变已有地址格式与目录补全规则。
 	if in.WebDAVURL != "" {
 		if _, err := collector.ResolveHubBackupURL(in.WebDAVURL); err != nil {
 			s.fail(w, http.StatusBadRequest, err.Error())

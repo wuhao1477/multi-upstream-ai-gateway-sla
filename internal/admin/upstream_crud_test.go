@@ -43,8 +43,12 @@ func TestKeyAutomationRequiresExplicitScope(t *testing.T) {
 
 func TestKeyAutomationRejectsMalformedJSON(t *testing.T) {
 	code, body := do(t, unavailableUpstreamHandler(), "test-admin-token", http.MethodPost,
-		"/admin/keys/import", `{"account_id":`)
-	if code != http.StatusBadRequest || !strings.Contains(body, "请求体解析失败") {
+		"/admin/keys/import", `{"account_id":1,"note":"test-secret-marker"`)
+	var response struct {
+		Error string `json:"error"`
+	}
+	if code != http.StatusBadRequest || json.Unmarshal([]byte(body), &response) != nil || response.Error == "" ||
+		strings.Contains(body, "test-secret-marker") {
 		t.Fatalf("畸形 JSON = %d %s，期望返回解析错误", code, body)
 	}
 }

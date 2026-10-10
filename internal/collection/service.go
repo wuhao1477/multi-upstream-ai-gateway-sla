@@ -367,6 +367,9 @@ func (s *Service) collectChannel(ctx context.Context, task channelTask) channelO
 	outcome.completedAt = s.Now()
 	if err != nil {
 		status, retryAfter, _ := collector.HTTPFailure(err)
+		if collector.IsAuthenticationFailure(err) {
+			retryAfter = max(retryAfter, 5*time.Minute)
+		}
 		outcome.failed = failuresFor(task.capabilities, status, retryAfter)
 		outcome.err = fmt.Errorf("渠道 %d: %w", task.channel.ID, err)
 		return outcome
@@ -388,10 +391,12 @@ func completedCapabilities(
 	for _, item := range result.Items {
 		seen[item.Capability] = true
 		if item.Status == collector.StatusFailed || item.Status == collector.StatusPartial {
+			minimumDelay := retryMinimum(item.HTTPStatus, time.Duration(item.RetryAfterMs)*time.Millisecond)
+			if item.BusinessCode == 401 {
+				minimumDelay = max(minimumDelay, 5*time.Minute)
+			}
 			failed[item.Capability] = capabilityFailure{
-				capability: item.Capability,
-				minimumDelay: retryMinimum(
-					item.HTTPStatus, time.Duration(item.RetryAfterMs)*time.Millisecond),
+				capability: item.Capability, minimumDelay: minimumDelay,
 			}
 			failures = append(failures, fmt.Errorf(
 				"渠道 %d 的 %s 采集为 %s: %s",

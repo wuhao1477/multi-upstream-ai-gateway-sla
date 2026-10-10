@@ -250,7 +250,7 @@ func (a *CookieAccess) sendOnce(req *http.Request, s collector.Session, explicit
 	if err != nil {
 		return nil, cred, cookieNetworkError(err)
 	}
-	m, raw, err := collector.ReadAuthResponse(resp, req.Method, path, true)
+	m, raw, err := collector.ReadAuthResponse(resp, collector.FamilyNewAPI, req.Method, path, true)
 	if err != nil {
 		return nil, cred, err
 	}

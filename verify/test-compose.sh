@@ -8,8 +8,12 @@ export ADMIN_TOKEN="smoke-$(date +%s)"
 export POSTGRES_PASSWORD="smoke-pg"
 export ADMIN_PORT="${ADMIN_PORT:-18080}"
 COMPOSE=(docker compose -f deploy/docker-compose.yml)
+DEFAULT_CORE=""
 
-cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() {
+  [ -z "$DEFAULT_CORE" ] || docker rm -f "$DEFAULT_CORE" >/dev/null 2>&1 || true
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 cleanup
 
@@ -36,6 +40,21 @@ $ready || {
   echo "── core 日志 ──"; "${COMPOSE[@]}" logs --tail=15 sla-core-a sla-core-b
   exit 1; }
 echo "   ✅ 栈已就绪"
+
+# 检查实际创建的容器，而非只在 YAML 中搜索配置字段。
+for service in sla-core-a sla-core-b collector; do
+  id=$("${COMPOSE[@]}" ps -q "$service")
+  docker inspect --format '{"user":{{json .Config.User}},"cap_drop":{{json .HostConfig.CapDrop}},"security_opt":{{json .HostConfig.SecurityOpt}},"running":{{json .State.Running}}}' "$id" |
+    python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+assert c["running"], "应用容器未运行"
+assert c["user"].split(":")[0] not in ("", "0", "root"), "应用容器必须为非 root"
+assert "ALL" in c["cap_drop"], "应用容器未删除全部 capabilities"
+assert "no-new-privileges:true" in c["security_opt"], "应用容器未禁止提权"
+'
+  echo "   ✅ ${service}：非 root、cap_drop ALL、no-new-privileges"
+done
 
 echo "── 2/5 /healthz 内容正确 ──"
 # 状态码与响应体分开取：先断言 200 再解析 JSON。
@@ -64,6 +83,30 @@ assert d['config_snapshot'] == 'loaded', d
 assert d.get('note'), '缺少 note 声明（06 §6 健康语义分层）'
 print('   ✅', d['status'], '| db', d['db'], '| snapshot', d['config_snapshot'])
 PYEOF
+
+# 不传 SLA_ADDR：Compose 的显式设置不能掩盖镜像默认监听回环导致的端口不可达。
+CORE_ID=$("${COMPOSE[@]}" ps -q sla-core-a)
+CORE_IMAGE=$(docker inspect --format '{{.Image}}' "$CORE_ID")
+CORE_NETWORK=$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$CORE_ID")
+DEFAULT_CORE=$(docker run -d --network "$CORE_NETWORK" \
+  -e "DATABASE_URL=postgres://sla:${POSTGRES_PASSWORD}@postgres:5432/sla?sslmode=disable" \
+  -e ADMIN_TOKEN -p 127.0.0.1::8080 "$CORE_IMAGE")
+DEFAULT_ADDR=$(docker port "$DEFAULT_CORE" 8080/tcp)
+ready=false
+for _ in $(seq 1 30); do
+  if [ "$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://${DEFAULT_ADDR}/healthz")" = "200" ]; then
+    ready=true; break
+  fi
+  sleep 1
+done
+$ready || {
+  echo "❌ 镜像未配置 SLA_ADDR 时，发布端口不可达"
+  docker logs --tail 10 "$DEFAULT_CORE"
+  exit 1
+}
+docker rm -f "$DEFAULT_CORE" >/dev/null
+DEFAULT_CORE=""
+echo "   ✅ 镜像默认监听可通过本机发布端口访问"
 
 echo "── 3/5 选主：迁移只执行一遍，落败者等待而非跳过 ──"
 # ⚠️ 这一步抓到过真 bug：首版落败者 return nil 直接去灌种子，而抢到锁的
