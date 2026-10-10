@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -531,15 +532,17 @@ VALUES ($1,'vip',0.8,'auto_collect',now())`, channelID); err != nil {
 	if result.Created != 1 || result.Imported != 1 || result.Failed != 0 {
 		t.Fatalf("补齐结果 = %+v", result)
 	}
-	var secret, externalRef, groupRef string
+	var prefix, externalRef, groupRef string
+	var encrypted []byte
 	if err := conn.QueryRow(ctx, `
-SELECT k.secret, k.external_ref, g.group_ref
+SELECT k.secret_prefix, k.secret_ciphertext, k.external_ref, g.group_ref
   FROM upstream_keys k JOIN channel_groups g ON g.id=k.channel_group_id
- WHERE k.account_id=$1`, accountID).Scan(&secret, &externalRef, &groupRef); err != nil {
+ WHERE k.account_id=$1`, accountID).Scan(&prefix, &encrypted, &externalRef, &groupRef); err != nil {
 		t.Fatal(err)
 	}
-	if secret != "created-secret" || externalRef != "501" || groupRef != "vip" {
-		t.Fatalf("登记结果 = secret:%q ref:%q group:%q", secret, externalRef, groupRef)
+	if prefix != "created-" || bytes.Contains(encrypted, []byte("created-secret")) ||
+		externalRef != "501" || groupRef != "vip" {
+		t.Fatalf("登记结果 = prefix:%q ref:%q group:%q", prefix, externalRef, groupRef)
 	}
 }
 

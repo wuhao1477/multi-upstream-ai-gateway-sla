@@ -92,6 +92,40 @@ async function checkErrorText(page, id, width, check) {
     safe.text && safe.noElement && safe.noExecution, JSON.stringify(safe));
 }
 
+// WebDAV 地址整体加密存储（#34），界面只拿到去掉认证信息的展示值。
+const WEBDAV_SECRET = 'test-webdav-url-marker';
+const WEBDAV_URL = `https://dav.example.invalid/dav/?token=${WEBDAV_SECRET}`;
+
+async function hubSyncAPI(base, token, method, body) {
+  const res = await fetch(`${base}/admin/hub-sync`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body && JSON.stringify(body),
+  });
+  const text = await res.text();
+  assert(res.ok, `${method} /admin/hub-sync → ${res.status}: ${text}`);
+  return JSON.parse(text);
+}
+
+async function checkWebDAVRedaction(page, width, check) {
+  await page.waitForSelector('#hs-url-redacted');
+  const view = await page.evaluate(secret => {
+    const note = document.querySelector('#hs-url-redacted').getBoundingClientRect();
+    const width = document.documentElement.clientWidth;
+    return {
+      value: document.querySelector('#hs-url').value,
+      hidden: !document.documentElement.outerHTML.includes(secret),
+      // 只量本次新增的提示：它必须完整落在视口内（375px 不能把页面顶宽）。
+      fits: note.left >= 0 && note.right <= width && note.width > 0,
+      wider: [...document.querySelectorAll('body *')]
+        .filter(el => el.getBoundingClientRect().right > width + 1)
+        .slice(0, 3).map(el => el.id || el.className || el.tagName),
+    };
+  }, WEBDAV_SECRET);
+  check(`${width}px：WebDAV 地址只显示去掉认证参数的展示值并提示已隐藏`,
+    view.value === 'https://dav.example.invalid/dav/' && view.hidden && view.fits, JSON.stringify(view));
+}
+
 export async function verifySPASecurity(browser, { base, token, check }) {
   assert(['127.0.0.1', 'localhost'].includes(new URL(base).hostname), '仅允许本地验收实例');
   // 危险字符串是被测输入，不是假上游协议。真 PG 写入后经真实历史 API 与 Vue 渲染；
@@ -100,6 +134,14 @@ export async function verifySPASecurity(browser, { base, token, check }) {
     (started_at, finished_at, trigger, applied, error)
     VALUES (now(), now(), 'manual', false, :'security_error') RETURNING id;`);
   assert(/^\d+$/.test(id), '测试记录必须返回唯一数字 ID');
+  const hubSync = await hubSyncAPI(base, token, 'GET');
+  assert(!hubSync.webdav_url_redacted, '隔离测试库不应已有带认证信息的 WebDAV 地址');
+  const saved = await hubSyncAPI(base, token, 'PUT', {
+    webdav_url: WEBDAV_URL, webdav_username: hubSync.webdav_username, enabled: false,
+    interval_minutes: hubSync.interval_minutes, apply_mode: hubSync.apply_mode,
+  });
+  check('WebDAV 地址的管理接口只回展示值', saved.webdav_url_redacted === true &&
+    !JSON.stringify(saved).includes(WEBDAV_SECRET), JSON.stringify(saved));
   try {
     for (const scenario of [
       { width: 1280, theme: 'dark', dark: true },
@@ -119,6 +161,7 @@ export async function verifySPASecurity(browser, { base, token, check }) {
         }));
         await checkFirstPaint(page, base, token, scenario, check);
         await checkErrorText(page, id, scenario.width, check);
+        await checkWebDAVRedaction(page, scenario.width, check);
         check(`${scenario.width}px ${scenario.theme}：无 CSP 违例或页面错误`,
           violations.length === 0 && errors.length === 0,
           [...violations, ...errors].slice(0, 2).join(' | '));
@@ -128,5 +171,9 @@ export async function verifySPASecurity(browser, { base, token, check }) {
     }
   } finally {
     testSQL(`DELETE FROM hub_sync_runs WHERE id = ${id};`);
+    await hubSyncAPI(base, token, 'PUT', {
+      webdav_url: hubSync.webdav_url, webdav_username: hubSync.webdav_username, enabled: hubSync.enabled,
+      interval_minutes: hubSync.interval_minutes, apply_mode: hubSync.apply_mode,
+    });
   }
 }

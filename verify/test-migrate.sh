@@ -155,18 +155,19 @@ neg_setup=$(q "
        VALUES ('t029', 'https://t029.invalid', 'newapi');
   INSERT INTO upstream_accounts (channel_id)
        SELECT id FROM channels WHERE name='t029';
-  INSERT INTO upstream_keys (account_id, secret, status)
-       SELECT a.id, 'sk-t029', 'active' FROM upstream_accounts a
+  -- 035 起只存密文；本段测的是数值约束，密文用占位字节，按前缀定位这一行。
+  INSERT INTO upstream_keys (account_id, secret_ciphertext, secret_prefix, status)
+       SELECT a.id, '\\x00'::bytea, 'sk-t029', 'active' FROM upstream_accounts a
          JOIN channels c ON c.id=a.channel_id WHERE c.name='t029';
-  UPDATE upstream_keys SET remain_quota_usd = -3.5 WHERE secret='sk-t029';
-  SELECT remain_quota_usd FROM upstream_keys WHERE secret='sk-t029';" 2>&1 | tail -1) || true
+  UPDATE upstream_keys SET remain_quota_usd = -3.5 WHERE secret_prefix='sk-t029';
+  SELECT remain_quota_usd FROM upstream_keys WHERE secret_prefix='sk-t029';" 2>&1 | tail -1) || true
 case "$neg_setup" in
   -3.5*) ;;
   *) echo "❌ 029：remain_quota_usd 不收负数（实际：$neg_setup）——"
      echo "   上游对不限额 Key 扣穿后就回负数，收不下等于整个渠道的 keys 采集报 failed"
      exit 1 ;;
 esac
-used_neg=$(q "UPDATE upstream_keys SET used_quota_usd = -1 WHERE secret='sk-t029'" 2>&1 | tail -1) || true
+used_neg=$(q "UPDATE upstream_keys SET used_quota_usd = -1 WHERE secret_prefix='sk-t029'" 2>&1 | tail -1) || true
 case "$used_neg" in
   *nonneg_usd*|*violates*) ;;
   *) echo "❌ 029：used_quota_usd 竟然收下了负数（实际：$used_neg）——"
@@ -496,6 +497,9 @@ STORE_TESTS=(
   TestDisableHubRemovedChannelsDoesNothingOnEmptyKeepList
   TestDisableHubRemovedChannelsKeepsExistingDisabledReason
   TestCredentialTokenDiffers
+  TestPlaintextCredentialsMigrateToCiphertext
+  TestKeySecretEncryptedAtRest
+  TestHubSyncURLDisplayRoundTripKeepsRealURL
 )
 PAT="^($(IFS='|'; echo "${STORE_TESTS[*]}"))\$"
 EXPECT=${#STORE_TESTS[@]}
@@ -518,6 +522,7 @@ echo "   ✅ Key 用量：明确采到 0 时覆盖旧额度，不把 0 当成缺
 echo "   ✅ 价格：独立价格周期刷新现有目录且不推进目录轮次"
 echo "   ✅ 分组：降级响应缺少模型字段时保留旧模型清单"
 echo "   ✅ 凭证：跨实例共享 refresh_lock_key 且只刷新一次"
+echo "   ✅ 凭证加密：034→035 回填并全量比对 / 缺密钥整体回滚 / 跨行替换密文被拒 / WebDAV 展示值往返不覆盖真实地址"
 echo "   ✅ host 限速：跨进程串行 / 不同 host 互不阻塞 / 取消即退出"
 echo "   ✅ 连接池：4 条时并发采集会互等到超时，MinPoolConns 条够用"
 

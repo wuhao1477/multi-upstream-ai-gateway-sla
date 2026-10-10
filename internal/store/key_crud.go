@@ -46,29 +46,46 @@ type Key struct {
 	CreatedAt        time.Time  `json:"created_at"`
 }
 
-// CreateKey 登记一把 Key。明文只在此处接收，之后永不回显。
+// CreateKey 登记一把 Key。明文只在此处接收，加密落库，之后永不回显。
+//
+// 先取 ID 再插入：密文的 AAD 绑定记录 ID，必须在加密前就确定。
 func CreateKey(ctx context.Context, conn *pgx.Conn, accountID int64,
 	secret, externalRef string, groupID *int64) (int64, error) {
 	if secret == "" {
 		return 0, fmt.Errorf("secret 不可为空")
 	}
 	var id int64
-	err := conn.QueryRow(ctx, `
-INSERT INTO upstream_keys (account_id, secret, external_ref, channel_group_id, status)
-VALUES ($1,$2,NULLIF($3,''),$4,'active')
-RETURNING id`, accountID, secret, externalRef, groupID).Scan(&id)
+	if err := conn.QueryRow(ctx,
+		`SELECT nextval(pg_get_serial_sequence('upstream_keys', 'id'))`).Scan(&id); err != nil {
+		return 0, fmt.Errorf("建 Key（账号 %d）: %w", accountID, err)
+	}
+	encrypted, err := sealCredential("upstream_keys", id, "secret", secret)
+	if err != nil {
+		return 0, err
+	}
+	_, err = conn.Exec(ctx, `
+INSERT INTO upstream_keys (id, account_id, secret_ciphertext, secret_prefix, external_ref, channel_group_id, status)
+OVERRIDING SYSTEM VALUE
+VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,'active')`,
+		id, accountID, encrypted, secretPrefix(secret), externalRef, groupID)
 	if err != nil {
 		return 0, fmt.Errorf("建 Key（账号 %d）: %w", accountID, err)
 	}
 	return id, nil
 }
 
+// secretPrefix 是写入时随密文一起存下的展示前缀：只取前 8 个字符
+// （09：列表只显示 secret_prefix，永不回显完整凭证）。列表读它，不为展示解密。
+func secretPrefix(secret string) string {
+	runes := []rune(secret)
+	if len(runes) > 8 {
+		runes = runes[:8]
+	}
+	return string(runes)
+}
+
 // secretPrefixExpr 是脱敏展示表达式。
-//
-// **只取前 8 位**（09：列表只显示 secret_prefix，永不回显完整凭证）。
-// 用 SQL 表达式而非 Go 侧截断：这样完整 secret 根本不出库，
-// 少一处可能被日志/错误信息带出去的路径。
-const secretPrefixExpr = `left(secret, 8) || '…'`
+const secretPrefixExpr = `k.secret_prefix || '…'`
 
 // accountGroupJoin 解析「跟账号走」的那一档分组。
 //
@@ -189,9 +206,23 @@ type KeyPatch struct {
 
 // UpdateKey 更新 Key 可变字段。读路径仍只暴露脱敏前缀。
 func UpdateKey(ctx context.Context, conn *pgx.Conn, p KeyPatch) error {
+	var encrypted []byte
+	var prefix *string
+	if p.Secret != nil {
+		if *p.Secret == "" {
+			return fmt.Errorf("secret 不可为空")
+		}
+		var err error
+		if encrypted, err = sealCredential("upstream_keys", p.ID, "secret", *p.Secret); err != nil {
+			return err
+		}
+		v := secretPrefix(*p.Secret)
+		prefix = &v
+	}
 	tag, err := conn.Exec(ctx, `
 UPDATE upstream_keys
-   SET secret = COALESCE($2, secret),
+   SET secret_ciphertext = COALESCE($2, secret_ciphertext),
+       secret_prefix = COALESCE($12, secret_prefix),
 	       external_ref = CASE WHEN $3::text IS NULL THEN external_ref ELSE NULLIF($3,'') END,
 	       channel_group_id = CASE WHEN $4 THEN $5 ELSE channel_group_id END,
 	       remain_quota_usd = COALESCE($6, remain_quota_usd),
@@ -201,9 +232,9 @@ UPDATE upstream_keys
 	       status = COALESCE($10, status),
 	       expired_time = COALESCE($11, expired_time),
        updated_at = now()
-	 WHERE id = $1`, p.ID, p.Secret, p.ExternalRef, p.ChannelGroupIDSet, p.ChannelGroupID,
+	 WHERE id = $1`, p.ID, encrypted, p.ExternalRef, p.ChannelGroupIDSet, p.ChannelGroupID,
 		p.RemainQuotaUSD, p.UsedQuotaUSD, p.RPMLimit, p.ConcurrencyLimit,
-		p.Status, p.ExpiredTime)
+		p.Status, p.ExpiredTime, prefix)
 	if err != nil {
 		return asDuplicate(fmt.Errorf("更新 Key %d: %w", p.ID, err),
 			"该账号下 external_ref 已存在")

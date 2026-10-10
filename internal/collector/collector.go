@@ -124,7 +124,7 @@ type DetectResult struct {
 	Meta         SourceMeta
 }
 
-// Credential 是登记的采集凭证（明文，FR-113）。
+// Credential 是登记的采集凭证（内存中的解密值；库里加密存储，FR-113）。
 type Credential struct {
 	AccountID int64
 	ChannelID int64

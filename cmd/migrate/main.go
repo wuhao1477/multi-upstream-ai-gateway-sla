@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/bootstrap"
+	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/store"
 )
 
 func main() {
@@ -30,6 +31,11 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// 迁移 035 用它加密库中已有的明文凭证。
+	if err := store.ConfigureCredentialKey(os.Getenv("SLA_CREDENTIAL_SECRET_KEY")); err != nil {
+		logger.Error("凭证密钥无效", "err", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

@@ -141,8 +141,7 @@ func TestImportCookieAccountIsolationAndDisable(t *testing.T) {
 	if err != nil || other.CookieHeader != "session=second-account" {
 		t.Fatal("another account's Cookie was changed")
 	}
-	var token string
-	if err := conn.QueryRow(ctx, `SELECT access_token FROM collector_credentials WHERE account_id=$1`, first.AccountID).Scan(&token); err != nil || token != "preserved-test-token" {
+	if differs, exists, err := store.CredentialTokenDiffers(ctx, conn, first.AccountID, "preserved-test-token"); err != nil || !exists || differs {
 		t.Fatal("Cookie import overwrote the token")
 	}
 	a = hubCookieAccount(t, base, "", "session=missing-identity")

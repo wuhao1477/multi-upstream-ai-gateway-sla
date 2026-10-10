@@ -531,9 +531,14 @@ export interface GlobalCatalogResp {
  *
  * **两个密码只回 has_*，永远拿不到内容**（FR-094 同源纪律）。所以界面上那两个
  * 输入框每次打开都是空的，而"空"的意思是"不改"，不是"清空"。
+ *
+ * 地址只回展示值（去掉 userinfo/query/fragment）。原样提交展示值 = 地址不变，
+ * 服务端沿用加密存储的完整地址；改成别的值才替换，清空即删除。
  */
 export interface HubSyncConfig {
   webdav_url: string
+  /** 展示值隐藏了原地址中的认证信息（账号、查询参数等）。 */
+  webdav_url_redacted: boolean
   webdav_username: string
   has_webdav_password: boolean
   has_backup_password: boolean

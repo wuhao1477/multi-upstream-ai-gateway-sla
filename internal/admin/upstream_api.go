@@ -56,7 +56,7 @@ func (s *Server) UpstreamRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /admin/keys/{id}", h(s.deleteKey))
 	mux.Handle("POST /admin/keys/{id}/disable", h(s.disableKey))
 	mux.Handle("GET /admin/keys/{id}/usage", h(s.keyUsage))
-	// 采集凭证（04 §5；一期明文 FR-113）
+	// 采集凭证（04 §5；加密存储 FR-113）
 	mux.Handle("POST /admin/collector/credentials", h(s.saveCredential))
 	mux.Handle("GET /admin/collector/credentials", h(s.listCredentials))
 	// 分组
@@ -824,7 +824,7 @@ func (s *Server) failWith(w http.ResponseWriter, code int, msg string, extra map
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// ── 采集凭证（04 §5，一期明文 FR-113）──
+// ── 采集凭证（04 §5，加密存储 FR-113）──
 
 func (s *Server) saveCredential(w http.ResponseWriter, r *http.Request) {
 	var in struct {

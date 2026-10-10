@@ -2,10 +2,7 @@ package store
 
 import (
 	"context"
-	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -49,17 +46,9 @@ func NewCookieCredentialStore(key string) (*CookieCredentialStore, error) {
 	if key == "" {
 		return nil, nil
 	}
-	raw, err := base64.StdEncoding.DecodeString(key)
-	if err != nil || len(raw) != 32 {
-		return nil, errors.New("SLA_COOKIE_SECRET_KEY 必须是 Base64 编码的 32 字节密钥")
-	}
-	block, err := aes.NewCipher(raw)
+	aead, err := newAESGCM(key, "SLA_COOKIE_SECRET_KEY")
 	if err != nil {
-		return nil, ErrCookieSecret
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, ErrCookieSecret
+		return nil, err
 	}
 	return &CookieCredentialStore{cipher: aead}, nil
 }
@@ -119,19 +108,18 @@ func (s *CookieCredentialStore) seal(id int64, origin string, plain []byte) ([]b
 	if s == nil {
 		return nil, ErrCookieSecret
 	}
-	nonce := make([]byte, s.cipher.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	sealed, err := gcmSeal(s.cipher, plain, cookieAAD(id, origin))
+	if err != nil {
 		return nil, ErrCookieSecret
 	}
-	return s.cipher.Seal(nonce, nonce, plain, cookieAAD(id, origin)), nil
+	return sealed, nil
 }
 
 func (s *CookieCredentialStore) open(id int64, origin string, encrypted []byte) ([]byte, error) {
-	if s == nil || len(encrypted) < s.cipher.NonceSize()+s.cipher.Overhead() {
+	if s == nil {
 		return nil, ErrCookieSecret
 	}
-	n := s.cipher.NonceSize()
-	plain, err := s.cipher.Open(nil, encrypted[:n], encrypted[n:], cookieAAD(id, origin))
+	plain, err := gcmOpen(s.cipher, encrypted, cookieAAD(id, origin))
 	if err != nil {
 		return nil, ErrCookieSecret
 	}

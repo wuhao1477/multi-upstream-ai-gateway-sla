@@ -290,7 +290,7 @@ export function groupModels(groupID: number): Promise<GroupModelsResp> {
   return api<GroupModelsResp>(`/admin/channel-groups/${groupID}/models`)
 }
 
-// ── 采集凭证（04 §5，一期明文 FR-113）────────────────────────────────────────
+// ── 采集凭证（04 §5，加密存储 FR-113）────────────────────────────────────────
 
 export interface SaveCredentialInput {
   account_id: number

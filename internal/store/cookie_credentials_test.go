@@ -167,8 +167,7 @@ func TestCookieCredentialLifecycle(t *testing.T) {
 	if err := s.MarkState(ctx, conn, cred, "ready"); !errors.Is(err, ErrCookieCredentialChanged) {
 		t.Fatal("deleted cookie was restored")
 	}
-	var token string
-	if err := conn.QueryRow(ctx, `SELECT access_token FROM collector_credentials WHERE account_id=$1`, id).Scan(&token); err != nil || token != "test-only-token" {
+	if differs, exists, err := CredentialTokenDiffers(ctx, conn, id, "test-only-token"); err != nil || !exists || differs {
 		t.Fatal("cookie changes modified the original token")
 	}
 }

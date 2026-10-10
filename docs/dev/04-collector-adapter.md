@@ -568,7 +568,7 @@ JSON 顶层字段里、无令牌端点只能账密重登。这些不是那一站
 | `channel_model_catalog` | `FetchModelCatalog` | `model_name`、`input_price`、`output_price`、`first_seen_at`（首次采到时写入，之后不变）、`last_seen_at`（每轮刷新）。**无 token 上界**——那是 `models` 的必填项 | **FR-126** |
 | `subscription_plans`（含 `rate_multiplier`/`peak_*`） | 后续阶段独立订阅采集 | 分组/高峰倍率、固定费用、有效期、支持模型、续订状态、**`usable_multiplier`/`actual_multiplier`** 双倍率 | FR-010/033 | ⏭ **二期** |
 | `user_subscriptions` + `subscription_quota_windows` | 后续阶段独立订阅采集 | `(ext_user_id, group_id)` 共享归集、周期额度/已用/剩余/重置、`primary/secondary_source`、`active_reset_*`、`overage_rule` | FR-034/035/036 | ⏭ **二期** |
-| `collector_credentials` | `Authenticate` 副产物 | access/refresh 令牌（P1 明文，FR-113），脱敏引用入日志（FR-094） | FR-113 |
+| `collector_credentials` | `Authenticate` 副产物 | access/refresh 令牌（加密存储，FR-113/#34），脱敏引用入日志（FR-094） | FR-113 |
 | `collector_snapshots`（内嵌 `data_source/fetched_at/valid_until`） | 所有 Fetch* | source、endpoint、fetched_at、valid_until（人工 +7d）；**陈旧性不落列**，查 `collector_snapshots_v.is_stale` 视图（[02 §7](./02-data-model.md)） | FR-011 |
 
 **`balance_signals` 的列级写入归属**（第 41 轮：采集器与余额下限 worker **都写 `conservative_floor`**，
@@ -898,8 +898,8 @@ TokenExpiryFrom func(accessToken string) (time.Time, bool)   // nil = 读不出
 
 | 列 | 读写规则 |
 | --- | --- |
-| `webdav_url` | 取回时按上面那条路径规则解析；为空即"没配置"，定时循环直接跳过（不报错，没配置不是故障） |
-| `webdav_username` / `webdav_password` | Basic 鉴权的两半。密码明文存（FR-113 一期），**只在去 WebDAV 的那个请求里出现**，读接口一律只回 `has_webdav_password` |
+| `webdav_url` | 整体加密存储（#34：query/userinfo 可能承载认证信息），读接口只回去掉这些部分的展示值。取回时按上面那条路径规则解析；为空即"没配置"，定时循环直接跳过（不报错，没配置不是故障） |
+| `webdav_username` / `webdav_password` | Basic 鉴权的两半。密码加密存储（FR-113/#34），解密值**只在去 WebDAV 的那个请求里出现**，读接口一律只回 `has_webdav_password` |
 | `backup_password` | 解信封用；远端是明文备份时留空。同样只回 `has_backup_password`。⚠️ 写入时**空串 = 保持原值**：界面上这两个框每次打开都是空的，当清空处理的话，一次"只改间隔"的保存就会把密码抹掉，而症状要等下一轮同步 401 才出现 |
 
 每一轮的记录另存 `hub_sync_runs`（同 §7ter 的表，[02 §7](./02-data-model.md)）。

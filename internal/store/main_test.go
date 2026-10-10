@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/base64"
 	"os"
 	"testing"
 
@@ -13,5 +14,21 @@ func TestMain(m *testing.M) {
 	if err := collector.ConfigureOutbound(`{"127.0.0.1": ["127.0.0.1/32"]}`); err != nil {
 		panic(err)
 	}
+	if err := ConfigureCredentialKey(testCredentialKey); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
+}
+
+// 各测试包共用一个测试库（hub_sync_config 只有一行），密钥必须一致才能互读密文。
+// 只用于测试数据；生产密钥来自部署环境，从不入库。
+var testCredentialKey = base64.StdEncoding.EncodeToString([]byte("sla-test-credential-key-32bytes!"))
+
+// useCredentialKey 临时换密钥（含"未配置"），用例结束时换回测试密钥。
+func useCredentialKey(t *testing.T, key string) {
+	t.Helper()
+	if err := ConfigureCredentialKey(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ConfigureCredentialKey(testCredentialKey) })
 }

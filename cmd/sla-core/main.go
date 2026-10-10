@@ -77,6 +77,10 @@ func run(addr, dsn string, readOnly, collect bool, logger *slog.Logger) error {
 	if err := collector.ConfigureOutbound(os.Getenv("SLA_OUTBOUND_PRIVATE_TARGETS")); err != nil {
 		return err
 	}
+	// 迁移 035 要用它加密存量明文；未配置时，有秘密的读写路径会明确失败。
+	if err := store.ConfigureCredentialKey(os.Getenv("SLA_CREDENTIAL_SECRET_KEY")); err != nil {
+		return err
+	}
 
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancelStart()

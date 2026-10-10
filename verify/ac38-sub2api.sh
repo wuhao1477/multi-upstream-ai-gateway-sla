@@ -164,7 +164,10 @@ docker exec "$CT" pg_isready -h 127.0.0.1 -U postgres -d sla >/dev/null 2>&1 || 
   echo "❌ PG 60s 内没起来"; docker logs "$CT" 2>&1 | tail -20 | sed 's/^/   /'; exit 1; }
 sleep 2
 go build -o bin/sla-core ./cmd/sla-core
-DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" ./bin/sla-core -addr ":${APIPORT}" >"$LOG" 2>&1 &
+# 凭证加密密钥（#34）：一次性库用一次性密钥，导入的 Sub2API 令牌要加密落库。
+CRED_KEY="$(openssl rand -base64 32)"
+DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" SLA_CREDENTIAL_SECRET_KEY="$CRED_KEY" \
+  ./bin/sla-core -addr ":${APIPORT}" >"$LOG" 2>&1 &
 CORE_PID=$!
 for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:${APIPORT}/healthz" >/dev/null 2>&1 && break

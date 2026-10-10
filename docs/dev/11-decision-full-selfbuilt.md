@@ -124,7 +124,7 @@
 | Responses reasoning 丢失 | M1 就做 protocol 直连 → 进而升级为**彻底自研** |
 | 外部网关去留 | **全移除**（AxonHub + ccLoad） |
 | 实现策略 | **自写为主，读其源码当参考**；不引其包、不 fork |
-| 直连渠道凭证管理 | 复用自研 PG 登记（`channels`/`upstream_keys`，一期明文 FR-113） |
+| 直连渠道凭证管理 | 复用自研 PG 登记（`channels`/`upstream_keys`，Key 加密存储 FR-113） |
 | 返工节奏 | 一次性全量 |
 | 历史文档 | 原地加标注 |
 

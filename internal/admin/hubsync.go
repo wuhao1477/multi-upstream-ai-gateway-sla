@@ -302,9 +302,11 @@ func (s *Server) getHubSyncRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// hubSyncView 是回给界面的形态。**两个密码只报有没有**（FR-094 同源纪律）。
+// hubSyncView 是回给界面的形态。**两个密码只报有没有**（FR-094 同源纪律）；
+// 地址只回去掉 userinfo/query/fragment 的展示值，原样提交回来表示地址不变。
 type hubSyncView struct {
 	WebDAVURL         string `json:"webdav_url"`
+	WebDAVURLRedacted bool   `json:"webdav_url_redacted"` // 展示值隐藏了原地址中的认证信息
 	WebDAVUsername    string `json:"webdav_username"`
 	HasWebDAVPassword bool   `json:"has_webdav_password"`
 	HasBackupPassword bool   `json:"has_backup_password"`
@@ -334,7 +336,8 @@ func (s *Server) hubSyncViewNow(c store.HubSyncConfig) hubSyncView {
 // 不属于配置，硬塞进这个纯函数会逼它收一个 *Server。
 func hubSyncViewOf(c store.HubSyncConfig) hubSyncView {
 	v := hubSyncView{
-		WebDAVURL:         c.WebDAVURL,
+		WebDAVURL:         c.WebDAVURLDisplay,
+		WebDAVURLRedacted: c.WebDAVURLDisplay != c.WebDAVURL,
 		WebDAVUsername:    c.WebDAVUsername,
 		HasWebDAVPassword: c.WebDAVPassword != "",
 		HasBackupPassword: c.BackupPassword != "",

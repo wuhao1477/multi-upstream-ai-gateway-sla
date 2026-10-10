@@ -16,7 +16,7 @@
 
 | 平面 | 端点前缀 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用 `upstream_keys.secret`**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
+| 数据平面 | `/v1/*`（chat_completions、responses） | **网关调用方凭证**（`gateway_clients`，只存哈希） | 承载真实请求（[03](./03-upstream-layer.md)）。⚠️ **严禁复用上游 Key（`upstream_keys.secret_ciphertext`）**——那是打上游用的，复用会把高价值凭证暴露给调用方（[02 §2bis](./02-data-model.md)） |
 | 健康 | `/healthz` | 无 | LB 探针（[06](./06-deployment-and-operations.md)） |
 | **管理平面** | **`/admin/*`**、`/metrics` | **两层都要**：① 网络边界（Caddy 不代理，仅容器网络/本机可达）② **独立管理令牌** `ADMIN_TOKEN`（env 注入，非业务 Key，与 `gateway_clients` 无关） | 本篇；配置读写、策略、审计查询 |
 
@@ -26,7 +26,7 @@
 > 缺失或错误的令牌一律 **401**；令牌**不得**出现在日志与 `/metrics`（[12 §6](./12-debuggability.md) 脱敏同标准）。
 
 - 管理平面挂在 sla-core 上，是**我方核心对运维暴露的面**；与上游站点自身的管理接口（采集器访问，[04](./04-collector-adapter.md)）互不相干。
-- 一期鉴权：单个**管理令牌**（环境变量注入，明文一期可接受，随 FR-113 一起在对外前升级）；管理平面**只在内网/本机可达**，不经公网。
+- 一期鉴权：单个**管理令牌**（环境变量注入；对外前随 FR-113 一起重评）；管理平面**只在内网/本机可达**，不经公网。
 
 2026-10-09 修订：使用标准库恒时比较令牌；未配置 `ADMIN_TOKEN` 返回 503，提交令牌
 缺失或错误返回 401，不回显输入。不新增认证失败计数或认证限速，已有采集限速不变。
@@ -293,7 +293,7 @@ model:<model_id> → channel:<channel_id> → policy:<policy_id> → tenant:<ten
 | `GET /admin/site-families` | **已注册的站型**：读 [04 §7bis](./04-collector-adapter.md) 的站型注册表，逐项返回 `family`/`display_name`/`aliases`/`cred_type`/`requires_external_user_id`。存在的理由是界面的站型下拉此前写死四项——**加一个站型时那份写死的列表不报任何错**，新站型只是在界面上不存在，运维只能靠自动探测碰上它。不查库、不碰凭证 | **P1** |
 | `GET /admin/version` | **正在跑的这个二进制的版本**（`main.version`，由 `-ldflags` 注入；没注入时回 `dev`）。管理界面顶栏（品牌那一块）显示它。为什么向后端要而不是编进前端：界面由 `go:embed` 打进二进制，但运维要回答的是"这台在跑哪一版"，而前端构建期常量只能回答"这份界面是哪一版编的" —— 滚动升级或手工换二进制时两者会不一样，而那正是需要查版本的时候。与其它 `/admin/*` 一样要令牌（§1 的口径不为它开口子） | **P1** |
 | **导入/同步的差异语义**（`/admin/import/all-api-hub` 与 `/admin/hub-sync/run` 共用） | 结果里 `imported`（新建）/ `updated`（已有渠道被改）/ `unchanged`（已有且一致）/ `removed`（本地有、备份里没了）/ `skipped`（探测失败、站型未识别）/ `failed`，逐条 `items[].status` 同名，`items[].changes[]` 写清改了什么。<br>**为什么要有这组数**：原先只有 imported/skipped/failed，而它们描述的只是"建没建出渠道"。台账一旦建齐，之后每一轮都是 `imported 0 / skipped N` —— 那行数字读起来就是"同步没起作用"。<br>⚠️ **已有渠道过去是真的什么都不做**（2026-09-16 修）：`importOne` 对"已存在且完整"的渠道直接 return，于是扩展那边轮换了令牌、重新导出、同步之后，库里还是那把**死令牌**，报告上只有一句"已存在同地址的渠道 #N"。实测复现：备份里 `TOKEN-B`，库里仍 `TOKEN-A`，状态 `skipped`。现在令牌不同即更新并记 `updated`（取舍依据是 NewAPI 的不变式 N-1：生成新令牌会作废旧的，所以备份里一旦换了，旧的已经是死的；代价是**手动导入一份旧备份会把好令牌覆盖成旧的**）。<br>`removed` **只出现在 `/admin/hub-sync/run`（WebDAV 同步）的结果里**：那份备份由扩展维护、是全量；手工上传的文件可能只是一部分，拿它判「已移除」会把其余渠道全停掉，所以手工导入既不报也不停。判据是条目**是否出现在备份里**，与本轮探测/落库成败无关 —— 今天连不上的站仍在备份里，不能被当成已移除。<br>`removed` 只数 `channels.source='hub'` 的（031），`apply` 时**停用**而非删除（可逆；删会连带账号与已登记的 Key 明文，而备份里根本没有那些明文）。手工建的渠道永远不在此列 —— 它本就不在任何备份里，停它会每轮复发。取备份失败得到空列表时**一个都不动**：空不是"全没了"，是"这次没读到" | **P1** |
-| `GET /admin/hub-sync`、`PUT /admin/hub-sync` | all-api-hub 的 **WebDAV 定时同步**配置（单行，`hub_sync_config`）。响应**只回 `has_webdav_password` / `has_backup_password`，不回显任一密码**（FR-094 同源纪律）；写入时这两个字段**留空 = 保持原值**，不是清空 —— 界面上它们每次打开都是空的，若当清空，任何一次"只改间隔"的保存都会把密码抹掉，而症状要等下一轮同步 401 才出现。`apply_mode` 取 `report`（只拉取比对）或 `import`（等同正式导入）；`interval_minutes` 下限 5。⚠️ WebDAV 地址**刻意不过 SSRF 校验**：自建 WebDAV 十有八九就在内网，而这个地址是管理员在鉴权之后自己填的，与导入文件里那一百个陌生站点不是同一类输入 | **P1** |
+| `GET /admin/hub-sync`、`PUT /admin/hub-sync` | all-api-hub 的 **WebDAV 定时同步**配置（单行，`hub_sync_config`）。响应**只回 `has_webdav_password` / `has_backup_password`，不回显任一密码**（FR-094 同源纪律）；`webdav_url` 只回去掉 userinfo/query/fragment 的展示值，`webdav_url_redacted` 表示原地址里有被隐藏的认证信息。写入时 `webdav_url` **等于当前展示值 = 地址不变**（沿用加密存储的完整地址），其他值即替换，空串即清空；写入时这两个字段**留空 = 保持原值**，不是清空 —— 界面上它们每次打开都是空的，若当清空，任何一次"只改间隔"的保存都会把密码抹掉，而症状要等下一轮同步 401 才出现。`apply_mode` 取 `report`（只拉取比对）或 `import`（等同正式导入）；`interval_minutes` 下限 5。WebDAV 地址只做格式校验；内网 WebDAV 须在部署环境 `SLA_OUTBOUND_PRIVATE_TARGETS` 授权，连接时按出站策略校验（#33） | **P1** |
 | `GET /admin/hub-sync/runs?limit=`、`GET /admin/hub-sync/runs/{id}` | 同步历史（倒序，保留最近 50 轮）与单条详情。**列表回的 `result` 已剥掉 `items`**（服务端 `result - 'items'`）：几十行逐站明细一起回等于把上兆 JSON 塞进一个列表响应；要明细就取单条。失败的轮次同样在表里 —— 它是"为什么一直没同步"的唯一可见处 | **P1** |
 | `POST /admin/hub-sync/run?apply=true\|false` | 立即跑一轮：取回 WebDAV 上的备份 → 解密（上游信封为 PBKDF2-SHA256 + AES-256-GCM，见 [04](./04-collector-adapter.md)）→ 走 `/admin/import/all-api-hub` 同一条管线。`apply=true` 强制落库，否则按 `apply_mode`。定时器跑的是同一段代码，只是永远不 force。<br>**起了就回 `202`**（2026-09-16 起），结果不在响应里 —— 去 `/admin/hub-sync/runs` 看，那本来就是它唯一的落点（含逐站明细）。改成后台跑修的是三个缺陷：① 整轮原先跑在**请求的 ctx** 上，浏览器切走页面 / 反向代理超时就把它腰斩，而一轮要探测备份里上百个站点（实测 110 站 108 秒）—— 腰斩时已经建了一部分渠道，且连"这轮失败了"都写不进 `hub_sync_runs`（那条写入用的是同一个 ctx），留下半个状态加零条历史；② 手动触发**没有任何互斥**（定时那条有 advisory 锁，手动这条没有），两个标签页各点一次就是两轮并发的百站导入；③ 前端只能干等两分钟且不知道在等什么。<br>现在：进程内 `CompareAndSwap` + advisory 锁两层互斥，已有一轮在跑时回 `409`；配置问题（如没填 WebDAV 地址）仍**当场**回 `400`，不会变成"202 + 只在日志里的错误"。进度看 `GET /admin/hub-sync` 的 `running` | **P1** |
 | `GET /admin/collector/credentials`、`POST /admin/collector/credentials` | 采集凭证读写（[04](./04-collector-adapter.md)、明文一期；响应只报状态与是否存在，不回显内容）。⚠️ 管理界面**只用 `POST`**：凭证是账号的属性，列表那一侧已由 `GET /admin/accounts` 的 `cred_*` 三列覆盖（2026-09-13 并栏）。`GET` 保留给脚本 | **P1** |
