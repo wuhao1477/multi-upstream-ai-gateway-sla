@@ -294,6 +294,7 @@ export interface SyncItem {
   http_status?: number
   business_code?: number
   retry_after_ms?: number
+  authentication_failed?: boolean
 }
 
 export interface SyncResult {

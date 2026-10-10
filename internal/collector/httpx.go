@@ -17,6 +17,9 @@ import (
 // 返回巨大 HTML；不限量会让采集器把内存吃掉。
 const maxBodyBytes = 8 << 20
 
+// NoRedirect keeps credentials on the original target and returns its redirect response.
+func NoRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 // Client 是采集侧的 HTTP 客户端：带站内最小间隔限速。
 //
 // **限速是硬要求**（04 §6）：同站点请求强制最小间隔，避免触发风控。
@@ -41,7 +44,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	hc := c.HC
 	if hc == nil {
 		hc = &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			CheckRedirect: NoRedirect,
 		}
 	}
 	resp, err := hc.Do(req)
@@ -53,7 +56,7 @@ func NewClient(minInterval time.Duration) *Client {
 	return &Client{
 		HC: &http.Client{
 			Timeout:       30 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			CheckRedirect: NoRedirect,
 		},
 		MinInterval: minInterval,
 		last:        map[string]time.Time{},

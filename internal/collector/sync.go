@@ -23,17 +23,18 @@ const (
 
 // SyncItem 是一项采集的结果。
 type SyncItem struct {
-	Capability   Capability   `json:"capability"`
-	Support      SupportLevel `json:"support"`
-	Status       ItemStatus   `json:"status"`
-	ElapsedMs    int64        `json:"elapsed_ms"`
-	Rows         int          `json:"rows,omitempty"`
-	Failed       int          `json:"failed,omitempty"`
-	Error        string       `json:"error,omitempty"`
-	Note         string       `json:"note,omitempty"`
-	HTTPStatus   int          `json:"http_status,omitempty"`
-	BusinessCode int64        `json:"business_code,omitempty"`
-	RetryAfterMs int64        `json:"retry_after_ms,omitempty"`
+	Capability           Capability   `json:"capability"`
+	Support              SupportLevel `json:"support"`
+	Status               ItemStatus   `json:"status"`
+	ElapsedMs            int64        `json:"elapsed_ms"`
+	Rows                 int          `json:"rows,omitempty"`
+	Failed               int          `json:"failed,omitempty"`
+	Error                string       `json:"error,omitempty"`
+	Note                 string       `json:"note,omitempty"`
+	HTTPStatus           int          `json:"http_status,omitempty"`
+	BusinessCode         int64        `json:"business_code,omitempty"`
+	RetryAfterMs         int64        `json:"retry_after_ms,omitempty"`
+	AuthenticationFailed bool         `json:"authentication_failed,omitempty"`
 }
 
 // SyncResult 是一次 sync 的完整结果（09 §5.0bis 的响应结构）。
@@ -593,6 +594,7 @@ func (s *Syncer) run(
 		Support:    caps[cap],
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Rows:       rows, Failed: failed, Note: note,
+		AuthenticationFailed: IsAuthenticationFailure(err),
 	}
 	var failure *HTTPError
 	if errors.As(err, &failure) {

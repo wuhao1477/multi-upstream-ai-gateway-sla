@@ -46,7 +46,7 @@ func NewCookieAccess(pool *store.Pool, credentials *store.CookieCredentialStore,
 	transport.Proxy = nil
 	transport.DialContext = dialCookie
 	hc.Transport, hc.Jar = transport, nil
-	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	hc.CheckRedirect = collector.NoRedirect
 	access := &CookieAccess{Pool: pool, Credentials: credentials, Client: client, http: &hc}
 	client.CookieRequest = access.Do
 	return access
