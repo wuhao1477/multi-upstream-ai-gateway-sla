@@ -235,6 +235,9 @@ async function waitForRun(): Promise<void> {
           placeholder="https://dav.example/dav/ 或直接指向 .json"
           autocomplete="off"
         />
+        <p v-if="cfg?.webdav_url_redacted === true" id="hs-url-redacted" class="note">
+          原地址中的账号或查询参数已隐藏；保持此地址不变即沿用原地址，修改后按新地址保存。
+        </p>
       </UiField>
       <UiField label="用户名" for="hs-user">
         <input id="hs-user" v-model="username" autocomplete="off" />
