@@ -43,9 +43,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 	hc := c.HC
 	if hc == nil {
-		hc = &http.Client{
-			CheckRedirect: NoRedirect,
-		}
+		hc = OutboundHTTPClient(0)
 	}
 	resp, err := hc.Do(req)
 	return resp, transportError(err)
@@ -54,10 +52,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 // NewClient 构造采集客户端。
 func NewClient(minInterval time.Duration) *Client {
 	return &Client{
-		HC: &http.Client{
-			Timeout:       30 * time.Second,
-			CheckRedirect: NoRedirect,
-		},
+		HC:          OutboundHTTPClient(30 * time.Second),
 		MinInterval: minInterval,
 		last:        map[string]time.Time{},
 	}

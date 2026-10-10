@@ -34,14 +34,10 @@ import (
 // 判成同一个。也不动默认端口 —— `:443` 与省略在字面上不同，但真站点不会两种都给，
 // 而"规范化端口"要先知道 scheme 的默认端口表，收益不抵那份表。
 //
-// ⚠️ **这是格式校验，不是出站策略。** loopback 与私网地址**按设计放行** ——
-// 把采集器指向内网地址正是本系统的用途。历史回环夹具渠道已停用，35 项验收中的
-// 3 条 Key 断言只读取已有数据，不依赖已删除的假上游服务。
-// 2026-10-09 起，采集、探测与 WebDAV 默认客户端已单独禁止自动重定向。
-// 仍缺少网段限制与连接前 DNS 复核，见
-// docs/acceptance/P1-release-readiness.md 的“P1 内的非阻塞事项”：当前管理面是
-// **单一 admin 令牌、无角色分级**，能改 base_url 的人已经握有配置面本身，
-// 故完整私网/DNS 防护仍留待引入 RBAC 或把管理面暴露到公网时实施。
+// ⚠️ **这是格式校验，不是出站策略。** 这里不拒绝私网地址：只看字面量拦不住
+// DNS 重绑定，而内网上游是否可连由部署环境决定，不由管理面决定。出站策略在
+// 每次建连时执行（internal/collector/outbound.go，#33）：默认只连公网，内网目标须
+// 在 SLA_OUTBOUND_PRIVATE_TARGETS 中授权，且不跟随重定向。
 func validateBaseURL(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {

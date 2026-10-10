@@ -1,5 +1,18 @@
 # 06 部署与运维（单机 Docker Compose · v0.1 草案）
 
+> 2026-10-10 出站兼容性变更（Issue #33，取代下条中"内网和回环直连及环境代理保持原样"
+> 与"网段限制与 DNS 重绑定防护仍未实施"）：采集、探测与 WebDAV **默认只连公网**，并且
+> 不再读取 `HTTP_PROXY`/`HTTPS_PROXY`。升级前先找出解析到内网、回环或运营商 NAT（含
+> Tailscale 的 100.64.0.0/10）的渠道地址与 WebDAV 地址，写进 `SLA_OUTBOUND_PRIVATE_TARGETS`：
+>
+> ```
+> SLA_OUTBOUND_PRIVATE_TARGETS='{"nas.lan:5005": ["192.168.1.10/32"], "10.0.0.8": ["10.0.0.8/32"]}'
+> ```
+>
+> 键是主机名或 `host:port`（省略端口即任意端口），值是该主机允许解析到的网段，不接受
+> `/0`。core 与 collector 必须使用同一份配置；格式非法时进程拒绝启动。未授权的目标在
+> 同步结果里报"出站目标不是公网地址，且未在 SLA_OUTBOUND_PRIVATE_TARGETS 中授权"。
+
 > 2026-10-09 出站兼容性变更（Issue #30）：采集、探测与 WebDAV 不再自动跟随
 > 301/302/303/307/308。原先依赖 HTTP→HTTPS、旧域名或下载地址跳转的部署，应将
 > 渠道/WebDAV 配置改为最终地址；NewAPI Key 列表已直接使用 `/api/token/`。

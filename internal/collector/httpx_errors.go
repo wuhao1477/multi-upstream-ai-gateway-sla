@@ -30,6 +30,8 @@ func networkError(err error) error {
 	var hostname x509.HostnameError
 	var operation *net.OpError
 	switch {
+	case errors.Is(err, ErrOutboundBlocked):
+		return ErrOutboundBlocked
 	case errors.Is(err, context.Canceled):
 		return context.Canceled
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
