@@ -392,7 +392,7 @@ func completedCapabilities(
 		seen[item.Capability] = true
 		if item.Status == collector.StatusFailed || item.Status == collector.StatusPartial {
 			minimumDelay := retryMinimum(item.HTTPStatus, time.Duration(item.RetryAfterMs)*time.Millisecond)
-			if item.AuthenticationFailed || item.BusinessCode == 401 {
+			if item.AuthenticationFailed {
 				minimumDelay = retryMinimum(401, minimumDelay)
 			}
 			failed[item.Capability] = capabilityFailure{

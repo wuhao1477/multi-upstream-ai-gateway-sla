@@ -247,7 +247,8 @@ func keyImportRetryDelay(err error, attempts int) (time.Duration, bool) {
 		case status >= 500:
 			return backoff, true
 		default:
-			// 4xx（401/403/404…）是确定性的：换个时间再打还是同一个答案。
+			// 其他响应错误不自动重排，包括 4xx（429 除外）、重定向，
+			// 以及 HTTP 200 承载的业务拒绝。
 			return 0, false
 		}
 	}

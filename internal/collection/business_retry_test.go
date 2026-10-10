@@ -2,7 +2,6 @@ package collection
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -11,11 +10,11 @@ import (
 )
 
 func TestBusinessAuthenticationFailureUsesAuthBackoff(t *testing.T) {
-	var result collector.SyncResult
-	if err := json.Unmarshal([]byte(`{"items":[{"capability":"account","status":"failed","http_status":200,"business_code":401}]}`), &result); err != nil {
-		t.Fatal(err)
-	}
-	_, failed, _ := completedCapabilities(channelTask{capabilities: []collector.Capability{collector.CapAccount}}, &result)
+	result := &collector.SyncResult{Items: []collector.SyncItem{{
+		Capability: collector.CapAccount, Status: collector.StatusFailed,
+		HTTPStatus: 200, BusinessCode: 401, AuthenticationFailed: true,
+	}}}
+	_, failed, _ := completedCapabilities(channelTask{capabilities: []collector.Capability{collector.CapAccount}}, result)
 	if len(failed) != 1 || failed[0].minimumDelay != 5*time.Minute {
 		t.Fatal("HTTP 200 business authentication failure skipped authentication backoff")
 	}
