@@ -66,7 +66,7 @@ type Sink interface {
 
 // ErrKeyNotRegistered：采到一把库中未登记的 Key。
 //
-// **不是失败**（02 §1.3bis）：采集不自动创建 Key（secret 是明文凭证，
+// **不是失败**（02 §1.3bis）：采集不自动创建 Key（secret 是完整凭证，
 // 上游只回掩码，凭空插一行会让它永远不可用），故计入 inventory 异常项
 // 提示运维补登记。
 var ErrKeyNotRegistered = errors.New("collector: 上游存在但库中未登记的 Key")

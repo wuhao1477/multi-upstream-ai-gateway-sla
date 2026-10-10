@@ -163,7 +163,7 @@ func (s *CollectorSink) SaveGroups(
 // SaveKey 写一把 Key 的用量（每把一个事务，09 §5.0bis）。
 //
 // **只 UPDATE 不 INSERT**：库中无该 Key 时返回 collector.ErrKeyNotRegistered
-// （02 §1.3bis：secret 是明文凭证、上游只回掩码，凭空插一行会让它永远不可用）。
+// （02 §1.3bis：secret 是完整凭证、上游只回掩码，凭空插一行会让它永远不可用）。
 func (s *CollectorSink) SaveKey(
 	ctx context.Context, channelID, accountID int64, k collector.Key,
 ) error {

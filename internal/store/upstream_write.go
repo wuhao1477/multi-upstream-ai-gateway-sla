@@ -163,7 +163,7 @@ type KeyUsageRow struct {
 //
 // ⚠️ **只 UPDATE 不 INSERT**（02 §1.3bis）：Key 行由 /admin/keys 人工登记
 // （我们持有的凭证不可能从上游"发现"）。采到库里没有的 Key **不自动插入** ——
-// upstream_keys.secret 是明文凭证，上游列表接口通常只回前缀或掩码，
+// upstream_keys 存的是完整凭证（加密），上游列表接口通常只回前缀或掩码，
 // 凭空插一行没有 secret 的 Key 会让它永远不可用且污染资产台账。
 //
 // 每把 Key 一个事务（09 §5.0bis）：单把失败不影响其它。

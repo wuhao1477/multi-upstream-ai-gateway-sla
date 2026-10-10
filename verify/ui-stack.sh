@@ -296,7 +296,10 @@ CORE_VERSION="ui-verify-$$"
 go build -ldflags "-X main.version=${CORE_VERSION}" -o bin/sla-core ./cmd/sla-core
 # Cookie 加密密钥：每轮随机生成，只给这个一次性 core 用（Cookie 登记界面验收要它）。
 COOKIE_KEY="$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))')"
-DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" SLA_COOKIE_SECRET_KEY="$COOKIE_KEY" ./bin/sla-core -addr ":${PORT}" \
+# 凭证加密密钥（#34）同理：导入的令牌、Key 与 WebDAV 配置都要用它加密落库。
+CRED_KEY="$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))')"
+DATABASE_URL="$DSN" ADMIN_TOKEN="$TOKEN" SLA_COOKIE_SECRET_KEY="$COOKIE_KEY" \
+  SLA_CREDENTIAL_SECRET_KEY="$CRED_KEY" ./bin/sla-core -addr ":${PORT}" \
   >"$CORELOG" 2>&1 &
 CORE_PID=$!
 ready=false

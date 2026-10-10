@@ -84,6 +84,15 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 //  3. **防篡改**：已应用文件的 checksum 变了即报错 —— 已应用的迁移不可修改，
 //     改了会让已部署环境与新环境 schema 不一致（split_migrations.py 的告示）
 func Migrate(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) error {
+	ms, err := LoadMigrations()
+	if err != nil {
+		return err
+	}
+	return applyMigrations(ctx, conn, logger, ms)
+}
+
+// applyMigrations 应用给定迁移中尚未应用的部分（测试用它停在中间版本）。
+func applyMigrations(ctx context.Context, conn *pgx.Conn, logger *slog.Logger, ms []Migration) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -141,11 +150,6 @@ func Migrate(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) error {
 		return fmt.Errorf("遍历已应用迁移: %w", err)
 	}
 
-	ms, err := LoadMigrations()
-	if err != nil {
-		return err
-	}
-
 	var ran int
 	for _, m := range ms {
 		if old, ok := applied[m.Name]; ok {
@@ -160,6 +164,12 @@ func Migrate(ctx context.Context, conn *pgx.Conn, logger *slog.Logger) error {
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("开启事务 %s: %w", m.Name, err)
+		}
+		if hook := beforeMigration[m.Name]; hook != nil {
+			if err := hook(ctx, tx); err != nil {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("应用 %s: %w", m.Name, err)
+			}
 		}
 		if _, err := tx.Exec(ctx, m.SQL); err != nil {
 			_ = tx.Rollback(ctx)

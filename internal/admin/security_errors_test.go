@@ -163,10 +163,14 @@ func assertSafeHubRun(t *testing.T, conn *pgx.Conn, mux http.Handler, want strin
 
 func restoreErrorTestConfig(t *testing.T, conn *pgx.Conn, c store.HubSyncConfig) {
 	t.Helper()
-	_, err := conn.Exec(context.Background(), `UPDATE hub_sync_config SET webdav_url=$1,
-webdav_username=$2, webdav_password=$3, backup_password=$4, enabled=$5,
-interval_minutes=$6, apply_mode=$7 WHERE id=1`, c.WebDAVURL, c.WebDAVUsername,
-		c.WebDAVPassword, c.BackupPassword, c.Enabled, c.IntervalMinutes, c.ApplyMode)
+	if err := store.SaveHubSyncConfig(context.Background(), conn, c); err != nil {
+		t.Error(err)
+	}
+	// 保存时空密码表示"不改"；原本没有密码的要显式清掉。
+	_, err := conn.Exec(context.Background(), `UPDATE hub_sync_config
+   SET webdav_password_ciphertext = CASE WHEN $1 THEN NULL ELSE webdav_password_ciphertext END,
+       backup_password_ciphertext = CASE WHEN $2 THEN NULL ELSE backup_password_ciphertext END
+ WHERE id=1`, c.WebDAVPassword == "", c.BackupPassword == "")
 	if err != nil {
 		t.Error(err)
 	}

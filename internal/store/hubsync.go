@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,13 +13,17 @@ import (
 
 // HubSyncConfig 是 all-api-hub WebDAV 定时同步的那一行配置（hub_sync_config，id=1）。
 //
-// 两个密码是明文（与 collector_credentials 同一取舍，FR-113 一期）。它们**只出现在
-// 这个结构里与去 WebDAV 的那个请求里** —— 管理接口只报 has_*，不回显内容。
+// 地址与两个密码加密存储（D1，#34）。解密后的值**只出现在这个结构里与去 WebDAV
+// 的那个请求里** —— 管理接口只回地址的展示值和密码的 has_*，不回显秘密。
 type HubSyncConfig struct {
-	WebDAVURL      string
+	WebDAVURL      string // 完整地址，可能带认证用的 query/userinfo
 	WebDAVUsername string
 	WebDAVPassword string
 	BackupPassword string
+
+	// WebDAVURLDisplay 是去掉 userinfo/query/fragment 的地址，管理接口只回它。
+	// 保存时传回同一个展示值表示"地址不变"，见 SaveHubSyncConfig。
+	WebDAVURLDisplay string
 
 	Enabled         bool
 	IntervalMinutes int
@@ -63,17 +68,45 @@ type HubSyncRun struct {
 // 迁移里已经 INSERT 了 id=1，所以正常不会缺行。
 func LoadHubSyncConfig(ctx context.Context, db DBTX) (HubSyncConfig, error) {
 	var c HubSyncConfig
+	var url, password, backup []byte
 	err := db.QueryRow(ctx, `
-SELECT webdav_url, webdav_username, webdav_password, backup_password,
+SELECT webdav_url_ciphertext, webdav_url_display, webdav_username,
+       webdav_password_ciphertext, backup_password_ciphertext,
        enabled, interval_minutes, apply_mode,
        (SELECT max(started_at) FROM hub_sync_runs)
   FROM hub_sync_config WHERE id=1`).Scan(
-		&c.WebDAVURL, &c.WebDAVUsername, &c.WebDAVPassword, &c.BackupPassword,
+		&url, &c.WebDAVURLDisplay, &c.WebDAVUsername, &password, &backup,
 		&c.Enabled, &c.IntervalMinutes, &c.ApplyMode, &c.LastRunAt)
 	if err != nil {
 		return HubSyncConfig{}, fmt.Errorf("读 all-api-hub 同步配置: %w", err)
 	}
+	for _, f := range []struct {
+		name string
+		in   []byte
+		out  *string
+	}{{"webdav_url", url, &c.WebDAVURL}, {"webdav_password", password, &c.WebDAVPassword},
+		{"backup_password", backup, &c.BackupPassword}} {
+		if *f.out, err = openCredential("hub_sync_config", hubSyncRowID, f.name, f.in); err != nil {
+			return HubSyncConfig{}, err
+		}
+	}
 	return c, nil
+}
+
+// hubSyncRowID 是 hub_sync_config 唯一一行的 id（CHECK id = 1），也是密文 AAD 里的记录 ID。
+const hubSyncRowID = 1
+
+// webdavDisplayURL 去掉可能承载认证信息的 userinfo、query 与 fragment。
+func webdavDisplayURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.User == nil && u.RawQuery == "" && u.Fragment == "" && !u.ForceQuery {
+		return raw // 没有可隐藏的部分就原样展示，避免规范化差异被误报为"已隐藏"
+	}
+	u.User, u.RawQuery, u.Fragment, u.ForceQuery = nil, "", "", false
+	return u.String()
 }
 
 // SaveHubSyncConfig 写配置。
@@ -81,21 +114,34 @@ SELECT webdav_url, webdav_username, webdav_password, backup_password,
 // **两个密码留空 = 保持原值**，不是清空：管理接口从不回显它们，所以界面上那两个
 // 输入框每次打开都是空的 —— 若把空串当"清空"，任何一次只改间隔的保存都会顺手
 // 把密码抹掉，而症状要等到下一次定时同步 401 才出现。
-// 非密码字段一律按传入值覆盖（它们本来就会回显，空就是空）。
+//
+// **地址传回当前展示值 = 保持原地址**：界面拿到的是去掉认证信息的展示值，原样
+// 提交时若按传入值覆盖，就会用它顶掉带认证参数的真实地址。其他值按新地址保存，
+// 空串即清空。其余非秘密字段一律按传入值覆盖。
 func SaveHubSyncConfig(ctx context.Context, db DBTX, c HubSyncConfig) error {
+	var encrypted [3][]byte
+	for i, f := range []struct{ name, value string }{
+		{"webdav_url", c.WebDAVURL}, {"webdav_password", c.WebDAVPassword}, {"backup_password", c.BackupPassword},
+	} {
+		var err error
+		if encrypted[i], err = sealCredential("hub_sync_config", hubSyncRowID, f.name, f.value); err != nil {
+			return err
+		}
+	}
 	_, err := db.Exec(ctx, `
 UPDATE hub_sync_config
-   SET webdav_url       = $1,
-       webdav_username  = $2,
-       webdav_password  = COALESCE(NULLIF($3,''), webdav_password),
-       backup_password  = COALESCE(NULLIF($4,''), backup_password),
-       enabled          = $5,
-       interval_minutes = $6,
-       apply_mode       = $7,
+   SET webdav_url_ciphertext = CASE WHEN $1 = webdav_url_display THEN webdav_url_ciphertext ELSE $2 END,
+       webdav_url_display    = CASE WHEN $1 = webdav_url_display THEN webdav_url_display ELSE $3 END,
+       webdav_username  = $4,
+       webdav_password_ciphertext = COALESCE($5, webdav_password_ciphertext),
+       backup_password_ciphertext = COALESCE($6, backup_password_ciphertext),
+       enabled          = $7,
+       interval_minutes = $8,
+       apply_mode       = $9,
        updated_at       = now()
  WHERE id = 1`,
-		c.WebDAVURL, c.WebDAVUsername, c.WebDAVPassword, c.BackupPassword,
-		c.Enabled, c.IntervalMinutes, c.ApplyMode)
+		c.WebDAVURL, encrypted[0], webdavDisplayURL(c.WebDAVURL), c.WebDAVUsername,
+		encrypted[1], encrypted[2], c.Enabled, c.IntervalMinutes, c.ApplyMode)
 	if err != nil {
 		return fmt.Errorf("写 all-api-hub 同步配置: %w", err)
 	}

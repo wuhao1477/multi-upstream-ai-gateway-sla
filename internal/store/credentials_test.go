@@ -69,12 +69,13 @@ func TestSub2APIRefreshIsSerializedAcrossInstancesByRefreshLockKey(t *testing.T)
 		if err != nil {
 			t.Fatalf("建账号: %v", err)
 		}
+		access, refresh := mustSealTokens(t, accountIDs[i], "old-access", "old-refresh")
 		_, err = conn.Exec(ctx, `
 INSERT INTO collector_credentials (
-       account_id, channel_id, site_family, cred_type, access_token, refresh_token,
+       account_id, channel_id, site_family, cred_type, access_token_ciphertext, refresh_token_ciphertext,
        token_expires_at, refresh_lock_key)
-VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
-			accountIDs[i], channels[i].ID, time.Now().Add(10*time.Second), lockKey)
+VALUES ($1,$2,'sub2api','sub2api_jwt',$5,$6,$3,$4)`,
+			accountIDs[i], channels[i].ID, time.Now().Add(10*time.Second), lockKey, access, refresh)
 		if err != nil {
 			t.Fatalf("写凭证: %v", err)
 		}
@@ -118,11 +119,21 @@ VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
 	}
 
 	for _, ch := range channels {
-		var access, refresh string
+		var accountID int64
+		var sealedAccess, sealedRefresh []byte
 		if err := conn.QueryRow(ctx, `
-SELECT access_token, refresh_token
-  FROM collector_credentials WHERE channel_id=$1`, ch.ID).Scan(&access, &refresh); err != nil {
+SELECT account_id, access_token_ciphertext, refresh_token_ciphertext
+  FROM collector_credentials WHERE channel_id=$1`, ch.ID).Scan(&accountID, &sealedAccess, &sealedRefresh); err != nil {
 			t.Fatalf("读刷新结果: %v", err)
+		}
+		// 每行用自己的 account_id 作 AAD 才解得开：同一份密文不能写给两行。
+		access, err := openCredential("collector_credentials", accountID, "access_token", sealedAccess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refresh, err := openCredential("collector_credentials", accountID, "refresh_token", sealedRefresh)
+		if err != nil {
+			t.Fatal(err)
 		}
 		if access != "new-access" || refresh != "new-refresh" {
 			t.Errorf("渠道 %d 仍是旧凭证: access=%q refresh=%q", ch.ID, access, refresh)
@@ -159,12 +170,13 @@ func TestSaveTxPreservesExistingRefreshLockKeyOnPartialUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建账号: %v", err)
 	}
+	seedAccess, seedRefresh := mustSealTokens(t, accountID, "old-access", "old-refresh")
 	_, err = conn.Exec(ctx, `
 INSERT INTO collector_credentials (
-       account_id, channel_id, site_family, cred_type, access_token, refresh_token,
+       account_id, channel_id, site_family, cred_type, access_token_ciphertext, refresh_token_ciphertext,
        token_expires_at, refresh_lock_key)
-VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
-		accountID, channelID, time.Now().Add(time.Hour), wantLockKey)
+VALUES ($1,$2,'sub2api','sub2api_jwt',$5,$6,$3,$4)`,
+		accountID, channelID, time.Now().Add(time.Hour), wantLockKey, seedAccess, seedRefresh)
 	if err != nil {
 		t.Fatalf("写凭证: %v", err)
 	}
@@ -181,12 +193,17 @@ VALUES ($1,$2,'sub2api','sub2api_jwt','old-access','old-refresh',$3,$4)`,
 		t.Fatalf("部分更新凭证: %v", err)
 	}
 
-	var gotLockKey, access string
+	var gotLockKey string
+	var sealed []byte
 	if err := conn.QueryRow(ctx, `
-SELECT refresh_lock_key, access_token
+SELECT refresh_lock_key, access_token_ciphertext
   FROM collector_credentials WHERE channel_id=$1`, channelID).
-		Scan(&gotLockKey, &access); err != nil {
+		Scan(&gotLockKey, &sealed); err != nil {
 		t.Fatalf("读凭证: %v", err)
+	}
+	access, err := openCredential("collector_credentials", accountID, "access_token", sealed)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if gotLockKey != wantLockKey {
 		t.Fatalf("部分更新改写了刷新锁键: got=%q want=%q", gotLockKey, wantLockKey)
@@ -411,4 +428,13 @@ DELETE FROM upstream_accounts
 	if _, err := conn.Exec(ctx, `DELETE FROM channels WHERE base_url = ANY($1)`, bases); err != nil {
 		t.Fatalf("清理刷新锁测试渠道: %v", err)
 	}
+}
+
+func mustSealTokens(t *testing.T, accountID int64, access, refresh string) ([]byte, []byte) {
+	t.Helper()
+	a, r, err := sealTokens(accountID, access, refresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, r
 }

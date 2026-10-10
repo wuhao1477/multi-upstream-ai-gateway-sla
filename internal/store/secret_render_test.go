@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -154,48 +153,31 @@ func TestKeyReadPathNeverSelectsPlaintext(t *testing.T) {
 	t.Logf("扫过 %d 条 upstream_keys 读查询（未解析拼接 %d 处）", found, unresolved)
 }
 
-// TestSecretPrefixExprTruncates 脱敏表达式必须真的截断，且不是原样返回。
+// TestSecretPrefixExprTruncates 列表只读写入时存下的前缀，且前缀真的截断。
 //
-// 没有这条，`secretPrefixExpr = "secret"` 会让上一条测试全绿 ——
-// 它检查的是"有没有裸 secret 出现在列里"，而常量替换后那个位置是个标识符，
-// 上一条看到的是 `secretPrefixExpr` 这个 Go 变量名，不是 SQL 文本。
+// 没有这条，`secretPrefixExpr = "k.secret_ciphertext"` 会让上一条测试全绿 ——
+// 它检查的是"有没有裸 secret 出现在列里"，而常量替换后那个位置是个标识符。
+// 自 #34 起库里没有明文 secret，截断发生在写入时的 secretPrefix。
 func TestSecretPrefixExprTruncates(t *testing.T) {
-	if !strings.Contains(secretPrefixExpr, "left(") {
-		t.Errorf("secretPrefixExpr = %q，应当用 left() 截断", secretPrefixExpr)
-	}
-	if !regexp.MustCompile(`left\(\s*secret\s*,\s*\d+\s*\)`).MatchString(secretPrefixExpr) {
-		t.Errorf("secretPrefixExpr = %q，未见 left(secret, N) 形态", secretPrefixExpr)
+	if !regexp.MustCompile(`^k\.secret_prefix\b`).MatchString(secretPrefixExpr) {
+		t.Errorf("secretPrefixExpr = %q，列表应只读 secret_prefix", secretPrefixExpr)
 	}
 	// 截断长度必须远小于真实 Key 长度：真库那两把是 40 / 21 字符。
 	//
 	// 上界取 8（= 09 的设计值，列表只显示 secret_prefix）。**放宽要改这条断言**，
 	// 于是"回显变长"必然是一次显式决定，而不是某次调参的副作用；收紧（<8）随便改。
-	//
-	// ⚠️ 第一版写的是 `len(n[1]) > 2` —— 判的是**位数**不是**取值**，于是
-	//    `left(secret, 32)` 因为"32 只有两位"而通过。32 对真库那把 21 字符的 Key
-	//    等于整条回显。反向自验 B2 当场证明这条守卫是空的。
 	const maxPrefix = 8
-	n := regexp.MustCompile(`left\(\s*secret\s*,\s*(\d+)\s*\)`).
-		FindStringSubmatch(secretPrefixExpr)
-	if n == nil {
-		t.Fatalf("secretPrefixExpr = %q，取不出截断长度 —— 上面那条已经报过形态，"+
-			"这里直接停，避免拿 nil 继续判", secretPrefixExpr)
-	}
-	got, err := strconv.Atoi(n[1])
-	if err != nil {
-		t.Fatalf("截断长度 %q 解析失败：%v", n[1], err)
-	}
-	if got < 1 || got > maxPrefix {
-		pct := func(keyLen int) float64 {
-			// 截到比 Key 还长就是整条回显，封顶 100% —— 不然会打出 "152%"
-			if got >= keyLen {
-				return 100
-			}
-			return float64(got) * 100 / float64(keyLen)
+	for _, secret := range []string{
+		"sk-0123456789abcdefghijklmnopqrstuvwxyz0123", // 40+ 字符
+		"密钥密钥密钥密钥密钥密钥",                                // 按字符截，不切坏多字节
+	} {
+		got := secretPrefix(secret)
+		if n := len([]rune(got)); n < 1 || n > maxPrefix || !strings.HasPrefix(secret, got) {
+			t.Errorf("secretPrefix(%q) = %q，应为原文前 1~%d 个字符", secret, got, maxPrefix)
 		}
-		t.Errorf("截断长度取 %d，应在 1~%d —— 真库那两把 Key 是 40 / 21 字符，"+
-			"取 %d 位等于回显 %.0f%% / %.0f%%，已不是「只显前缀」",
-			got, maxPrefix, got, pct(40), pct(21))
+	}
+	if got := secretPrefix("sk-short"); got != "sk-short" {
+		t.Errorf("短于上限的 secret 应原样作前缀，得 %q", got)
 	}
 }
 

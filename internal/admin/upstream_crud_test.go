@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -467,17 +468,19 @@ func TestPatchKeyUpdatesSecretWithoutEchoingPlaintext(t *testing.T) {
 		t.Fatalf("Key PATCH 响应回显了明文：%s", body)
 	}
 
-	var secret, ref, status string
+	var prefix, ref, status string
+	var encrypted []byte
 	var rpm, conc int
 	if err := conn.QueryRow(ctx, `
-SELECT secret, COALESCE(external_ref,''), status, rpm_limit, concurrency_limit
-  FROM upstream_keys WHERE id=$1`, keyID).Scan(&secret, &ref, &status, &rpm, &conc); err != nil {
+SELECT secret_prefix, secret_ciphertext, COALESCE(external_ref,''), status, rpm_limit, concurrency_limit
+  FROM upstream_keys WHERE id=$1`, keyID).Scan(&prefix, &encrypted, &ref, &status, &rpm, &conc); err != nil {
 		t.Fatalf("读 Key: %v", err)
 	}
-	if secret != "sk-after-secret" || ref != "ref-after" ||
+	// 新密钥按前缀可辨认，库里只有密文（解密正确性由 store 包的用例覆盖）。
+	if prefix != "sk-after" || bytes.Contains(encrypted, []byte("sk-after-secret")) || ref != "ref-after" ||
 		status != "active" || rpm != 120 || conc != 3 {
-		t.Fatalf("Key PATCH 未按请求落库：secret=%q ref=%q status=%q rpm=%d conc=%d",
-			secret, ref, status, rpm, conc)
+		t.Fatalf("Key PATCH 未按请求落库：prefix=%q ref=%q status=%q rpm=%d conc=%d",
+			prefix, ref, status, rpm, conc)
 	}
 }
 

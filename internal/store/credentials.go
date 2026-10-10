@@ -11,7 +11,8 @@ import (
 	"github.com/wuhao1477/multi-upstream-ai-gateway-sla/internal/collector"
 )
 
-// CredentialStore 持久化采集凭证（一期明文，FR-113）。
+// CredentialStore 持久化采集凭证。access/refresh token 加密存储（D1，#34），
+// AAD 绑定 account_id —— collector_credentials 上它唯一且不变。
 //
 // 实现 collector.CredentialStore —— 那个接口存在的理由是让
 // "刷新结果先持久化再释放锁"（不变式 S-1）可以被单测覆盖。
@@ -32,18 +33,23 @@ func NewCredentialStore(p *Pool) *CredentialStore { return &CredentialStore{Pool
 // 判为已存在直接跳过 —— 永不自愈。
 func (s *CredentialStore) SaveTx(ctx context.Context, db DBTX, cred collector.Credential) error {
 	lockKey := collector.RefreshLockKey(cred)
-	_, err := db.Exec(ctx, `
+	access, refresh, err := sealTokens(cred.AccountID, cred.AccessToken, cred.RefreshToken)
+	if err != nil {
+		return err
+	}
+	// 空令牌加密为 NULL，与原先的 NULLIF(...,'') 一样表示"不改已存值"。
+	_, err = db.Exec(ctx, `
 INSERT INTO collector_credentials (account_id, channel_id, site_family, cred_type,
-       access_token, refresh_token, external_user_id,
+       access_token_ciphertext, refresh_token_ciphertext, external_user_id,
        user_id_header_name, token_expires_at, refresh_lock_key, status, updated_at)
-VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),
+VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),
         NULLIF($8,''),$9,NULLIF($10,''),'valid',now())
 ON CONFLICT (account_id) DO UPDATE
    SET channel_id         = EXCLUDED.channel_id,
        site_family        = EXCLUDED.site_family,
        cred_type          = EXCLUDED.cred_type,
-       access_token       = COALESCE(NULLIF(EXCLUDED.access_token,''), collector_credentials.access_token),
-       refresh_token      = COALESCE(NULLIF(EXCLUDED.refresh_token,''), collector_credentials.refresh_token),
+       access_token_ciphertext  = COALESCE(EXCLUDED.access_token_ciphertext, collector_credentials.access_token_ciphertext),
+       refresh_token_ciphertext = COALESCE(EXCLUDED.refresh_token_ciphertext, collector_credentials.refresh_token_ciphertext),
        external_user_id   = COALESCE(EXCLUDED.external_user_id, collector_credentials.external_user_id),
        user_id_header_name = COALESCE(EXCLUDED.user_id_header_name, collector_credentials.user_id_header_name),
        token_expires_at   = EXCLUDED.token_expires_at,
@@ -51,7 +57,7 @@ ON CONFLICT (account_id) DO UPDATE
        status             = 'valid',
        updated_at         = now()`,
 		cred.AccountID, cred.ChannelID, string(cred.Family), cred.CredType,
-		cred.AccessToken, cred.RefreshToken, cred.ExternalUserID,
+		access, refresh, cred.ExternalUserID,
 		cred.UserIDHeaderName, nullTime(cred.TokenExpiresAt), lockKey)
 	if err != nil {
 		return fmt.Errorf("保存账号 %d 凭证: %w", cred.AccountID, err)
@@ -102,20 +108,8 @@ SELECT COALESCE(refresh_lock_key,'')
 	}
 	if changed {
 		fresh.RefreshLockKey = lockKey
-		tag, err := tx.Exec(ctx, `
-UPDATE collector_credentials
-   SET access_token = NULLIF($2,''),
-       refresh_token = COALESCE(NULLIF($3,''), refresh_token),
-       token_expires_at = $4,
-       status = 'valid', updated_at = now()
- WHERE refresh_lock_key = $1 AND site_family = $5`, lockKey, fresh.AccessToken,
-			fresh.RefreshToken, nullTime(fresh.TokenExpiresAt), string(fresh.Family))
-		if err != nil {
+		if err := saveRefreshed(ctx, tx, lockKey, fresh); err != nil {
 			return current, fmt.Errorf("刷新后保存账号 %d 凭证: %w", cred.AccountID, err)
-		}
-		if tag.RowsAffected() == 0 {
-			return current, fmt.Errorf("刷新后保存账号 %d 凭证: 刷新锁键 %q 没有关联凭证",
-				cred.AccountID, lockKey)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -127,12 +121,58 @@ UPDATE collector_credentials
 	return current, nil
 }
 
+// saveRefreshed 把新令牌写给共用同一刷新锁键的每一行（同一上游账号被导入到多个账号行）。
+//
+// 每行各自加密：AAD 绑定 account_id，同一份密文不能写给两行。仍在刷新锁的事务内，
+// 不改变"先持久化新令牌、再释放锁"的顺序。
+func saveRefreshed(ctx context.Context, tx pgx.Tx, lockKey string, fresh collector.Credential) error {
+	rows, err := tx.Query(ctx, `
+SELECT account_id FROM collector_credentials
+ WHERE refresh_lock_key = $1 AND site_family = $2 FOR UPDATE`, lockKey, string(fresh.Family))
+	if err != nil {
+		return err
+	}
+	accounts, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return err
+	}
+	if len(accounts) == 0 {
+		return fmt.Errorf("刷新锁键 %q 没有关联凭证", lockKey)
+	}
+	for _, accountID := range accounts {
+		access, refresh, err := sealTokens(accountID, fresh.AccessToken, fresh.RefreshToken)
+		if err != nil {
+			return err
+		}
+		// access 为空即清空（与原先 NULLIF 一致）；refresh 为空则保留旧值。
+		if _, err := tx.Exec(ctx, `
+UPDATE collector_credentials
+   SET access_token_ciphertext = $2,
+       refresh_token_ciphertext = COALESCE($3, refresh_token_ciphertext),
+       token_expires_at = $4,
+       status = 'valid', updated_at = now()
+ WHERE account_id = $1`, accountID, access, refresh, nullTime(fresh.TokenExpiresAt)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sealTokens(accountID int64, access, refresh string) ([]byte, []byte, error) {
+	a, err := sealCredential("collector_credentials", accountID, "access_token", access)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := sealCredential("collector_credentials", accountID, "refresh_token", refresh)
+	return a, r, err
+}
+
 // ListByChannel 读取渠道下全部有效账号的采集凭证。
 func (s *CredentialStore) ListByChannel(
 	ctx context.Context, db DBTX, ch Channel,
 ) ([]collector.Credential, error) {
 	rows, err := db.Query(ctx, `
-SELECT a.id, ch.site_family, COALESCE(c.cred_type,''), c.access_token, c.refresh_token,
+SELECT a.id, ch.site_family, COALESCE(c.cred_type,''), c.access_token_ciphertext, c.refresh_token_ciphertext,
        COALESCE(NULLIF(a.external_user_id,''),c.external_user_id), c.user_id_header_name,
        c.token_expires_at, c.refresh_lock_key, a.channel_id, ch.base_url,
        COALESCE(b.enabled,false)
@@ -169,7 +209,7 @@ func (s *CredentialStore) loadByAccount(
 ) (collector.Credential, error) {
 	var cred collector.Credential
 	query := `
-SELECT c.account_id, c.site_family, c.cred_type, c.access_token, c.refresh_token,
+SELECT c.account_id, c.site_family, c.cred_type, c.access_token_ciphertext, c.refresh_token_ciphertext,
        c.external_user_id, c.user_id_header_name, c.token_expires_at, c.refresh_lock_key,
        c.channel_id, ch.base_url, false
   FROM collector_credentials AS c
@@ -195,16 +235,22 @@ type credentialScanner interface {
 
 func scanCredential(row credentialScanner, cred *collector.Credential) error {
 	var family, credType string
-	var access, refresh, extUID, hdrName, lockKey *string
+	var extUID, hdrName, lockKey *string
+	var access, refresh []byte
 	var expiresAt *time.Time
 	if err := row.Scan(&cred.AccountID, &family, &credType, &access, &refresh,
 		&extUID, &hdrName, &expiresAt, &lockKey, &cred.ChannelID, &cred.BaseURL, &cred.CookieEnabled); err != nil {
 		return err
 	}
+	var err error
+	if cred.AccessToken, err = openCredential("collector_credentials", cred.AccountID, "access_token", access); err != nil {
+		return err
+	}
+	if cred.RefreshToken, err = openCredential("collector_credentials", cred.AccountID, "refresh_token", refresh); err != nil {
+		return err
+	}
 	cred.Family = collector.Family(family)
 	cred.CredType = credType
-	cred.AccessToken = deref(access)
-	cred.RefreshToken = deref(refresh)
 	cred.ExternalUserID = deref(extUID)
 	cred.UserIDHeaderName = deref(hdrName)
 	cred.RefreshLockKey = deref(lockKey)
@@ -309,22 +355,25 @@ var _ collector.CredentialStore = (*CredentialStore)(nil)
 
 // CredentialTokenDiffers 报告该账号已存的 access_token 与给定值是否不同。
 //
-// **比较放在 SQL 里做，明文不进程**：这里只需要一个"要不要更新"的布尔值，
-// 为它把令牌捞回来一趟等于凭空多一个明文的落点（FR-094 的同源纪律 ——
-// 能不碰就不碰）。
+// 密文每次加密都不同，只能解密后比较；解密结果只用于这次比较，不返回、不记录。
+// 解密失败报错，不能当成"不同"或"没有凭证"。
 //
 // exists=false 表示这个账号根本还没有凭证，调用方该走"新登记"而不是"更新"。
 func CredentialTokenDiffers(
 	ctx context.Context, db DBTX, accountID int64, token string,
 ) (differs bool, exists bool, err error) {
+	var encrypted []byte
 	err = db.QueryRow(ctx, `
-SELECT COALESCE(access_token,'') <> $2
-  FROM collector_credentials WHERE account_id = $1`, accountID, token).Scan(&differs)
+SELECT access_token_ciphertext FROM collector_credentials WHERE account_id = $1`, accountID).Scan(&encrypted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, false, fmt.Errorf("比对账号 %d 的凭证: %w", accountID, err)
 	}
-	return differs, true, nil
+	stored, err := openCredential("collector_credentials", accountID, "access_token", encrypted)
+	if err != nil {
+		return false, false, err
+	}
+	return stored != token, true, nil
 }
