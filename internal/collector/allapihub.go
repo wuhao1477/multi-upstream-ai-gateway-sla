@@ -2,8 +2,10 @@ package collector
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -97,11 +99,15 @@ func (a HubAccount) HasCredential() bool {
 	}
 }
 
-// ParseHubBackup 解析导出文件。
+// ParseHubBackup 解析导出文件，错误文案不包含上传内容或原始读取错误。
 func ParseHubBackup(r io.Reader) (*HubBackup, error) {
 	// 导出文件可达数百 KB，但不该无上限 —— 管理接口不接受任意大的上传
 	raw, err := io.ReadAll(io.LimitReader(r, hubMaxBackupBytes+1))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if !errors.As(err, &tooLarge) {
+			err = networkError(err)
+		}
 		return nil, fmt.Errorf("读取 all-api-hub 导出失败: %w", err)
 	}
 	if len(raw) > hubMaxBackupBytes {

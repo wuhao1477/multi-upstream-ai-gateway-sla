@@ -67,6 +67,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
         -o /out/migrate ./cmd/migrate
 
 FROM gcr.io/distroless/static-debian12:nonroot
+ENV SLA_ADDR=:8080
 COPY --from=build /out/sla-core /sla-core
 COPY --from=build /out/collector /collector
 COPY --from=build /out/migrate /migrate
